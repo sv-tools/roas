@@ -21,4 +21,27 @@ jobs:
     - name: Clippy
       run: cargo clippy
     - name: Run tests
-      run: cargo test --verbose
+      env:
+        CARGO_INCREMENTAL: 0
+        RUSTFLAGS: '-Cinstrument-coverage'
+        LLVM_PROFILE_FILE: 'target/coverage/cargo-test-%p-%m.profraw'
+      run: |
+        # Install grcov
+        mkdir -p "${HOME}/.local/bin" "target/coverage" 
+        curl -sL https://github.com/mozilla/grcov/releases/download/v0.8.18/grcov-x86_64-unknown-linux-gnu.tar.bz2 | tar jxf - -C "${HOME}/.local/bin"
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+        # Install llvm-tools-preview
+        rustup component add llvm-tools-preview
+
+        # Run tests
+        cargo test --verbose
+        
+        # Convert raw coverage data into lcov format
+        grcov . --binary-path ./target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../*' --ignore "/*" -o target/coverage/tests.lcov
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v3
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      with:
+        files: coverage/*.lcov
