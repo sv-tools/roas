@@ -10,5 +10,6 @@ homepage = "https://github.com/sv-tools/roas"
 repository = "https://github.com/sv-tools/roas"
 keywords = ["openapi", "swagger"]
 categories = ["web-programming", "parser-implementations"]
+exclude = [".*", ".github"]
 
 [dependencies]
