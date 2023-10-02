@@ -1,2 +1,2 @@
 # roas
-OpenAPI Specification for Rust
+Rust OpenAPI Specification

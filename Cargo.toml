@@ -1,0 +1,14 @@
+[package]
+name = "roas"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sergey Vilgelm <sergey@vilglem.com>"]
+description = "Rust OpenAPI Specification"
+readme = "README.md"
+license-file = "LICENSE"
+homepage = "https://github.com/sv-tools/roas"
+repository = "https://github.com/sv-tools/roas"
+keywords = ["openapi", "swagger"]
+categories = ["web-programming", "parser-implementations"]
+
+[dependencies]
