@@ -39,6 +39,8 @@ jobs:
         
         # Convert raw coverage data into lcov format
         grcov . --binary-path ./target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../*' --ignore "/*" -o target/coverage/tests.lcov
+    - name: Build package
+      run: cargo package --verbose
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v3
       env:
