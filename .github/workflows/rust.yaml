@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --all-features --verbose
       - name: Format
         run: cargo fmt --all --check --verbose
       - name: Clippy
@@ -35,16 +35,16 @@ jobs:
           rustup component add llvm-tools-preview
           
           # Run tests
-          cargo test --verbose
+          cargo test --all-features --verbose
           
           # Convert raw coverage data into lcov format
           grcov . --binary-path ./target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../*' --ignore "/*" -o target/coverage/tests.lcov
       - name: Dry run publish
         run: |
           cargo install cargo-license
-          cargo license --avoid-dev-deps --json > dependencies-license.json
-          cargo publish --allow-dirty --dry-run
-          cargo package --list --allow-dirty
+          cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
+          cargo publish --all-features --allow-dirty --dry-run
+          cargo package --all-features --list --allow-dirty
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v3
         env:
