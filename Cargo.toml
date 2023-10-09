@@ -2,7 +2,7 @@
 name = "roas"
 version = "0.1.0"
 edition = "2021"
-authors = ["Sergey Vilgelm <sergey@vilglem.com>"]
+authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 description = "Rust OpenAPI Specification"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
