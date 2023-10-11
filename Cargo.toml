@@ -10,6 +10,9 @@ homepage = "https://github.com/sv-tools/roas"
 repository = "https://github.com/sv-tools/roas"
 keywords = ["openapi", "swagger"]
 categories = ["web-programming", "parser-implementations"]
-exclude = [".*", ".github"]
+include = ["src", "Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT", "dependencies-license.json"]
 
 [dependencies]
+
+[dev-dependencies]
+cargo-license = { version = "0.5.1" }
