@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
-use crate::common::reference::{RefOr, ResolveReference};
+use crate::common::reference::{Ref, RefOr};
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;
 use crate::v2::response::Responses;
@@ -117,26 +117,15 @@ impl ValidateWithContext<Spec> for Operation {
                 if tag.is_empty() {
                     continue;
                 }
-                let spec_tag: Option<&Tag> = ctx
-                    .spec
-                    .resolve_reference(format!("#/tags/{}", tag).as_str());
-                match spec_tag {
-                    Some(spec_tag) => {
-                        let path = format!("#/tags/{}", tag);
-                        if ctx.visited.insert(path.clone()) {
-                            spec_tag.validate_with_context(ctx, path);
-                        }
+
+                let reference = format!("#/tags/{}", tag);
+                if let Ok(spec_tag) = Ref::new(reference.clone()).resolve::<Spec, Tag>(ctx.spec) {
+                    if ctx.visited.insert(reference.clone()) {
+                        spec_tag.validate_with_context(ctx, reference);
                     }
-                    None => {
-                        if !ctx.options.contains(Options::IgnoreMissingTags) {
-                            ctx.errors.push(format!(
-                                "{}.tags[{}]: `{}` not found in spec",
-                                path.clone(),
-                                i,
-                                tag
-                            ));
-                        }
-                    }
+                } else if !ctx.options.contains(Options::IgnoreMissingTags) {
+                    ctx.errors
+                        .push(format!("{}.tags[{}]: `{}` not found in spec", path, i, tag));
                 }
             }
         }
@@ -170,7 +159,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_operation_deserialize() {
+    fn deserialize() {
         assert_eq!(
             serde_json::from_value::<Operation>(serde_json::json!({
                 "tags": [
@@ -294,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_serialize() {
+    fn serialize() {
         assert_eq!(
             serde_json::to_value(Operation {
                 tags: Some(vec!["pet".to_owned()]),

@@ -17,6 +17,13 @@ pub struct Context<'a, T> {
     pub options: EnumSet<Options>,
 }
 
+impl<'a, T> Context<'a, T> {
+    pub fn reset(&mut self) {
+        self.visited.clear();
+        self.errors.clear();
+    }
+}
+
 impl Context<'_, ()> {
     pub fn new<T>(spec: &T, options: EnumSet<Options>) -> Context<T> {
         Context {

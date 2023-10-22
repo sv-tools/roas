@@ -4,15 +4,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{
-    validate_optional_url, validate_required_string, Context, ValidateWithContext,
-};
-use crate::v2::spec::Spec;
+use crate::common::helpers::{validate_optional_url, Context, ValidateWithContext};
+use crate::v3_0::spec::Spec;
 
 /// A metadata object that allows for more fine-tuned XML model definitions.
 ///
 /// When using arrays, XML element names are not inferred (for singular/plural forms)
-/// and the `name` property should be used to add that information.
+/// and the `name` property SHOULD be used to add that information.
 /// See examples for expected behavior.
 ///
 /// Examples:
@@ -78,16 +76,16 @@ use crate::v2::spec::Spec;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct XML {
     /// Replaces the name of the element/attribute used for the described schema property.
-    /// When defined within the Items Object (items),
-    /// it will affect the name of the individual XML elements within the list.
-    /// When defined alongside type being array (outside the items),
-    /// it will affect the wrapping element and only if wrapped is true.
-    /// If wrapped is false, it will be ignored.
+    /// When defined within `items`, it will affect the name of the individual XML elements
+    /// within the list.
+    /// When defined alongside `type` being `array` (outside the `items`),
+    /// it will affect the wrapping element and only if `wrapped` is `true`.
+    /// If `wrapped` is `false`, it will be ignored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// The URL of the namespace definition.
-    /// Value SHOULD be in the form of a URL.
+    /// The URI of the namespace definition.
+    /// Value MUST be in the form of an absolute URI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 
@@ -101,10 +99,10 @@ pub struct XML {
     pub attribute: Option<bool>,
 
     /// MAY be used only for an array definition.
-    /// Signifies whether the array is wrapped (for example, <books><book/><book/></books>) or
-    /// unwrapped (<book/><book/>).
-    /// Default value is false.
-    /// The definition takes effect only when defined alongside type being array (outside the items).
+    /// Signifies whether the array is wrapped (for example, `<books><book/><book/></books>`) or
+    /// unwrapped (`<book/><book/>`).
+    /// Default value is `false`.
+    /// The definition takes effect only when defined alongside `type` being `array` (outside the `items`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrapped: Option<bool>,
 
@@ -119,9 +117,6 @@ pub struct XML {
 
 impl ValidateWithContext<Spec> for XML {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        if let Some(name) = &self.name {
-            validate_required_string(name, ctx, format!("{}.name", path));
-        }
         validate_optional_url(&self.namespace, ctx, format!("{}.namespace", path));
     }
 }
@@ -223,18 +218,14 @@ mod tests {
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
         XML {
-            name: Some("".to_owned()),
             namespace: Some("foo-bar".to_owned()),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "xml".to_owned());
         assert_eq!(
             ctx.errors,
-            vec![
-                "xml.name: must not be empty",
-                "xml.namespace: must be a valid URL, found `foo-bar`",
-            ],
-            "invalid URL and empty name: {:?}",
+            vec!["xml.namespace: must be a valid URL, found `foo-bar`"],
+            "invalid URL: {:?}",
             ctx.errors
         );
     }
