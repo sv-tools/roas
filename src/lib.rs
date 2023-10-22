@@ -1,14 +1,7 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+//! OpenAPI Specification
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod common;
+pub mod validation;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+#[cfg(feature = "v2")]
+pub mod v2;
