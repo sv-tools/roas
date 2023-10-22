@@ -1,6 +1,6 @@
 [package]
 name = "roas"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 description = "Rust OpenAPI Specification"
@@ -11,6 +11,9 @@ repository = "https://github.com/sv-tools/roas"
 keywords = ["openapi", "swagger"]
 categories = ["web-programming", "parser-implementations"]
 include = ["src", "Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT", "dependencies-license.json"]
+
+[package.metadata]
+dependencies-license-file = "dependencies-license.json"
 
 [features]
 default = ["v2"]
