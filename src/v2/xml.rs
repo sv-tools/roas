@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::ops::Add;
 
+use serde::{Deserialize, Serialize};
+
 use crate::common::helpers::{
     validate_required_string, validate_url, Context, ValidateWithContext,
 };
-use serde::{Deserialize, Serialize};
-
 use crate::v2::spec::Spec;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]

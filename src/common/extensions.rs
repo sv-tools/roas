@@ -29,9 +29,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::{Deserializer, Serialize, Serializer};
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
+use serde::{Deserializer, Serialize, Serializer};
 
 pub fn deserialize<'de, D>(
     deserializer: D,
