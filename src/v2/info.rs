@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 use std::ops::Add;
 
+use crate::common::helpers::{
+    validate_email, validate_required_string, validate_url, Context, ValidateWithContext,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::v2::spec::Spec;
-use crate::validation::{
-    validate_email, validate_required_string, validate_url, Context, ValidateWithContext,
-};
 
 /// The object provides metadata about the API.
 /// The metadata can be used by the clients if needed, and can be presented in the Swagger-UI for convenience.

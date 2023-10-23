@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::ops::Add;
 
+use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 
 use crate::common::reference::RefOr;
@@ -10,7 +11,7 @@ use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;
 use crate::v2::response::Responses;
 use crate::v2::spec::{Scheme, Spec};
-use crate::validation::{validate_required_string, Context, Options, ValidateWithContext};
+use crate::validation::Options;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Operation {

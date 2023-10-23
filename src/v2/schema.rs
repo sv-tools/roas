@@ -7,12 +7,12 @@ use std::ops::Add;
 use serde::{Deserialize, Serialize};
 
 use crate::common::bool_or::BoolOr;
+use crate::common::helpers::{Context, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::formats::{IntegerFormat, NumberFormat, StringFormat};
 use crate::v2::spec::Spec;
 use crate::v2::xml::XML;
-use crate::validation::{Context, ValidateWithContext};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type")]

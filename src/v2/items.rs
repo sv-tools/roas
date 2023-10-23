@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::ops::Add;
 
+use crate::common::helpers::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 
 use crate::v2::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
 use crate::v2::spec::Spec;
-use crate::validation::{Context, ValidateWithContext};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type")]

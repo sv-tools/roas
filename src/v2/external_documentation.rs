@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 use std::ops::Add;
 
+use crate::common::helpers::{validate_url, Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 
 use crate::v2::spec::Spec;
-use crate::validation::{validate_url, Context, ValidateWithContext};
 
 /// Allows referencing an external resource for extended documentation.
 ///

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::common::helpers::{Context, ValidateWithContext};
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -11,12 +12,61 @@ use crate::common::reference::RefOr;
 use crate::v2::operation::Operation;
 use crate::v2::parameter::Parameter;
 use crate::v2::spec::Spec;
-use crate::validation::{Context, ValidateWithContext};
 
 /// Describes the operations available on a single path.
 /// A Path Item may be empty, due to [ACL constraints](https://swagger.io/specification/v2/#security-filtering).
 /// The path itself is still exposed to the documentation viewer
 /// but they will not know which operations and parameters are available.
+///
+/// Specification example:
+///
+/// ```yaml
+/// get:
+///   description: Returns pets based on ID
+///   summary: Find pets by ID
+///   operationId: getPetsById
+///   produces:
+///   - application/json
+///   - text/html
+///   responses:
+///     '200':
+///       description: pet response
+///       schema:
+///         type: array
+///         items:
+///           $ref: '#/definitions/Pet'
+///     default:
+///       description: error payload
+///       schema:
+///         $ref: '#/definitions/ErrorModel'
+/// search:
+///   description: Returns pets based on the search parameters
+///   summary: Find pets by ID
+///   operationId: getPetsById
+///   produces:
+///   - application/json
+///   - text/html
+///   responses:
+///     '200':
+///       description: pet response
+///       schema:
+///         type: array
+///         items:
+///           $ref: '#/definitions/Pet'
+///     default:
+///       description: error payload
+///       schema:
+///         $ref: '#/definitions/ErrorModel'
+/// parameters:
+/// - name: id
+///   in: path
+///   description: ID of pet to use
+///   required: true
+///   type: array
+///   items:
+///     type: string
+///   collectionFormat: csv
+/// ```
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct PathItem {
     /// A definition of the operations on this path.

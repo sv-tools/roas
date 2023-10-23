@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Add;
 
+use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -12,7 +13,6 @@ use crate::common::reference::RefOr;
 use crate::v2::header::Header;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
-use crate::validation::{validate_required_string, Context, ValidateWithContext};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Responses {

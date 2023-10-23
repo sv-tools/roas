@@ -4,10 +4,12 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::ops::Add;
 
+use crate::common::helpers::{
+    validate_required_string, validate_url, Context, ValidateWithContext,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::v2::spec::Spec;
-use crate::validation::{validate_required_string, validate_url, Context, ValidateWithContext};
 
 /// Allows the definition of a security scheme that can be used by the operations.
 /// Supported schemes are basic authentication, an API key (either as a header or as a query parameter)

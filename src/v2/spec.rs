@@ -6,6 +6,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::ops::Add;
 
+use crate::common::helpers::{validate_optional_string_matches, Context, ValidateWithContext};
 use enumset::EnumSet;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -19,9 +20,7 @@ use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
 use crate::v2::tag::Tag;
-use crate::validation::{
-    validate_optional_string_matches, Context, Error, Options, Validate, ValidateWithContext,
-};
+use crate::validation::{Error, Options, Validate};
 
 /// This is the root document object for the API specification.
 /// It combines what previously was the Resource Listing and API Declaration (version 1.2 and earlier) together into one document.
