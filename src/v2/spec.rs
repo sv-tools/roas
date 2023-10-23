@@ -1,4 +1,4 @@
-//! The root document object for the API specification.
+//! The root document object of the OpenAPI v2.0 specification.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

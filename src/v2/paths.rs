@@ -1,9 +1,11 @@
 //! Path Items
 
 use std::collections::BTreeMap;
-use std::ops::Add;
+use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{Error, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::common::reference::RefOr;
 use crate::v2::operation::Operation;
@@ -15,42 +17,14 @@ use crate::validation::{Context, ValidateWithContext};
 /// A Path Item may be empty, due to [ACL constraints](https://swagger.io/specification/v2/#security-filtering).
 /// The path itself is still exposed to the documentation viewer
 /// but they will not know which operations and parameters are available.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct PathItem {
-    /// A definition of a GET operation on this path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "GET")] // in most cases the methods are in uppercase
-    pub get: Option<Operation>,
-
-    /// A definition of a HEAD operation on this path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "HEAD")] // in most cases the methods are in uppercase
-    pub head: Option<Operation>,
-
-    /// A definition of a POST operation on this path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "POST")] // in most cases the methods are in uppercase
-    pub post: Option<Operation>,
-
-    /// A definition of a PUT operation on this path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "PUT")] // in most cases the methods are in uppercase
-    pub put: Option<Operation>,
-
-    /// A definition of a DELETE operation on this path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "DELETE")] // in most cases the methods are in uppercase
-    pub delete: Option<Operation>,
-
-    /// A definition of a PATCH operation on this path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "PATCH")] // in most cases the methods are in uppercase
-    pub patch: Option<Operation>,
-
-    /// A definition of a OPTIONS operation on this path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "OPTIONS")] // in most cases the methods are in uppercase
-    pub options: Option<Operation>,
+    /// A definition of the operations on this path.
+    ///
+    /// Any map items that can be converted to an `Operation` object will be stored here.
+    /// This includes `get`, `put`, `post`, `delete`, `options`, `head`, `patch`, `trace`,
+    /// and any other custom operations, like SEARCH and etc...
+    operations: Option<BTreeMap<String, Operation>>,
 
     /// A list of parameters that are applicable for all the operations described under this path.
     /// These parameters can be overridden at the operation level, but cannot be removed there.
@@ -59,40 +33,117 @@ pub struct PathItem {
     /// The list can use the [Reference Object](crate::common::reference::Ref) to link to parameters
     /// that are defined at the [Swagger Object's](crate::v2::spec::Spec::parameters) parameters.
     /// There can be one "body" parameter at most.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Vec<RefOr<Parameter>>>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
-    #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+impl Serialize for PathItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+
+        if let Some(o) = &self.operations {
+            for (k, v) in o {
+                map.serialize_entry(&k, &v)?;
+            }
+        }
+
+        if let Some(parameters) = &self.parameters {
+            map.serialize_entry("parameters", parameters)?;
+        }
+
+        if let Some(ref ext) = self.extensions {
+            for (k, v) in ext {
+                if k.starts_with("x-") {
+                    map.serialize_entry(&k, &v)?;
+                }
+            }
+        }
+
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PathItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "parameters",
+            "get",
+            "head",
+            "post",
+            "put",
+            "patch",
+            "delete",
+            "options",
+            "trace",
+            "<custom method>",
+            "x-<ext name>",
+        ];
+
+        struct PathItemVisitor;
+
+        impl<'de> Visitor<'de> for PathItemVisitor {
+            type Value = PathItem;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct PathItem")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<PathItem, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut res = PathItem::default();
+                let mut operations: BTreeMap<String, Operation> = BTreeMap::new();
+                let mut extensions: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "parameters" {
+                        if res.parameters.is_some() {
+                            return Err(Error::duplicate_field("parameters"));
+                        }
+                        res.parameters = Some(map.next_value()?);
+                    } else if key.starts_with("x-") {
+                        if extensions.contains_key(key.clone().as_str()) {
+                            return Err(Error::custom(format!("duplicate field '{}'", key)));
+                        }
+                        extensions.insert(key, map.next_value()?);
+                    } else {
+                        let key = key.to_lowercase();
+                        if operations.contains_key(key.as_str()) {
+                            return Err(Error::custom(format!("duplicate field '{}'", key)));
+                        }
+                        operations.insert(key, map.next_value()?);
+                    }
+                }
+                if !operations.is_empty() {
+                    res.operations = Some(operations);
+                }
+                if !extensions.is_empty() {
+                    res.extensions = Some(extensions);
+                }
+                Ok(res)
+            }
+        }
+
+        deserializer.deserialize_struct("PathItem", FIELDS, PathItemVisitor)
+    }
 }
 
 impl ValidateWithContext<Spec> for PathItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        if let Some(o) = &self.get {
-            o.validate_with_context(ctx, path.clone().add(".get"));
-        }
-        if let Some(o) = &self.head {
-            o.validate_with_context(ctx, path.clone().add(".head"));
-        }
-        if let Some(o) = &self.post {
-            o.validate_with_context(ctx, path.clone().add(".post"));
-        }
-        if let Some(o) = &self.put {
-            o.validate_with_context(ctx, path.clone().add(".put"));
-        }
-        if let Some(o) = &self.delete {
-            o.validate_with_context(ctx, path.clone().add(".delete"));
-        }
-        if let Some(o) = &self.patch {
-            o.validate_with_context(ctx, path.clone().add(".patch"));
-        }
-        if let Some(o) = &self.options {
-            o.validate_with_context(ctx, path.clone().add(".options"));
+        if let Some(other) = &self.operations {
+            for (method, operation) in other.iter() {
+                operation.validate_with_context(ctx, format!("{}.{}", path, method));
+            }
         }
 
         if let Some(parameters) = &self.parameters {
@@ -249,6 +300,40 @@ mod tests {
                         }
                     }
                 },
+                "trace": {
+                    "description": "Trace pet by ID",
+                    "summary": "Trace pet by ID",
+                    "operationId": "tracePet",
+                    "produces": [
+                        "application/json",
+                        "text/html"
+                    ],
+                    "responses": {
+                        "default": {
+                            "description": "error payload",
+                            "schema": {
+                                "$ref": "#/definitions/ErrorModel"
+                            }
+                        }
+                    }
+                },
+                "search": {
+                    "description": "Search Pets",
+                    "summary": "Search pets",
+                    "operationId": "searchPets",
+                    "produces": [
+                        "application/json",
+                        "text/html"
+                    ],
+                    "responses": {
+                        "default": {
+                            "description": "error payload",
+                            "schema": {
+                                "$ref": "#/definitions/ErrorModel"
+                            }
+                        }
+                    }
+                },
                 "parameters": [
                     {
                         "name": "id",
@@ -266,165 +351,238 @@ mod tests {
             }))
             .unwrap(),
             PathItem {
-                get: Some(Operation {
-                    description: Some(String::from("Returns pets based on ID")),
-                    summary: Some(String::from("Find pets by ID")),
-                    operation_id: Some(String::from("getPetsById")),
-                    produces: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/html"),
-                    ]),
-                    responses: Responses {
-                        default: Some(RefOr::Item(Response {
-                            description: String::from("error payload"),
-                            schema: Some(RefOr::Ref(Ref {
-                                reference: String::from("#/definitions/ErrorModel"),
+                operations: Some({
+                    let mut operations = BTreeMap::new();
+                    operations.insert(
+                        String::from("get"),
+                        Operation {
+                            description: Some(String::from("Returns pets based on ID")),
+                            summary: Some(String::from("Find pets by ID")),
+                            operation_id: Some(String::from("getPetsById")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
                                 ..Default::default()
-                            })),
+                            },
                             ..Default::default()
-                        }),),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-                post: Some(Operation {
-                    description: Some(String::from("Run Pet's Action")),
-                    summary: Some(String::from("Run pet's action by ID")),
-                    operation_id: Some(String::from("actionPet")),
-                    produces: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/html"),
-                    ]),
-                    consumes: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/xml"),
-                    ]),
-                    responses: Responses {
-                        default: Some(RefOr::Item(Response {
-                            description: String::from("error payload"),
-                            schema: Some(RefOr::Ref(Ref {
-                                reference: String::from("#/definitions/ErrorModel"),
+                        },
+                    );
+                    operations.insert(
+                        String::from("post"),
+                        Operation {
+                            description: Some(String::from("Run Pet's Action")),
+                            summary: Some(String::from("Run pet's action by ID")),
+                            operation_id: Some(String::from("actionPet")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                            ]),
+                            consumes: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/xml"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
                                 ..Default::default()
-                            })),
+                            },
                             ..Default::default()
-                        }),),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-                put: Some(Operation {
-                    description: Some(String::from("Update pet by ID")),
-                    summary: Some(String::from("Update pet by ID")),
-                    operation_id: Some(String::from("updatePet")),
-                    produces: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/html"),
-                    ]),
-                    consumes: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/xml"),
-                    ]),
-                    responses: Responses {
-                        default: Some(RefOr::Item(Response {
-                            description: String::from("error payload"),
-                            schema: Some(RefOr::Ref(Ref {
-                                reference: String::from("#/definitions/ErrorModel"),
+                        },
+                    );
+                    operations.insert(
+                        String::from("put"),
+                        Operation {
+                            description: Some(String::from("Update pet by ID")),
+                            summary: Some(String::from("Update pet by ID")),
+                            operation_id: Some(String::from("updatePet")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                            ]),
+                            consumes: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/xml"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
                                 ..Default::default()
-                            })),
+                            },
                             ..Default::default()
-                        }),),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-                head: Some(Operation {
-                    description: Some(String::from("Check pet by ID")),
-                    summary: Some(String::from("Check if pet exists by ID")),
-                    operation_id: Some(String::from("checkPet")),
-                    produces: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/html"),
-                    ]),
-                    responses: Responses {
-                        default: Some(RefOr::Item(Response {
-                            description: String::from("error payload"),
-                            schema: Some(RefOr::Ref(Ref {
-                                reference: String::from("#/definitions/ErrorModel"),
+                        },
+                    );
+                    operations.insert(
+                        String::from("head"),
+                        Operation {
+                            description: Some(String::from("Check pet by ID")),
+                            summary: Some(String::from("Check if pet exists by ID")),
+                            operation_id: Some(String::from("checkPet")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
                                 ..Default::default()
-                            })),
+                            },
                             ..Default::default()
-                        }),),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-                delete: Some(Operation {
-                    description: Some(String::from("Delete pet by ID")),
-                    summary: Some(String::from("Delete pet by ID")),
-                    operation_id: Some(String::from("deletePet")),
-                    produces: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/html"),
-                    ]),
-                    responses: Responses {
-                        default: Some(RefOr::Item(Response {
-                            description: String::from("error payload"),
-                            schema: Some(RefOr::Ref(Ref {
-                                reference: String::from("#/definitions/ErrorModel"),
+                        },
+                    );
+                    operations.insert(
+                        String::from("delete"),
+                        Operation {
+                            description: Some(String::from("Delete pet by ID")),
+                            summary: Some(String::from("Delete pet by ID")),
+                            operation_id: Some(String::from("deletePet")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
                                 ..Default::default()
-                            })),
+                            },
                             ..Default::default()
-                        }),),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-                patch: Some(Operation {
-                    description: Some(String::from("Change pet by ID")),
-                    summary: Some(String::from("Change pet by ID")),
-                    operation_id: Some(String::from("changePet")),
-                    produces: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/html"),
-                    ]),
-                    consumes: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/xml"),
-                    ]),
-                    responses: Responses {
-                        default: Some(RefOr::Item(Response {
-                            description: String::from("error payload"),
-                            schema: Some(RefOr::Ref(Ref {
-                                reference: String::from("#/definitions/ErrorModel"),
+                        },
+                    );
+                    operations.insert(
+                        String::from("patch"),
+                        Operation {
+                            description: Some(String::from("Change pet by ID")),
+                            summary: Some(String::from("Change pet by ID")),
+                            operation_id: Some(String::from("changePet")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                            ]),
+                            consumes: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/xml"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
                                 ..Default::default()
-                            })),
+                            },
                             ..Default::default()
-                        }),),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-                options: Some(Operation {
-                    description: Some(String::from("List of possible operations")),
-                    summary: Some(String::from("Return the list of possible operations")),
-                    operation_id: Some(String::from("petOperations")),
-                    produces: Some(vec![
-                        String::from("application/json"),
-                        String::from("text/html"),
-                        String::from("text/plain"),
-                    ]),
-                    responses: Responses {
-                        default: Some(RefOr::Item(Response {
-                            description: String::from("error payload"),
-                            schema: Some(RefOr::Ref(Ref {
-                                reference: String::from("#/definitions/ErrorModel"),
+                        },
+                    );
+                    operations.insert(
+                        String::from("options"),
+                        Operation {
+                            description: Some(String::from("List of possible operations")),
+                            summary: Some(String::from("Return the list of possible operations")),
+                            operation_id: Some(String::from("petOperations")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                                String::from("text/plain"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
                                 ..Default::default()
-                            })),
+                            },
                             ..Default::default()
-                        }),),
-                        ..Default::default()
-                    },
-                    ..Default::default()
+                        },
+                    );
+                    operations.insert(
+                        String::from("trace"),
+                        Operation {
+                            description: Some(String::from("Trace pet by ID")),
+                            summary: Some(String::from("Trace pet by ID")),
+                            operation_id: Some(String::from("tracePet")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    );
+                    operations.insert(
+                        String::from("search"),
+                        Operation {
+                            description: Some(String::from("Search Pets")),
+                            summary: Some(String::from("Search pets")),
+                            operation_id: Some(String::from("searchPets")),
+                            produces: Some(vec![
+                                String::from("application/json"),
+                                String::from("text/html"),
+                            ]),
+                            responses: Responses {
+                                default: Some(RefOr::Item(Response {
+                                    description: String::from("error payload"),
+                                    schema: Some(RefOr::Ref(Ref {
+                                        reference: String::from("#/definitions/ErrorModel"),
+                                        ..Default::default()
+                                    })),
+                                    ..Default::default()
+                                })),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    );
+                    operations
                 }),
                 parameters: Some(vec![RefOr::Item(Parameter::Path(InPath::Array(
                     ArrayParameter {
