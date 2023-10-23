@@ -5,8 +5,8 @@ use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
+use crate::common::helpers::{validate_url, Context, ValidateWithContext};
 use crate::v2::spec::Spec;
-use crate::validation::{validate_url, Context, ValidateWithContext};
 
 /// Allows referencing an external resource for extended documentation.
 ///

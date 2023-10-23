@@ -5,9 +5,9 @@ use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
+use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::spec::Spec;
-use crate::validation::{validate_required_string, Context, ValidateWithContext};
 
 /// Allows adding meta data to a single tag that is used by the Operation Object.
 /// It is not mandatory to have a Tag Object per tag used there.

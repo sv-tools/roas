@@ -1,6 +1,5 @@
-//! The root document object for the API specification.
+//! The root document object of the OpenAPI v2.0 specification.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -10,6 +9,7 @@ use enumset::EnumSet;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::common::helpers::{validate_optional_string_matches, Context, ValidateWithContext};
 use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::info::Info;
@@ -19,9 +19,7 @@ use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
 use crate::v2::tag::Tag;
-use crate::validation::{
-    validate_optional_string_matches, Context, Error, Options, Validate, ValidateWithContext,
-};
+use crate::validation::{Error, Options, Validate};
 
 /// This is the root document object for the API specification.
 /// It combines what previously was the Resource Listing and API Declaration (version 1.2 and earlier) together into one document.
@@ -287,6 +285,15 @@ impl ResolveReference<SecurityScheme> for Spec {
     }
 }
 
+impl ResolveReference<Tag> for Spec {
+    fn resolve_reference(&self, reference: &str) -> Option<&Tag> {
+        self.tags
+            .iter()
+            .flatten()
+            .find(|tag| tag.name == reference.trim_start_matches("#/tags/"))
+    }
+}
+
 impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
@@ -298,23 +305,13 @@ impl Validate for Spec {
     }
 }
 
-thread_local! {
-    static HOST_RE: RefCell<Regex> = RefCell::new(Regex::new(r"^[^{}/ :\\]+(?::\d+)?$").unwrap());
-}
-
 impl ValidateWithContext<Spec> for Spec {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.info
             .validate_with_context(ctx, path.clone().add(".info"));
 
-        HOST_RE.with(|re| {
-            validate_optional_string_matches(
-                &self.host,
-                &re.borrow(),
-                ctx,
-                path.clone().add(".host"),
-            )
-        });
+        let re = Regex::new(r"^[^{}/ :\\]+(?::\d+)?$").unwrap();
+        validate_optional_string_matches(&self.host, &re, ctx, path.clone().add(".host"));
 
         if let Some(base_path) = &self.base_path {
             if !base_path.starts_with('/') {
@@ -322,52 +319,6 @@ impl ValidateWithContext<Spec> for Spec {
                     "{}.basePath: must start with `/`, found `{}`",
                     path, base_path
                 ));
-            }
-        }
-
-        // validate tags and memorize them first, so the validation of the operations can use them
-        if let Some(tags) = &self.tags {
-            for tag in tags.iter() {
-                let path = format!("{}/tags/{}", path, tag.name);
-                if ctx.visited.insert(path.clone()) {
-                    tag.validate_with_context(ctx, path)
-                }
-            }
-        }
-
-        if let Some(definitions) = &self.security_definitions {
-            for (name, definition) in definitions {
-                let path = format!("{}/securityDefinitions/{}", path, name);
-                if ctx.visited.insert(path.clone()) {
-                    definition.validate_with_context(ctx, path)
-                }
-            }
-        }
-
-        if let Some(definitions) = &self.definitions {
-            for (name, definition) in definitions {
-                let path = format!("{}/definitions/{}", path, name);
-                if ctx.visited.insert(path.clone()) {
-                    definition.validate_with_context(ctx, path)
-                }
-            }
-        }
-
-        if let Some(responses) = &self.responses {
-            for (name, response) in responses {
-                let path = format!("{}/responses/{}", path, name);
-                if ctx.visited.insert(path.clone()) {
-                    response.validate_with_context(ctx, path)
-                }
-            }
-        }
-
-        if let Some(parameters) = &self.parameters {
-            for (name, parameter) in parameters {
-                let path = format!("{}/parameters/{}", path, name);
-                if ctx.visited.insert(path.clone()) {
-                    parameter.validate_with_context(ctx, path)
-                }
             }
         }
 
@@ -381,7 +332,56 @@ impl ValidateWithContext<Spec> for Spec {
         }
 
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.add(".externalDocs"))
+            docs.validate_with_context(ctx, path.clone().add(".externalDocs"))
+        }
+
+        // validate unused components
+        if !ctx.options.contains(Options::IgnoreUnusedTags) {
+            if let Some(tags) = &self.tags {
+                for tag in tags.iter() {
+                    let path = format!("{}/tags/{}", path, tag.name);
+                    if ctx.visited.insert(path.clone()) {
+                        ctx.errors.push(format!("{}: unused", path));
+                        tag.validate_with_context(ctx, path);
+                    }
+                }
+            }
+        }
+
+        if !ctx.options.contains(Options::IgnoreUnusedDefinitions) {
+            if let Some(definitions) = &self.definitions {
+                for (name, definition) in definitions.iter() {
+                    let path = format!("{}/definitions/{}", path, name);
+                    if ctx.visited.insert(path.clone()) {
+                        ctx.errors.push(format!("{}: unused", path));
+                        definition.validate_with_context(ctx, path);
+                    }
+                }
+            }
+        }
+
+        if !ctx.options.contains(Options::IgnoreUnusedParameters) {
+            if let Some(parameters) = &self.parameters {
+                for (name, parameter) in parameters.iter() {
+                    let path = format!("{}/parameters/{}", path, name);
+                    if ctx.visited.insert(path.clone()) {
+                        ctx.errors.push(format!("{}: unused", path));
+                        parameter.validate_with_context(ctx, path);
+                    }
+                }
+            }
+        }
+
+        if !ctx.options.contains(Options::IgnoreUnusedResponses) {
+            if let Some(responses) = &self.responses {
+                for (name, response) in responses.iter() {
+                    let path = format!("{}/responses/{}", path, name);
+                    if ctx.visited.insert(path.clone()) {
+                        ctx.errors.push(format!("{}: unused", path));
+                        response.validate_with_context(ctx, path);
+                    }
+                }
+            }
         }
     }
 }

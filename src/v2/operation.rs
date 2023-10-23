@@ -5,12 +5,14 @@ use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::reference::RefOr;
+use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
+use crate::common::reference::{RefOr, ResolveReference};
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;
 use crate::v2::response::Responses;
 use crate::v2::spec::{Scheme, Spec};
-use crate::validation::{validate_required_string, Context, Options, ValidateWithContext};
+use crate::v2::tag::Tag;
+use crate::validation::Options;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Operation {
@@ -116,15 +118,26 @@ impl ValidateWithContext<Spec> for Operation {
                 if tag.is_empty() {
                     continue;
                 }
-                if !ctx.options.contains(Options::IgnoreMissingTags)
-                    && !ctx.visited.contains(format!("#/tags/{}", tag).as_str())
-                {
-                    ctx.errors.push(format!(
-                        "{}.tags[{}]: `{}` not found in spec",
-                        path.clone(),
-                        i,
-                        tag
-                    ));
+                let spec_tag: Option<&Tag> = ctx
+                    .spec
+                    .resolve_reference(format!("#/tags/{}", tag).as_str());
+                match spec_tag {
+                    Some(spec_tag) => {
+                        let path = format!("#/tags/{}", tag);
+                        if ctx.visited.insert(path.clone()) {
+                            spec_tag.validate_with_context(ctx, path);
+                        }
+                    }
+                    None => {
+                        if !ctx.options.contains(Options::IgnoreMissingTags) {
+                            ctx.errors.push(format!(
+                                "{}.tags[{}]: `{}` not found in spec",
+                                path.clone(),
+                                i,
+                                tag
+                            ));
+                        }
+                    }
                 }
             }
         }

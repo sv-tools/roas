@@ -5,10 +5,10 @@ use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
-use crate::v2::spec::Spec;
-use crate::validation::{
+use crate::common::helpers::{
     validate_email, validate_required_string, validate_url, Context, ValidateWithContext,
 };
+use crate::v2::spec::Spec;
 
 /// The object provides metadata about the API.
 /// The metadata can be used by the clients if needed, and can be presented in the Swagger-UI for convenience.
@@ -28,7 +28,6 @@ use crate::validation::{
 /// version: 1.0.1
 /// ```
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct Info {
     /// **Required** The title of the application.
     pub title: String,
@@ -40,6 +39,7 @@ pub struct Info {
 
     /// The Terms of Service for the API.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "termsOfService")]
     pub terms_of_service: Option<String>,
 
     /// The contact information for the exposed API.
