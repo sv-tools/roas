@@ -2,6 +2,10 @@ use std::fmt::Display;
 
 use enumset::{EnumSet, EnumSetType};
 
+use crate::validation::Options::{
+    IgnoreUnusedDefinitions, IgnoreUnusedParameters, IgnoreUnusedResponses, IgnoreUnusedTags,
+};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Error {
     pub errors: Vec<String>,
@@ -22,10 +26,18 @@ pub enum Options {
     IgnoreMissingTags,
     IgnoreExternalReferences,
     IgnoreNonUniqOperationIDs,
+    IgnoreUnusedTags,
+    IgnoreUnusedDefinitions,
+    IgnoreUnusedParameters,
+    IgnoreUnusedResponses,
+}
+
+impl Options {
+    pub fn ignore_unused() -> EnumSet<Options> {
+        IgnoreUnusedTags | IgnoreUnusedDefinitions | IgnoreUnusedParameters | IgnoreUnusedResponses
+    }
 }
 
 pub trait Validate {
-    fn validate(&self, _options: EnumSet<Options>) -> Result<(), Error> {
-        Ok(())
-    }
+    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error>;
 }
