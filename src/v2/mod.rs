@@ -1,7 +1,6 @@
 //! Implementation of v2.0 Specification
 
 pub mod external_documentation;
-pub mod formats;
 pub mod header;
 pub mod info;
 pub mod items;
