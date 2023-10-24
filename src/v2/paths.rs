@@ -206,8 +206,8 @@ impl ValidateWithContext<Spec> for PathItem {
 
 #[cfg(test)]
 mod tests {
+    use crate::common::formats::CollectionFormat;
     use crate::common::reference::Ref;
-    use crate::v2::formats::CollectionFormat;
     use crate::v2::items::{Items, StringItem};
     use crate::v2::parameter::{ArrayParameter, InPath};
     use crate::v2::response::{Response, Responses};
