@@ -14,7 +14,7 @@ use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::info::Info;
 use crate::v2::parameter::Parameter;
-use crate::v2::paths::PathItem;
+use crate::v2::path_item::PathItem;
 use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
