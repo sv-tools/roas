@@ -98,15 +98,6 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
 
-    /// Adds support for polymorphism.
-    /// The discriminator is the schema property name that is used to differentiate between
-    /// other schema that inherit this schema.
-    /// The property name used MUST be defined at this schema and it MUST be in the required
-    /// property list.
-    /// When used, the value MUST be the name of this schema or any schema that inherits it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discriminator: Option<String>,
-
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
     /// This means that it MAY be sent as part of a response but MUST NOT be sent as part of
@@ -116,7 +107,7 @@ pub struct StringSchema {
     /// Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
-    read_only: Option<bool>,
+    pub read_only: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -127,11 +118,11 @@ pub struct StringSchema {
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
-    external_docs: Option<ExternalDocumentation>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    example: Option<serde_json::Value>,
+    pub example: Option<serde_json::Value>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -190,15 +181,6 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
 
-    /// Adds support for polymorphism.
-    /// The discriminator is the schema property name that is used to differentiate between
-    /// other schema that inherit this schema.
-    /// The property name used MUST be defined at this schema and it MUST be in the required
-    /// property list.
-    /// When used, the value MUST be the name of this schema or any schema that inherits it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discriminator: Option<String>,
-
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
     /// This means that it MAY be sent as part of a response but MUST NOT be sent as part of
@@ -208,7 +190,7 @@ pub struct IntegerSchema {
     /// Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
-    read_only: Option<bool>,
+    pub read_only: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -219,11 +201,11 @@ pub struct IntegerSchema {
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
-    external_docs: Option<ExternalDocumentation>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    example: Option<serde_json::Value>,
+    pub example: Option<serde_json::Value>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -282,15 +264,6 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
 
-    /// Adds support for polymorphism.
-    /// The discriminator is the schema property name that is used to differentiate between
-    /// other schema that inherit this schema.
-    /// The property name used MUST be defined at this schema and it MUST be in the required
-    /// property list.
-    /// When used, the value MUST be the name of this schema or any schema that inherits it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discriminator: Option<String>,
-
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
     /// This means that it MAY be sent as part of a response but MUST NOT be sent as part of
@@ -300,7 +273,7 @@ pub struct NumberSchema {
     /// Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
-    read_only: Option<bool>,
+    pub read_only: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -311,11 +284,11 @@ pub struct NumberSchema {
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
-    external_docs: Option<ExternalDocumentation>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    example: Option<serde_json::Value>,
+    pub example: Option<serde_json::Value>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -342,15 +315,6 @@ pub struct BooleanSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<bool>,
 
-    /// Adds support for polymorphism.
-    /// The discriminator is the schema property name that is used to differentiate between
-    /// other schema that inherit this schema.
-    /// The property name used MUST be defined at this schema and it MUST be in the required
-    /// property list.
-    /// When used, the value MUST be the name of this schema or any schema that inherits it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discriminator: Option<String>,
-
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
     /// This means that it MAY be sent as part of a response but MUST NOT be sent as part of
@@ -360,7 +324,7 @@ pub struct BooleanSchema {
     /// Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
-    read_only: Option<bool>,
+    pub read_only: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -371,11 +335,11 @@ pub struct BooleanSchema {
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
-    external_docs: Option<ExternalDocumentation>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    example: Option<serde_json::Value>,
+    pub example: Option<serde_json::Value>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -419,15 +383,6 @@ pub struct ArraySchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique_items: Option<bool>,
 
-    /// Adds support for polymorphism.
-    /// The discriminator is the schema property name that is used to differentiate between
-    /// other schema that inherit this schema.
-    /// The property name used MUST be defined at this schema and it MUST be in the required
-    /// property list.
-    /// When used, the value MUST be the name of this schema or any schema that inherits it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discriminator: Option<String>,
-
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
     /// This means that it MAY be sent as part of a response but MUST NOT be sent as part of
@@ -437,7 +392,7 @@ pub struct ArraySchema {
     /// Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
-    read_only: Option<bool>,
+    pub read_only: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -448,11 +403,11 @@ pub struct ArraySchema {
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
-    external_docs: Option<ExternalDocumentation>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    example: Option<serde_json::Value>,
+    pub example: Option<serde_json::Value>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -520,7 +475,7 @@ pub struct ObjectSchema {
     /// Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
-    read_only: Option<bool>,
+    pub read_only: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -531,11 +486,11 @@ pub struct ObjectSchema {
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
-    external_docs: Option<ExternalDocumentation>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    example: Option<serde_json::Value>,
+    pub example: Option<serde_json::Value>,
 
     /// Takes an array of object definitions that are validated independently
     /// but together compose a single object
@@ -562,15 +517,6 @@ pub struct NullSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// Adds support for polymorphism.
-    /// The discriminator is the schema property name that is used to differentiate between
-    /// other schema that inherit this schema.
-    /// The property name used MUST be defined at this schema and it MUST be in the required
-    /// property list.
-    /// When used, the value MUST be the name of this schema or any schema that inherits it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discriminator: Option<String>,
-
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
     /// This means that it MAY be sent as part of a response but MUST NOT be sent as part of
@@ -580,7 +526,7 @@ pub struct NullSchema {
     /// Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
-    read_only: Option<bool>,
+    pub read_only: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -591,11 +537,11 @@ pub struct NullSchema {
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
-    external_docs: Option<ExternalDocumentation>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    example: Option<serde_json::Value>,
+    pub example: Option<serde_json::Value>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.

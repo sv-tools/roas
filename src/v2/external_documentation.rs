@@ -5,9 +5,7 @@ use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{
-    validate_optional_url, validate_required_url, Context, ValidateWithContext,
-};
+use crate::common::helpers::{validate_required_url, Context, ValidateWithContext};
 use crate::v2::spec::Spec;
 
 /// Allows referencing an external resource for extended documentation.
