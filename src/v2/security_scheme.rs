@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -172,7 +171,7 @@ impl ValidateWithContext<Spec> for BasicSecurityScheme {
 
 impl ValidateWithContext<Spec> for ApiKeySecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.add(".name"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
     }
 }
 
@@ -191,7 +190,11 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
                 path, self.flow,
             ));
         } else {
-            validate_optional_url(&self.authorization_url, ctx, path.add(".authorizationUrl"));
+            validate_optional_url(
+                &self.authorization_url,
+                ctx,
+                format!("{}.authorizationUrl", path),
+            );
         }
     }
 }

@@ -1,7 +1,6 @@
 //! Operation Object
 
 use std::collections::BTreeMap;
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -159,7 +158,7 @@ impl ValidateWithContext<Spec> for Operation {
         }
 
         self.responses
-            .validate_with_context(ctx, path.add(".responses"));
+            .validate_with_context(ctx, format!("{}.responses", path));
     }
 }
 

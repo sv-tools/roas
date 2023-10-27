@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::ops::Add;
 
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
@@ -159,9 +158,9 @@ impl<'de> Deserialize<'de> for Responses {
 
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.description, ctx, path.clone().add(".description"));
+        validate_required_string(&self.description, ctx, format!("{}.description", path));
         if let Some(schema) = &self.schema {
-            schema.validate_with_context(ctx, path.clone().add(".schema"));
+            schema.validate_with_context(ctx, format!("{}.schema", path));
         }
         if let Some(headers) = &self.headers {
             for (name, header) in headers {
@@ -174,7 +173,7 @@ impl ValidateWithContext<Spec> for Response {
 impl ValidateWithContext<Spec> for Responses {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(response) = &self.default {
-            response.validate_with_context(ctx, path.clone().add(".default"));
+            response.validate_with_context(ctx, format!("{}.default", path));
         }
         if let Some(responses) = &self.responses {
             for (name, response) in responses {
