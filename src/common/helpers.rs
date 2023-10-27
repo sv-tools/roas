@@ -42,12 +42,16 @@ pub fn validate_email<T>(email: &Option<String>, ctx: &mut Context<T>, path: Str
 const HTTP: &str = "http://";
 const HTTPS: &str = "https://";
 
-pub fn validate_url<T>(url: &Option<String>, ctx: &mut Context<T>, path: String) {
+pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path: String) {
     if let Some(url) = url {
-        if !url.starts_with(HTTP) && !url.starts_with(HTTPS) {
-            ctx.errors
-                .push(format!("{}: must be a valid URL, found `{}`", path, url));
-        }
+        validate_required_url(url, ctx, path);
+    }
+}
+
+pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
+    if !url.starts_with(HTTP) && !url.starts_with(HTTPS) {
+        ctx.errors
+            .push(format!("{}: must be a valid URL, found `{}`", path, url));
     }
 }
 

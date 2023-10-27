@@ -14,7 +14,7 @@ use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::info::Info;
 use crate::v2::parameter::Parameter;
-use crate::v2::paths::PathItem;
+use crate::v2::path_item::PathItem;
 use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
@@ -348,7 +348,7 @@ impl ValidateWithContext<Spec> for Spec {
             }
         }
 
-        if !ctx.options.contains(Options::IgnoreUnusedDefinitions) {
+        if !ctx.options.contains(Options::IgnoreUnusedSchemas) {
             if let Some(definitions) = &self.definitions {
                 for (name, definition) in definitions.iter() {
                     let path = format!("{}/definitions/{}", path, name);

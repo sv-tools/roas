@@ -74,7 +74,7 @@ pub struct PathItem {
     /// Any map items that can be converted to an `Operation` object will be stored here.
     /// This includes `get`, `put`, `post`, `delete`, `options`, `head`, `patch`, `trace`,
     /// and any other custom operations, like SEARCH and etc...
-    operations: Option<BTreeMap<String, Operation>>,
+    pub operations: Option<BTreeMap<String, Operation>>,
 
     /// A list of parameters that are applicable for all the operations described under this path.
     /// These parameters can be overridden at the operation level, but cannot be removed there.

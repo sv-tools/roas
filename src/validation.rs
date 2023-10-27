@@ -2,10 +2,6 @@ use std::fmt::Display;
 
 use enumset::{EnumSet, EnumSetType};
 
-use crate::validation::Options::{
-    IgnoreUnusedDefinitions, IgnoreUnusedParameters, IgnoreUnusedResponses, IgnoreUnusedTags,
-};
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Error {
     pub errors: Vec<String>,
@@ -27,14 +23,23 @@ pub enum Options {
     IgnoreExternalReferences,
     IgnoreNonUniqOperationIDs,
     IgnoreUnusedTags,
-    IgnoreUnusedDefinitions,
+    IgnoreUnusedSchemas,
     IgnoreUnusedParameters,
     IgnoreUnusedResponses,
 }
 
 impl Options {
+    /// Create an empty (strict) set of options.
+    pub fn new() -> EnumSet<Options> {
+        EnumSet::empty()
+    }
+
+    /// Create options to ignore unused elements.
     pub fn ignore_unused() -> EnumSet<Options> {
-        IgnoreUnusedTags | IgnoreUnusedDefinitions | IgnoreUnusedParameters | IgnoreUnusedResponses
+        Options::IgnoreUnusedTags
+            | Options::IgnoreUnusedSchemas
+            | Options::IgnoreUnusedParameters
+            | Options::IgnoreUnusedResponses
     }
 }
 
