@@ -3,7 +3,7 @@ use std::fmt::Display;
 use enumset::{EnumSet, EnumSetType};
 
 use crate::validation::Options::{
-    IgnoreUnusedDefinitions, IgnoreUnusedParameters, IgnoreUnusedResponses, IgnoreUnusedTags,
+    IgnoreUnusedParameters, IgnoreUnusedResponses, IgnoreUnusedSchemas, IgnoreUnusedTags,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,14 +27,14 @@ pub enum Options {
     IgnoreExternalReferences,
     IgnoreNonUniqOperationIDs,
     IgnoreUnusedTags,
-    IgnoreUnusedDefinitions,
+    IgnoreUnusedSchemas,
     IgnoreUnusedParameters,
     IgnoreUnusedResponses,
 }
 
 impl Options {
     pub fn ignore_unused() -> EnumSet<Options> {
-        IgnoreUnusedTags | IgnoreUnusedDefinitions | IgnoreUnusedParameters | IgnoreUnusedResponses
+        IgnoreUnusedTags | IgnoreUnusedSchemas | IgnoreUnusedParameters | IgnoreUnusedResponses
     }
 }
 

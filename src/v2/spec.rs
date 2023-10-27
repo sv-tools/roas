@@ -348,7 +348,7 @@ impl ValidateWithContext<Spec> for Spec {
             }
         }
 
-        if !ctx.options.contains(Options::IgnoreUnusedDefinitions) {
+        if !ctx.options.contains(Options::IgnoreUnusedSchemas) {
             if let Some(definitions) = &self.definitions {
                 for (name, definition) in definitions.iter() {
                     let path = format!("{}/definitions/{}", path, name);
