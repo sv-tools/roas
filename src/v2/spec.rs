@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
-use std::ops::Add;
 
 use enumset::EnumSet;
 use regex::Regex;
@@ -308,10 +307,10 @@ impl Validate for Spec {
 impl ValidateWithContext<Spec> for Spec {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.info
-            .validate_with_context(ctx, path.clone().add(".info"));
+            .validate_with_context(ctx, format!("{}.info", path));
 
         let re = Regex::new(r"^[^{}/ :\\]+(?::\d+)?$").unwrap();
-        validate_optional_string_matches(&self.host, &re, ctx, path.clone().add(".host"));
+        validate_optional_string_matches(&self.host, &re, ctx, format!("{}.host", path));
 
         if let Some(base_path) = &self.base_path {
             if !base_path.starts_with('/') {
@@ -332,7 +331,7 @@ impl ValidateWithContext<Spec> for Spec {
         }
 
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.clone().add(".externalDocs"))
+            docs.validate_with_context(ctx, format!("{}.externalDocs", path))
         }
 
         // validate unused components

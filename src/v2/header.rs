@@ -1,7 +1,6 @@
 //! Header Object
 
 use std::collections::BTreeMap;
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -271,7 +270,8 @@ impl ValidateWithContext<Spec> for BooleanHeader {
 
 impl ValidateWithContext<Spec> for ArrayHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        self.items.validate_with_context(ctx, path.add(".items"));
+        self.items
+            .validate_with_context(ctx, format!("{}.items", path));
     }
 }
 

@@ -1,7 +1,6 @@
 //! Tag Object
 
 use std::collections::BTreeMap;
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,9 +44,9 @@ pub struct Tag {
 
 impl ValidateWithContext<Spec> for Tag {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.clone().add(".name"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
         if let Some(doc) = &self.external_docs {
-            doc.validate_with_context(ctx, path.add(".externalDocs"));
+            doc.validate_with_context(ctx, format!("{}.externalDocs", path));
         }
     }
 }

@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -53,8 +52,8 @@ pub struct XML {
 impl ValidateWithContext<Spec> for XML {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(name) = &self.name {
-            validate_required_string(name, ctx, path.clone().add(".name"));
+            validate_required_string(name, ctx, format!("{}.name", path));
         }
-        validate_optional_url(&self.namespace, ctx, path.add(".namespace"));
+        validate_optional_url(&self.namespace, ctx, format!("{}.namespace", path));
     }
 }

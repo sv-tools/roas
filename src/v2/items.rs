@@ -1,7 +1,6 @@
 //! Item Object
 
 use std::collections::BTreeMap;
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -257,7 +256,8 @@ impl ValidateWithContext<Spec> for BooleanItem {
 
 impl ValidateWithContext<Spec> for ArrayItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        self.items.validate_with_context(ctx, path.add(".items"));
+        self.items
+            .validate_with_context(ctx, format!("{}.items", path));
     }
 }
 

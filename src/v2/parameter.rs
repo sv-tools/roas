@@ -1,7 +1,6 @@
 //! Parameter Object
 
 use std::collections::BTreeMap;
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -481,8 +480,9 @@ impl ValidateWithContext<Spec> for Parameter {
 
 impl ValidateWithContext<Spec> for InBody {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.clone().add("name"));
-        self.schema.validate_with_context(ctx, path.add(".schema"));
+        validate_required_string(&self.name, ctx, format!("{}name", path));
+        self.schema
+            .validate_with_context(ctx, format!("{}.schema", path));
     }
 }
 
@@ -589,37 +589,37 @@ impl ValidateWithContext<Spec> for InFormData {
 
 impl ValidateWithContext<Spec> for StringParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.add(".name"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
     }
 }
 
 impl ValidateWithContext<Spec> for IntegerParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.add(".name"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
     }
 }
 
 impl ValidateWithContext<Spec> for NumberParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.add(".name"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
     }
 }
 
 impl ValidateWithContext<Spec> for BooleanParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.add(".name"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
     }
 }
 
 impl ValidateWithContext<Spec> for ArrayParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.add(".name"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
     }
 }
 
 impl ValidateWithContext<Spec> for FileParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.add(".name"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
     }
 }
 

@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -569,10 +568,10 @@ impl ValidateWithContext<Spec> for Schema {
 impl ValidateWithContext<Spec> for StringSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.clone().add(".externalDocs"));
+            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, path.add(".xml"));
+            xml.validate_with_context(ctx, format!("{}.xml", path));
         }
     }
 }
@@ -580,10 +579,10 @@ impl ValidateWithContext<Spec> for StringSchema {
 impl ValidateWithContext<Spec> for IntegerSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.clone().add(".externalDocs"));
+            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, path.add(".xml"));
+            xml.validate_with_context(ctx, format!("{}.xml", path));
         }
     }
 }
@@ -591,10 +590,10 @@ impl ValidateWithContext<Spec> for IntegerSchema {
 impl ValidateWithContext<Spec> for NumberSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.clone().add(".externalDocs"));
+            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, path.add(".xml"));
+            xml.validate_with_context(ctx, format!("{}.xml", path));
         }
     }
 }
@@ -602,10 +601,10 @@ impl ValidateWithContext<Spec> for NumberSchema {
 impl ValidateWithContext<Spec> for BooleanSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.clone().add(".externalDocs"));
+            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, path.add(".xml"));
+            xml.validate_with_context(ctx, format!("{}.xml", path));
         }
     }
 }
@@ -613,14 +612,14 @@ impl ValidateWithContext<Spec> for BooleanSchema {
 impl ValidateWithContext<Spec> for ArraySchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.clone().add(".externalDocs"));
+            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, path.clone().add(".xml"));
+            xml.validate_with_context(ctx, format!("{}.xml", path));
         }
 
         if let Some(items) = &self.items {
-            items.validate_with_context_boxed(ctx, path.add(".items"));
+            items.validate_with_context_boxed(ctx, format!("{}.items", path));
         }
     }
 }
@@ -628,10 +627,10 @@ impl ValidateWithContext<Spec> for ArraySchema {
 impl ValidateWithContext<Spec> for ObjectSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.clone().add(".externalDocs"));
+            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, path.clone().add(".xml"));
+            xml.validate_with_context(ctx, format!("{}.xml", path));
         }
 
         if let Some(properties) = &self.properties {
@@ -644,10 +643,8 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match additional_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema.validate_with_context_boxed(
-                        ctx,
-                        path.clone().add(".additionalProperties"),
-                    );
+                    schema
+                        .validate_with_context_boxed(ctx, format!("{}.additionalProperties", path));
                 }
             }
         }
@@ -662,10 +659,10 @@ impl ValidateWithContext<Spec> for ObjectSchema {
 impl ValidateWithContext<Spec> for NullSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, path.clone().add(".externalDocs"));
+            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, path.add(".xml"));
+            xml.validate_with_context(ctx, format!("{}.xml", path));
         }
     }
 }

@@ -1,7 +1,6 @@
 //! Metadata about the API.
 
 use std::collections::BTreeMap;
-use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
@@ -127,30 +126,30 @@ pub struct License {
 
 impl ValidateWithContext<Spec> for Info {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.title, ctx, path.clone().add(".title"));
-        validate_required_string(&self.version, ctx, path.clone().add(".version"));
+        validate_required_string(&self.title, ctx, format!("{}.title", path));
+        validate_required_string(&self.version, ctx, format!("{}.version", path));
 
         if let Some(contact) = &self.contact {
-            contact.validate_with_context(ctx, path.clone().add(".contact"));
+            contact.validate_with_context(ctx, format!("{}.contact", path));
         }
 
         if let Some(license) = &self.license {
-            license.validate_with_context(ctx, path.add(".license"));
+            license.validate_with_context(ctx, format!("{}.license", path));
         }
     }
 }
 
 impl ValidateWithContext<Spec> for Contact {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&self.url, ctx, path.clone().add(".url"));
-        validate_email(&self.email, ctx, path.add(".email"));
+        validate_optional_url(&self.url, ctx, format!("{}.url", path));
+        validate_email(&self.email, ctx, format!("{}.email", path));
     }
 }
 
 impl ValidateWithContext<Spec> for License {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, path.clone().add(".name"));
-        validate_optional_url(&self.url, ctx, path.add(".url"));
+        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_optional_url(&self.url, ctx, format!("{}.url", path));
     }
 }
 
