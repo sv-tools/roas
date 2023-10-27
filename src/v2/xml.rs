@@ -4,7 +4,7 @@ use std::ops::Add;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    validate_required_string, validate_url, Context, ValidateWithContext,
+    validate_optional_url, validate_required_string, Context, ValidateWithContext,
 };
 use crate::v2::spec::Spec;
 
@@ -55,6 +55,6 @@ impl ValidateWithContext<Spec> for XML {
         if let Some(name) = &self.name {
             validate_required_string(name, ctx, path.clone().add(".name"));
         }
-        validate_url(&self.namespace, ctx, path.add(".namespace"));
+        validate_optional_url(&self.namespace, ctx, path.add(".namespace"));
     }
 }

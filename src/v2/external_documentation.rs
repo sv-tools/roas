@@ -5,7 +5,9 @@ use std::ops::Add;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_url, Context, ValidateWithContext};
+use crate::common::helpers::{
+    validate_optional_url, validate_required_url, Context, ValidateWithContext,
+};
 use crate::v2::spec::Spec;
 
 /// Allows referencing an external resource for extended documentation.
@@ -37,7 +39,7 @@ pub struct ExternalDocumentation {
 
 impl ValidateWithContext<Spec> for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_url(&Some(self.url.clone()), ctx, path.add(".url"));
+        validate_required_url(&self.url, ctx, path.add(".url"));
     }
 }
 

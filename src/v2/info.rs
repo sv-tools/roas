@@ -6,7 +6,7 @@ use std::ops::Add;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    validate_email, validate_required_string, validate_url, Context, ValidateWithContext,
+    validate_email, validate_optional_url, validate_required_string, Context, ValidateWithContext,
 };
 use crate::v2::spec::Spec;
 
@@ -142,7 +142,7 @@ impl ValidateWithContext<Spec> for Info {
 
 impl ValidateWithContext<Spec> for Contact {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_url(&self.url, ctx, path.clone().add(".url"));
+        validate_optional_url(&self.url, ctx, path.clone().add(".url"));
         validate_email(&self.email, ctx, path.add(".email"));
     }
 }
@@ -150,7 +150,7 @@ impl ValidateWithContext<Spec> for Contact {
 impl ValidateWithContext<Spec> for License {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, path.clone().add(".name"));
-        validate_url(&self.url, ctx, path.add(".url"));
+        validate_optional_url(&self.url, ctx, path.add(".url"));
     }
 }
 

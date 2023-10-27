@@ -7,7 +7,7 @@ use std::ops::Add;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    validate_required_string, validate_url, Context, ValidateWithContext,
+    validate_optional_url, validate_required_string, Context, ValidateWithContext,
 };
 use crate::v2::spec::Spec;
 
@@ -191,7 +191,7 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
                 path, self.flow,
             ));
         } else {
-            validate_url(&self.authorization_url, ctx, path.add(".authorizationUrl"));
+            validate_optional_url(&self.authorization_url, ctx, path.add(".authorizationUrl"));
         }
     }
 }
