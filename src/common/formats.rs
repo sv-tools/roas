@@ -1,36 +1,35 @@
+use std::fmt;
 use std::fmt::Display;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{Error, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum StringFormat {
     /// base64 encoded characters
-    #[serde(rename = "byte")]
     Byte,
 
     /// any sequence of octets
-    #[serde(rename = "binary")]
     Binary,
 
     /// As defined by `full-date` - [RFC3339](https://www.rfc-editor.org/rfc/rfc3339)
-    #[serde(rename = "date")]
     Date,
 
     /// As defined by `date-time` - [RFC3339](https://www.rfc-editor.org/rfc/rfc3339)
-    #[serde(rename = "date-time")]
     DateTime,
 
     /// Used to hint UIs the input needs to be obscured.
-    #[serde(rename = "password")]
     Password,
 
     /// As defined by [RFC4122](https://www.rfc-editor.org/rfc/rfc4122)
-    #[serde(rename = "uuid")]
     UUID,
+
+    /// A custom string format
+    Custom(String),
 }
 
 impl Display for StringFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StringFormat::Byte => write!(f, "byte"),
             StringFormat::Binary => write!(f, "binary"),
@@ -38,6 +37,7 @@ impl Display for StringFormat {
             StringFormat::DateTime => write!(f, "date-time"),
             StringFormat::Password => write!(f, "password"),
             StringFormat::UUID => write!(f, "uuid"),
+            StringFormat::Custom(s) => write!(f, "{}", s),
         }
     }
 }
@@ -53,7 +53,7 @@ pub enum IntegerFormat {
 }
 
 impl Display for IntegerFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IntegerFormat::Int32 => write!(f, "int32"),
             IntegerFormat::Int64 => write!(f, "int64"),
@@ -72,7 +72,7 @@ pub enum NumberFormat {
 }
 
 impl Display for NumberFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NumberFormat::Float => write!(f, "float"),
             NumberFormat::Double => write!(f, "double"),
@@ -101,7 +101,7 @@ pub enum CollectionFormat {
 }
 
 impl Display for CollectionFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CollectionFormat::CSV => write!(f, "csv"),
             CollectionFormat::SSV => write!(f, "ssv"),
@@ -109,6 +109,46 @@ impl Display for CollectionFormat {
             CollectionFormat::PIPES => write!(f, "pipes"),
             CollectionFormat::Multi => write!(f, "multi"),
         }
+    }
+}
+
+impl Serialize for StringFormat {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.to_string().as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StringFormat {
+    fn deserialize<D>(deserializer: D) -> Result<StringFormat, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StringFormatVisitor;
+
+        impl<'de> Visitor<'de> for StringFormatVisitor {
+            type Value = StringFormat;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("one of `byte`, `binary`, `date`, `date-time`, `password`, `uuid` or a custom string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                match value {
+                    "byte" => Ok(StringFormat::Byte),
+                    "binary" => Ok(StringFormat::Binary),
+                    "date" => Ok(StringFormat::Date),
+                    "date-time" => Ok(StringFormat::DateTime),
+                    "password" => Ok(StringFormat::Password),
+                    "uuid" => Ok(StringFormat::UUID),
+                    _ => Ok(StringFormat::Custom(String::from(value))),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(StringFormatVisitor)
     }
 }
 
@@ -148,6 +188,11 @@ mod tests {
             StringFormat::UUID,
             "deserialize uuid",
         );
+        assert_eq!(
+            serde_json::from_str::<StringFormat>(r#""foo-bar""#).unwrap(),
+            StringFormat::Custom(String::from("foo-bar")),
+            "deserialize foo-bar as custom",
+        );
     }
 
     #[test]
@@ -176,6 +221,16 @@ mod tests {
             serde_json::to_string(&StringFormat::Password).unwrap(),
             r#""password""#,
             "serialize password",
+        );
+        assert_eq!(
+            serde_json::to_string(&StringFormat::UUID).unwrap(),
+            r#""uuid""#,
+            "serialize uuid",
+        );
+        assert_eq!(
+            serde_json::to_string(&StringFormat::Custom(String::from("foo-bar"))).unwrap(),
+            r#""foo-bar""#,
+            "serialize foo-bar as custom",
         );
     }
 

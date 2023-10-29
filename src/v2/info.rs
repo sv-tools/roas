@@ -195,7 +195,7 @@ mod tests {
                     )),
                     ..Default::default()
                 }),
-                version: "1.0.1".to_string(),
+                version: "1.0.1".to_owned(),
                 ..Default::default()
             },
             "deserialize",
@@ -222,7 +222,7 @@ mod tests {
                     )),
                     ..Default::default()
                 }),
-                version: "1.0.1".to_string(),
+                version: "1.0.1".to_owned(),
                 ..Default::default()
             })
             .unwrap(),

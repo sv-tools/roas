@@ -195,7 +195,6 @@ impl ValidateWithContext<Spec> for Responses {
 
 #[cfg(test)]
 mod tests {
-    use crate::common::reference::Ref;
     use crate::v2::header::{IntegerHeader, StringHeader};
 
     use super::*;
@@ -224,25 +223,25 @@ mod tests {
             }))
             .unwrap(),
             Response {
-                description: "A simple response".to_string(),
+                description: "A simple response".to_owned(),
                 schema: None,
                 headers: Some({
                     let mut map = BTreeMap::new();
                     map.insert(
-                        "Authorization".to_string(),
+                        "Authorization".to_owned(),
                         Header::String(StringHeader {
                             description: Some(
-                                "The bearer token to use in all other requests".to_string(),
+                                "The bearer token to use in all other requests".to_owned(),
                             ),
                             pattern: Some(r#""^Bearer [a-zA-Z0-9-._~+/]+={0,2}$""#.to_string()),
                             ..Default::default()
                         }),
                     );
                     map.insert(
-                        "X-Rate-Limit-Limit".to_string(),
+                        "X-Rate-Limit-Limit".to_owned(),
                         Header::Integer(IntegerHeader {
                             description: Some(
-                                "The number of allowed requests in the current period".to_string(),
+                                "The number of allowed requests in the current period".to_owned(),
                             ),
                             ..Default::default()
                         }),
@@ -251,13 +250,13 @@ mod tests {
                 }),
                 examples: Some({
                     let mut map = BTreeMap::new();
-                    map.insert("foo".to_string(), serde_json::json!("bar"));
-                    map.insert("baz".to_string(), serde_json::json!(42));
+                    map.insert("foo".to_owned(), serde_json::json!("bar"));
+                    map.insert("baz".to_owned(), serde_json::json!(42));
                     map
                 }),
                 extensions: Some({
                     let mut map = BTreeMap::new();
-                    map.insert("x-extra".to_string(), serde_json::json!("extension"));
+                    map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                     map
                 }),
             },
@@ -269,25 +268,25 @@ mod tests {
     fn test_response_serialization() {
         assert_eq!(
             serde_json::to_value(Response {
-                description: "A simple response".to_string(),
+                description: "A simple response".to_owned(),
                 schema: None,
                 headers: Some({
                     let mut map = BTreeMap::new();
                     map.insert(
-                        "Authorization".to_string(),
+                        "Authorization".to_owned(),
                         Header::String(StringHeader {
                             description: Some(
-                                "The bearer token to use in all other requests".to_string(),
+                                "The bearer token to use in all other requests".to_owned(),
                             ),
                             pattern: Some(r#""^Bearer [a-zA-Z0-9-._~+/]+={0,2}$""#.to_string()),
                             ..Default::default()
                         }),
                     );
                     map.insert(
-                        "X-Rate-Limit-Limit".to_string(),
+                        "X-Rate-Limit-Limit".to_owned(),
                         Header::Integer(IntegerHeader {
                             description: Some(
-                                "The number of allowed requests in the current period".to_string(),
+                                "The number of allowed requests in the current period".to_owned(),
                             ),
                             ..Default::default()
                         }),
@@ -296,13 +295,13 @@ mod tests {
                 }),
                 examples: Some({
                     let mut map = BTreeMap::new();
-                    map.insert("foo".to_string(), serde_json::json!("bar"));
-                    map.insert("baz".to_string(), serde_json::json!(42));
+                    map.insert("foo".to_owned(), serde_json::json!("bar"));
+                    map.insert("baz".to_owned(), serde_json::json!(42));
                     map
                 }),
                 extensions: Some({
                     let mut map = BTreeMap::new();
-                    map.insert("x-extra".to_string(), serde_json::json!("extension"));
+                    map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                     map
                 }),
             })
@@ -379,23 +378,23 @@ mod tests {
             }))
             .unwrap(),
             Responses {
-                default: Some(RefOr::Item(Response {
-                    description: "A simple response".to_string(),
+                default: Some(RefOr::new_item(Response {
+                    description: "A simple response".to_owned(),
                     schema: None,
                     headers: Some({
                         let mut map = BTreeMap::new();
                         map.insert(
-                            "Authorization".to_string(),
+                            "Authorization".to_owned(),
                             Header::String(StringHeader {
                                 description: Some(
-                                    "The bearer token to use in all other requests".to_string(),
+                                    "The bearer token to use in all other requests".to_owned(),
                                 ),
                                 pattern: Some(r#""^Bearer [a-zA-Z0-9-._~+/]+={0,2}$""#.to_string()),
                                 ..Default::default()
                             }),
                         );
                         map.insert(
-                            "X-Rate-Limit-Limit".to_string(),
+                            "X-Rate-Limit-Limit".to_owned(),
                             Header::Integer(IntegerHeader {
                                 description: Some(
                                     "The number of allowed requests in the current period"
@@ -408,27 +407,27 @@ mod tests {
                     }),
                     examples: Some({
                         let mut map = BTreeMap::new();
-                        map.insert("foo".to_string(), serde_json::json!("bar"));
-                        map.insert("baz".to_string(), serde_json::json!(42));
+                        map.insert("foo".to_owned(), serde_json::json!("bar"));
+                        map.insert("baz".to_owned(), serde_json::json!(42));
                         map
                     }),
                     extensions: Some({
                         let mut map = BTreeMap::new();
-                        map.insert("x-extra".to_string(), serde_json::json!("extension"));
+                        map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                         map
                     }),
                 })),
                 responses: Some({
                     let mut map = BTreeMap::new();
                     map.insert(
-                        "200".to_string(),
-                        RefOr::Item(Response {
-                            description: "A simple response".to_string(),
+                        "200".to_owned(),
+                        RefOr::new_item(Response {
+                            description: "A simple response".to_owned(),
                             schema: None,
                             headers: Some({
                                 let mut map = BTreeMap::new();
                                 map.insert(
-                                    "Authorization".to_string(),
+                                    "Authorization".to_owned(),
                                     Header::String(StringHeader {
                                         description: Some(
                                             "The bearer token to use in all other requests"
@@ -441,7 +440,7 @@ mod tests {
                                     }),
                                 );
                                 map.insert(
-                                    "X-Rate-Limit-Limit".to_string(),
+                                    "X-Rate-Limit-Limit".to_owned(),
                                     Header::Integer(IntegerHeader {
                                         description: Some(
                                             "The number of allowed requests in the current period"
@@ -454,29 +453,26 @@ mod tests {
                             }),
                             examples: Some({
                                 let mut map = BTreeMap::new();
-                                map.insert("foo".to_string(), serde_json::json!("bar"));
-                                map.insert("baz".to_string(), serde_json::json!(42));
+                                map.insert("foo".to_owned(), serde_json::json!("bar"));
+                                map.insert("baz".to_owned(), serde_json::json!(42));
                                 map
                             }),
                             extensions: Some({
                                 let mut map = BTreeMap::new();
-                                map.insert("x-extra".to_string(), serde_json::json!("extension"));
+                                map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                                 map
                             }),
                         }),
                     );
                     map.insert(
-                        "404".to_string(),
-                        RefOr::Ref(Ref {
-                            reference: "#/components/responses/NotFound".to_string(),
-                            ..Default::default()
-                        }),
+                        "404".to_owned(),
+                        RefOr::new_ref("#/components/responses/NotFound".to_owned()),
                     );
                     map
                 }),
                 extensions: Some({
                     let mut map = BTreeMap::new();
-                    map.insert("x-extra".to_string(), serde_json::json!("extension"));
+                    map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                     map
                 }),
             },
@@ -531,23 +527,23 @@ mod tests {
     fn test_responses_serialize() {
         assert_eq!(
             serde_json::to_value(Responses {
-                default: Some(RefOr::Item(Response {
-                    description: "A simple response".to_string(),
+                default: Some(RefOr::new_item(Response {
+                    description: "A simple response".to_owned(),
                     schema: None,
                     headers: Some({
                         let mut map = BTreeMap::new();
                         map.insert(
-                            "Authorization".to_string(),
+                            "Authorization".to_owned(),
                             Header::String(StringHeader {
                                 description: Some(
-                                    "The bearer token to use in all other requests".to_string(),
+                                    "The bearer token to use in all other requests".to_owned(),
                                 ),
                                 pattern: Some(r#""^Bearer [a-zA-Z0-9-._~+/]+={0,2}$""#.to_string()),
                                 ..Default::default()
                             }),
                         );
                         map.insert(
-                            "X-Rate-Limit-Limit".to_string(),
+                            "X-Rate-Limit-Limit".to_owned(),
                             Header::Integer(IntegerHeader {
                                 description: Some(
                                     "The number of allowed requests in the current period"
@@ -560,27 +556,27 @@ mod tests {
                     }),
                     examples: Some({
                         let mut map = BTreeMap::new();
-                        map.insert("foo".to_string(), serde_json::json!("bar"));
-                        map.insert("baz".to_string(), serde_json::json!(42));
+                        map.insert("foo".to_owned(), serde_json::json!("bar"));
+                        map.insert("baz".to_owned(), serde_json::json!(42));
                         map
                     }),
                     extensions: Some({
                         let mut map = BTreeMap::new();
-                        map.insert("x-extra".to_string(), serde_json::json!("extension"));
+                        map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                         map
                     }),
                 })),
                 responses: Some({
                     let mut map = BTreeMap::new();
                     map.insert(
-                        "200".to_string(),
-                        RefOr::Item(Response {
-                            description: "A simple response".to_string(),
+                        "200".to_owned(),
+                        RefOr::new_item(Response {
+                            description: "A simple response".to_owned(),
                             schema: None,
                             headers: Some({
                                 let mut map = BTreeMap::new();
                                 map.insert(
-                                    "Authorization".to_string(),
+                                    "Authorization".to_owned(),
                                     Header::String(StringHeader {
                                         description: Some(
                                             "The bearer token to use in all other requests"
@@ -593,7 +589,7 @@ mod tests {
                                     }),
                                 );
                                 map.insert(
-                                    "X-Rate-Limit-Limit".to_string(),
+                                    "X-Rate-Limit-Limit".to_owned(),
                                     Header::Integer(IntegerHeader {
                                         description: Some(
                                             "The number of allowed requests in the current period"
@@ -606,29 +602,26 @@ mod tests {
                             }),
                             examples: Some({
                                 let mut map = BTreeMap::new();
-                                map.insert("foo".to_string(), serde_json::json!("bar"));
-                                map.insert("baz".to_string(), serde_json::json!(42));
+                                map.insert("foo".to_owned(), serde_json::json!("bar"));
+                                map.insert("baz".to_owned(), serde_json::json!(42));
                                 map
                             }),
                             extensions: Some({
                                 let mut map = BTreeMap::new();
-                                map.insert("x-extra".to_string(), serde_json::json!("extension"));
+                                map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                                 map
                             }),
                         }),
                     );
                     map.insert(
-                        "404".to_string(),
-                        RefOr::Ref(Ref {
-                            reference: "#/components/responses/NotFound".to_string(),
-                            ..Default::default()
-                        }),
+                        "404".to_owned(),
+                        RefOr::new_ref("#/components/responses/NotFound".to_owned()),
                     );
                     map
                 }),
                 extensions: Some({
                     let mut map = BTreeMap::new();
-                    map.insert("x-extra".to_string(), serde_json::json!("extension"));
+                    map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                     map
                 }),
             })

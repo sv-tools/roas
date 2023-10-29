@@ -207,7 +207,6 @@ impl ValidateWithContext<Spec> for PathItem {
 #[cfg(test)]
 mod tests {
     use crate::common::formats::CollectionFormat;
-    use crate::common::reference::Ref;
     use crate::v2::items::{Items, StringItem};
     use crate::v2::parameter::{ArrayParameter, InPath};
     use crate::v2::response::{Response, Responses};
@@ -414,12 +413,11 @@ mod tests {
                                 String::from("text/html"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -442,12 +440,11 @@ mod tests {
                                 String::from("text/xml"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -470,12 +467,11 @@ mod tests {
                                 String::from("text/xml"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -494,12 +490,11 @@ mod tests {
                                 String::from("text/html"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -518,12 +513,11 @@ mod tests {
                                 String::from("text/html"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -546,12 +540,11 @@ mod tests {
                                 String::from("text/xml"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -571,12 +564,11 @@ mod tests {
                                 String::from("text/plain"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -595,12 +587,11 @@ mod tests {
                                 String::from("text/html"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -619,12 +610,11 @@ mod tests {
                                 String::from("text/html"),
                             ]),
                             responses: Responses {
-                                default: Some(RefOr::Item(Response {
+                                default: Some(RefOr::new_item(Response {
                                     description: String::from("error payload"),
-                                    schema: Some(RefOr::Ref(Ref {
-                                        reference: String::from("#/definitions/ErrorModel"),
-                                        ..Default::default()
-                                    })),
+                                    schema: Some(RefOr::new_ref(
+                                        "#/definitions/ErrorModel".to_owned(),
+                                    )),
                                     ..Default::default()
                                 })),
                                 ..Default::default()
@@ -634,7 +624,7 @@ mod tests {
                     );
                     operations
                 }),
-                parameters: Some(vec![RefOr::Item(Parameter::Path(InPath::Array(
+                parameters: Some(vec![RefOr::new_item(Parameter::Path(InPath::Array(
                     ArrayParameter {
                         name: String::from("id"),
                         description: Some(String::from("ID of pet to use")),
