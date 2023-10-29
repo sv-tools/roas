@@ -1,7 +1,5 @@
 //! Reference Object
 
-use std::ops::Add;
-
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{Context, ValidateWithContext};
@@ -57,6 +55,27 @@ impl<D> RefOr<D> {
             }
         }
     }
+
+    pub fn new_ref(reference: String) -> Self {
+        RefOr::Ref(Ref {
+            reference,
+            ..Default::default()
+        })
+    }
+
+    pub fn new_item(item: D) -> Self {
+        RefOr::Item(item)
+    }
+
+    pub fn get_item<'a, T>(&'a self, spec: &'a T) -> Option<&D>
+    where
+        T: ResolveReference<D>,
+    {
+        match self {
+            RefOr::Item(d) => Some(d),
+            RefOr::Ref(r) => spec.resolve_reference(&r.reference),
+        }
+    }
 }
 
 impl<D> RefOr<Box<D>> {
@@ -83,7 +102,7 @@ impl Ref {
         D: ValidateWithContext<T>,
     {
         if self.reference.is_empty() {
-            ctx.errors.push(path.add(".$ref: must not be empty"));
+            ctx.errors.push(format!("{}.$ref: must not be empty", path));
             return;
         }
         if ctx.visited.insert(self.reference.clone()) {
@@ -167,7 +186,7 @@ mod tests {
     #[test]
     fn test_ref_or_foo_serialize() {
         assert_eq!(
-            serde_json::to_value(RefOr::Item(Foo {
+            serde_json::to_value(RefOr::new_item(Foo {
                 foo: String::from("bar"),
             }))
             .unwrap(),
@@ -196,7 +215,7 @@ mod tests {
                 "foo":"bar",
             }))
             .unwrap(),
-            RefOr::Item(Foo {
+            RefOr::new_item(Foo {
                 foo: String::from("bar"),
             }),
             "deserialize item",

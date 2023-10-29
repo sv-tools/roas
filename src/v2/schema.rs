@@ -669,8 +669,6 @@ impl ValidateWithContext<Spec> for NullSchema {
 
 #[cfg(test)]
 mod tests {
-    use crate::common::reference::Ref;
-
     use super::*;
 
     #[test]
@@ -753,7 +751,7 @@ mod tests {
                     let mut map = BTreeMap::new();
                     map.insert(
                         "bar".to_owned(),
-                        RefOr::Item(Box::new(Schema::String(StringSchema {
+                        RefOr::new_item(Box::new(Schema::String(StringSchema {
                             title: Some("foo bar".to_owned()),
                             ..Default::default()
                         }))),
@@ -782,11 +780,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Schema::Object(ObjectSchema {
                 all_of: Some(vec![
-                    RefOr::Ref(Ref {
-                        reference: "#/definitions/bar".to_owned(),
-                        ..Default::default()
-                    }),
-                    RefOr::Item(ObjectSchema {
+                    RefOr::new_ref("#/definitions/bar".to_owned()),
+                    RefOr::new_item(ObjectSchema {
                         title: Some("foo".to_owned()),
                         ..Default::default()
                     }),

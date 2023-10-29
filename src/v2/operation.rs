@@ -164,8 +164,8 @@ impl ValidateWithContext<Spec> for Operation {
 
 #[cfg(test)]
 mod tests {
-    use crate::common::reference::Ref;
     use crate::v2::parameter::{InPath, StringParameter};
+    use crate::v2::response::Response;
 
     use super::*;
 
@@ -242,33 +242,27 @@ mod tests {
                     "application/xml".to_owned(),
                 ]),
                 parameters: Some(vec![
-                    RefOr::Item(Parameter::Path(InPath::String(StringParameter {
+                    RefOr::new_item(Parameter::Path(InPath::String(StringParameter {
                         name: "petId".to_owned(),
                         description: Some("ID of pet that needs to be updated".to_owned()),
                         required: Some(true),
                         ..Default::default()
                     }))),
-                    RefOr::Ref(Ref {
-                        reference: "#/definitions/Pet".to_owned(),
-                        ..Default::default()
-                    }),
+                    RefOr::new_ref("#/definitions/Pet".to_owned()),
                 ]),
                 responses: Responses {
                     responses: Some({
                         let mut map = BTreeMap::new();
                         map.insert(
                             "200".to_owned(),
-                            RefOr::Item(crate::v2::response::Response {
+                            RefOr::new_item(Response {
                                 description: "Pet updated.".to_owned(),
                                 ..Default::default()
                             }),
                         );
                         map.insert(
                             "405".to_owned(),
-                            RefOr::Ref(Ref {
-                                reference: "#/responses/InvalidInput".to_owned(),
-                                ..Default::default()
-                            }),
+                            RefOr::new_ref("#/responses/InvalidInput".to_owned()),
                         );
                         map
                     }),
@@ -318,33 +312,27 @@ mod tests {
                     "application/xml".to_owned(),
                 ]),
                 parameters: Some(vec![
-                    RefOr::Item(Parameter::Path(InPath::String(StringParameter {
+                    RefOr::new_item(Parameter::Path(InPath::String(StringParameter {
                         name: "petId".to_owned(),
                         description: Some("ID of pet that needs to be updated".to_owned()),
                         required: Some(true),
                         ..Default::default()
                     }))),
-                    RefOr::Ref(Ref {
-                        reference: "#/definitions/Pet".to_owned(),
-                        ..Default::default()
-                    }),
+                    RefOr::new_ref("#/definitions/Pet".to_owned()),
                 ]),
                 responses: Responses {
                     responses: Some({
                         let mut map = BTreeMap::new();
                         map.insert(
                             "200".to_owned(),
-                            RefOr::Item(crate::v2::response::Response {
+                            RefOr::new_item(Response {
                                 description: "Pet updated.".to_owned(),
                                 ..Default::default()
                             }),
                         );
                         map.insert(
                             "405".to_owned(),
-                            RefOr::Ref(Ref {
-                                reference: "#/responses/InvalidInput".to_owned(),
-                                ..Default::default()
-                            }),
+                            RefOr::new_ref("#/responses/InvalidInput".to_owned()),
                         );
                         map
                     }),
