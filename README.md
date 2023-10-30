@@ -7,23 +7,33 @@ Rust OpenAPI Specification (v2.0, v3.0.X and v3.1.X)
 
 Parsing and generating OpenAPI Specification:
 
-* [x] OpenAPI Specification v2.0
-* [x] OpenAPI Specification v3.0.X
-* [ ] OpenAPI Specification v3.1.X
+* [x] OpenAPI Specification v2.0 (**v2**: old specification, disabled by default)
+* [x] OpenAPI Specification v3.0.x (**v3_0**: default feature)
+* [x] OpenAPI Specification v3.1.x (**v3_1**:; experimental and disabled by default)
+
+> [!CAUTION]
+> The project is in early development stage, so the API may change in the future.
+> Consider any 0.x.x version as unstable and subject to breaking changes.
 
 ## Usage
 
-Add this to your `Cargo.toml`:
+To use `roas`, add it to your `Cargo.toml`:
+
+```shell
+cargo add roas
+```
+
+or manually add the following lines:
 
 ```toml
 [dependencies]
-roas = "0.3"  
+roas = "0.4"  
 ```
 
 ## Examples
 
 ```rust
-use roas::v3_0::spec::Spec;
+use roas::v3_1::spec::Spec;
 use roas::validation::{Options, Validate};
 
 ...
