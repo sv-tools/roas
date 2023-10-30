@@ -1,13 +1,54 @@
 //! Reference Object
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::common::helpers::{Context, ValidateWithContext};
 use crate::validation::Options;
 
+/// ResolveReference is a trait for resolving references.
+pub trait ResolveReference<D> {
+    fn resolve_reference(&self, reference: &str) -> Option<&D>;
+}
+
+/// ResolveError is an error type for resolving references.
+#[derive(Debug, Error)]
 pub enum ResolveError {
-    NotFound,
-    External(String),
+    /// NotFound is returned when the reference is not found.
+    #[error("reference `{0}` not found")]
+    NotFound(String),
+
+    /// External is returned when the resolving of an external reference failed.
+    #[error("resolving of an external reference `{0}` is not supported")]
+    ExternalUnsupported(String),
+}
+
+/// RefOr is a simple object to allow storing a reference to another component or a component itself.
+///
+/// Example:
+///
+/// ```rust
+/// use serde::{Deserialize, Serialize};
+/// use roas::common::reference::RefOr;
+///
+/// #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+/// struct Foo {
+///     pub value: String,
+/// }
+///
+/// #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+/// struct Bar {
+///     pub foo: Option<RefOr<Foo>>,
+/// }
+/// ```
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum RefOr<T> {
+    /// A reference to another component.
+    Ref(Ref),
+
+    /// The component itself.
+    Item(T),
 }
 
 /// Ref is a simple object to allow referencing other components in the OpenAPI document,
@@ -56,24 +97,24 @@ impl<D> RefOr<D> {
         }
     }
 
+    /// Create a new RefOr with a reference.
     pub fn new_ref(reference: String) -> Self {
-        RefOr::Ref(Ref {
-            reference,
-            ..Default::default()
-        })
+        RefOr::Ref(Ref::new(reference))
     }
 
+    /// Create a new RefOr with an item.
     pub fn new_item(item: D) -> Self {
         RefOr::Item(item)
     }
 
-    pub fn get_item<'a, T>(&'a self, spec: &'a T) -> Option<&D>
+    /// Get the item from the RefOr by returning the Item or resolving a reference.
+    pub fn get_item<'a, T>(&'a self, spec: &'a T) -> Result<&D, ResolveError>
     where
         T: ResolveReference<D>,
     {
         match self {
-            RefOr::Item(d) => Some(d),
-            RefOr::Ref(r) => spec.resolve_reference(&r.reference),
+            RefOr::Item(d) => Ok(d),
+            RefOr::Ref(r) => r.resolve(spec),
         }
     }
 }
@@ -111,13 +152,12 @@ impl Ref {
                     d.validate_with_context(ctx, self.reference.clone());
                 }
                 Err(e) => match e {
-                    ResolveError::NotFound => {
-                        ctx.errors
-                            .push(format!("{}.$ref: `{}` not found", path, self.reference));
+                    ResolveError::NotFound(r) => {
+                        ctx.errors.push(format!("{}.$ref: `{}` not found", path, r));
                     }
-                    ResolveError::External(e) => {
+                    ResolveError::ExternalUnsupported(r) => {
                         if !ctx.options.contains(Options::IgnoreExternalReferences) {
-                            ctx.errors.push(format!("{}.$ref: {}", path, e));
+                            ctx.errors.push(format!("{}.$ref: {}", path, r));
                         }
                     }
                 },
@@ -125,6 +165,7 @@ impl Ref {
         }
     }
 
+    /// Resolve the reference.
     pub fn resolve<'a, T, D>(&'a self, spec: &'a T) -> Result<&D, ResolveError>
     where
         T: ResolveReference<D>,
@@ -132,46 +173,20 @@ impl Ref {
         if self.reference.starts_with("#/") {
             match spec.resolve_reference(&self.reference) {
                 Some(d) => Ok(d),
-                None => Err(ResolveError::NotFound),
+                None => Err(ResolveError::NotFound(self.reference.clone())),
             }
         } else {
             // TODO: resolve external reference
-            Err(ResolveError::External(format!(
-                "external reference not supported: {}",
-                self.reference
-            )))
+            Err(ResolveError::ExternalUnsupported(self.reference.clone()))
         }
     }
-}
 
-pub trait ResolveReference<D> {
-    fn resolve_reference(&self, reference: &str) -> Option<&D>;
-}
-
-/// RefOr is a simple object to allow storing a reference to another component or a component itself.
-///
-/// Example:
-///
-/// ```rust
-/// use serde::{Deserialize, Serialize};
-/// use roas::common::reference::RefOr;
-///
-/// #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-/// struct Foo {
-///     pub value: String,
-/// }
-///
-/// #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-/// struct Bar {
-///     pub foo: Option<RefOr<Foo>>,
-/// }
-///
-/// ```
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum RefOr<T> {
-    Ref(Ref),
-    Item(T),
+    pub fn new(reference: String) -> Self {
+        Ref {
+            reference,
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
-use crate::v2::external_documentation::ExternalDocumentation;
-use crate::v2::spec::Spec;
+use crate::v3_0::external_documentation::ExternalDocumentation;
+use crate::v3_0::spec::Spec;
 
-/// Allows adding meta data to a single tag that is used by the Operation Object.
-/// It is not mandatory to have a Tag Object per tag used there.
+/// Adds metadata to a single tag that is used by the Operation Object.
+/// It is not mandatory to have a Tag Object per tag defined in the Operation Object instances.
 ///
 /// Specification Example:
 ///
@@ -24,8 +24,7 @@ pub struct Tag {
     pub name: String,
 
     /// A short description for the tag.
-    /// [GFM](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#-git-hub-flavored-markdown)
-    /// syntax can be used for rich text representation.
+    /// [CommonMark](https://spec.commonmark.org) syntax MAY be used for rich text representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
@@ -61,6 +60,29 @@ mod tests {
             serde_json::from_value::<Tag>(serde_json::json!({
                 "name": "pet",
                 "description": "Pets operations",
+                "externalDocs": {
+                    "description": "Find more info here",
+                    "url": "https://example.com/about"
+                },
+            }))
+            .unwrap(),
+            Tag {
+                name: String::from("pet"),
+                description: Some(String::from("Pets operations")),
+                external_docs: Some(ExternalDocumentation {
+                    description: Some(String::from("Find more info here")),
+                    url: String::from("https://example.com/about"),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            "deserialize name, description and externalDocs"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<Tag>(serde_json::json!({
+                "name": "pet",
+                "description": "Pets operations",
             }))
             .unwrap(),
             Tag {
@@ -68,12 +90,47 @@ mod tests {
                 description: Some(String::from("Pets operations")),
                 ..Default::default()
             },
-            "deserialize",
+            "deserialize name and description"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<Tag>(serde_json::json!({
+                "name": "pet",
+            }))
+            .unwrap(),
+            Tag {
+                name: String::from("pet"),
+                ..Default::default()
+            },
+            "deserialize name only"
         );
     }
 
     #[test]
     fn serialize() {
+        assert_eq!(
+            serde_json::to_value(Tag {
+                name: String::from("pet"),
+                description: Some(String::from("Pets operations")),
+                external_docs: Some(ExternalDocumentation {
+                    description: Some(String::from("Find more info here")),
+                    url: String::from("https://example.com/about"),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap(),
+            serde_json::json!({
+                "name": "pet",
+                "description":"Pets operations",
+                "externalDocs": {
+                    "description": "Find more info here",
+                    "url": "https://example.com/about"
+                },
+            }),
+            "serialize name, description and externalDocs",
+        );
+
         assert_eq!(
             serde_json::to_value(Tag {
                 name: String::from("pet"),
@@ -85,7 +142,19 @@ mod tests {
                 "name": "pet",
                 "description":"Pets operations",
             }),
-            "serialize",
+            "serialize name and description",
+        );
+
+        assert_eq!(
+            serde_json::to_value(Tag {
+                name: String::from("pet"),
+                ..Default::default()
+            })
+            .unwrap(),
+            serde_json::json!({
+                "name": "pet",
+            }),
+            "serialize name only",
         );
     }
 
