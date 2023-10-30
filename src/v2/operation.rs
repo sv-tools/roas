@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
-use crate::common::reference::{Ref, RefOr};
+use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
+use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;
 use crate::v2::response::Responses;
@@ -105,10 +105,10 @@ impl ValidateWithContext<Spec> for Operation {
                 .visited
                 .insert(format!("#/paths/operations/{}", operation_id))
             {
-                ctx.errors.push(format!(
-                    "{}: operationId `{}` already exists",
-                    path, operation_id
-                ));
+                ctx.error(
+                    path.clone(),
+                    format_args!("operationId `{}` already exists", operation_id),
+                );
             }
         }
         if let Some(tags) = &self.tags {
@@ -119,13 +119,15 @@ impl ValidateWithContext<Spec> for Operation {
                 }
 
                 let reference = format!("#/tags/{}", tag);
-                if let Ok(spec_tag) = Ref::new(reference.clone()).resolve::<Spec, Tag>(ctx.spec) {
-                    if ctx.visited.insert(reference.clone()) {
+                if let Ok(spec_tag) = RefOr::<Tag>::new_ref(reference.clone()).get_item(ctx.spec) {
+                    if ctx.visit(reference.clone()) {
                         spec_tag.validate_with_context(ctx, reference);
                     }
-                } else if !ctx.options.contains(Options::IgnoreMissingTags) {
-                    ctx.errors
-                        .push(format!("{}.tags[{}]: `{}` not found in spec", path, i, tag));
+                } else if !ctx.is_option(Options::IgnoreMissingTags) {
+                    ctx.error(
+                        path.clone(),
+                        format_args!(".tags[{}]: `{}` not found in spec", i, tag),
+                    );
                 }
             }
         }
@@ -139,10 +141,13 @@ impl ValidateWithContext<Spec> for Operation {
                 }
             }
             if body_count > 1 {
-                ctx.errors.push(format!(
-                    "{}.parameters: only one body parameter allowed, found {}",
-                    path, body_count,
-                ));
+                ctx.error(
+                    path.clone(),
+                    format_args!(
+                        ".parameters: only one body parameter allowed, found {}",
+                        body_count,
+                    ),
+                );
             }
         }
 

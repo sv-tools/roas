@@ -8,3 +8,6 @@ pub mod v2;
 
 #[cfg(feature = "v3_0")]
 pub mod v3_0;
+
+#[cfg(feature = "v3_1")]
+pub mod v3_1;
