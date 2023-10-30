@@ -9,7 +9,7 @@ Parsing and generating OpenAPI Specification:
 
 * [x] OpenAPI Specification v2.0
 * [x] OpenAPI Specification v3.0.X
-* [ ] OpenAPI Specification v3.0.0
+* [x] OpenAPI Specification v3.1.X
 
 ## Usage
 
@@ -17,13 +17,13 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-roas = { version = "0.2", features = ["v3_0"] } 
+roas = "0.3"  
 ```
 
 ## Examples
 
 ```rust
-use roas::v3_0::spec::Spec;
+use roas::v3_1::spec::Spec;
 use roas::validation::{Options, Validate};
 
 ...
