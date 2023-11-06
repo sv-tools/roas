@@ -6,7 +6,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
-use crate::v3_0::spec::Spec;
+use crate::v3_1::spec::Spec;
 use crate::validation::Options;
 
 /// An object representing a Server.

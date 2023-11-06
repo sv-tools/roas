@@ -7,16 +7,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{validate_string_matches, Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
-use crate::v3_0::callback::Callback;
-use crate::v3_0::example::Example;
-use crate::v3_0::header::Header;
-use crate::v3_0::link::Link;
-use crate::v3_0::parameter::Parameter;
-use crate::v3_0::request_body::RequestBody;
-use crate::v3_0::response::Response;
-use crate::v3_0::schema::Schema;
-use crate::v3_0::security_scheme::SecurityScheme;
-use crate::v3_0::spec::Spec;
+use crate::v3_1::callback::Callback;
+use crate::v3_1::example::Example;
+use crate::v3_1::header::Header;
+use crate::v3_1::link::Link;
+use crate::v3_1::parameter::Parameter;
+use crate::v3_1::request_body::RequestBody;
+use crate::v3_1::response::Response;
+use crate::v3_1::schema::Schema;
+use crate::v3_1::security_scheme::SecurityScheme;
+use crate::v3_1::spec::Spec;
 use crate::validation::Options;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]

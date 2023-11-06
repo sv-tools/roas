@@ -1,6 +1,6 @@
 [package]
 name = "roas"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 description = "Rust OpenAPI Specification"
@@ -16,13 +16,14 @@ include = ["src", "Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT", "d
 dependencies-license-file = "dependencies-license.json"
 
 [features]
-default = ["v3_0"]
+default = ["v3_1"]
 v2 = []
 v3_0 = []
+v3_1 = []
 
 [dependencies]
 serde = { version = "1.0.190", features = ["derive"] }
-serde_json = { version = "1.0.107" }
+serde_json = { version = "1.0.108" }
 regex = { version = "1.10.2" }
 enumset = { version = "1.1.3" }
 thiserror = { version = "1.0.50" }

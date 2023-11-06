@@ -1,4 +1,4 @@
-//! The root document object of the OpenAPI v3.0.X specification.
+//! The root document object of the OpenAPI v3.1.X specification.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -9,21 +9,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::{resolve_in_map, ResolveReference};
-use crate::v3_0::callback::Callback;
-use crate::v3_0::components::Components;
-use crate::v3_0::example::Example;
-use crate::v3_0::external_documentation::ExternalDocumentation;
-use crate::v3_0::header::Header;
-use crate::v3_0::info::Info;
-use crate::v3_0::link::Link;
-use crate::v3_0::parameter::Parameter;
-use crate::v3_0::path_item::PathItem;
-use crate::v3_0::request_body::RequestBody;
-use crate::v3_0::response::Response;
-use crate::v3_0::schema::Schema;
-use crate::v3_0::security_scheme::SecurityScheme;
-use crate::v3_0::server::Server;
-use crate::v3_0::tag::Tag;
+use crate::v3_1::callback::Callback;
+use crate::v3_1::components::Components;
+use crate::v3_1::example::Example;
+use crate::v3_1::external_documentation::ExternalDocumentation;
+use crate::v3_1::header::Header;
+use crate::v3_1::info::Info;
+use crate::v3_1::link::Link;
+use crate::v3_1::parameter::Parameter;
+use crate::v3_1::path_item::PathItem;
+use crate::v3_1::request_body::RequestBody;
+use crate::v3_1::response::Response;
+use crate::v3_1::schema::Schema;
+use crate::v3_1::security_scheme::SecurityScheme;
+use crate::v3_1::server::Server;
+use crate::v3_1::tag::Tag;
 use crate::validation::{Error, Options, Validate};
 
 /// This is the root document object of the OpenAPI document.
@@ -31,7 +31,7 @@ use crate::validation::{Error, Options, Validate};
 /// Specification example:
 ///
 /// ```yaml
-/// openapi: "3.0.3"
+/// openapi: "3.1.0"
 /// info:
 ///   version: 1.0.0
 ///   title: Swagger Petstore
@@ -154,7 +154,7 @@ pub struct Spec {
     /// the OpenAPI document.
     /// This is not related to the API info.version string.
     ///
-    /// The value MUST be one of ["3.0.0", "3.0.1", "3.0.2", "3.0.3"].
+    /// The value MUST be one of ["3.1.0"].
     pub openapi: Version,
 
     /// **Required** Provides metadata about the API.
@@ -198,7 +198,7 @@ pub struct Spec {
     ///               items:
     ///                 $ref: '#/components/schemas/pet'
     /// ```
-    pub paths: BTreeMap<String, PathItem>,
+    pub paths: Option<BTreeMap<String, PathItem>>,
 
     /// An element to hold various schemas for the specification.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -247,31 +247,16 @@ pub struct Spec {
 /// The Swagger Specification version.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub enum Version {
-    /// `3.0.0` version
-    #[serde(rename = "3.0.0")]
-    V3_0_0,
-
-    /// `3.0.1` version
-    #[serde(rename = "3.0.1")]
-    V3_0_1,
-
-    /// `3.0.2` version
-    #[serde(rename = "3.0.2")]
-    V3_0_2,
-
-    /// `3.0.3` version
+    /// `3.1.0` version
     #[default]
-    #[serde(rename = "3.0.3")]
-    V3_0_3,
+    #[serde(rename = "3.1.0")]
+    V3_1_0,
 }
 
 impl Display for Version {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            Self::V3_0_0 => write!(f, "3.0.0"),
-            Self::V3_0_1 => write!(f, "3.0.1"),
-            Self::V3_0_2 => write!(f, "3.0.2"),
-            Self::V3_0_3 => write!(f, "3.0.3"),
+            Self::V3_1_0 => write!(f, "3.1.0"),
         }
     }
 }
@@ -381,33 +366,35 @@ impl Validate for Spec {
         }
 
         // memorize all operation ids for all paths first, so we can check the links
-        for (name, item) in self.paths.iter() {
-            if let Some(operations) = &item.operations {
-                for (method, operation) in operations.iter() {
-                    if let Some(operation_id) = &operation.operation_id {
-                        if !ctx
-                            .visited
-                            .insert(format!("#/paths/operations/{}", operation_id))
-                        {
-                            ctx.error(
-                                "#".to_owned(),
-                                format!(
-                                    ".paths[{}].{}.operationId: `{}` already in use",
-                                    name, method, operation_id
-                                ),
-                            );
+        if let Some(paths) = &self.paths {
+            for (name, item) in paths.iter() {
+                if let Some(operations) = &item.operations {
+                    for (method, operation) in operations.iter() {
+                        if let Some(operation_id) = &operation.operation_id {
+                            if !ctx
+                                .visited
+                                .insert(format!("#/paths/operations/{}", operation_id))
+                            {
+                                ctx.error(
+                                    "#".to_owned(),
+                                    format_args!(
+                                        ".paths[{}].{}.operationId: `{}` already in use",
+                                        name, method, operation_id
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
             }
-        }
 
-        for (name, item) in self.paths.iter() {
-            let path = format!("#.paths[{}]", name);
-            if !name.starts_with('/') {
-                ctx.error(path.clone(), "must start with `/`");
+            for (name, item) in paths.iter() {
+                let path = format!("#.paths[{}]", name);
+                if !name.starts_with('/') {
+                    ctx.error(path.clone(), "must start with `/`");
+                }
+                item.validate_with_context(&mut ctx, path);
             }
-            item.validate_with_context(&mut ctx, path);
         }
 
         if let Some(components) = &self.components {

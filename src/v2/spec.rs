@@ -8,7 +8,9 @@ use enumset::EnumSet;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_optional_string_matches, Context, ValidateWithContext};
+use crate::common::helpers::{
+    validate_optional_string_matches, Context, PushError, ValidateWithContext,
+};
 use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::info::Info;
@@ -230,24 +232,20 @@ impl Display for Scheme {
 
 impl ResolveReference<Schema> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Schema> {
-        if let Some(definitions) = &self.definitions {
-            definitions.get(reference.trim_start_matches("#/definitions/"))
-        } else {
-            None
-        }
+        self.definitions
+            .as_ref()
+            .and_then(|x| x.get(reference.trim_start_matches("#/definitions/")))
     }
 }
 
 impl ResolveReference<ObjectSchema> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&ObjectSchema> {
-        if let Some(definitions) = &self.definitions {
-            if let Some(Schema::Object(object_schema)) =
-                definitions.get(reference.trim_start_matches("#/definitions/"))
-            {
-                Some(object_schema)
-            } else {
-                None
-            }
+        if let Schema::Object(ref schema) = self
+            .definitions
+            .as_ref()
+            .and_then(|x| x.get(reference.trim_start_matches("#/definitions/")))?
+        {
+            Some(schema)
         } else {
             None
         }
@@ -256,31 +254,25 @@ impl ResolveReference<ObjectSchema> for Spec {
 
 impl ResolveReference<Parameter> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Parameter> {
-        if let Some(parameters) = &self.parameters {
-            parameters.get(reference.trim_start_matches("#/parameters/"))
-        } else {
-            None
-        }
+        self.parameters
+            .as_ref()
+            .and_then(|x| x.get(reference.trim_start_matches("#/parameters/")))
     }
 }
 
 impl ResolveReference<Response> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Response> {
-        if let Some(responses) = &self.responses {
-            responses.get(reference.trim_start_matches("#/responses/"))
-        } else {
-            None
-        }
+        self.responses
+            .as_ref()
+            .and_then(|x| x.get(reference.trim_start_matches("#/responses/")))
     }
 }
 
 impl ResolveReference<SecurityScheme> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&SecurityScheme> {
-        if let Some(definitions) = &self.security_definitions {
-            definitions.get(reference.trim_start_matches("#/securityDefinitions/"))
-        } else {
-            None
-        }
+        self.security_definitions
+            .as_ref()
+            .and_then(|x| x.get(reference.trim_start_matches("#/securityDefinitions/")))
     }
 }
 
@@ -296,92 +288,85 @@ impl ResolveReference<Tag> for Spec {
 impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
-        self.validate_with_context(&mut ctx, String::from("#"));
-        ctx.errors
-            .is_empty()
-            .then_some(())
-            .ok_or(Error { errors: ctx.errors })
-    }
-}
 
-impl ValidateWithContext<Spec> for Spec {
-    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.info
-            .validate_with_context(ctx, format!("{}.info", path));
+            .validate_with_context(&mut ctx, "#.info".to_owned());
 
         let re = Regex::new(r"^[^{}/ :\\]+(?::\d+)?$").unwrap();
-        validate_optional_string_matches(&self.host, &re, ctx, format!("{}.host", path));
+        validate_optional_string_matches(&self.host, &re, &mut ctx, "#.host".to_owned());
 
         if let Some(base_path) = &self.base_path {
             if !base_path.starts_with('/') {
-                ctx.errors.push(format!(
-                    "{}.basePath: must start with `/`, found `{}`",
-                    path, base_path
-                ));
+                ctx.error(
+                    "#.basePath".to_owned(),
+                    format_args!("must start with `/`, found `{}`", base_path),
+                );
             }
         }
 
         // validate paths operations
         for (name, item) in self.paths.iter() {
-            let path = format!("{}.paths[{}]", path, name);
+            let path = format!("#.paths[{}]", name);
             if !name.starts_with('/') {
-                ctx.errors.push(format!("{}: must start with `/`", path));
+                ctx.error(path.clone(), "must start with `/`");
             }
-            item.validate_with_context(ctx, path);
+            item.validate_with_context(&mut ctx, path);
         }
 
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path))
+            docs.validate_with_context(&mut ctx, "#.externalDocs".to_owned())
         }
 
         // validate unused components
-        if !ctx.options.contains(Options::IgnoreUnusedTags) {
+        if !ctx.is_option(Options::IgnoreUnusedTags) {
             if let Some(tags) = &self.tags {
                 for tag in tags.iter() {
-                    let path = format!("{}/tags/{}", path, tag.name);
-                    if ctx.visited.insert(path.clone()) {
-                        ctx.errors.push(format!("{}: unused", path));
-                        tag.validate_with_context(ctx, path);
+                    let path = format!("#/tags/{}", tag.name);
+                    if ctx.visit(path.clone()) {
+                        ctx.error(path.clone(), "unused");
+                        tag.validate_with_context(&mut ctx, path);
                     }
                 }
             }
         }
 
-        if !ctx.options.contains(Options::IgnoreUnusedSchemas) {
+        if !ctx.is_option(Options::IgnoreUnusedSchemas) {
             if let Some(definitions) = &self.definitions {
                 for (name, definition) in definitions.iter() {
-                    let path = format!("{}/definitions/{}", path, name);
-                    if ctx.visited.insert(path.clone()) {
-                        ctx.errors.push(format!("{}: unused", path));
-                        definition.validate_with_context(ctx, path);
+                    let path = format!("#/definitions/{}", name);
+                    if ctx.visit(path.clone()) {
+                        ctx.error(path.clone(), "unused");
+                        definition.validate_with_context(&mut ctx, path);
                     }
                 }
             }
         }
 
-        if !ctx.options.contains(Options::IgnoreUnusedParameters) {
+        if !ctx.is_option(Options::IgnoreUnusedParameters) {
             if let Some(parameters) = &self.parameters {
                 for (name, parameter) in parameters.iter() {
-                    let path = format!("{}/parameters/{}", path, name);
-                    if ctx.visited.insert(path.clone()) {
-                        ctx.errors.push(format!("{}: unused", path));
-                        parameter.validate_with_context(ctx, path);
+                    let path = format!("#/parameters/{}", name);
+                    if ctx.visit(path.clone()) {
+                        ctx.error(path.clone(), "unused");
+                        parameter.validate_with_context(&mut ctx, path);
                     }
                 }
             }
         }
 
-        if !ctx.options.contains(Options::IgnoreUnusedResponses) {
+        if !ctx.is_option(Options::IgnoreUnusedResponses) {
             if let Some(responses) = &self.responses {
                 for (name, response) in responses.iter() {
-                    let path = format!("{}/responses/{}", path, name);
-                    if ctx.visited.insert(path.clone()) {
-                        ctx.errors.push(format!("{}: unused", path));
-                        response.validate_with_context(ctx, path);
+                    let path = format!("#/responses/{}", name);
+                    if ctx.visit(path.clone()) {
+                        ctx.error(path.clone(), "unused");
+                        response.validate_with_context(&mut ctx, path);
                     }
                 }
             }
         }
+
+        ctx.into()
     }
 }
 

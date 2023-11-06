@@ -9,10 +9,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
-use crate::v3_0::header::Header;
-use crate::v3_0::link::Link;
-use crate::v3_0::media_type::MediaType;
-use crate::v3_0::spec::Spec;
+use crate::v3_1::header::Header;
+use crate::v3_1::link::Link;
+use crate::v3_1::media_type::MediaType;
+use crate::v3_1::spec::Spec;
 
 /// A container for the expected responses of an operation.
 /// The container maps a HTTP response code to the expected response.

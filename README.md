@@ -8,8 +8,8 @@ Rust OpenAPI Specification (v2.0, v3.0.X and v3.1.X)
 Parsing and generating OpenAPI Specification:
 
 * [x] OpenAPI Specification v2.0
-* [ ] OpenAPI Specification v3.0.X
-* [ ] OpenAPI Specification v3.0.0
+* [x] OpenAPI Specification v3.0.X
+* [x] OpenAPI Specification v3.1.X
 
 ## Usage
 

@@ -9,7 +9,7 @@ use crate::common::helpers::{
     validate_optional_url, validate_required_string, validate_required_url, Context, PushError,
     ValidateWithContext,
 };
-use crate::v3_0::spec::Spec;
+use crate::v3_1::spec::Spec;
 
 /// Defines a security scheme that can be used by the operations.
 /// Supported schemes are HTTP authentication, an API key (either as a header,

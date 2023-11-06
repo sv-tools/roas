@@ -1,9 +1,11 @@
 //! Reference Object
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::validation::Options;
 
 /// ResolveReference is a trait for resolving references.
@@ -89,7 +91,24 @@ impl<D> RefOr<D> {
     {
         match self {
             RefOr::Ref(r) => {
-                r.validate_with_context(ctx, path);
+                r.validate_with_context(ctx, path.clone());
+                if ctx.visit(r.reference.clone()) {
+                    match self.get_item(ctx.spec) {
+                        Ok(d) => {
+                            d.validate_with_context(ctx, r.reference.clone());
+                        }
+                        Err(e) => match e {
+                            ResolveError::NotFound(r) => {
+                                ctx.error(path, format_args!(".$ref: `{}` not found", r));
+                            }
+                            ResolveError::ExternalUnsupported(_) => {
+                                if !ctx.is_option(Options::IgnoreExternalReferences) {
+                                    ctx.error(path, format_args!(".$ref: {}", e));
+                                }
+                            }
+                        },
+                    }
+                }
             }
             RefOr::Item(d) => {
                 d.validate_with_context(ctx, path);
@@ -114,7 +133,17 @@ impl<D> RefOr<D> {
     {
         match self {
             RefOr::Item(d) => Ok(d),
-            RefOr::Ref(r) => r.resolve(spec),
+            RefOr::Ref(r) => {
+                if r.reference.starts_with("#/") {
+                    match spec.resolve_reference(&r.reference) {
+                        Some(d) => Ok(d),
+                        None => Err(ResolveError::NotFound(r.reference.clone())),
+                    }
+                } else {
+                    // TODO: resolve external reference
+                    Err(ResolveError::ExternalUnsupported(r.reference.clone()))
+                }
+            }
         }
     }
 }
@@ -127,10 +156,10 @@ impl<D> RefOr<Box<D>> {
     {
         match self {
             RefOr::Ref(r) => {
-                r.validate_with_context(ctx, path);
+                RefOr::<D>::new_ref(r.reference.clone()).validate_with_context(ctx, path);
             }
             RefOr::Item(d) => {
-                d.validate_with_context(ctx, path);
+                d.as_ref().validate_with_context(ctx, path);
             }
         }
     }
@@ -143,41 +172,7 @@ impl Ref {
         D: ValidateWithContext<T>,
     {
         if self.reference.is_empty() {
-            ctx.errors.push(format!("{}.$ref: must not be empty", path));
-            return;
-        }
-        if ctx.visited.insert(self.reference.clone()) {
-            match self.resolve(ctx.spec) {
-                Ok(d) => {
-                    d.validate_with_context(ctx, self.reference.clone());
-                }
-                Err(e) => match e {
-                    ResolveError::NotFound(r) => {
-                        ctx.errors.push(format!("{}.$ref: `{}` not found", path, r));
-                    }
-                    ResolveError::ExternalUnsupported(r) => {
-                        if !ctx.options.contains(Options::IgnoreExternalReferences) {
-                            ctx.errors.push(format!("{}.$ref: {}", path, r));
-                        }
-                    }
-                },
-            }
-        }
-    }
-
-    /// Resolve the reference.
-    pub fn resolve<'a, T, D>(&'a self, spec: &'a T) -> Result<&D, ResolveError>
-    where
-        T: ResolveReference<D>,
-    {
-        if self.reference.starts_with("#/") {
-            match spec.resolve_reference(&self.reference) {
-                Some(d) => Ok(d),
-                None => Err(ResolveError::NotFound(self.reference.clone())),
-            }
-        } else {
-            // TODO: resolve external reference
-            Err(ResolveError::ExternalUnsupported(self.reference.clone()))
+            ctx.error(path, ".$ref: must not be empty");
         }
     }
 
@@ -187,6 +182,20 @@ impl Ref {
             ..Default::default()
         }
     }
+}
+
+pub fn resolve_in_map<'a, T, D>(
+    spec: &'a T,
+    reference: &str,
+    prefix: &str,
+    map: &'a Option<BTreeMap<String, RefOr<D>>>,
+) -> Option<&'a D>
+where
+    T: ResolveReference<D>,
+{
+    map.as_ref()
+        .and_then(|x| x.get(reference.trim_start_matches(prefix)))
+        .and_then(move |x| x.get_item(spec).ok())
 }
 
 #[cfg(test)]

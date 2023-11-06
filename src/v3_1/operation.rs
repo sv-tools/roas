@@ -6,15 +6,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
-use crate::v3_0::callback::Callback;
-use crate::v3_0::external_documentation::ExternalDocumentation;
-use crate::v3_0::parameter::Parameter;
-use crate::v3_0::request_body::RequestBody;
-use crate::v3_0::response::Responses;
-use crate::v3_0::security_scheme::SecurityScheme;
-use crate::v3_0::server::Server;
-use crate::v3_0::spec::Spec;
-use crate::v3_0::tag::Tag;
+use crate::v3_1::callback::Callback;
+use crate::v3_1::external_documentation::ExternalDocumentation;
+use crate::v3_1::parameter::Parameter;
+use crate::v3_1::request_body::RequestBody;
+use crate::v3_1::response::Responses;
+use crate::v3_1::security_scheme::SecurityScheme;
+use crate::v3_1::server::Server;
+use crate::v3_1::spec::Spec;
+use crate::v3_1::tag::Tag;
 use crate::validation::Options;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
