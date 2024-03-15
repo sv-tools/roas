@@ -1,0 +1,2 @@
+[alias]
+install-tools = "install cargo-deny@0.14.16 cargo-license@0.6.1 cargo-llvm-cov@0.6.7 cargo-machete@0.6.1 cargo-nextest@0.9.67"
