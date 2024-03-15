@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_string_matches, Context, ValidateWithContext};
+use crate::common::helpers::{validate_string_matches, Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::example::Example;
@@ -75,10 +75,8 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.schemas {
             for (name, obj) in objs {
                 let reference = format!("#/components/schemas/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedSchemas)
-                {
-                    ctx.errors.push(format!("{}: unused", reference));
+                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedSchemas) {
+                    ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, &re, ctx, format!("{}.schemas[<name>]", path));
                 obj.validate_with_context(ctx, format!("{}.schemas[{}]", path, name));
@@ -88,10 +86,8 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.responses {
             for (name, obj) in objs {
                 let reference = format!("#/components/responses/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedResponses)
-                {
-                    ctx.errors.push(format!("{}: unused", reference));
+                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedResponses) {
+                    ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, &re, ctx, format!("{}.responses[<name>]", path));
                 obj.validate_with_context(ctx, format!("{}.responses[{}]", path, name));
@@ -101,10 +97,8 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.parameters {
             for (name, obj) in objs {
                 let reference = format!("#/components/parameters/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedParameters)
-                {
-                    ctx.errors.push(format!("{}: unused", reference));
+                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedParameters) {
+                    ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, &re, ctx, format!("{}.parameters[<name>]", path));
                 obj.validate_with_context(ctx, format!("{}.parameters[{}]", path, name));
@@ -114,10 +108,8 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.examples {
             for (name, obj) in objs {
                 let reference = format!("#/components/examples/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedExamples)
-                {
-                    ctx.errors.push(format!("{}: unused", reference));
+                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedExamples) {
+                    ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, &re, ctx, format!("{}.examples[<name>]", path));
                 obj.validate_with_context(ctx, format!("{}.examples[{}]", path, name));
@@ -127,10 +119,9 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.request_bodies {
             for (name, obj) in objs {
                 let reference = format!("#/components/requestBodies/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedRequestBodies)
+                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedRequestBodies)
                 {
-                    ctx.errors.push(format!("{}: unused", reference));
+                    ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, &re, ctx, format!("{}.requestBodies[<name>]", path));
                 obj.validate_with_context(ctx, format!("{}.requestBodies[{}]", path, name));
@@ -140,10 +131,8 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.headers {
             for (name, obj) in objs {
                 let reference = format!("#/components/headers/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedHeaders)
-                {
-                    ctx.errors.push(format!("{}: unused", reference));
+                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedHeaders) {
+                    ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, &re, ctx, format!("{}.headers[<name>]", path));
                 obj.validate_with_context(ctx, format!("{}.headers[{}]", path, name));
@@ -153,10 +142,10 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.security_schemes {
             for (name, obj) in objs {
                 let reference = format!("#/components/securitySchemes/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedSecuritySchemes)
+                if !ctx.is_visited(&reference)
+                    && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
                 {
-                    ctx.errors.push(format!("{}: unused", reference));
+                    ctx.error(reference.clone(), "unused");
                 }
                 validate_string_matches(
                     name,
@@ -167,13 +156,12 @@ impl ValidateWithContext<Spec> for Components {
                 obj.validate_with_context(ctx, format!("{}.securitySchemes[{}]", path, name));
                 if let Ok(SecurityScheme::OAuth2(oauth2)) = obj.get_item(ctx.spec) {
                     if let Some(flow) = &oauth2.flows.implicit {
-                        for name in flow.scopes.keys() {
-                            if !ctx
-                                .visited
-                                .contains(format!("{}/{}", reference, name).as_str())
-                                && !ctx.options.contains(Options::IgnoreUnusedSecuritySchemes)
+                        for scope in flow.scopes.keys() {
+                            let reference = format!("{}/{}", reference, scope);
+                            if !ctx.is_visited(&reference)
+                                && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
                             {
-                                ctx.errors.push(format!("{}/{}: unused", reference, name));
+                                ctx.error(reference, "unused");
                             }
                         }
                     }
@@ -184,10 +172,8 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.links {
             for (name, obj) in objs {
                 let reference = format!("#/components/links/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedLinks)
-                {
-                    ctx.errors.push(format!("{}: unused", reference));
+                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedLinks) {
+                    ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, &re, ctx, format!("{}.links[<name>]", path));
                 obj.validate_with_context(ctx, format!("{}.links[{}]", path, name));
@@ -197,10 +183,8 @@ impl ValidateWithContext<Spec> for Components {
         if let Some(objs) = &self.callbacks {
             for (name, obj) in objs {
                 let reference = format!("#/components/callbacks/{}", name);
-                if !ctx.visited.contains(&reference)
-                    && !ctx.options.contains(Options::IgnoreUnusedCallbacks)
-                {
-                    ctx.errors.push(format!("{}: unused", reference));
+                if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedCallbacks) {
+                    ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, &re, ctx, format!("{}.callbacks[<name>]", path));
                 obj.validate_with_context(ctx, format!("{}.callbacks[{}]", path, name));

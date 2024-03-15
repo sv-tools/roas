@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
+use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
 
@@ -110,16 +110,18 @@ impl ValidateWithContext<Spec> for Server {
         let re = Regex::new(r"\{([a-zA-Z0-9.\-_]+)}").unwrap();
         for (_, [name]) in re.captures_iter(&self.url).map(|c| c.extract()) {
             if !visited.remove(name) {
-                ctx.errors.push(format!(
-                    "{}.url: `{}` is not defined in `variables`",
-                    path, name
-                ));
+                ctx.error(
+                    path.clone(),
+                    format_args!(".url: `{}` is not defined in `variables`", name),
+                );
             }
         }
-        if !ctx.options.contains(Options::IgnoreUnusedServerVariables) {
+        if !ctx.is_option(Options::IgnoreUnusedServerVariables) {
             for name in visited {
-                ctx.errors
-                    .push(format!("{}.variables[{}]: unused in `url`", path, name));
+                ctx.error(
+                    path.clone(),
+                    format_args!(".variables[{}]: unused in `url`", name),
+                );
             }
         }
     }
@@ -130,10 +132,13 @@ impl ValidateWithContext<Spec> for ServerVariable {
         validate_required_string(&self.default, ctx, format!("{}.default", path));
         if let Some(enum_values) = &self.enum_values {
             if !enum_values.contains(&self.default) {
-                ctx.errors.push(format!(
-                    "{}.default: `{}` must be in enum values: {:?}",
-                    path, self.default, enum_values,
-                ));
+                ctx.error(
+                    path,
+                    format!(
+                        ".default: `{}` must be in enum values: {:?}",
+                        self.default, enum_values,
+                    ),
+                );
             }
         }
     }

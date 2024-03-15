@@ -7,7 +7,7 @@ use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
+use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_0::header::Header;
 use crate::v3_0::link::Link;
@@ -227,11 +227,13 @@ impl ValidateWithContext<Spec> for Responses {
                 match name.parse::<u16>() {
                     Ok(100..=599) => {}
                     _ => {
-                        ctx.errors.push(format!(
-                            "{}: name must be an integer within [100..599] range, found `{}`",
+                        ctx.error(
                             path.clone(),
-                            name
-                        ));
+                            format_args!(
+                                "name must be an integer within [100..599] range, found `{}`",
+                                name
+                            ),
+                        );
                     }
                 }
                 response.validate_with_context(ctx, format!("{}.{}", path, name));

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
+use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::media_type::MediaType;
@@ -458,8 +458,7 @@ impl ValidateWithContext<Spec> for InCookie {
 
 fn must_be_required(p: &Option<bool>, ctx: &mut Context<Spec>, path: String, name: String) {
     if !p.is_some_and(|x| x) {
-        ctx.errors
-            .push(format!("{}.{}: must be required", path, name));
+        ctx.error(path, format_args!(".{}: must be required", name));
     }
 }
 
@@ -470,10 +469,7 @@ fn either_example_or_examples(
     path: String,
 ) {
     if example.is_some() && examples.is_some() {
-        ctx.errors.push(format!(
-            "{}: either example or examples must be specified, but not both",
-            path
-        ));
+        ctx.error(path, "example and examples are mutually exclusive");
     }
 }
 
@@ -484,9 +480,6 @@ fn either_schema_or_content(
     path: String,
 ) {
     if schema.is_some() && content.is_some() {
-        ctx.errors.push(format!(
-            "{}: either schema or content must be specified, but not both",
-            path
-        ));
+        ctx.error(path, "schema and content are mutually exclusive");
     }
 }

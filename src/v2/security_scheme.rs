@@ -6,7 +6,7 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    validate_optional_url, validate_required_string, Context, ValidateWithContext,
+    validate_optional_url, validate_required_string, Context, PushError, ValidateWithContext,
 };
 use crate::v2::spec::Spec;
 
@@ -178,17 +178,19 @@ impl ValidateWithContext<Spec> for ApiKeySecurityScheme {
 impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if self.scopes.is_empty() {
-            ctx.errors
-                .push(format!("{}.scopes: must not be empty", path));
+            ctx.error(path.clone(), ".scopes: must not be empty");
         }
         if self.authorization_url.is_none()
             && (self.flow == SecuritySchemeOAuth2Flow::Implicit
                 || self.flow == SecuritySchemeOAuth2Flow::AccessCode)
         {
-            ctx.errors.push(format!(
-                "{}.authorization_url: must be present for flow = {}",
-                path, self.flow,
-            ));
+            ctx.error(
+                path,
+                format_args!(
+                    ".authorizationUrl: must be present for flow `{}`",
+                    self.flow,
+                ),
+            );
         } else {
             validate_optional_url(
                 &self.authorization_url,

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::media_type::MediaType;
@@ -84,16 +84,10 @@ pub struct Header {
 impl ValidateWithContext<Spec> for Header {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if self.example.is_some() && self.examples.is_some() {
-            ctx.errors.push(format!(
-                "{}: either example or examples must be specified, but not both",
-                path
-            ));
+            ctx.error(path.clone(), "example and examples are mutually exclusive");
         }
         if self.schema.is_some() && self.content.is_some() {
-            ctx.errors.push(format!(
-                "{}: either schema or content must be specified, but not both",
-                path
-            ));
+            ctx.error(path.clone(), "schema and content are mutually exclusive");
         }
         if let Some(examples) = &self.examples {
             for (k, v) in examples {

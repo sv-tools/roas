@@ -6,7 +6,7 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    validate_optional_url, validate_required_string, validate_required_url, Context,
+    validate_optional_url, validate_required_string, validate_required_url, Context, PushError,
     ValidateWithContext,
 };
 use crate::v3_0::spec::Spec;
@@ -446,10 +446,10 @@ impl ValidateWithContext<Spec> for HttpSecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(bearer_format) = &self.bearer_format {
             if !bearer_format.is_empty() && self.scheme != HttpScheme::Bearer {
-                ctx.errors.push(format!(
-                    "{}.bearerFormat: must be empty for scheme = {}",
-                    path, self.scheme,
-                ));
+                ctx.error(
+                    path,
+                    format_args!(".bearerFormat: must be empty for scheme `{}`", self.scheme,),
+                );
             }
         }
     }
