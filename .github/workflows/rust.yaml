@@ -14,40 +14,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-all-crates: true
       - name: Build
         run: cargo build --all-features --verbose
       - name: Format
         run: cargo fmt --all --check --verbose
       - name: Clippy
         run: cargo clippy
+      - name: Install tools
+        run: cargo install cargo-nextest cargo-machete cargo-license cargo-deny cargo-llvm-cov
       - name: Run tests
-        env:
-          CARGO_INCREMENTAL: 0
-          RUSTFLAGS: '-Cinstrument-coverage'
-          LLVM_PROFILE_FILE: 'target/coverage/cargo-test-%p-%m.profraw'
+        continue-on-error: true
         run: |
-          # Install grcov
-          mkdir -p "${HOME}/.local/bin" "target/coverage" 
-          curl -sL https://github.com/mozilla/grcov/releases/download/v0.8.18/grcov-x86_64-unknown-linux-gnu.tar.bz2 | tar jxf - -C "${HOME}/.local/bin"
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          
-          # Install llvm-tools-preview
-          rustup component add llvm-tools-preview
-          
-          # Run tests
-          cargo test --all-features --verbose
-          
-          # Convert raw coverage data into lcov format
-          grcov . --binary-path ./target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../*' --ignore "/*" -o target/coverage/tests.lcov
-      - name: Dry run publish
-        run: |
-          cargo install cargo-license
-          cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
-          cargo publish --all-features --allow-dirty --dry-run
-          cargo package --all-features --list --allow-dirty
+          cargo llvm-cov nextest --all-features --all-targets --no-fail-fast
+          cargo llvm-cov report --lcov --output-path coverage.lcov
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v4
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: coverage/*.lcov
+      - name: Machete
+        run: cargo machete
+      - name: Deny
+        run: cargo deny check all
+      - name: Dry run publish
+        run: |
+          cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
+          cargo publish --all-features --allow-dirty --dry-run
+          cargo package --all-features --list --allow-dirty
