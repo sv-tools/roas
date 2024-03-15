@@ -27,11 +27,14 @@ jobs:
       - name: Install tools
         run: cargo install cargo-nextest cargo-machete cargo-license cargo-deny cargo-llvm-cov
       - name: Run tests
-        continue-on-error: true
-        run: |
-          cargo llvm-cov nextest --all-features --all-targets --no-fail-fast
-          cargo llvm-cov report --lcov --output-path coverage.lcov
+        id: tests
+        run: cargo llvm-cov nextest --all-features --all-targets --no-fail-fast
+      - name: Prepare coverage report
+        id: coverage
+        if: success() || steps.tests.outcome == 'failure'
+        run: cargo llvm-cov report --lcov --output-path coverage.lcov
       - name: Upload coverage reports to Codecov
+        if: success() || steps.coverage.outcome == 'success'
         uses: codecov/codecov-action@v4
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
