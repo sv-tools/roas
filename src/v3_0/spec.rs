@@ -7,8 +7,8 @@ use std::fmt::{Display, Formatter};
 use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, ValidateWithContext};
-use crate::common::reference::{RefOr, ResolveReference};
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
+use crate::common::reference::{resolve_in_map, ResolveReference};
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
 use crate::v3_0::example::Example;
@@ -278,190 +278,83 @@ impl Display for Version {
 
 impl ResolveReference<Response> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Response> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .responses
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/responses/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components
+            .as_ref()
+            .and_then(|x| resolve_in_map(self, reference, "#/components/responses/", &x.responses))
     }
 }
 
 impl ResolveReference<Parameter> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Parameter> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .parameters
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/parameters/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components.as_ref().and_then(|x| {
+            resolve_in_map(self, reference, "#/components/parameters/", &x.parameters)
+        })
     }
 }
 
 impl ResolveReference<RequestBody> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&RequestBody> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .request_bodies
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/requestBodies/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components.as_ref().and_then(|x| {
+            resolve_in_map(
+                self,
+                reference,
+                "#/components/requestBodies/",
+                &x.request_bodies,
+            )
+        })
     }
 }
 
 impl ResolveReference<Header> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Header> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .headers
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/headers/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components
+            .as_ref()
+            .and_then(|x| resolve_in_map(self, reference, "#/components/headers/", &x.headers))
     }
 }
 
 impl ResolveReference<Schema> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Schema> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .schemas
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/schemas/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components
+            .as_ref()
+            .and_then(|x| resolve_in_map(self, reference, "#/components/schemas/", &x.schemas))
     }
 }
 
 impl ResolveReference<Example> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Example> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .examples
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/examples/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components
+            .as_ref()
+            .and_then(|x| resolve_in_map(self, reference, "#/components/examples/", &x.examples))
     }
 }
 
 impl ResolveReference<Callback> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Callback> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .callbacks
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/callbacks/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components
+            .as_ref()
+            .and_then(|x| resolve_in_map(self, reference, "#/components/callbacks/", &x.callbacks))
     }
 }
 
 impl ResolveReference<Link> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Link> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .links
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/links/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components
+            .as_ref()
+            .and_then(|x| resolve_in_map(self, reference, "#/components/links/", &x.links))
     }
 }
 
 impl ResolveReference<SecurityScheme> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&SecurityScheme> {
-        if let Some(components) = &self.components {
-            if let Some(o) = components
-                .security_schemes
-                .as_ref()
-                .and_then(|c| c.get(reference.trim_start_matches("#/components/securitySchemes/")))
-            {
-                match o {
-                    RefOr::Ref(r) => self.resolve_reference(r.reference.as_str()),
-                    RefOr::Item(o) => Some(o),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.components.as_ref().and_then(|x| {
+            resolve_in_map(
+                self,
+                reference,
+                "#/components/securitySchemes/",
+                &x.security_schemes,
+            )
+        })
     }
 }
 
@@ -477,27 +370,18 @@ impl ResolveReference<Tag> for Spec {
 impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
-        self.validate_with_context(&mut ctx, String::from("#"));
-        ctx.errors
-            .is_empty()
-            .then_some(())
-            .ok_or(Error { errors: ctx.errors })
-    }
-}
 
-impl ValidateWithContext<Spec> for Spec {
-    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.info
-            .validate_with_context(ctx, format!("{}.info", path));
+            .validate_with_context(&mut ctx, "#.info".to_owned());
 
         if let Some(servers) = &self.servers {
             for (i, server) in servers.iter().enumerate() {
-                server.validate_with_context(ctx, format!("{}.servers[{}]", path, i))
+                server.validate_with_context(&mut ctx, format!("#.servers[{}]", i))
             }
         }
 
         // memorize all operation ids for all paths first, so we can check the links
-        for item in self.paths.values() {
+        for (name, item) in self.paths.iter() {
             if let Some(operations) = &item.operations {
                 for (method, operation) in operations.iter() {
                     if let Some(operation_id) = &operation.operation_id {
@@ -505,10 +389,13 @@ impl ValidateWithContext<Spec> for Spec {
                             .visited
                             .insert(format!("#/paths/operations/{}", operation_id))
                         {
-                            ctx.errors.push(format!(
-                                "{}.{}.operationId: `{}` already in use",
-                                path, method, operation_id
-                            ));
+                            ctx.error(
+                                "#".to_owned(),
+                                format!(
+                                    ".paths[{}].{}.operationId: `{}` already in use",
+                                    name, method, operation_id
+                                ),
+                            );
                         }
                     }
                 }
@@ -516,32 +403,34 @@ impl ValidateWithContext<Spec> for Spec {
         }
 
         for (name, item) in self.paths.iter() {
-            let path = format!("{}.paths[{}]", path, name);
+            let path = format!("#.paths[{}]", name);
             if !name.starts_with('/') {
-                ctx.errors.push(format!("{}: must start with `/`", path));
+                ctx.error(path.clone(), "must start with `/`");
             }
-            item.validate_with_context(ctx, path);
+            item.validate_with_context(&mut ctx, path);
         }
 
         if let Some(components) = &self.components {
-            components.validate_with_context(ctx, format!("{}.components", path));
+            components.validate_with_context(&mut ctx, "{}.components".to_owned());
         }
 
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path))
+            docs.validate_with_context(&mut ctx, "#.externalDocs".to_owned())
         }
 
         if let Some(tags) = &self.tags {
             for tag in tags.iter() {
-                let path = format!("{}/tags/{}", path, tag.name);
-                if ctx.visited.insert(path.clone()) {
-                    if !ctx.options.contains(Options::IgnoreUnusedTags) {
-                        ctx.errors.push(format!("{}: unused", path));
+                let path = format!("#/tags/{}", tag.name);
+                if ctx.visit(path.clone()) {
+                    if !ctx.is_option(Options::IgnoreUnusedTags) {
+                        ctx.error(path.clone(), "unused");
                     }
-                    tag.validate_with_context(ctx, path)
+                    tag.validate_with_context(&mut ctx, path)
                 }
             }
         }
+
+        ctx.into()
     }
 }
 

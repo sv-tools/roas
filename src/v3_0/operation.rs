@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
-use crate::common::reference::{Ref, RefOr};
+use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
+use crate::common::reference::RefOr;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::parameter::Parameter;
@@ -117,13 +117,15 @@ impl ValidateWithContext<Spec> for Operation {
                     continue;
                 }
                 let reference = format!("#/tags/{}", tag);
-                if let Ok(spec_tag) = Ref::new(reference.clone()).resolve::<Spec, Tag>(ctx.spec) {
-                    if ctx.visited.insert(reference.clone()) {
+                if let Ok(spec_tag) = RefOr::<Tag>::new_ref(reference.clone()).get_item(ctx.spec) {
+                    if ctx.visit(reference.clone()) {
                         spec_tag.validate_with_context(ctx, reference);
                     }
-                } else if !ctx.options.contains(Options::IgnoreMissingTags) {
-                    ctx.errors
-                        .push(format!("{}.tags[{}]: `{}` not found in spec", path, i, tag));
+                } else if !ctx.is_option(Options::IgnoreMissingTags) {
+                    ctx.error(
+                        path,
+                        format_args!(".tags[{}]: `{}` not found in spec", i, tag),
+                    );
                 }
             }
         }
@@ -167,7 +169,7 @@ impl ValidateWithContext<Spec> for Operation {
                     if !scopes.is_empty() {
                         if let Ok(SecurityScheme::OAuth2(oauth2)) = spec_ref.get_item(ctx.spec) {
                             for scope in scopes {
-                                ctx.visited.insert(format!("{}/{}", reference, scope));
+                                ctx.visit(format!("{}/{}", reference, scope));
                                 let mut found = false;
                                 if let Some(flow) = &oauth2.flows.implicit {
                                     found = found || flow.scopes.contains_key(scope)
@@ -188,10 +190,13 @@ impl ValidateWithContext<Spec> for Operation {
                                     }
                                 }
                                 if !found {
-                                    ctx.errors.push(format!(
-                                        "{}: scope `{}` not found in spec by reference `{}`",
-                                        path, scope, reference
-                                    ));
+                                    ctx.error(
+                                        path.clone(),
+                                        format_args!(
+                                            "scope `{}` not found in spec by reference `{}`",
+                                            scope, reference
+                                        ),
+                                    );
                                 }
                             }
                         }

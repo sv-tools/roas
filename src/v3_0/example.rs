@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_optional_url, Context, ValidateWithContext};
+use crate::common::helpers::{validate_optional_url, Context, PushError, ValidateWithContext};
 use crate::v3_0::spec::Spec;
 
 /// Example object.
@@ -46,10 +46,10 @@ pub struct Example {
 impl ValidateWithContext<Spec> for Example {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if self.value.is_some() && self.external_value.is_some() {
-            ctx.errors.push(format!(
-                "{}: value and externalValue are mutually exclusive",
-                path
-            ));
+            ctx.error(
+                path.clone(),
+                "value and externalValue are mutually exclusive",
+            );
         }
         validate_optional_url(&self.external_value, ctx, format!("{}.externalValue", path));
     }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
 
@@ -73,10 +73,10 @@ impl ValidateWithContext<Spec> for Link {
                 .visited
                 .contains(format!("#/paths/operations/{}", operation_id).as_str())
             {
-                ctx.errors.push(format!(
-                    "{}.operationId: missing operation with id `{}`",
-                    path, operation_id
-                ));
+                ctx.error(
+                    path.clone(),
+                    format_args!(".operationId: missing operation with id `{}`", operation_id),
+                );
             }
         }
         if let Some(server) = &self.server {
