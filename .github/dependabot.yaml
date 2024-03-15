@@ -1,14 +1,18 @@
-  version: 2
-  updates:
-    - package-ecosystem: "github-actions"
-      directory: "/"
-      schedule:
-        interval: "weekly"
-      groups:
-        ci:
-          patterns:
-            - "*"
-    - package-ecosystem: "cargo"
-      directory: "/"
-      schedule:
-        interval: "daily"
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      ci:
+        patterns:
+          - "*"
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    groups:
+      serde: # group updates of all serde crates togethers
+        patterns:
+          - "serde*"
