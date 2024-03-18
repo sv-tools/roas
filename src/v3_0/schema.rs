@@ -1,5 +1,6 @@
 //! Schema Object
 
+use monostate::MustBe;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::helpers::{validate_pattern, Context, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_0::discriminator::Discriminator;
 use crate::v3_0::external_documentation::ExternalDocumentation;
@@ -17,11 +18,11 @@ use crate::v3_0::xml::XML;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
-    Single(SingleSchema),
     AllOf(AllOfSchema),
     AnyOf(AnyOfSchema),
     OneOf(OneOfSchema),
     Not(NotSchema),
+    Single(SingleSchema), // must be last
 }
 
 impl Default for Schema {
@@ -112,7 +113,7 @@ pub struct NotSchema {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type")]
+#[serde(untagged)]
 pub enum SingleSchema {
     #[serde(rename = "string")]
     String(StringSchema),
@@ -129,11 +130,11 @@ pub enum SingleSchema {
     #[serde(rename = "array")]
     Array(ArraySchema),
 
+    #[serde(rename = "null")]
+    Null(NullSchema),
+
     #[serde(rename = "object")]
     Object(ObjectSchema),
-
-    #[serde(rename = "bull")]
-    Null(NullSchema),
 }
 
 impl Default for SingleSchema {
@@ -158,6 +159,9 @@ impl Display for SingleSchema {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct StringSchema {
+    #[serde(rename = "type")]
+    _type: MustBe!("string"),
+
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -232,6 +236,9 @@ pub struct StringSchema {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct IntegerSchema {
+    #[serde(rename = "type")]
+    _type: MustBe!("integer"),
+
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -315,6 +322,9 @@ pub struct IntegerSchema {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct NumberSchema {
+    #[serde(rename = "type")]
+    _type: MustBe!("number"),
+
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -398,6 +408,9 @@ pub struct NumberSchema {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct BooleanSchema {
+    #[serde(rename = "type")]
+    _type: MustBe!("boolean"),
+
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -449,6 +462,9 @@ pub struct BooleanSchema {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ArraySchema {
+    #[serde(rename = "type")]
+    _type: MustBe!("array"),
+
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -515,8 +531,12 @@ pub struct ArraySchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ObjectSchema {
+    #[serde(rename = "type")]
+    #[serde(default)]
+    _type: String,
+
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -531,7 +551,7 @@ pub struct ObjectSchema {
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<Vec<serde_json::Value>>,
+    pub default: Option<BTreeMap<String, serde_json::Value>>,
 
     /// Declares the maximum number of items that are allowed in the array.
     #[serde(rename = "maxProperties")]
@@ -589,8 +609,32 @@ pub struct ObjectSchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+impl Default for ObjectSchema {
+    fn default() -> Self {
+        ObjectSchema {
+            _type: "object".to_owned(),
+            title: None,
+            description: None,
+            properties: None,
+            default: None,
+            max_properties: None,
+            min_properties: None,
+            additional_properties: None,
+            required: None,
+            read_only: None,
+            xml: None,
+            external_docs: None,
+            example: None,
+            extensions: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct NullSchema {
+    #[serde(rename = "type")]
+    _type: MustBe!("null"),
+
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -691,6 +735,9 @@ impl ValidateWithContext<Spec> for StringSchema {
         }
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{}.xml", path));
+        }
+        if let Some(pattern) = &self.pattern {
+            validate_pattern(pattern, ctx, format!("{}.pattern", path));
         }
     }
 }
