@@ -1,0 +1,22 @@
+name: Publish
+
+on:
+  push:
+    tags: [ "v*" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    uses: ./.github/workflows/rust.yaml
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish
+        run: |
+          cargo login ${{ secrets.CRATES_IO_TOKEN }}
+          cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
+          cargo publish --all-features --allow-dirty
