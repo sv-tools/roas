@@ -10,11 +10,19 @@ env:
 jobs:
   build:
     uses: ./.github/workflows/rust.yaml
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
   publish:
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-all-crates: true
+      - name: Install tools
+        run: cargo install-tools
       - name: Publish
         run: |
           cargo login ${{ secrets.CRATES_IO_TOKEN }}
