@@ -1,3 +1,5 @@
+use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::reference::{RefOr, ResolveReference};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -5,6 +7,21 @@ use serde::{Deserialize, Serialize};
 pub enum BoolOr<T> {
     Bool(bool),
     Item(T),
+}
+
+impl<D> BoolOr<RefOr<Box<D>>> {
+    pub fn validate_with_context_boxed<T>(&self, ctx: &mut Context<T>, path: String)
+    where
+        T: ResolveReference<D>,
+        D: ValidateWithContext<T>,
+    {
+        match self {
+            BoolOr::Bool(_) => {}
+            BoolOr::Item(d) => {
+                d.validate_with_context_boxed(ctx, path);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

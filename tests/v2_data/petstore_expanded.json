@@ -164,6 +164,7 @@
           "$ref": "#/definitions/NewPet"
         },
         {
+          "type": "object",
           "required": [
             "id"
           ],

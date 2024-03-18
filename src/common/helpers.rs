@@ -135,3 +135,13 @@ pub fn validate_optional_string_matches<T>(
         validate_string_matches(s, pattern, ctx, path);
     }
 }
+
+pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
+    match Regex::new(pattern) {
+        Ok(_) => {}
+        Err(e) => ctx.error(
+            path,
+            format_args!("pattern `{}` is invalid: {}", pattern, e),
+        ),
+    }
+}

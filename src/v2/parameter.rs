@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{validate_required_string, Context, ValidateWithContext};
+use crate::common::helpers::{
+    validate_pattern, validate_required_string, Context, ValidateWithContext,
+};
 use crate::common::reference::RefOr;
 use crate::v2::items::Items;
 use crate::v2::schema::Schema;
@@ -492,6 +494,9 @@ impl ValidateWithContext<Spec> for InHeader {
             InHeader::String(p) => {
                 p.validate_with_context(ctx, path.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
+                if let Some(pattern) = &p.pattern {
+                    validate_pattern(pattern, ctx, format!("{}.pattern", path));
+                }
             }
             InHeader::Integer(p) => {
                 p.validate_with_context(ctx, path.clone());

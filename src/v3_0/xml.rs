@@ -136,7 +136,7 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::to_value(&XML {
+            serde_json::to_value(XML {
                 name: Some("name".to_owned()),
                 namespace: Some("https://example.com/schema/sample".to_owned()),
                 prefix: Some("sample".to_owned()),

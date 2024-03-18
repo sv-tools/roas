@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::helpers::{validate_pattern, Context, ValidateWithContext};
 use crate::v2::spec::Spec;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -239,7 +239,11 @@ impl ValidateWithContext<Spec> for Items {
 }
 
 impl ValidateWithContext<Spec> for StringItem {
-    fn validate_with_context(&self, _ctx: &mut Context<Spec>, _path: String) {}
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if let Some(pattern) = &self.pattern {
+            validate_pattern(pattern, ctx, format!("{}.pattern", path));
+        }
+    }
 }
 
 impl ValidateWithContext<Spec> for IntegerItem {
