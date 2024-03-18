@@ -9,6 +9,8 @@ on:
     secrets:
       CODECOV_TOKEN:
         required: true
+  schedule:
+    - cron: '0 0 * * 0'
 
 env:
   CARGO_TERM_COLOR: always
