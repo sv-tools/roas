@@ -16,7 +16,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  Build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --all-features --verbose
+  Format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all --check --verbose
+  Clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo clippy --all-features
+  Tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,14 +39,7 @@ jobs:
         with:
           cache-targets: false
           cache-all-crates: true
-      - name: Build
-        run: cargo build --all-features --verbose
-      - name: Format
-        run: cargo fmt --all --check --verbose
-      - name: Clippy
-        run: cargo clippy
-      - name: Install tools
-        run: cargo install-tools
+      - run: cargo install-test-tools
       - name: Run tests
         id: tests
         run: cargo llvm-cov nextest --all-features --all-targets --no-fail-fast
@@ -46,10 +54,28 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: coverage/*.lcov
+  Deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-all-crates: true
+      - run: cargo install-dependency-check-tools
       - name: Machete
         run: cargo machete
       - name: Deny
         run: cargo deny check all
+  Publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-all-crates: true
+      - run: cargo install-license
       - name: Dry run publish
         run: |
           cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
