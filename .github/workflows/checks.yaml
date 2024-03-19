@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo clippy --all-features
+      - run: cargo clippy --all-features --verbose
   Tests:
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +42,7 @@ jobs:
       - run: cargo install-test-tools
       - name: Run tests
         id: tests
-        run: cargo llvm-cov nextest --all-features --all-targets --no-fail-fast
+        run: cargo llvm-cov nextest --all-features --all-targets --no-fail-fast --verbose
       - name: Prepare coverage report
         id: coverage
         if: success() || steps.tests.outcome == 'failure'
@@ -79,5 +79,5 @@ jobs:
       - name: Dry run publish
         run: |
           cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
-          cargo publish --all-features --allow-dirty --dry-run
+          cargo publish --all-features --allow-dirty --dry-run --verbose
           cargo package --all-features --list --allow-dirty
