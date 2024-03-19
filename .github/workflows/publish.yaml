@@ -23,4 +23,4 @@ jobs:
         run: |
           cargo login ${{ secrets.CRATES_IO_TOKEN }}
           cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
-          cargo publish --all-features --allow-dirty
+          cargo publish --all-features --allow-dirty --verbose
