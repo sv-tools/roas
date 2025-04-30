@@ -22,7 +22,7 @@ pub trait PushError<T> {
     fn error(&mut self, path: String, args: T);
 }
 
-impl<'a, T> PushError<&str> for Context<'a, T> {
+impl<T> PushError<&str> for Context<'_, T> {
     fn error(&mut self, path: String, msg: &str) {
         if msg.starts_with('.') {
             self.errors.push(format!("{}{}", path, msg));
@@ -32,19 +32,19 @@ impl<'a, T> PushError<&str> for Context<'a, T> {
     }
 }
 
-impl<'a, T> PushError<String> for Context<'a, T> {
+impl<T> PushError<String> for Context<'_, T> {
     fn error(&mut self, path: String, msg: String) {
         self.error(path, msg.as_str());
     }
 }
 
-impl<'a, T> PushError<fmt::Arguments<'_>> for Context<'a, T> {
+impl<T> PushError<fmt::Arguments<'_>> for Context<'_, T> {
     fn error(&mut self, path: String, args: fmt::Arguments<'_>) {
         self.error(path, args.to_string().as_str());
     }
 }
 
-impl<'a, T> Context<'a, T> {
+impl<T> Context<'_, T> {
     pub fn reset(&mut self) {
         self.visited.clear();
         self.errors.clear();

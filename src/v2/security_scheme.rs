@@ -6,7 +6,7 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    validate_optional_url, validate_required_string, Context, PushError, ValidateWithContext,
+    Context, PushError, ValidateWithContext, validate_optional_url, validate_required_string,
 };
 use crate::v2::spec::Spec;
 

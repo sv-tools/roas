@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{validate_pattern, Context, ValidateWithContext};
+use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
 use crate::common::reference::RefOr;
 use crate::v3_0::discriminator::Discriminator;
 use crate::v3_0::external_documentation::ExternalDocumentation;

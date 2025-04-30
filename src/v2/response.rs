@@ -7,7 +7,7 @@ use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
 use crate::common::reference::RefOr;
 use crate::v2::header::Header;
 use crate::v2::schema::Schema;
@@ -487,8 +487,8 @@ mod tests {
                     "description": "A simple response",
                 },
             }))
-                .unwrap_err()
-                .to_string(),
+            .unwrap_err()
+            .to_string(),
             "unknown field `foo`, expected one of `default`, `x-...`, `1xx`, `2xx`, `3xx`, `4xx`, `5xx`",
             "responses deserialization with invalid status code",
         );
@@ -499,8 +499,8 @@ mod tests {
                     "description": "A simple response",
                 },
             }))
-                .unwrap_err()
-                .to_string(),
+            .unwrap_err()
+            .to_string(),
             "unknown field `600`, expected one of `default`, `x-...`, `1xx`, `2xx`, `3xx`, `4xx`, `5xx`",
             "responses deserialization with 600 as status code",
         );
@@ -511,8 +511,8 @@ mod tests {
                     "description": "A simple response",
                 },
             }))
-                .unwrap_err()
-                .to_string(),
+            .unwrap_err()
+            .to_string(),
             "unknown field `42`, expected one of `default`, `x-...`, `1xx`, `2xx`, `3xx`, `4xx`, `5xx`",
             "responses deserialization with 42 as status code",
         );

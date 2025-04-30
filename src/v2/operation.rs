@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
 use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;

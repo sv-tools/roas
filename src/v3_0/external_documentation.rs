@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_optional_url, Context, ValidateWithContext};
+use crate::common::helpers::{Context, ValidateWithContext, validate_optional_url};
 use crate::v3_0::spec::Spec;
 
 /// Allows referencing an external resource for extended documentation.

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{validate_pattern, Context, ValidateWithContext};
+use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
 use crate::v2::items::Items;
 use crate::v2::spec::Spec;
 

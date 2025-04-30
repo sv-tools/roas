@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{validate_string_matches, Context, PushError, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_string_matches};
 use crate::common::reference::RefOr;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::example::Example;

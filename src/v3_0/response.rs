@@ -7,7 +7,7 @@ use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::common::helpers::{validate_required_string, Context, PushError, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
 use crate::common::reference::RefOr;
 use crate::v3_0::header::Header;
 use crate::v3_0::link::Link;

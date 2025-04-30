@@ -1,5 +1,5 @@
 [alias]
 install-license = "install cargo-license@0.6.1"
-install-test-tools = "install cargo-llvm-cov@0.6.7 cargo-nextest@0.9.67"
-install-dependency-check-tools = "install cargo-deny@0.14.17 cargo-machete@0.6.1"
+install-test-tools = "install cargo-llvm-cov@0.6.16 cargo-nextest@0.9.94"
+install-dependency-check-tools = "install cargo-deny@0.18.2 cargo-machete@0.8.0"
 update-tools = "install cargo-deny cargo-license cargo-llvm-cov cargo-machete cargo-nextest"
