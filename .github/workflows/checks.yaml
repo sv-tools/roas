@@ -15,6 +15,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions: read-all
+
 jobs:
   Build:
     runs-on: ubuntu-latest
@@ -41,19 +43,20 @@ jobs:
           cache-all-crates: true
       - run: cargo install-test-tools
       - name: Run tests
-        id: tests
         run: cargo llvm-cov nextest --all-features --all-targets --no-fail-fast --verbose
       - name: Prepare coverage report
-        id: coverage
-        if: success() || steps.tests.outcome == 'failure'
+        if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
       - name: Upload coverage reports to Codecov
-        if: success() || steps.coverage.outcome == 'success'
+        if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v5
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          files: coverage/*.lcov
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
   Deps:
     runs-on: ubuntu-latest
     steps:
