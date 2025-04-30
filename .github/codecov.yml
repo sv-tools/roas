@@ -1,1 +1,22 @@
 comment: false
+
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
+  individual_components:
+    - component_id: common
+      name: common
+      paths:
+        - src/common/**
+    - component_id: v2
+      name: v2
+      paths:
+        - src/v2/**
+        - tests/v2_test.rs
+    - component_id: v3_0
+      name: v3.0
+      paths:
+        - src/v3_0/**
+        - tests/v3_0_test.rs
