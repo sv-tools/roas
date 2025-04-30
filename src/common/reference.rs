@@ -127,7 +127,7 @@ impl<D> RefOr<D> {
     }
 
     /// Get the item from the RefOr by returning the Item or resolving a reference.
-    pub fn get_item<'a, T>(&'a self, spec: &'a T) -> Result<&D, ResolveError>
+    pub fn get_item<'a, T>(&'a self, spec: &'a T) -> Result<&'a D, ResolveError>
     where
         T: ResolveReference<D>,
     {

@@ -125,7 +125,7 @@ impl<'de> Deserialize<'de> for StringFormat {
     {
         struct StringFormatVisitor;
 
-        impl<'de> Visitor<'de> for StringFormatVisitor {
+        impl Visitor<'_> for StringFormatVisitor {
             type Value = StringFormat;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
