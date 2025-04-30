@@ -240,7 +240,7 @@ impl ResolveReference<Schema> for Spec {
 
 impl ResolveReference<ObjectSchema> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&ObjectSchema> {
-        if let Schema::Object(ref schema) = self
+        if let Schema::Object(schema) = self
             .definitions
             .as_ref()
             .and_then(|x| x.get(reference.trim_start_matches("#/definitions/")))?
