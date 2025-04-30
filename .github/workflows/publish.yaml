@@ -7,6 +7,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions: read-all
+
 jobs:
   build:
     uses: ./.github/workflows/checks.yaml
