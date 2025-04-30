@@ -8,7 +8,7 @@ use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
-use crate::common::reference::{resolve_in_map, ResolveReference};
+use crate::common::reference::{ResolveReference, resolve_in_map};
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
 use crate::v3_0::example::Example;

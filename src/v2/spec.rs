@@ -9,7 +9,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    validate_optional_string_matches, Context, PushError, ValidateWithContext,
+    Context, PushError, ValidateWithContext, validate_optional_string_matches,
 };
 use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;

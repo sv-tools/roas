@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    validate_email, validate_optional_url, validate_required_string, Context, ValidateWithContext,
+    Context, ValidateWithContext, validate_email, validate_optional_url, validate_required_string,
 };
 use crate::v3_0::spec::Spec;
 

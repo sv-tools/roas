@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
 use crate::common::helpers::{
-    validate_pattern, validate_required_string, Context, ValidateWithContext,
+    Context, ValidateWithContext, validate_pattern, validate_required_string,
 };
 use crate::common::reference::RefOr;
 use crate::v2::items::Items;
