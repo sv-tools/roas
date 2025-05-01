@@ -19,8 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install tools
-        run: cargo install-license
+      - run: cargo install cargo-license
       - name: Publish
         run: |
           cargo login ${{ secrets.CRATES_IO_TOKEN }}
