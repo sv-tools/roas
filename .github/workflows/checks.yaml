@@ -23,6 +23,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --all-features --verbose
+  Toml-Fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-all-crates: true
+      - run: cargo tools
+      - run: taplo fmt --check
   Format:
     runs-on: ubuntu-latest
     steps:
@@ -32,7 +42,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo clippy --all-features --verbose
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-all-crates: true
+      - run: cargo tools
+      - run: cargo clippy --all-features --verbose -- --deny warnings
+      - run: cargo clippy --all-features --quiet --message-format=json | cargo-action-fmt
+        if: failure()
   Tests:
     runs-on: ubuntu-latest
     steps:
@@ -41,7 +58,7 @@ jobs:
         with:
           cache-targets: false
           cache-all-crates: true
-      - run: cargo install-test-tools
+      - run: cargo tools
       - name: Run tests
         run: cargo llvm-cov nextest --all-features --all-targets --no-fail-fast --verbose
       - name: Prepare coverage report
@@ -65,7 +82,7 @@ jobs:
         with:
           cache-targets: false
           cache-all-crates: true
-      - run: cargo install-dependency-check-tools
+      - run: cargo tools
       - name: Machete
         run: cargo machete
       - name: Deny
@@ -78,7 +95,7 @@ jobs:
         with:
           cache-targets: false
           cache-all-crates: true
-      - run: cargo install-license
+      - run: cargo tools
       - name: Dry run publish
         run: |
           cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
