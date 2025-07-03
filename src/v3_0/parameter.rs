@@ -425,7 +425,7 @@ impl ValidateWithContext<Spec> for Parameter {
 
 impl ValidateWithContext<Spec> for InPath {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
         must_be_required(&Some(self.required), ctx, path.clone(), self.name.clone());
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
@@ -434,7 +434,7 @@ impl ValidateWithContext<Spec> for InPath {
 
 impl ValidateWithContext<Spec> for InQuery {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
     }
@@ -442,7 +442,7 @@ impl ValidateWithContext<Spec> for InQuery {
 
 impl ValidateWithContext<Spec> for InHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
     }
@@ -450,7 +450,7 @@ impl ValidateWithContext<Spec> for InHeader {
 
 impl ValidateWithContext<Spec> for InCookie {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
     }
@@ -458,7 +458,7 @@ impl ValidateWithContext<Spec> for InCookie {
 
 fn must_be_required(p: &Option<bool>, ctx: &mut Context<Spec>, path: String, name: String) {
     if !p.is_some_and(|x| x) {
-        ctx.error(path, format_args!(".{}: must be required", name));
+        ctx.error(path, format_args!(".{name}: must be required"));
     }
 }
 

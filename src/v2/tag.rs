@@ -44,9 +44,9 @@ pub struct Tag {
 
 impl ValidateWithContext<Spec> for Tag {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
         if let Some(doc) = &self.external_docs {
-            doc.validate_with_context(ctx, format!("{}.externalDocs", path));
+            doc.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
     }
 }

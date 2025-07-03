@@ -117,7 +117,7 @@ pub struct XML {
 
 impl ValidateWithContext<Spec> for XML {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&self.namespace, ctx, format!("{}.namespace", path));
+        validate_optional_url(&self.namespace, ctx, format!("{path}.namespace"));
     }
 }
 

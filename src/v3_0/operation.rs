@@ -111,12 +111,12 @@ impl ValidateWithContext<Spec> for Operation {
 
         if let Some(tags) = &self.tags {
             for (i, tag) in tags.iter().enumerate() {
-                let path = format!("{}.tags[{}]", path, i);
+                let path = format!("{path}.tags[{i}]");
                 validate_required_string(tag, ctx, path.clone());
                 if tag.is_empty() {
                     continue;
                 }
-                let reference = format!("#/tags/{}", tag);
+                let reference = format!("#/tags/{tag}");
                 if let Ok(spec_tag) = RefOr::<Tag>::new_ref(reference.clone()).get_item(ctx.spec) {
                     if ctx.visit(reference.clone()) {
                         spec_tag.validate_with_context(ctx, reference);
@@ -124,7 +124,7 @@ impl ValidateWithContext<Spec> for Operation {
                 } else if !ctx.is_option(Options::IgnoreMissingTags) {
                     ctx.error(
                         path,
-                        format_args!(".tags[{}]: `{}` not found in spec", i, tag),
+                        format_args!(".tags[{i}]: `{tag}` not found in spec"),
                     );
                 }
             }
@@ -132,44 +132,44 @@ impl ValidateWithContext<Spec> for Operation {
 
         if let Some(parameters) = &self.parameters {
             for (i, parameter) in parameters.clone().iter().enumerate() {
-                parameter.validate_with_context(ctx, format!("{}.parameters[{}]", path, i));
+                parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
             }
         }
 
         if let Some(request_body) = &self.request_body {
-            request_body.validate_with_context(ctx, format!("{}.requestBody", path));
+            request_body.validate_with_context(ctx, format!("{path}.requestBody"));
         }
 
         if let Some(servers) = &self.servers {
             for (i, server) in servers.iter().enumerate() {
-                server.validate_with_context(ctx, format!("{}.servers[{}]", path, i));
+                server.validate_with_context(ctx, format!("{path}.servers[{i}]"));
             }
         }
 
         if let Some(callbacks) = &self.callbacks {
             for (k, v) in callbacks {
-                v.validate_with_context(ctx, format!("{}.callbacks[{}]", path, k));
+                v.validate_with_context(ctx, format!("{path}.callbacks[{k}]"));
             }
         }
 
         self.responses
-            .validate_with_context(ctx, format!("{}.responses", path));
+            .validate_with_context(ctx, format!("{path}.responses"));
 
         if let Some(external_doc) = &self.external_docs {
-            external_doc.validate_with_context(ctx, format!("{}.externalDocs", path));
+            external_doc.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
 
         if let Some(security) = &self.security {
             for (i, security) in security.iter().enumerate() {
                 for (name, scopes) in security {
-                    let path = format!("{}.security[{}][{}]", path, i, name);
-                    let reference = format!("#/components/securitySchemes/{}", name);
+                    let path = format!("{path}.security[{i}][{name}]");
+                    let reference = format!("#/components/securitySchemes/{name}");
                     let spec_ref = RefOr::<SecurityScheme>::new_ref(reference.clone());
                     spec_ref.validate_with_context(ctx, path.clone());
                     if !scopes.is_empty() {
                         if let Ok(SecurityScheme::OAuth2(oauth2)) = spec_ref.get_item(ctx.spec) {
                             for scope in scopes {
-                                ctx.visit(format!("{}/{}", reference, scope));
+                                ctx.visit(format!("{reference}/{scope}"));
                                 let mut found = false;
                                 if let Some(flow) = &oauth2.flows.implicit {
                                     found = found || flow.scopes.contains_key(scope)
@@ -193,8 +193,7 @@ impl ValidateWithContext<Spec> for Operation {
                                     ctx.error(
                                         path.clone(),
                                         format_args!(
-                                            "scope `{}` not found in spec by reference `{}`",
-                                            scope, reference
+                                            "scope `{scope}` not found in spec by reference `{reference}`"
                                         ),
                                     );
                                 }

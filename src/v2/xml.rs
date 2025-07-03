@@ -120,9 +120,9 @@ pub struct XML {
 impl ValidateWithContext<Spec> for XML {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(name) = &self.name {
-            validate_required_string(name, ctx, format!("{}.name", path));
+            validate_required_string(name, ctx, format!("{path}.name"));
         }
-        validate_optional_url(&self.namespace, ctx, format!("{}.namespace", path));
+        validate_optional_url(&self.namespace, ctx, format!("{path}.namespace"));
     }
 }
 

@@ -37,7 +37,7 @@ impl Display for StringFormat {
             StringFormat::DateTime => write!(f, "date-time"),
             StringFormat::Password => write!(f, "password"),
             StringFormat::UUID => write!(f, "uuid"),
-            StringFormat::Custom(s) => write!(f, "{}", s),
+            StringFormat::Custom(s) => write!(f, "{s}"),
         }
     }
 }

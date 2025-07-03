@@ -62,7 +62,7 @@ pub struct RequestBody {
 impl ValidateWithContext<Spec> for RequestBody {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         for (k, v) in &self.content {
-            v.validate_with_context(ctx, format!("{}.content[{}]", path, k));
+            v.validate_with_context(ctx, format!("{path}.content[{k}]"));
         }
     }
 }

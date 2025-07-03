@@ -11,7 +11,7 @@ impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "{} errors found:", self.errors.len())?;
         for error in &self.errors {
-            writeln!(f, "- {}", error)?;
+            writeln!(f, "- {error}")?;
         }
         Ok(())
     }
@@ -111,12 +111,12 @@ pub const IGNORE_EMPTY_REQUIRED_FIELDS: EnumSet<Options> = enum_set!(
 );
 
 impl Options {
-    /// Creates an empty (strict) set of options.
+    /// /// Creates an empty set of options, representing the strictest validation.
     pub fn new() -> EnumSet<Options> {
         EnumSet::empty()
     }
 
-    /// Creates a set of options for only one option (self).
+    /// Creates a set containing only given option.
     pub fn only(&self) -> EnumSet<Options> {
         EnumSet::only(*self)
     }

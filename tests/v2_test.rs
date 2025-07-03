@@ -9,7 +9,7 @@ mod v2_tests {
     fn files() {
         for path in fs::read_dir("tests/v2_data").unwrap() {
             let path_buf = path.unwrap().path();
-            println!("validating: {:?}", path_buf);
+            println!("validating: {path_buf:?}");
             let json_spec = fs::read_to_string(&path_buf).unwrap();
             let spec = serde_json::from_str::<Spec>(&json_spec).unwrap();
             spec.validate(Options::IgnoreMissingTags | Options::IgnoreExternalReferences)

@@ -457,30 +457,30 @@ impl ValidateWithContext<Spec> for HttpSecurityScheme {
 
 impl ValidateWithContext<Spec> for ApiKeySecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.flows
-            .validate_with_context(ctx, format!("{}.flow", path));
+            .validate_with_context(ctx, format!("{path}.flow"));
     }
 }
 
 impl ValidateWithContext<Spec> for OAuth2Flows {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(flow) = &self.implicit {
-            flow.validate_with_context(ctx, format!("{}.implicit", path));
+            flow.validate_with_context(ctx, format!("{path}.implicit"));
         }
         if let Some(flow) = &self.password {
-            flow.validate_with_context(ctx, format!("{}.password", path));
+            flow.validate_with_context(ctx, format!("{path}.password"));
         }
         if let Some(flow) = &self.client_credentials {
-            flow.validate_with_context(ctx, format!("{}.clientCredentials", path));
+            flow.validate_with_context(ctx, format!("{path}.clientCredentials"));
         }
         if let Some(flow) = &self.authorization_code {
-            flow.validate_with_context(ctx, format!("{}.authorizationCode", path));
+            flow.validate_with_context(ctx, format!("{path}.authorizationCode"));
         }
     }
 }
@@ -490,23 +490,23 @@ impl ValidateWithContext<Spec> for ImplicitOAuth2Flow {
         validate_required_url(
             &self.authorization_url,
             ctx,
-            format!("{}.authorizationUrl", path),
+            format!("{path}.authorizationUrl"),
         );
-        validate_optional_url(&self.refresh_url, ctx, format!("{}.refreshUrl", path));
+        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for PasswordOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.token_url, ctx, format!("{}.tokenUrl", path));
-        validate_optional_url(&self.refresh_url, ctx, format!("{}.refreshUrl", path));
+        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for ClientCredentialsOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.token_url, ctx, format!("{}.tokenUrl", path));
-        validate_optional_url(&self.refresh_url, ctx, format!("{}.refreshUrl", path));
+        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
@@ -515,10 +515,10 @@ impl ValidateWithContext<Spec> for AuthorizationCodeOAuth2Flow {
         validate_required_url(
             &self.authorization_url,
             ctx,
-            format!("{}.authorizationUrl", path),
+            format!("{path}.authorizationUrl"),
         );
-        validate_required_url(&self.token_url, ctx, format!("{}.tokenUrl", path));
-        validate_optional_url(&self.refresh_url, ctx, format!("{}.refreshUrl", path));
+        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
@@ -527,7 +527,7 @@ impl ValidateWithContext<Spec> for OpenIdConnectSecurityScheme {
         validate_required_url(
             &self.open_id_connect_url,
             ctx,
-            format!("{}.openIdConnectUrl", path),
+            format!("{path}.openIdConnectUrl"),
         );
     }
 }

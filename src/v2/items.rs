@@ -241,7 +241,7 @@ impl ValidateWithContext<Spec> for Items {
 impl ValidateWithContext<Spec> for StringItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(pattern) = &self.pattern {
-            validate_pattern(pattern, ctx, format!("{}.pattern", path));
+            validate_pattern(pattern, ctx, format!("{path}.pattern"));
         }
     }
 }
@@ -261,7 +261,7 @@ impl ValidateWithContext<Spec> for BooleanItem {
 impl ValidateWithContext<Spec> for ArrayItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.items
-            .validate_with_context(ctx, format!("{}.items", path));
+            .validate_with_context(ctx, format!("{path}.items"));
     }
 }
 
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn test_string_items_serialize() {
         assert_eq!(
-            serde_json::to_value(&Items::String(StringItem {
+            serde_json::to_value(Items::String(StringItem {
                 format: Some(StringFormat::Byte),
                 default: Some(String::from("default")),
                 enum_values: Some(vec![String::from("enum1"), String::from("enum2")]),
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn test_integer_items_serialize() {
         assert_eq!(
-            serde_json::to_value(&Items::Integer(IntegerItem {
+            serde_json::to_value(Items::Integer(IntegerItem {
                 format: Some(IntegerFormat::Int64),
                 default: Some(42),
                 enum_values: Some(vec![42, 105]),
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn test_number_items_serialize() {
         assert_eq!(
-            serde_json::to_value(&Items::Number(NumberItem {
+            serde_json::to_value(Items::Number(NumberItem {
                 format: Some(NumberFormat::Double),
                 default: Some(42.0),
                 enum_values: Some(vec![42.0, 105.0]),
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn test_boolean_items_serialize() {
         assert_eq!(
-            serde_json::to_value(&Items::Boolean(BooleanItem {
+            serde_json::to_value(Items::Boolean(BooleanItem {
                 default: Some(true),
                 extensions: Some({
                     let mut map = BTreeMap::new();
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn test_array_items_serialize() {
         assert_eq!(
-            serde_json::to_value(&Items::Array(ArrayItem {
+            serde_json::to_value(Items::Array(ArrayItem {
                 items: Box::new(Items::Number(NumberItem {
                     format: Some(NumberFormat::Double),
                     ..Default::default()

@@ -166,7 +166,7 @@ impl<'de> Deserialize<'de> for Responses {
                         res.default = Some(map.next_value()?);
                     } else if key.starts_with("x-") {
                         if extensions.contains_key(key.as_str()) {
-                            return Err(Error::custom(format_args!("duplicate field `{}`", key)));
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
                         }
                         extensions.insert(key, map.next_value()?);
                     } else {
@@ -174,8 +174,7 @@ impl<'de> Deserialize<'de> for Responses {
                             Ok(100..=599) => {
                                 if responses.contains_key(key.as_str()) {
                                     return Err(Error::custom(format_args!(
-                                        "duplicate field `{}`",
-                                        key
+                                        "duplicate field `{key}`"
                                     )));
                                 }
                                 responses.insert(key, map.next_value()?);
@@ -201,21 +200,21 @@ impl<'de> Deserialize<'de> for Responses {
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if !ctx.is_option(Options::IgnoreEmptyResponseDescription) {
-            validate_required_string(&self.description, ctx, format!("{}.description", path));
+            validate_required_string(&self.description, ctx, format!("{path}.description"));
         }
         if let Some(headers) = &self.headers {
             for (name, header) in headers {
-                header.validate_with_context(ctx, format!("{}.headers[{}]", path, name));
+                header.validate_with_context(ctx, format!("{path}.headers[{name}]"));
             }
         }
         if let Some(media_types) = &self.content {
             for (name, media_type) in media_types {
-                media_type.validate_with_context(ctx, format!("{}.mediaTypes[{}]", path, name));
+                media_type.validate_with_context(ctx, format!("{path}.mediaTypes[{name}]"));
             }
         }
         if let Some(links) = &self.links {
             for (name, link) in links {
-                link.validate_with_context(ctx, format!("{}.links[{}]", path, name));
+                link.validate_with_context(ctx, format!("{path}.links[{name}]"));
             }
         }
     }
@@ -224,7 +223,7 @@ impl ValidateWithContext<Spec> for Response {
 impl ValidateWithContext<Spec> for Responses {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(response) = &self.default {
-            response.validate_with_context(ctx, format!("{}.default", path));
+            response.validate_with_context(ctx, format!("{path}.default"));
         }
         if let Some(responses) = &self.responses {
             for (name, response) in responses {
@@ -234,13 +233,12 @@ impl ValidateWithContext<Spec> for Responses {
                         ctx.error(
                             path.clone(),
                             format_args!(
-                                "name must be an integer within [100..599] range, found `{}`",
-                                name
+                                "name must be an integer within [100..599] range, found `{name}`"
                             ),
                         );
                     }
                 }
-                response.validate_with_context(ctx, format!("{}.{}", path, name));
+                response.validate_with_context(ctx, format!("{path}.{name}"));
             }
         }
     }

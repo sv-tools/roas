@@ -99,11 +99,11 @@ pub struct ServerVariable {
 
 impl ValidateWithContext<Spec> for Server {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.url, ctx, format!("{}.url", path));
+        validate_required_string(&self.url, ctx, format!("{path}.url"));
         let mut visited = HashSet::<String>::new();
         if let Some(variables) = &self.variables {
             for (name, variable) in variables {
-                variable.validate_with_context(ctx, format!("{}.variables[{}]", path, name));
+                variable.validate_with_context(ctx, format!("{path}.variables[{name}]"));
                 visited.insert(name.clone());
             }
         };
@@ -112,7 +112,7 @@ impl ValidateWithContext<Spec> for Server {
             if !visited.remove(name) {
                 ctx.error(
                     path.clone(),
-                    format_args!(".url: `{}` is not defined in `variables`", name),
+                    format_args!(".url: `{name}` is not defined in `variables`"),
                 );
             }
         }
@@ -120,7 +120,7 @@ impl ValidateWithContext<Spec> for Server {
             for name in visited {
                 ctx.error(
                     path.clone(),
-                    format_args!(".variables[{}]: unused in `url`", name),
+                    format_args!(".variables[{name}]: unused in `url`"),
                 );
             }
         }
@@ -129,7 +129,7 @@ impl ValidateWithContext<Spec> for Server {
 
 impl ValidateWithContext<Spec> for ServerVariable {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.default, ctx, format!("{}.default", path));
+        validate_required_string(&self.default, ctx, format!("{path}.default"));
         if let Some(enum_values) = &self.enum_values {
             if !enum_values.contains(&self.default) {
                 ctx.error(

@@ -99,11 +99,11 @@ impl<D> RefOr<D> {
                         }
                         Err(e) => match e {
                             ResolveError::NotFound(r) => {
-                                ctx.error(path, format_args!(".$ref: `{}` not found", r));
+                                ctx.error(path, format_args!(".$ref: `{r}` not found"));
                             }
                             ResolveError::ExternalUnsupported(_) => {
                                 if !ctx.is_option(Options::IgnoreExternalReferences) {
-                                    ctx.error(path, format_args!(".$ref: {}", e));
+                                    ctx.error(path, format_args!(".$ref: {e}"));
                                 }
                             }
                         },

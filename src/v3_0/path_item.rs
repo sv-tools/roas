@@ -161,13 +161,13 @@ impl<'de> Deserialize<'de> for PathItem {
                         res.parameters = Some(map.next_value()?);
                     } else if key.starts_with("x-") {
                         if extensions.contains_key(key.clone().as_str()) {
-                            return Err(Error::custom(format!("duplicate field '{}'", key)));
+                            return Err(Error::custom(format!("duplicate field '{key}'")));
                         }
                         extensions.insert(key, map.next_value()?);
                     } else {
                         let key = key.to_lowercase();
                         if operations.contains_key(key.as_str()) {
-                            return Err(Error::custom(format!("duplicate field '{}'", key)));
+                            return Err(Error::custom(format!("duplicate field '{key}'")));
                         }
                         operations.insert(key, map.next_value()?);
                     }
@@ -190,19 +190,19 @@ impl ValidateWithContext<Spec> for PathItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(operations) = &self.operations {
             for (method, operation) in operations.iter() {
-                operation.validate_with_context(ctx, format!("{}.{}", path, method));
+                operation.validate_with_context(ctx, format!("{path}.{method}"));
             }
         }
 
         if let Some(servers) = &self.servers {
             for (i, server) in servers.iter().enumerate() {
-                server.validate_with_context(ctx, format!("{}.servers[{}]", path, i));
+                server.validate_with_context(ctx, format!("{path}.servers[{i}]"));
             }
         }
 
         if let Some(parameters) = &self.parameters {
             for (i, parameter) in parameters.iter().enumerate() {
-                parameter.validate_with_context(ctx, format!("{}.parameters[{}]", path, i));
+                parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
             }
         }
     }

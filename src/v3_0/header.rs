@@ -91,12 +91,12 @@ impl ValidateWithContext<Spec> for Header {
         }
         if let Some(examples) = &self.examples {
             for (k, v) in examples {
-                v.validate_with_context(ctx, format!("{}.examples[{}]", path, k));
+                v.validate_with_context(ctx, format!("{path}.examples[{k}]"));
             }
         }
         if let Some(content) = &self.content {
             for (k, v) in content {
-                v.validate_with_context(ctx, format!("{}.content[{}]", path, k));
+                v.validate_with_context(ctx, format!("{path}.content[{k}]"));
             }
         }
     }

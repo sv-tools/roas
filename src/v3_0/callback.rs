@@ -111,12 +111,12 @@ impl<'de> Deserialize<'de> for Callback {
                 while let Some(key) = map.next_key::<String>()? {
                     if key.starts_with("x-") {
                         if extensions.contains_key(key.as_str()) {
-                            return Err(Error::custom(format_args!("duplicate field `{}`", key)));
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
                         }
                         extensions.insert(key, map.next_value()?);
                     } else {
                         if res.paths.contains_key(key.as_str()) {
-                            return Err(Error::custom(format_args!("duplicate field `{}`", key)));
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
                         }
                         res.paths.insert(key, map.next_value()?);
                     }
@@ -135,7 +135,7 @@ impl<'de> Deserialize<'de> for Callback {
 impl ValidateWithContext<Spec> for Callback {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         for (name, path_item) in &self.paths {
-            path_item.validate_with_context(ctx, format!("{}[{}]", path, name));
+            path_item.validate_with_context(ctx, format!("{path}[{name}]"));
         }
     }
 }

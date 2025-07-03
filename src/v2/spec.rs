@@ -299,14 +299,14 @@ impl Validate for Spec {
             if !base_path.starts_with('/') {
                 ctx.error(
                     "#.basePath".to_owned(),
-                    format_args!("must start with `/`, found `{}`", base_path),
+                    format_args!("must start with `/`, found `{base_path}`"),
                 );
             }
         }
 
         // validate paths operations
         for (name, item) in self.paths.iter() {
-            let path = format!("#.paths[{}]", name);
+            let path = format!("#.paths[{name}]");
             if !name.starts_with('/') {
                 ctx.error(path.clone(), "must start with `/`");
             }
@@ -333,7 +333,7 @@ impl Validate for Spec {
         if !ctx.is_option(Options::IgnoreUnusedSchemas) {
             if let Some(definitions) = &self.definitions {
                 for (name, definition) in definitions.iter() {
-                    let path = format!("#/definitions/{}", name);
+                    let path = format!("#/definitions/{name}");
                     if ctx.visit(path.clone()) {
                         ctx.error(path.clone(), "unused");
                         definition.validate_with_context(&mut ctx, path);
@@ -345,7 +345,7 @@ impl Validate for Spec {
         if !ctx.is_option(Options::IgnoreUnusedParameters) {
             if let Some(parameters) = &self.parameters {
                 for (name, parameter) in parameters.iter() {
-                    let path = format!("#/parameters/{}", name);
+                    let path = format!("#/parameters/{name}");
                     if ctx.visit(path.clone()) {
                         ctx.error(path.clone(), "unused");
                         parameter.validate_with_context(&mut ctx, path);
@@ -357,7 +357,7 @@ impl Validate for Spec {
         if !ctx.is_option(Options::IgnoreUnusedResponses) {
             if let Some(responses) = &self.responses {
                 for (name, response) in responses.iter() {
-                    let path = format!("#/responses/{}", name);
+                    let path = format!("#/responses/{name}");
                     if ctx.visit(path.clone()) {
                         ctx.error(path.clone(), "unused");
                         response.validate_with_context(&mut ctx, path);

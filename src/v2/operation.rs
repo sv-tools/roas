@@ -103,22 +103,22 @@ impl ValidateWithContext<Spec> for Operation {
         if let Some(operation_id) = &self.operation_id {
             if !ctx
                 .visited
-                .insert(format!("#/paths/operations/{}", operation_id))
+                .insert(format!("#/paths/operations/{operation_id}"))
             {
                 ctx.error(
                     path.clone(),
-                    format_args!("operationId `{}` already exists", operation_id),
+                    format_args!("operationId `{operation_id}` already exists"),
                 );
             }
         }
         if let Some(tags) = &self.tags {
             for (i, tag) in tags.iter().enumerate() {
-                validate_required_string(tag, ctx, format!("{}.tags[{}]", path, i));
+                validate_required_string(tag, ctx, format!("{path}.tags[{i}]"));
                 if tag.is_empty() {
                     continue;
                 }
 
-                let reference = format!("#/tags/{}", tag);
+                let reference = format!("#/tags/{tag}");
                 if let Ok(spec_tag) = RefOr::<Tag>::new_ref(reference.clone()).get_item(ctx.spec) {
                     if ctx.visit(reference.clone()) {
                         spec_tag.validate_with_context(ctx, reference);
@@ -126,7 +126,7 @@ impl ValidateWithContext<Spec> for Operation {
                 } else if !ctx.is_option(Options::IgnoreMissingTags) {
                     ctx.error(
                         path.clone(),
-                        format_args!(".tags[{}]: `{}` not found in spec", i, tag),
+                        format_args!(".tags[{i}]: `{tag}` not found in spec"),
                     );
                 }
             }
@@ -135,7 +135,7 @@ impl ValidateWithContext<Spec> for Operation {
         if let Some(parameters) = &self.parameters {
             let mut body_count = 0;
             for (i, parameter) in parameters.clone().iter().enumerate() {
-                parameter.validate_with_context(ctx, format!("{}.parameters[{}]", path, i));
+                parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
                 if let RefOr::Item(Parameter::Body(_)) = parameter {
                     body_count += 1;
                 }
@@ -144,15 +144,14 @@ impl ValidateWithContext<Spec> for Operation {
                 ctx.error(
                     path.clone(),
                     format_args!(
-                        ".parameters: only one body parameter allowed, found {}",
-                        body_count,
+                        ".parameters: only one body parameter allowed, found {body_count}",
                     ),
                 );
             }
         }
 
         self.responses
-            .validate_with_context(ctx, format!("{}.responses", path));
+            .validate_with_context(ctx, format!("{path}.responses"));
     }
 }
 

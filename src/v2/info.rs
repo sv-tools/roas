@@ -130,33 +130,33 @@ pub struct License {
 impl ValidateWithContext<Spec> for Info {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if !ctx.is_option(Options::IgnoreEmptyInfoTitle) {
-            validate_required_string(&self.title, ctx, format!("{}.title", path));
+            validate_required_string(&self.title, ctx, format!("{path}.title"));
         }
         if !ctx.is_option(Options::IgnoreEmptyInfoVersion) {
-            validate_required_string(&self.version, ctx, format!("{}.version", path));
+            validate_required_string(&self.version, ctx, format!("{path}.version"));
         }
 
         if let Some(contact) = &self.contact {
-            contact.validate_with_context(ctx, format!("{}.contact", path));
+            contact.validate_with_context(ctx, format!("{path}.contact"));
         }
 
         if let Some(license) = &self.license {
-            license.validate_with_context(ctx, format!("{}.license", path));
+            license.validate_with_context(ctx, format!("{path}.license"));
         }
     }
 }
 
 impl ValidateWithContext<Spec> for Contact {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&self.url, ctx, format!("{}.url", path));
-        validate_email(&self.email, ctx, format!("{}.email", path));
+        validate_optional_url(&self.url, ctx, format!("{path}.url"));
+        validate_email(&self.email, ctx, format!("{path}.email"));
     }
 }
 
 impl ValidateWithContext<Spec> for License {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
-        validate_optional_url(&self.url, ctx, format!("{}.url", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
+        validate_optional_url(&self.url, ctx, format!("{path}.url"));
     }
 }
 
