@@ -692,8 +692,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match additional_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema
-                        .validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
+                    schema.validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
                 }
             }
         }

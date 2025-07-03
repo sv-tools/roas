@@ -139,9 +139,6 @@ pub fn validate_optional_string_matches<T>(
 pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
     match Regex::new(pattern) {
         Ok(_) => {}
-        Err(e) => ctx.error(
-            path,
-            format_args!("pattern `{pattern}` is invalid: {e}"),
-        ),
+        Err(e) => ctx.error(path, format_args!("pattern `{pattern}` is invalid: {e}")),
     }
 }

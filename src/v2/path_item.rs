@@ -624,8 +624,8 @@ mod tests {
                     );
                     operations
                 }),
-                parameters: Some(vec![RefOr::new_item(Parameter::Path(InPath::Array(
-                    ArrayParameter {
+                parameters: Some(vec![RefOr::new_item(Parameter::Path(Box::new(
+                    InPath::Array(ArrayParameter {
                         name: String::from("id"),
                         description: Some(String::from("ID of pet to use")),
                         required: Some(true),
@@ -634,7 +634,7 @@ mod tests {
                         }),
                         collection_format: Some(CollectionFormat::CSV),
                         ..Default::default()
-                    }
+                    })
                 )))]),
                 extensions: Some({
                     let mut map = BTreeMap::new();

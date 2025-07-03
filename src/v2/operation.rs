@@ -235,12 +235,12 @@ mod tests {
                     "application/xml".to_owned(),
                 ]),
                 parameters: Some(vec![
-                    RefOr::new_item(Parameter::Path(InPath::String(StringParameter {
+                    RefOr::new_item(Parameter::Path(Box::new(InPath::String(StringParameter {
                         name: "petId".to_owned(),
                         description: Some("ID of pet that needs to be updated".to_owned()),
                         required: Some(true),
                         ..Default::default()
-                    }))),
+                    })))),
                     RefOr::new_ref("#/definitions/Pet".to_owned()),
                 ]),
                 responses: Responses {
@@ -305,12 +305,12 @@ mod tests {
                     "application/xml".to_owned(),
                 ]),
                 parameters: Some(vec![
-                    RefOr::new_item(Parameter::Path(InPath::String(StringParameter {
+                    RefOr::new_item(Parameter::Path(Box::new(InPath::String(StringParameter {
                         name: "petId".to_owned(),
                         description: Some("ID of pet that needs to be updated".to_owned()),
                         required: Some(true),
                         ..Default::default()
-                    }))),
+                    })))),
                     RefOr::new_ref("#/definitions/Pet".to_owned()),
                 ]),
                 responses: Responses {

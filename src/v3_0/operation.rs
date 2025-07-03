@@ -122,10 +122,7 @@ impl ValidateWithContext<Spec> for Operation {
                         spec_tag.validate_with_context(ctx, reference);
                     }
                 } else if !ctx.is_option(Options::IgnoreMissingTags) {
-                    ctx.error(
-                        path,
-                        format_args!(".tags[{i}]: `{tag}` not found in spec"),
-                    );
+                    ctx.error(path, format_args!(".tags[{i}]: `{tag}` not found in spec"));
                 }
             }
         }

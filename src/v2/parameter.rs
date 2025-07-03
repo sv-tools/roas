@@ -17,19 +17,19 @@ use crate::v2::spec::Spec;
 #[serde(tag = "in")]
 pub enum Parameter {
     #[serde(rename = "body")]
-    Body(InBody),
+    Body(Box<InBody>),
 
     #[serde(rename = "header")]
-    Header(InHeader),
+    Header(Box<InHeader>),
 
     #[serde(rename = "query")]
-    Query(InQuery),
+    Query(Box<InQuery>),
 
     #[serde(rename = "path")]
-    Path(InPath),
+    Path(Box<InPath>),
 
     #[serde(rename = "formData")]
-    FormData(InFormData),
+    FormData(Box<InFormData>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -630,8 +630,7 @@ impl ValidateWithContext<Spec> for FileParameter {
 
 fn must_be_required(p: &Option<bool>, ctx: &mut Context<Spec>, path: String, name: String) {
     if !p.is_some_and(|x| x) {
-        ctx.errors
-            .push(format!("{path}.{name}: must be required"));
+        ctx.errors.push(format!("{path}.{name}: must be required"));
     }
 }
 

@@ -55,19 +55,19 @@ use crate::v3_0::spec::Spec;
 pub enum SecurityScheme {
     /// Basic Authentication Type
     #[serde(rename = "http")]
-    HTTP(HttpSecurityScheme),
+    HTTP(Box<HttpSecurityScheme>),
 
     /// API Key Authentication Type
     #[serde(rename = "apiKey")]
-    ApiKey(ApiKeySecurityScheme),
+    ApiKey(Box<ApiKeySecurityScheme>),
 
     /// OAuth2 Authentication Type
     #[serde(rename = "oauth2")]
-    OAuth2(OAuth2SecurityScheme),
+    OAuth2(Box<OAuth2SecurityScheme>),
 
     /// OpenIdConnect Authentication Type
     #[serde(rename = "openIdConnect")]
-    OpenIdConnect(OpenIdConnectSecurityScheme),
+    OpenIdConnect(Box<OpenIdConnectSecurityScheme>),
 }
 
 impl Display for SecurityScheme {
@@ -549,11 +549,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Basic,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = basic",
         );
         assert_eq!(
@@ -563,11 +563,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Bearer,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = bearer",
         );
         assert_eq!(
@@ -577,11 +577,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Digest,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = digest",
         );
         assert_eq!(
@@ -591,11 +591,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::DPoP,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = dpop",
         );
         assert_eq!(
@@ -605,11 +605,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::HOBA,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = hoba",
         );
         assert_eq!(
@@ -619,11 +619,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Mutual,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = mutual",
         );
         assert_eq!(
@@ -633,11 +633,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Negotiate,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = negotiate",
         );
         assert_eq!(
@@ -647,11 +647,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::OAuth,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = oauth",
         );
         assert_eq!(
@@ -661,11 +661,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::SCRAMSHA1,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = scram-sha-1",
         );
         assert_eq!(
@@ -675,11 +675,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::SCRAMSHA256,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = scram-sha-2256",
         );
         assert_eq!(
@@ -689,11 +689,11 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::HTTP(HttpSecurityScheme {
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Vapid,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize scheme = vapid",
         );
     }
@@ -701,11 +701,11 @@ mod tests {
     #[test]
     fn test_security_scheme_http_serialize() {
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Basic,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -715,11 +715,11 @@ mod tests {
             "serialize scheme = basic",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Bearer,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -729,11 +729,11 @@ mod tests {
             "serialize scheme = bearer",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Digest,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -743,11 +743,11 @@ mod tests {
             "serialize scheme = digest",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::DPoP,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -757,11 +757,11 @@ mod tests {
             "serialize scheme = dpop",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::HOBA,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -771,11 +771,11 @@ mod tests {
             "serialize scheme = hoba",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Mutual,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -785,11 +785,11 @@ mod tests {
             "serialize scheme = mutual",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Negotiate,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -799,11 +799,11 @@ mod tests {
             "serialize scheme = negotiate",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::OAuth,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -813,11 +813,11 @@ mod tests {
             "serialize scheme = oauth",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::SCRAMSHA1,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -827,11 +827,11 @@ mod tests {
             "serialize scheme = scram-sha-1",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::SCRAMSHA256,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -841,11 +841,11 @@ mod tests {
             "serialize scheme = scram-sha-256",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::HTTP(HttpSecurityScheme {
+            serde_json::to_value(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
                 scheme: HttpScheme::Vapid,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "http",
@@ -866,12 +866,12 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::ApiKey(ApiKeySecurityScheme {
+            SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
                 name: String::from("api_key"),
                 location: ApiKeyLocation::Header,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize in = header",
         );
         assert_eq!(
@@ -882,12 +882,12 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::ApiKey(ApiKeySecurityScheme {
+            SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
                 name: String::from("api_key"),
                 location: ApiKeyLocation::Query,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize in = query",
         );
         assert_eq!(
@@ -898,12 +898,12 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::ApiKey(ApiKeySecurityScheme {
+            SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
                 name: String::from("api_key"),
                 location: ApiKeyLocation::Cookie,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize in = cookie",
         );
     }
@@ -911,12 +911,12 @@ mod tests {
     #[test]
     fn test_security_scheme_api_key_serialize() {
         assert_eq!(
-            serde_json::to_value(SecurityScheme::ApiKey(ApiKeySecurityScheme {
+            serde_json::to_value(SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
                 name: String::from("api_key"),
                 location: ApiKeyLocation::Header,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "apiKey",
@@ -927,12 +927,12 @@ mod tests {
             "serialize location = header",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::ApiKey(ApiKeySecurityScheme {
+            serde_json::to_value(SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
                 name: String::from("api_key"),
                 location: ApiKeyLocation::Query,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "apiKey",
@@ -943,12 +943,12 @@ mod tests {
             "serialize location = query",
         );
         assert_eq!(
-            serde_json::to_value(SecurityScheme::ApiKey(ApiKeySecurityScheme {
+            serde_json::to_value(SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
                 name: String::from("api_key"),
                 location: ApiKeyLocation::Cookie,
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "apiKey",
@@ -1000,7 +1000,7 @@ mod tests {
                 "x-tra": "custom",
             }))
             .unwrap(),
-            SecurityScheme::OAuth2(OAuth2SecurityScheme {
+            SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
                 flows: OAuth2Flows {
                     implicit: Some(ImplicitOAuth2Flow {
                         authorization_url: String::from("https://example.com/api/oauth/dialog"),
@@ -1058,7 +1058,7 @@ mod tests {
                     );
                     map
                 }),
-            }),
+            })),
             "deserialize",
         );
     }
@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     fn test_security_scheme_oauth2_serialize() {
         assert_eq!(
-            serde_json::to_value(SecurityScheme::OAuth2(OAuth2SecurityScheme {
+            serde_json::to_value(SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
                 flows: OAuth2Flows {
                     implicit: Some(ImplicitOAuth2Flow {
                         authorization_url: String::from("https://example.com/api/oauth/dialog"),
@@ -1117,7 +1117,7 @@ mod tests {
                 },
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             json!({
                 "type": "oauth2",
@@ -1167,13 +1167,13 @@ mod tests {
                 "description": "A short description for security scheme.",
             }))
             .unwrap(),
-            SecurityScheme::OpenIdConnect(OpenIdConnectSecurityScheme {
+            SecurityScheme::OpenIdConnect(Box::new(OpenIdConnectSecurityScheme {
                 open_id_connect_url: String::from(
                     "https://example.com/.well-known/openid-configuration"
                 ),
                 description: Some(String::from("A short description for security scheme.")),
                 ..Default::default()
-            }),
+            })),
             "deserialize",
         );
     }
@@ -1181,13 +1181,15 @@ mod tests {
     #[test]
     fn test_security_scheme_open_id_connect_serialize() {
         assert_eq!(
-            serde_json::to_value(SecurityScheme::OpenIdConnect(OpenIdConnectSecurityScheme {
-                open_id_connect_url: String::from(
-                    "https://example.com/.well-known/openid-configuration"
-                ),
-                description: Some(String::from("A short description for security scheme.")),
-                ..Default::default()
-            }))
+            serde_json::to_value(SecurityScheme::OpenIdConnect(Box::new(
+                OpenIdConnectSecurityScheme {
+                    open_id_connect_url: String::from(
+                        "https://example.com/.well-known/openid-configuration"
+                    ),
+                    description: Some(String::from("A short description for security scheme.")),
+                    ..Default::default()
+                }
+            )))
             .unwrap(),
             json!({
                 "type": "openIdConnect",
@@ -1203,13 +1205,13 @@ mod tests {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
 
-        SecurityScheme::OpenIdConnect(OpenIdConnectSecurityScheme {
+        SecurityScheme::OpenIdConnect(Box::new(OpenIdConnectSecurityScheme {
             open_id_connect_url: String::from(
                 "https://example.com/.well-known/openid-configuration",
             ),
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert!(
             ctx.errors.is_empty(),
@@ -1217,11 +1219,11 @@ mod tests {
             ctx.errors
         );
 
-        SecurityScheme::OpenIdConnect(OpenIdConnectSecurityScheme {
+        SecurityScheme::OpenIdConnect(Box::new(OpenIdConnectSecurityScheme {
             open_id_connect_url: String::from(""),
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert_eq!(
             ctx.errors.len(),
@@ -1231,11 +1233,11 @@ mod tests {
         );
 
         ctx = Context::new(&spec, Options::new());
-        SecurityScheme::HTTP(HttpSecurityScheme {
+        SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
             scheme: HttpScheme::Basic,
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert!(
             ctx.errors.is_empty(),
@@ -1243,12 +1245,12 @@ mod tests {
             ctx.errors
         );
 
-        SecurityScheme::HTTP(HttpSecurityScheme {
+        SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
             scheme: HttpScheme::Bearer,
             bearer_format: Some(String::from("fooo")),
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert!(
             ctx.errors.is_empty(),
@@ -1256,12 +1258,12 @@ mod tests {
             ctx.errors
         );
 
-        SecurityScheme::HTTP(HttpSecurityScheme {
+        SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
             scheme: HttpScheme::Basic,
             bearer_format: Some(String::from("fooo")),
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert_eq!(
             ctx.errors.len(),
@@ -1271,34 +1273,34 @@ mod tests {
         );
 
         ctx = Context::new(&spec, Options::new());
-        SecurityScheme::ApiKey(ApiKeySecurityScheme {
+        SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
             name: String::from("api_key"),
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert!(ctx.errors.is_empty(), "ApiKey: no errors: {:?}", ctx.errors);
 
-        SecurityScheme::ApiKey(ApiKeySecurityScheme {
+        SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
             name: String::from(""),
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert_eq!(ctx.errors.len(), 1, "ApiKey: one error: {:?}", ctx.errors);
 
         ctx = Context::new(&spec, Options::new());
-        SecurityScheme::OAuth2(OAuth2SecurityScheme {
+        SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 ..Default::default()
             },
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert!(ctx.errors.is_empty(), "OAuth2: no errors: {:?}", ctx.errors);
 
-        SecurityScheme::OAuth2(OAuth2SecurityScheme {
+        SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 implicit: Some(ImplicitOAuth2Flow {
                     authorization_url: String::from("foo"),
@@ -1309,7 +1311,7 @@ mod tests {
             },
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert_eq!(
             ctx.errors.len(),
@@ -1319,7 +1321,7 @@ mod tests {
         );
 
         ctx = Context::new(&spec, Options::new());
-        SecurityScheme::OAuth2(OAuth2SecurityScheme {
+        SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 password: Some(PasswordOAuth2Flow {
                     token_url: String::from("foo"),
@@ -1330,7 +1332,7 @@ mod tests {
             },
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert_eq!(
             ctx.errors.len(),
@@ -1340,7 +1342,7 @@ mod tests {
         );
 
         ctx = Context::new(&spec, Options::new());
-        SecurityScheme::OAuth2(OAuth2SecurityScheme {
+        SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 client_credentials: Some(ClientCredentialsOAuth2Flow {
                     token_url: String::from("foo"),
@@ -1351,7 +1353,7 @@ mod tests {
             },
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert_eq!(
             ctx.errors.len(),
@@ -1361,7 +1363,7 @@ mod tests {
         );
 
         ctx = Context::new(&spec, Options::new());
-        SecurityScheme::OAuth2(OAuth2SecurityScheme {
+        SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 authorization_code: Some(AuthorizationCodeOAuth2Flow {
                     authorization_url: String::from("xyz"),
@@ -1373,7 +1375,7 @@ mod tests {
             },
             description: Some(String::from("A short description for security scheme.")),
             ..Default::default()
-        })
+        }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
         assert_eq!(
             ctx.errors.len(),

@@ -147,12 +147,7 @@ impl ValidateWithContext<Spec> for Components {
                 {
                     ctx.error(reference.clone(), "unused");
                 }
-                validate_string_matches(
-                    name,
-                    &re,
-                    ctx,
-                    format!("{path}.securitySchemes[<name>]"),
-                );
+                validate_string_matches(name, &re, ctx, format!("{path}.securitySchemes[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.securitySchemes[{name}]"));
                 if let Ok(SecurityScheme::OAuth2(oauth2)) = obj.get_item(ctx.spec) {
                     if let Some(flow) = &oauth2.flows.implicit {

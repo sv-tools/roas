@@ -18,16 +18,16 @@ use crate::v3_0::xml::XML;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
-    AllOf(AllOfSchema),
-    AnyOf(AnyOfSchema),
-    OneOf(OneOfSchema),
-    Not(NotSchema),
-    Single(SingleSchema), // must be last
+    AllOf(Box<AllOfSchema>),
+    AnyOf(Box<AnyOfSchema>),
+    OneOf(Box<OneOfSchema>),
+    Not(Box<NotSchema>),
+    Single(Box<SingleSchema>), // must be last
 }
 
 impl Default for Schema {
     fn default() -> Self {
-        Schema::Single(SingleSchema::default())
+        Schema::Single(Box::default())
     }
 }
 
@@ -809,8 +809,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match additional_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema
-                        .validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
+                    schema.validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
                 }
             }
         }
@@ -839,27 +838,33 @@ mod tests {
             "title": "foo",
         }))
         .unwrap();
-        if let Schema::Single(SingleSchema::String(string)) = &spec {
-            assert_eq!(string.title, Some("foo".to_owned()));
+        if let Schema::Single(val) = &spec {
+            if let SingleSchema::String(string) = &**val {
+                assert_eq!(string.title, Some("foo".to_owned()));
+            } else {
+                panic!("expected StringSchema");
+            }
         } else {
-            panic!("expected StringSchema");
+            panic!("expected Schema::Single");
         }
         assert_eq!(
             spec,
-            Schema::Single(SingleSchema::String(StringSchema {
+            Schema::Single(Box::new(SingleSchema::String(StringSchema {
                 title: Some("foo".to_owned()),
                 ..Default::default()
-            })),
+            }))),
         );
     }
 
     #[test]
     fn test_single_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::Single(SingleSchema::String(StringSchema {
-                title: Some("foo".to_owned()),
-                ..Default::default()
-            })))
+            serde_json::to_value(Schema::Single(Box::new(SingleSchema::String(
+                StringSchema {
+                    title: Some("foo".to_owned()),
+                    ..Default::default()
+                }
+            ))))
             .unwrap(),
             serde_json::json!({
                 "type": "string",
@@ -867,24 +872,26 @@ mod tests {
             }),
         );
         assert_eq!(
-            serde_json::to_value(Schema::Single(SingleSchema::Object(ObjectSchema {
-                title: Some("foo".to_owned()),
-                required: Some(vec!["bar".to_owned()]),
-                properties: Some({
-                    let mut map = BTreeMap::new();
-                    map.insert(
-                        "bar".to_owned(),
-                        RefOr::new_item(Box::new(Schema::Single(SingleSchema::String(
-                            StringSchema {
-                                title: Some("foo bar".to_owned()),
-                                ..Default::default()
-                            },
-                        )))),
-                    );
-                    map
-                }),
-                ..Default::default()
-            })))
+            serde_json::to_value(Schema::Single(Box::new(SingleSchema::Object(
+                ObjectSchema {
+                    title: Some("foo".to_owned()),
+                    required: Some(vec!["bar".to_owned()]),
+                    properties: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "bar".to_owned(),
+                            RefOr::new_item(Box::new(Schema::Single(Box::new(
+                                SingleSchema::String(StringSchema {
+                                    title: Some("foo bar".to_owned()),
+                                    ..Default::default()
+                                }),
+                            )))),
+                        );
+                        map
+                    }),
+                    ..Default::default()
+                }
+            ))))
             .unwrap(),
             serde_json::json!({
                 "type": "object",
@@ -924,10 +931,14 @@ mod tests {
             }
             match schema.all_of[1].clone() {
                 RefOr::Item(o) => {
-                    if let Schema::Single(SingleSchema::Object(o)) = *o {
-                        assert_eq!(o.title, Some("foo".to_owned()));
+                    if let Schema::Single(o) = *o {
+                        if let SingleSchema::Object(o) = *o {
+                            assert_eq!(o.title, Some("foo".to_owned()));
+                        } else {
+                            panic!("expected SingleSchema::Object");
+                        }
                     } else {
-                        panic!("expected ObjectSchema");
+                        panic!("expected Schema::Single");
                     }
                 }
                 _ => panic!("expected Schema"),
@@ -940,18 +951,18 @@ mod tests {
     #[test]
     fn test_all_of_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::AllOf(AllOfSchema {
+            serde_json::to_value(Schema::AllOf(Box::new(AllOfSchema {
                 all_of: vec![
                     RefOr::new_ref("#/definitions/bar".to_owned()),
-                    RefOr::new_item(Box::new(Schema::Single(SingleSchema::Object(
+                    RefOr::new_item(Box::new(Schema::Single(Box::new(SingleSchema::Object(
                         ObjectSchema {
                             title: Some("foo".to_owned()),
                             ..Default::default()
                         }
-                    )))),
+                    ))))),
                 ],
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "allOf": [
