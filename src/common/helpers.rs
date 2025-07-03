@@ -6,6 +6,9 @@ use regex::Regex;
 
 use crate::validation::{Error, Options};
 
+/// ValidateWithContext is a trait for validating an object with a context.
+/// It allows the object to be validated with additional context information,
+/// such as the specification and validation options.
 pub trait ValidateWithContext<T> {
     fn validate_with_context(&self, ctx: &mut Context<T>, path: String);
 }
@@ -84,6 +87,8 @@ impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
     }
 }
 
+/// Validates that the given optional email string contains an '@' character.
+/// If the email is present and invalid, records an error in the context.
 pub fn validate_email<T>(email: &Option<String>, ctx: &mut Context<T>, path: String) {
     if let Some(email) = email {
         if !email.contains('@') {
@@ -98,24 +103,33 @@ pub fn validate_email<T>(email: &Option<String>, ctx: &mut Context<T>, path: Str
 const HTTP: &str = "http://";
 const HTTPS: &str = "https://";
 
+/// Validates an optional URL string.
+/// If the URL is present, it checks if it is valid using `validate_required_url`.
+/// Records an error in the context if the URL is invalid.
 pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path: String) {
     if let Some(url) = url {
         validate_required_url(url, ctx, path);
     }
 }
 
+/// Validates that the given URL string starts with "http://" or "https://".
+/// If the URL is invalid, records an error in the context.
 pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
     if !url.starts_with(HTTP) && !url.starts_with(HTTPS) {
         ctx.error(path, format_args!("must be a valid URL, found `{url}`"));
     }
 }
 
+/// Validates that the given string is not empty.
+/// If the string is empty, records an error in the context.
 pub fn validate_required_string<T>(s: &str, ctx: &mut Context<T>, path: String) {
     if s.is_empty() {
         ctx.error(path, "must not be empty");
     }
 }
 
+/// Validates that the given string matches the provided regex pattern.
+/// If the string does not match, records an error in the context with details.
 pub fn validate_string_matches<T>(s: &str, pattern: &Regex, ctx: &mut Context<T>, path: String) {
     if !pattern.is_match(s) {
         ctx.error(
@@ -125,6 +139,7 @@ pub fn validate_string_matches<T>(s: &str, pattern: &Regex, ctx: &mut Context<T>
     }
 }
 
+// Validates an optional string against a regex pattern if present.
 pub fn validate_optional_string_matches<T>(
     s: &Option<String>,
     pattern: &Regex,
@@ -136,6 +151,8 @@ pub fn validate_optional_string_matches<T>(
     }
 }
 
+/// Validates that the given regex pattern is valid.
+/// If the pattern is invalid, records an error in the context with details.
 pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
     match Regex::new(pattern) {
         Ok(_) => {}
@@ -143,6 +160,10 @@ pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
     }
 }
 
+/// Validates that the given object has not been visited before,
+/// optionally ignoring the check based on the provided option.
+/// If the object has already been visited and the ignore option is not set, an error is recorded.
+/// Then, the object's own validation logic is invoked.
 pub fn validate_not_visited<T, D>(
     obj: &D,
     ctx: &mut Context<T>,
