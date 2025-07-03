@@ -31,7 +31,7 @@ use crate::validation::{Error, Options, Validate};
 /// Specification example:
 ///
 /// ```yaml
-/// openapi: "3.0.3"
+/// openapi: "3.0.4"
 /// info:
 ///   version: 1.0.0
 ///   title: Swagger Petstore
@@ -154,7 +154,7 @@ pub struct Spec {
     /// the OpenAPI document.
     /// This is not related to the API info.version string.
     ///
-    /// The value MUST be one of ["3.0.0", "3.0.1", "3.0.2", "3.0.3"].
+    /// The value MUST be one of ["3.0.0", "3.0.1", "3.0.2", "3.0.3", "3.0.4"].
     pub openapi: Version,
 
     /// **Required** Provides metadata about the API.
@@ -260,9 +260,13 @@ pub enum Version {
     V3_0_2,
 
     /// `3.0.3` version
-    #[default]
     #[serde(rename = "3.0.3")]
     V3_0_3,
+
+    /// `3.0.4` version
+    #[default]
+    #[serde(rename = "3.0.4")]
+    V3_0_4,
 }
 
 impl Display for Version {
@@ -272,6 +276,7 @@ impl Display for Version {
             Self::V3_0_1 => write!(f, "3.0.1"),
             Self::V3_0_2 => write!(f, "3.0.2"),
             Self::V3_0_3 => write!(f, "3.0.3"),
+            Self::V3_0_4 => write!(f, "3.0.4"),
         }
     }
 }
