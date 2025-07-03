@@ -71,16 +71,16 @@ impl ValidateWithContext<Spec> for Link {
         if let Some(operation_id) = &self.operation_id {
             if !ctx
                 .visited
-                .contains(format!("#/paths/operations/{}", operation_id).as_str())
+                .contains(format!("#/paths/operations/{operation_id}").as_str())
             {
                 ctx.error(
                     path.clone(),
-                    format_args!(".operationId: missing operation with id `{}`", operation_id),
+                    format_args!(".operationId: missing operation with id `{operation_id}`"),
                 );
             }
         }
         if let Some(server) = &self.server {
-            server.validate_with_context(ctx, format!("{}.server", path));
+            server.validate_with_context(ctx, format!("{path}.server"));
         }
     }
 }

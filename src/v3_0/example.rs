@@ -51,6 +51,6 @@ impl ValidateWithContext<Spec> for Example {
                 "value and externalValue are mutually exclusive",
             );
         }
-        validate_optional_url(&self.external_value, ctx, format!("{}.externalValue", path));
+        validate_optional_url(&self.external_value, ctx, format!("{path}.externalValue"));
     }
 }

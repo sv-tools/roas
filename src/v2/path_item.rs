@@ -163,13 +163,13 @@ impl<'de> Deserialize<'de> for PathItem {
                         res.parameters = Some(map.next_value()?);
                     } else if key.starts_with("x-") {
                         if extensions.contains_key(key.clone().as_str()) {
-                            return Err(Error::custom(format!("duplicate field '{}'", key)));
+                            return Err(Error::custom(format!("duplicate field '{key}'")));
                         }
                         extensions.insert(key, map.next_value()?);
                     } else {
                         let key = key.to_lowercase();
                         if operations.contains_key(key.as_str()) {
-                            return Err(Error::custom(format!("duplicate field '{}'", key)));
+                            return Err(Error::custom(format!("duplicate field '{key}'")));
                         }
                         operations.insert(key, map.next_value()?);
                     }
@@ -192,13 +192,13 @@ impl ValidateWithContext<Spec> for PathItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(other) = &self.operations {
             for (method, operation) in other.iter() {
-                operation.validate_with_context(ctx, format!("{}.{}", path, method));
+                operation.validate_with_context(ctx, format!("{path}.{method}"));
             }
         }
 
         if let Some(parameters) = &self.parameters {
             for (i, parameter) in parameters.iter().enumerate() {
-                parameter.validate_with_context(ctx, format!("{}.parameters[{}]", path, i));
+                parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
             }
         }
     }
@@ -624,8 +624,8 @@ mod tests {
                     );
                     operations
                 }),
-                parameters: Some(vec![RefOr::new_item(Parameter::Path(InPath::Array(
-                    ArrayParameter {
+                parameters: Some(vec![RefOr::new_item(Parameter::Path(Box::new(
+                    InPath::Array(ArrayParameter {
                         name: String::from("id"),
                         description: Some(String::from("ID of pet to use")),
                         required: Some(true),
@@ -634,7 +634,7 @@ mod tests {
                         }),
                         collection_format: Some(CollectionFormat::CSV),
                         ..Default::default()
-                    }
+                    })
                 )))]),
                 extensions: Some({
                     let mut map = BTreeMap::new();

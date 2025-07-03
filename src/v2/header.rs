@@ -255,7 +255,7 @@ impl ValidateWithContext<Spec> for Header {
 impl ValidateWithContext<Spec> for StringHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(pattern) = &self.pattern {
-            validate_pattern(pattern, ctx, format!("{}.pattern", path));
+            validate_pattern(pattern, ctx, format!("{path}.pattern"));
         }
     }
 }
@@ -275,7 +275,7 @@ impl ValidateWithContext<Spec> for BooleanHeader {
 impl ValidateWithContext<Spec> for ArrayHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.items
-            .validate_with_context(ctx, format!("{}.items", path));
+            .validate_with_context(ctx, format!("{path}.items"));
     }
 }
 

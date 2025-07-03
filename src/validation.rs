@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use enumset::{EnumSet, EnumSetType};
+use enumset::{EnumSet, EnumSetType, enum_set};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Error {
@@ -11,7 +11,7 @@ impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "{} errors found:", self.errors.len())?;
         for error in &self.errors {
-            writeln!(f, "- {}", error)?;
+            writeln!(f, "- {error}")?;
         }
         Ok(())
     }
@@ -74,35 +74,55 @@ pub enum Options {
     /// Ignore unused callbacks.
     /// Applies for v3.0
     IgnoreUnusedCallbacks,
+
+    /// Ignore empty Info.Title field.
+    /// Applies for v2.0, v3.0
+    IgnoreEmptyInfoTitle,
+
+    /// Ignore empty Info.Version field.
+    /// Applies for v2.0, v3.0
+    IgnoreEmptyInfoVersion,
+
+    /// Ignore empty Response.Description field.
+    /// Applies for v2.0, v3.0
+    IgnoreEmptyResponseDescription,
 }
 
+/// A set of options to ignore unused objects.
+pub const IGNORE_UNUSED: EnumSet<Options> = enum_set!(
+    Options::IgnoreUnusedTags
+        | Options::IgnoreUnusedSchemas
+        | Options::IgnoreUnusedParameters
+        | Options::IgnoreUnusedResponses
+        | Options::IgnoreUnusedServerVariables
+        | Options::IgnoreUnusedExamples
+        | Options::IgnoreUnusedRequestBodies
+        | Options::IgnoreUnusedHeaders
+        | Options::IgnoreUnusedSecuritySchemes
+        | Options::IgnoreUnusedLinks
+        | Options::IgnoreUnusedCallbacks
+);
+
+/// A predefined set of options to ignore required fields that are empty.
+pub const IGNORE_EMPTY_REQUIRED_FIELDS: EnumSet<Options> = enum_set!(
+    Options::IgnoreEmptyInfoTitle
+        | Options::IgnoreEmptyInfoVersion
+        | Options::IgnoreEmptyResponseDescription
+);
+
 impl Options {
-    /// Create an empty (strict) set of options.
+    /// Creates an empty set of options, representing the strictest validation.
     pub fn new() -> EnumSet<Options> {
         EnumSet::empty()
     }
 
-    /// Create options to ignore unused elements.
-    pub fn ignore_unused() -> EnumSet<Options> {
-        Options::IgnoreUnusedTags
-            | Options::IgnoreUnusedSchemas
-            | Options::IgnoreUnusedParameters
-            | Options::IgnoreUnusedResponses
-            | Options::IgnoreUnusedServerVariables
-            | Options::IgnoreUnusedExamples
-            | Options::IgnoreUnusedRequestBodies
-            | Options::IgnoreUnusedHeaders
-            | Options::IgnoreUnusedSecuritySchemes
-            | Options::IgnoreUnusedLinks
-            | Options::IgnoreUnusedCallbacks
-    }
-
+    /// Creates a set containing only given option.
     pub fn only(&self) -> EnumSet<Options> {
         EnumSet::only(*self)
     }
 }
 
-/// Validate a OpenAPI specification.
+/// Validates the OpenAPI specification.
 pub trait Validate {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error>;
 }

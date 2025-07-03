@@ -12,6 +12,7 @@ use crate::common::reference::RefOr;
 use crate::v2::header::Header;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
+use crate::validation::Options;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Responses {
@@ -37,6 +38,7 @@ pub struct Responses {
 pub struct Response {
     /// **Required** A short description of the response.
     /// [GFM](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#-git-hub-flavored-markdown) syntax can be used for rich text representation.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
 
     /// A definition of the response structure.
@@ -124,7 +126,7 @@ impl<'de> Deserialize<'de> for Responses {
                         res.default = Some(map.next_value()?);
                     } else if key.starts_with("x-") {
                         if extensions.contains_key(key.as_str()) {
-                            return Err(Error::custom(format_args!("duplicate field `{}`", key)));
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
                         }
                         extensions.insert(key, map.next_value()?);
                     } else {
@@ -132,8 +134,7 @@ impl<'de> Deserialize<'de> for Responses {
                             Ok(100..=599) => {
                                 if responses.contains_key(key.as_str()) {
                                     return Err(Error::custom(format_args!(
-                                        "duplicate field `{}`",
-                                        key
+                                        "duplicate field `{key}`"
                                     )));
                                 }
                                 responses.insert(key, map.next_value()?);
@@ -158,13 +159,15 @@ impl<'de> Deserialize<'de> for Responses {
 
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.description, ctx, format!("{}.description", path));
+        if !ctx.is_option(Options::IgnoreEmptyResponseDescription) {
+            validate_required_string(&self.description, ctx, format!("{path}.description"));
+        }
         if let Some(schema) = &self.schema {
-            schema.validate_with_context(ctx, format!("{}.schema", path));
+            schema.validate_with_context(ctx, format!("{path}.schema"));
         }
         if let Some(headers) = &self.headers {
             for (name, header) in headers {
-                header.validate_with_context(ctx, format!("{}.headers.{}", path, name));
+                header.validate_with_context(ctx, format!("{path}.headers.{name}"));
             }
         }
     }
@@ -173,7 +176,7 @@ impl ValidateWithContext<Spec> for Response {
 impl ValidateWithContext<Spec> for Responses {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(response) = &self.default {
-            response.validate_with_context(ctx, format!("{}.default", path));
+            response.validate_with_context(ctx, format!("{path}.default"));
         }
         if let Some(responses) = &self.responses {
             for (name, response) in responses {
@@ -183,13 +186,12 @@ impl ValidateWithContext<Spec> for Responses {
                         ctx.error(
                             path.clone(),
                             format!(
-                                "name must be an integer within [100..599] range, found `{}`",
-                                name
+                                "name must be an integer within [100..599] range, found `{name}`"
                             ),
                         );
                     }
                 }
-                response.validate_with_context(ctx, format!("{}.{}", path, name));
+                response.validate_with_context(ctx, format!("{path}.{name}"));
             }
         }
     }
@@ -197,9 +199,12 @@ impl ValidateWithContext<Spec> for Responses {
 
 #[cfg(test)]
 mod tests {
-    use crate::v2::header::{IntegerHeader, StringHeader};
-
     use super::*;
+    use crate::common::helpers::Context;
+    use crate::common::reference::RefOr;
+    use crate::v2::header::{IntegerHeader, StringHeader};
+    use crate::validation::Options;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_response_deserialize() {
@@ -674,5 +679,76 @@ mod tests {
             }),
             "responses serialization",
         );
+    }
+
+    #[test]
+    fn test_response_validate() {
+        let spec = Spec::default();
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response {
+            description: "A simple response".to_owned(),
+            schema: None,
+            headers: Some({
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "Authorization".to_owned(),
+                    Header::String(StringHeader {
+                        description: Some(
+                            "The bearer token to use in all other requests".to_owned(),
+                        ),
+                        pattern: Some(r#""^Bearer [a-zA-Z0-9-._~+/]+={0,2}$""#.to_string()),
+                        ..Default::default()
+                    }),
+                );
+                map.insert(
+                    "X-Rate-Limit-Limit".to_owned(),
+                    Header::Integer(IntegerHeader {
+                        description: Some(
+                            "The number of allowed requests in the current period".to_owned(),
+                        ),
+                        ..Default::default()
+                    }),
+                );
+                map
+            }),
+            examples: Some({
+                let mut map = BTreeMap::new();
+                map.insert("foo".to_owned(), serde_json::json!("bar"));
+                map.insert("baz".to_owned(), serde_json::json!(42));
+                map
+            }),
+            extensions: Some({
+                let mut map = BTreeMap::new();
+                map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                map
+            }),
+        }
+        .validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response {
+            description: "A simple response".to_owned(),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response::default().validate_with_context(&mut ctx, "response".to_owned());
+        assert!(
+            ctx.errors
+                .contains(&"response.description: must not be empty".to_string()),
+            "expected error: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(
+            &spec,
+            Options::only(&Options::IgnoreEmptyResponseDescription),
+        );
+        Response::default().validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }

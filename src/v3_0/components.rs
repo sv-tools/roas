@@ -74,90 +74,85 @@ impl ValidateWithContext<Spec> for Components {
 
         if let Some(objs) = &self.schemas {
             for (name, obj) in objs {
-                let reference = format!("#/components/schemas/{}", name);
+                let reference = format!("#/components/schemas/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedSchemas) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{}.schemas[<name>]", path));
-                obj.validate_with_context(ctx, format!("{}.schemas[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.schemas[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.schemas[{name}]"));
             }
         }
 
         if let Some(objs) = &self.responses {
             for (name, obj) in objs {
-                let reference = format!("#/components/responses/{}", name);
+                let reference = format!("#/components/responses/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedResponses) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{}.responses[<name>]", path));
-                obj.validate_with_context(ctx, format!("{}.responses[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.responses[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.responses[{name}]"));
             }
         }
 
         if let Some(objs) = &self.parameters {
             for (name, obj) in objs {
-                let reference = format!("#/components/parameters/{}", name);
+                let reference = format!("#/components/parameters/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedParameters) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{}.parameters[<name>]", path));
-                obj.validate_with_context(ctx, format!("{}.parameters[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.parameters[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.parameters[{name}]"));
             }
         }
 
         if let Some(objs) = &self.examples {
             for (name, obj) in objs {
-                let reference = format!("#/components/examples/{}", name);
+                let reference = format!("#/components/examples/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedExamples) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{}.examples[<name>]", path));
-                obj.validate_with_context(ctx, format!("{}.examples[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.examples[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.examples[{name}]"));
             }
         }
 
         if let Some(objs) = &self.request_bodies {
             for (name, obj) in objs {
-                let reference = format!("#/components/requestBodies/{}", name);
+                let reference = format!("#/components/requestBodies/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedRequestBodies)
                 {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{}.requestBodies[<name>]", path));
-                obj.validate_with_context(ctx, format!("{}.requestBodies[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.requestBodies[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.requestBodies[{name}]"));
             }
         }
 
         if let Some(objs) = &self.headers {
             for (name, obj) in objs {
-                let reference = format!("#/components/headers/{}", name);
+                let reference = format!("#/components/headers/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedHeaders) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{}.headers[<name>]", path));
-                obj.validate_with_context(ctx, format!("{}.headers[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.headers[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.headers[{name}]"));
             }
         }
 
         if let Some(objs) = &self.security_schemes {
             for (name, obj) in objs {
-                let reference = format!("#/components/securitySchemes/{}", name);
+                let reference = format!("#/components/securitySchemes/{name}");
                 if !ctx.is_visited(&reference)
                     && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
                 {
                     ctx.error(reference.clone(), "unused");
                 }
-                validate_string_matches(
-                    name,
-                    &re,
-                    ctx,
-                    format!("{}.securitySchemes[<name>]", path),
-                );
-                obj.validate_with_context(ctx, format!("{}.securitySchemes[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.securitySchemes[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.securitySchemes[{name}]"));
                 if let Ok(SecurityScheme::OAuth2(oauth2)) = obj.get_item(ctx.spec) {
                     if let Some(flow) = &oauth2.flows.implicit {
                         for scope in flow.scopes.keys() {
-                            let reference = format!("{}/{}", reference, scope);
+                            let reference = format!("{reference}/{scope}");
                             if !ctx.is_visited(&reference)
                                 && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
                             {
@@ -171,23 +166,23 @@ impl ValidateWithContext<Spec> for Components {
 
         if let Some(objs) = &self.links {
             for (name, obj) in objs {
-                let reference = format!("#/components/links/{}", name);
+                let reference = format!("#/components/links/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedLinks) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{}.links[<name>]", path));
-                obj.validate_with_context(ctx, format!("{}.links[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.links[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.links[{name}]"));
             }
         }
 
         if let Some(objs) = &self.callbacks {
             for (name, obj) in objs {
-                let reference = format!("#/components/callbacks/{}", name);
+                let reference = format!("#/components/callbacks/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedCallbacks) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{}.callbacks[<name>]", path));
-                obj.validate_with_context(ctx, format!("{}.callbacks[{}]", path, name));
+                validate_string_matches(name, &re, ctx, format!("{path}.callbacks[<name>]"));
+                obj.validate_with_context(ctx, format!("{path}.callbacks[{name}]"));
             }
         }
     }

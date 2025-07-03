@@ -1,6 +1,6 @@
 [package]
 name = "roas"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 description = "Rust OpenAPI Specification"
@@ -28,7 +28,7 @@ v2 = []
 v3_0 = []
 
 [dependencies]
-enumset = "1.1.5"
+enumset = "1.1.6"
 monostate = "0.1.14"
 regex = "1.11.1"
 serde = { version = "1.0.219", features = ["derive"] }

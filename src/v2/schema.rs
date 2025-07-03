@@ -62,7 +62,7 @@ impl Display for Schema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct StringSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("string"),
+    pub schema_type: MustBe!("string"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,7 +139,7 @@ pub struct StringSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct IntegerSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("integer"),
+    pub schema_type: MustBe!("integer"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -225,7 +225,7 @@ pub struct IntegerSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct NumberSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("number"),
+    pub schema_type: MustBe!("number"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,7 +311,7 @@ pub struct NumberSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct BooleanSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("boolean"),
+    pub schema_type: MustBe!("boolean"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -365,7 +365,7 @@ pub struct BooleanSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ArraySchema {
     #[serde(rename = "type")]
-    _type: MustBe!("array"),
+    pub schema_type: MustBe!("array"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -433,11 +433,11 @@ pub struct ArraySchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ObjectSchema {
     #[serde(rename = "type")]
     #[serde(default)]
-    _type: String,
+    pub schema_type: MustBe!("object"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -526,33 +526,10 @@ pub struct ObjectSchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-impl Default for ObjectSchema {
-    fn default() -> Self {
-        ObjectSchema {
-            _type: "object".to_owned(),
-            title: None,
-            description: None,
-            properties: None,
-            default: None,
-            max_properties: None,
-            min_properties: None,
-            additional_properties: None,
-            required: None,
-            discriminator: None,
-            read_only: None,
-            xml: None,
-            external_docs: None,
-            example: None,
-            all_of: None,
-            extensions: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct NullSchema {
-    #[serde(rename = "null")]
-    _type: MustBe!("string"),
+    #[serde(rename = "type")]
+    pub schema_type: MustBe!("null"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -614,13 +591,13 @@ impl ValidateWithContext<Spec> for Schema {
 impl ValidateWithContext<Spec> for StringSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
         if let Some(pattern) = &self.pattern {
-            validate_pattern(pattern, ctx, format!("{}.pattern", path));
+            validate_pattern(pattern, ctx, format!("{path}.pattern"));
         }
     }
 }
@@ -628,10 +605,10 @@ impl ValidateWithContext<Spec> for StringSchema {
 impl ValidateWithContext<Spec> for IntegerSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
     }
 }
@@ -639,10 +616,10 @@ impl ValidateWithContext<Spec> for IntegerSchema {
 impl ValidateWithContext<Spec> for NumberSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
     }
 }
@@ -650,10 +627,10 @@ impl ValidateWithContext<Spec> for NumberSchema {
 impl ValidateWithContext<Spec> for BooleanSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
     }
 }
@@ -661,14 +638,14 @@ impl ValidateWithContext<Spec> for BooleanSchema {
 impl ValidateWithContext<Spec> for ArraySchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
 
         if let Some(items) = &self.items {
-            items.validate_with_context_boxed(ctx, format!("{}.items", path));
+            items.validate_with_context_boxed(ctx, format!("{path}.items"));
         }
     }
 }
@@ -676,15 +653,15 @@ impl ValidateWithContext<Spec> for ArraySchema {
 impl ValidateWithContext<Spec> for ObjectSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
 
         if let Some(properties) = &self.properties {
             for (name, schema) in properties {
-                schema.validate_with_context_boxed(ctx, format!("{}.properties.{}", path, name));
+                schema.validate_with_context_boxed(ctx, format!("{path}.properties.{name}"));
             }
         }
 
@@ -692,14 +669,13 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match additional_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema
-                        .validate_with_context_boxed(ctx, format!("{}.additionalProperties", path));
+                    schema.validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
                 }
             }
         }
         if let Some(all_of) = &self.all_of {
             for (i, schema) in all_of.iter().enumerate() {
-                schema.validate_with_context(ctx, format!("{}.allOf[{}]", path, i));
+                schema.validate_with_context(ctx, format!("{path}.allOf[{i}]"));
             }
         }
     }
@@ -708,10 +684,10 @@ impl ValidateWithContext<Spec> for ObjectSchema {
 impl ValidateWithContext<Spec> for NullSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
     }
 }

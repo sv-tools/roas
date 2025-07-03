@@ -37,7 +37,7 @@ pub struct ExternalDocumentation {
 
 impl ValidateWithContext<Spec> for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&Some(self.url.clone()), ctx, format!("{}.url", path));
+        validate_optional_url(&Some(self.url.clone()), ctx, format!("{path}.url"));
     }
 }
 

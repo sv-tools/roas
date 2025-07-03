@@ -18,16 +18,16 @@ use crate::v3_0::xml::XML;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
-    AllOf(AllOfSchema),
-    AnyOf(AnyOfSchema),
-    OneOf(OneOfSchema),
-    Not(NotSchema),
-    Single(SingleSchema), // must be last
+    AllOf(Box<AllOfSchema>),
+    AnyOf(Box<AnyOfSchema>),
+    OneOf(Box<OneOfSchema>),
+    Not(Box<NotSchema>),
+    Single(Box<SingleSchema>), // must be last
 }
 
 impl Default for Schema {
     fn default() -> Self {
-        Schema::Single(SingleSchema::default())
+        Schema::Single(Box::default())
     }
 }
 
@@ -160,7 +160,7 @@ impl Display for SingleSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct StringSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("string"),
+    pub schema_type: MustBe!("string"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -237,7 +237,7 @@ pub struct StringSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct IntegerSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("integer"),
+    pub schema_type: MustBe!("integer"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,7 +323,7 @@ pub struct IntegerSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct NumberSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("number"),
+    pub schema_type: MustBe!("number"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -409,7 +409,7 @@ pub struct NumberSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct BooleanSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("boolean"),
+    pub schema_type: MustBe!("boolean"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -463,7 +463,7 @@ pub struct BooleanSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ArraySchema {
     #[serde(rename = "type")]
-    _type: MustBe!("array"),
+    pub schema_type: MustBe!("array"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -531,11 +531,11 @@ pub struct ArraySchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ObjectSchema {
     #[serde(rename = "type")]
     #[serde(default)]
-    _type: String,
+    pub schema_type: MustBe!("object"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -609,31 +609,10 @@ pub struct ObjectSchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-impl Default for ObjectSchema {
-    fn default() -> Self {
-        ObjectSchema {
-            _type: "object".to_owned(),
-            title: None,
-            description: None,
-            properties: None,
-            default: None,
-            max_properties: None,
-            min_properties: None,
-            additional_properties: None,
-            required: None,
-            read_only: None,
-            xml: None,
-            external_docs: None,
-            example: None,
-            extensions: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct NullSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("null"),
+    pub schema_type: MustBe!("null"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -684,31 +663,31 @@ impl ValidateWithContext<Spec> for Schema {
             Schema::Single(s) => s.validate_with_context(ctx, path),
             Schema::AllOf(s) => {
                 for (i, schema) in s.all_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{}.allOf[{}]", path, i));
+                    schema.validate_with_context_boxed(ctx, format!("{path}.allOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
-                    discriminator.validate_with_context(ctx, format!("{}.discriminator", path));
+                    discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
                 }
             }
             Schema::AnyOf(s) => {
                 for (i, schema) in s.any_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{}.anyOf[{}]", path, i));
+                    schema.validate_with_context_boxed(ctx, format!("{path}.anyOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
-                    discriminator.validate_with_context(ctx, format!("{}.discriminator", path));
+                    discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
                 }
             }
             Schema::OneOf(s) => {
                 for (i, schema) in s.one_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{}.oneOf[{}]", path, i));
+                    schema.validate_with_context_boxed(ctx, format!("{path}.oneOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
-                    discriminator.validate_with_context(ctx, format!("{}.discriminator", path));
+                    discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
                 }
             }
             Schema::Not(s) => {
                 s.not
-                    .validate_with_context_boxed(ctx, format!("{}.not", path));
+                    .validate_with_context_boxed(ctx, format!("{path}.not"));
             }
         }
     }
@@ -731,13 +710,13 @@ impl ValidateWithContext<Spec> for SingleSchema {
 impl ValidateWithContext<Spec> for StringSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
         if let Some(pattern) = &self.pattern {
-            validate_pattern(pattern, ctx, format!("{}.pattern", path));
+            validate_pattern(pattern, ctx, format!("{path}.pattern"));
         }
     }
 }
@@ -745,10 +724,10 @@ impl ValidateWithContext<Spec> for StringSchema {
 impl ValidateWithContext<Spec> for IntegerSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
     }
 }
@@ -756,10 +735,10 @@ impl ValidateWithContext<Spec> for IntegerSchema {
 impl ValidateWithContext<Spec> for NumberSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
     }
 }
@@ -767,10 +746,10 @@ impl ValidateWithContext<Spec> for NumberSchema {
 impl ValidateWithContext<Spec> for BooleanSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
     }
 }
@@ -778,14 +757,14 @@ impl ValidateWithContext<Spec> for BooleanSchema {
 impl ValidateWithContext<Spec> for ArraySchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
 
         if let Some(items) = &self.items {
-            items.validate_with_context_boxed(ctx, format!("{}.items", path));
+            items.validate_with_context_boxed(ctx, format!("{path}.items"));
         }
     }
 }
@@ -793,15 +772,15 @@ impl ValidateWithContext<Spec> for ArraySchema {
 impl ValidateWithContext<Spec> for ObjectSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
 
         if let Some(properties) = &self.properties {
             for (name, schema) in properties {
-                schema.validate_with_context_boxed(ctx, format!("{}.properties.{}", path, name));
+                schema.validate_with_context_boxed(ctx, format!("{path}.properties.{name}"));
             }
         }
 
@@ -809,8 +788,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match additional_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema
-                        .validate_with_context_boxed(ctx, format!("{}.additionalProperties", path));
+                    schema.validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
                 }
             }
         }
@@ -820,10 +798,10 @@ impl ValidateWithContext<Spec> for ObjectSchema {
 impl ValidateWithContext<Spec> for NullSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
-            docs.validate_with_context(ctx, format!("{}.externalDocs", path));
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
         if let Some(xml) = &self.xml {
-            xml.validate_with_context(ctx, format!("{}.xml", path));
+            xml.validate_with_context(ctx, format!("{path}.xml"));
         }
     }
 }
@@ -839,27 +817,33 @@ mod tests {
             "title": "foo",
         }))
         .unwrap();
-        if let Schema::Single(SingleSchema::String(string)) = &spec {
-            assert_eq!(string.title, Some("foo".to_owned()));
+        if let Schema::Single(val) = &spec {
+            if let SingleSchema::String(string) = &**val {
+                assert_eq!(string.title, Some("foo".to_owned()));
+            } else {
+                panic!("expected StringSchema");
+            }
         } else {
-            panic!("expected StringSchema");
+            panic!("expected Schema::Single");
         }
         assert_eq!(
             spec,
-            Schema::Single(SingleSchema::String(StringSchema {
+            Schema::Single(Box::new(SingleSchema::String(StringSchema {
                 title: Some("foo".to_owned()),
                 ..Default::default()
-            })),
+            }))),
         );
     }
 
     #[test]
     fn test_single_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::Single(SingleSchema::String(StringSchema {
-                title: Some("foo".to_owned()),
-                ..Default::default()
-            })))
+            serde_json::to_value(Schema::Single(Box::new(SingleSchema::String(
+                StringSchema {
+                    title: Some("foo".to_owned()),
+                    ..Default::default()
+                }
+            ))))
             .unwrap(),
             serde_json::json!({
                 "type": "string",
@@ -867,24 +851,26 @@ mod tests {
             }),
         );
         assert_eq!(
-            serde_json::to_value(Schema::Single(SingleSchema::Object(ObjectSchema {
-                title: Some("foo".to_owned()),
-                required: Some(vec!["bar".to_owned()]),
-                properties: Some({
-                    let mut map = BTreeMap::new();
-                    map.insert(
-                        "bar".to_owned(),
-                        RefOr::new_item(Box::new(Schema::Single(SingleSchema::String(
-                            StringSchema {
-                                title: Some("foo bar".to_owned()),
-                                ..Default::default()
-                            },
-                        )))),
-                    );
-                    map
-                }),
-                ..Default::default()
-            })))
+            serde_json::to_value(Schema::Single(Box::new(SingleSchema::Object(
+                ObjectSchema {
+                    title: Some("foo".to_owned()),
+                    required: Some(vec!["bar".to_owned()]),
+                    properties: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "bar".to_owned(),
+                            RefOr::new_item(Box::new(Schema::Single(Box::new(
+                                SingleSchema::String(StringSchema {
+                                    title: Some("foo bar".to_owned()),
+                                    ..Default::default()
+                                }),
+                            )))),
+                        );
+                        map
+                    }),
+                    ..Default::default()
+                }
+            ))))
             .unwrap(),
             serde_json::json!({
                 "type": "object",
@@ -924,10 +910,14 @@ mod tests {
             }
             match schema.all_of[1].clone() {
                 RefOr::Item(o) => {
-                    if let Schema::Single(SingleSchema::Object(o)) = *o {
-                        assert_eq!(o.title, Some("foo".to_owned()));
+                    if let Schema::Single(o) = *o {
+                        if let SingleSchema::Object(o) = *o {
+                            assert_eq!(o.title, Some("foo".to_owned()));
+                        } else {
+                            panic!("expected SingleSchema::Object");
+                        }
                     } else {
-                        panic!("expected ObjectSchema");
+                        panic!("expected Schema::Single");
                     }
                 }
                 _ => panic!("expected Schema"),
@@ -940,18 +930,18 @@ mod tests {
     #[test]
     fn test_all_of_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::AllOf(AllOfSchema {
+            serde_json::to_value(Schema::AllOf(Box::new(AllOfSchema {
                 all_of: vec![
                     RefOr::new_ref("#/definitions/bar".to_owned()),
-                    RefOr::new_item(Box::new(Schema::Single(SingleSchema::Object(
+                    RefOr::new_item(Box::new(Schema::Single(Box::new(SingleSchema::Object(
                         ObjectSchema {
                             title: Some("foo".to_owned()),
                             ..Default::default()
                         }
-                    )))),
+                    ))))),
                 ],
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "allOf": [

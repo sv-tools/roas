@@ -171,7 +171,7 @@ impl ValidateWithContext<Spec> for BasicSecurityScheme {
 
 impl ValidateWithContext<Spec> for ApiKeySecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
@@ -195,7 +195,7 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
             validate_optional_url(
                 &self.authorization_url,
                 ctx,
-                format!("{}.authorizationUrl", path),
+                format!("{path}.authorizationUrl"),
             );
         }
     }

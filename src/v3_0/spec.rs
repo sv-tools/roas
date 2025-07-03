@@ -376,7 +376,7 @@ impl Validate for Spec {
 
         if let Some(servers) = &self.servers {
             for (i, server) in servers.iter().enumerate() {
-                server.validate_with_context(&mut ctx, format!("#.servers[{}]", i))
+                server.validate_with_context(&mut ctx, format!("#.servers[{i}]"))
             }
         }
 
@@ -387,13 +387,12 @@ impl Validate for Spec {
                     if let Some(operation_id) = &operation.operation_id {
                         if !ctx
                             .visited
-                            .insert(format!("#/paths/operations/{}", operation_id))
+                            .insert(format!("#/paths/operations/{operation_id}"))
                         {
                             ctx.error(
                                 "#".to_owned(),
                                 format!(
-                                    ".paths[{}].{}.operationId: `{}` already in use",
-                                    name, method, operation_id
+                                    ".paths[{name}].{method}.operationId: `{operation_id}` already in use"
                                 ),
                             );
                         }
@@ -403,7 +402,7 @@ impl Validate for Spec {
         }
 
         for (name, item) in self.paths.iter() {
-            let path = format!("#.paths[{}]", name);
+            let path = format!("#.paths[{name}]");
             if !name.starts_with('/') {
                 ctx.error(path.clone(), "must start with `/`");
             }

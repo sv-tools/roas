@@ -17,19 +17,19 @@ use crate::v2::spec::Spec;
 #[serde(tag = "in")]
 pub enum Parameter {
     #[serde(rename = "body")]
-    Body(InBody),
+    Body(Box<InBody>),
 
     #[serde(rename = "header")]
-    Header(InHeader),
+    Header(Box<InHeader>),
 
     #[serde(rename = "query")]
-    Query(InQuery),
+    Query(Box<InQuery>),
 
     #[serde(rename = "path")]
-    Path(InPath),
+    Path(Box<InPath>),
 
     #[serde(rename = "formData")]
-    FormData(InFormData),
+    FormData(Box<InFormData>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -482,9 +482,9 @@ impl ValidateWithContext<Spec> for Parameter {
 
 impl ValidateWithContext<Spec> for InBody {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}name", path));
+        validate_required_string(&self.name, ctx, format!("{path}name"));
         self.schema
-            .validate_with_context(ctx, format!("{}.schema", path));
+            .validate_with_context(ctx, format!("{path}.schema"));
     }
 }
 
@@ -495,7 +495,7 @@ impl ValidateWithContext<Spec> for InHeader {
                 p.validate_with_context(ctx, path.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
                 if let Some(pattern) = &p.pattern {
-                    validate_pattern(pattern, ctx, format!("{}.pattern", path));
+                    validate_pattern(pattern, ctx, format!("{path}.pattern"));
                 }
             }
             InHeader::Integer(p) => {
@@ -594,44 +594,43 @@ impl ValidateWithContext<Spec> for InFormData {
 
 impl ValidateWithContext<Spec> for StringParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for IntegerParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for NumberParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for BooleanParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for ArrayParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 impl ValidateWithContext<Spec> for FileParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.name, ctx, format!("{}.name", path));
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
     }
 }
 
 fn must_be_required(p: &Option<bool>, ctx: &mut Context<Spec>, path: String, name: String) {
     if !p.is_some_and(|x| x) {
-        ctx.errors
-            .push(format!("{}.{}: must be required", path, name));
+        ctx.errors.push(format!("{path}.{name}: must be required"));
     }
 }
 
@@ -643,6 +642,6 @@ fn must_not_allow_empty_value(
 ) {
     if p.is_some_and(|x| x) {
         ctx.errors
-            .push(format!("{}.{}: must not allow empty value", path, name));
+            .push(format!("{path}.{name}: must not allow empty value"));
     }
 }

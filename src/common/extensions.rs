@@ -55,7 +55,7 @@ where
             while let Some(key) = map.next_key::<String>()? {
                 if key.starts_with("x-") {
                     if ext.contains_key(key.as_str()) {
-                        return Err(Error::custom(format_args!("duplicate field `{}`", key)));
+                        return Err(Error::custom(format_args!("duplicate field `{key}`")));
                     }
                     let value: serde_json::Value = map.next_value()?;
                     ext.insert(key, value);

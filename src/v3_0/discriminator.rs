@@ -28,12 +28,12 @@ pub struct Discriminator {
 
 impl ValidateWithContext<Spec> for Discriminator {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.property_name, ctx, format!("{}.propertyName", path));
+        validate_required_string(&self.property_name, ctx, format!("{path}.propertyName"));
 
         if let Some(mapping) = &self.mapping {
             for (k, v) in mapping {
-                let schema_ref = RefOr::<Schema>::new_ref(format!("#/components/schemas/{}", v));
-                schema_ref.validate_with_context(ctx, format!("{}.mapping[{}]", path, k));
+                let schema_ref = RefOr::<Schema>::new_ref(format!("#/components/schemas/{v}"));
+                schema_ref.validate_with_context(ctx, format!("{path}.mapping[{k}]"));
             }
         }
     }

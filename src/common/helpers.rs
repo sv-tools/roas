@@ -25,9 +25,9 @@ pub trait PushError<T> {
 impl<T> PushError<&str> for Context<'_, T> {
     fn error(&mut self, path: String, msg: &str) {
         if msg.starts_with('.') {
-            self.errors.push(format!("{}{}", path, msg));
+            self.errors.push(format!("{path}{msg}"));
         } else {
-            self.errors.push(format!("{}: {}", path, msg));
+            self.errors.push(format!("{path}: {msg}"));
         }
     }
 }
@@ -89,7 +89,7 @@ pub fn validate_email<T>(email: &Option<String>, ctx: &mut Context<T>, path: Str
         if !email.contains('@') {
             ctx.error(
                 path,
-                format_args!("must be a valid email address, found `{}`", email),
+                format_args!("must be a valid email address, found `{email}`"),
             );
         }
     }
@@ -106,7 +106,7 @@ pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path
 
 pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
     if !url.starts_with(HTTP) && !url.starts_with(HTTPS) {
-        ctx.error(path, format_args!("must be a valid URL, found `{}`", url));
+        ctx.error(path, format_args!("must be a valid URL, found `{url}`"));
     }
 }
 
@@ -120,7 +120,7 @@ pub fn validate_string_matches<T>(s: &str, pattern: &Regex, ctx: &mut Context<T>
     if !pattern.is_match(s) {
         ctx.error(
             path,
-            format_args!("must match pattern `{}`, found `{}`", pattern, s),
+            format_args!("must match pattern `{pattern}`, found `{s}`"),
         );
     }
 }
@@ -139,9 +139,6 @@ pub fn validate_optional_string_matches<T>(
 pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
     match Regex::new(pattern) {
         Ok(_) => {}
-        Err(e) => ctx.error(
-            path,
-            format_args!("pattern `{}` is invalid: {}", pattern, e),
-        ),
+        Err(e) => ctx.error(path, format_args!("pattern `{pattern}` is invalid: {e}")),
     }
 }

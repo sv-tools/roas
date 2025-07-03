@@ -39,7 +39,7 @@ use crate::v3_0::spec::Spec;
 ///     frog:
 ///       $ref: "#/components/examples/frog-example"
 /// ```
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct MediaType {
     /// The schema defining the content of the request, response, or parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -178,16 +178,16 @@ pub struct Encoding {
 impl ValidateWithContext<Spec> for MediaType {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(schema) = &self.schema {
-            schema.validate_with_context(ctx, format!("{}.schema", path));
+            schema.validate_with_context(ctx, format!("{path}.schema"));
         }
         if let Some(examples) = &self.examples {
             for (name, example) in examples {
-                example.validate_with_context(ctx, format!("{}.examples[{}]", path, name));
+                example.validate_with_context(ctx, format!("{path}.examples[{name}]"));
             }
         }
         if let Some(encoding) = &self.encoding {
             for (name, encoding) in encoding {
-                encoding.validate_with_context(ctx, format!("{}.encoding[{}]", path, name));
+                encoding.validate_with_context(ctx, format!("{path}.encoding[{name}]"));
             }
         }
     }
@@ -197,7 +197,7 @@ impl ValidateWithContext<Spec> for Encoding {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(headers) = &self.headers {
             for (name, header) in headers {
-                header.validate_with_context(ctx, format!("{}.headers[{}]", path, name));
+                header.validate_with_context(ctx, format!("{path}.headers[{name}]"));
             }
         }
     }
