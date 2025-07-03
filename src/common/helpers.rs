@@ -115,6 +115,11 @@ pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path
 /// Validates that the given URL string starts with "http://" or "https://".
 /// If the URL is invalid, records an error in the context.
 pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
+    if ctx.is_option(Options::IgnoreInvalidUrls) {
+        return;
+    }
+
+    // TODO: Consider using a more robust URL validation library.
     if !url.starts_with(HTTP) && !url.starts_with(HTTPS) {
         ctx.error(path, format_args!("must be a valid URL, found `{url}`"));
     }
@@ -177,5 +182,83 @@ pub fn validate_not_visited<T, D>(
             ctx.error(path.clone(), "unused");
         }
         obj.validate_with_context(ctx, path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_url() {
+        let mut ctx = Context::new(&(), Options::new());
+        validate_required_url(
+            &String::from("http://example.com"),
+            &mut ctx,
+            String::from("test_url"),
+        );
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&(), Options::new());
+        validate_required_url(
+            &String::from("https://example.com"),
+            &mut ctx,
+            String::from("test_url"),
+        );
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&(), Options::new());
+        validate_required_url(&String::from("foo-bar"), &mut ctx, String::from("test_url"));
+        assert!(
+            ctx.errors
+                .contains(&"test_url: must be a valid URL, found `foo-bar`".to_string()),
+            "expected error: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&(), Options::only(&Options::IgnoreInvalidUrls));
+        validate_required_url(&String::from("foo-bar"), &mut ctx, String::from("test_url"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&(), Options::new());
+        validate_optional_url(&None, &mut ctx, String::from("test_url"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&(), Options::new());
+        validate_optional_url(
+            &Some(String::from("http://example.com")),
+            &mut ctx,
+            String::from("test_url"),
+        );
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&(), Options::new());
+        validate_optional_url(
+            &Some(String::from("https://example.com")),
+            &mut ctx,
+            String::from("test_url"),
+        );
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&(), Options::new());
+        validate_optional_url(
+            &Some(String::from("foo-bar")),
+            &mut ctx,
+            String::from("test_url"),
+        );
+        assert!(
+            ctx.errors
+                .contains(&"test_url: must be a valid URL, found `foo-bar`".to_string()),
+            "expected error: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&(), Options::only(&Options::IgnoreInvalidUrls));
+        validate_optional_url(
+            &Some(String::from("foo-bar")),
+            &mut ctx,
+            String::from("test_url"),
+        );
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }

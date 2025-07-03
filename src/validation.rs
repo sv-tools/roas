@@ -27,6 +27,10 @@ pub enum Options {
     /// Applies for v2.0, v3.0
     IgnoreExternalReferences,
 
+    /// Ignore invalid URLs.
+    /// Applies for v2.0, v3.0
+    IgnoreInvalidUrls,
+
     /// Ignore non-unique operation IDs.
     /// Applies for v2.0, v3.0
     IgnoreNonUniqOperationIDs,
