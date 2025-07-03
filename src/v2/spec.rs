@@ -9,7 +9,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_optional_string_matches,
+    Context, PushError, ValidateWithContext, validate_not_visited, validate_optional_string_matches,
 };
 use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
@@ -317,52 +317,31 @@ impl Validate for Spec {
             docs.validate_with_context(&mut ctx, "#.externalDocs".to_owned())
         }
 
-        // validate unused components
-        if !ctx.is_option(Options::IgnoreUnusedTags) {
-            if let Some(tags) = &self.tags {
-                for tag in tags.iter() {
-                    let path = format!("#/tags/{}", tag.name);
-                    if ctx.visit(path.clone()) {
-                        ctx.error(path.clone(), "unused");
-                        tag.validate_with_context(&mut ctx, path);
-                    }
-                }
+        if let Some(tags) = &self.tags {
+            for tag in tags.iter() {
+                let path = format!("#/tags/{}", tag.name);
+                validate_not_visited(tag, &mut ctx, Options::IgnoreUnusedTags, path);
             }
         }
 
-        if !ctx.is_option(Options::IgnoreUnusedSchemas) {
-            if let Some(definitions) = &self.definitions {
-                for (name, definition) in definitions.iter() {
-                    let path = format!("#/definitions/{name}");
-                    if ctx.visit(path.clone()) {
-                        ctx.error(path.clone(), "unused");
-                        definition.validate_with_context(&mut ctx, path);
-                    }
-                }
+        if let Some(definitions) = &self.definitions {
+            for (name, definition) in definitions.iter() {
+                let path = format!("#/definitions/{name}");
+                validate_not_visited(definition, &mut ctx, Options::IgnoreUnusedSchemas, path);
             }
         }
 
-        if !ctx.is_option(Options::IgnoreUnusedParameters) {
-            if let Some(parameters) = &self.parameters {
-                for (name, parameter) in parameters.iter() {
-                    let path = format!("#/parameters/{name}");
-                    if ctx.visit(path.clone()) {
-                        ctx.error(path.clone(), "unused");
-                        parameter.validate_with_context(&mut ctx, path);
-                    }
-                }
+        if let Some(parameters) = &self.parameters {
+            for (name, parameter) in parameters.iter() {
+                let path = format!("#/parameters/{name}");
+                validate_not_visited(parameter, &mut ctx, Options::IgnoreUnusedParameters, path);
             }
         }
 
-        if !ctx.is_option(Options::IgnoreUnusedResponses) {
-            if let Some(responses) = &self.responses {
-                for (name, response) in responses.iter() {
-                    let path = format!("#/responses/{name}");
-                    if ctx.visit(path.clone()) {
-                        ctx.error(path.clone(), "unused");
-                        response.validate_with_context(&mut ctx, path);
-                    }
-                }
+        if let Some(responses) = &self.responses {
+            for (name, response) in responses.iter() {
+                let path = format!("#/responses/{name}");
+                validate_not_visited(response, &mut ctx, Options::IgnoreUnusedResponses, path);
             }
         }
 

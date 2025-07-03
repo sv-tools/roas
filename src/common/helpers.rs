@@ -142,3 +142,19 @@ pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
         Err(e) => ctx.error(path, format_args!("pattern `{pattern}` is invalid: {e}")),
     }
 }
+
+pub fn validate_not_visited<T, D>(
+    obj: &D,
+    ctx: &mut Context<T>,
+    ignore_option: Options,
+    path: String,
+) where
+    D: ValidateWithContext<T>,
+{
+    if ctx.visit(path.clone()) {
+        if !ctx.is_option(ignore_option) {
+            ctx.error(path.clone(), "unused");
+        }
+        obj.validate_with_context(ctx, path);
+    }
+}
