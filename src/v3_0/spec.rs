@@ -7,7 +7,7 @@ use std::fmt::{Display, Formatter};
 use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_not_visited};
 use crate::common::reference::{ResolveReference, resolve_in_map};
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
@@ -420,12 +420,7 @@ impl Validate for Spec {
         if let Some(tags) = &self.tags {
             for tag in tags.iter() {
                 let path = format!("#/tags/{}", tag.name);
-                if ctx.visit(path.clone()) {
-                    if !ctx.is_option(Options::IgnoreUnusedTags) {
-                        ctx.error(path.clone(), "unused");
-                    }
-                    tag.validate_with_context(&mut ctx, path)
-                }
+                validate_not_visited(tag, &mut ctx, Options::IgnoreUnusedTags, path);
             }
         }
 
