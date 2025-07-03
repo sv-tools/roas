@@ -17,7 +17,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-roas = { version = "0.2", features = ["v3_0"] } 
+roas = { version = "0.3", features = ["v3_0"] } 
 ```
 
 ## Examples

@@ -8,6 +8,7 @@ use crate::common::helpers::{
     Context, ValidateWithContext, validate_email, validate_optional_url, validate_required_string,
 };
 use crate::v2::spec::Spec;
+use crate::validation::Options;
 
 /// The object provides metadata about the API.
 /// The metadata can be used by the clients if needed, and can be presented in the Swagger-UI for convenience.
@@ -29,6 +30,7 @@ use crate::v2::spec::Spec;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Info {
     /// **Required** The title of the application.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub title: String,
 
     /// A short description of the application.
@@ -50,6 +52,7 @@ pub struct Info {
     pub license: Option<License>,
 
     /// **Required** Provides the version of the application API (not to be confused with the specification version).
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
 
     /// Allows extensions to the Swagger Schema.
@@ -126,8 +129,12 @@ pub struct License {
 
 impl ValidateWithContext<Spec> for Info {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.title, ctx, format!("{}.title", path));
-        validate_required_string(&self.version, ctx, format!("{}.version", path));
+        if !ctx.is_option(Options::IgnoreEmptyInfoTitle) {
+            validate_required_string(&self.title, ctx, format!("{}.title", path));
+        }
+        if !ctx.is_option(Options::IgnoreEmptyInfoVersion) {
+            validate_required_string(&self.version, ctx, format!("{}.version", path));
+        }
 
         if let Some(contact) = &self.contact {
             contact.validate_with_context(ctx, format!("{}.contact", path));

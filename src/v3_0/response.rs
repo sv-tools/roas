@@ -13,6 +13,7 @@ use crate::v3_0::header::Header;
 use crate::v3_0::link::Link;
 use crate::v3_0::media_type::MediaType;
 use crate::v3_0::spec::Spec;
+use crate::validation::Options;
 
 /// A container for the expected responses of an operation.
 /// The container maps a HTTP response code to the expected response.
@@ -74,6 +75,7 @@ pub struct Responses {
 pub struct Response {
     /// **Required** A short description of the response.
     /// [CommonMark](https://spec.commonmark.org) syntax MAY be used for rich text representation.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
 
     /// Maps a header name to its definition.
@@ -198,7 +200,9 @@ impl<'de> Deserialize<'de> for Responses {
 
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.description, ctx, format!("{}.description", path));
+        if !ctx.is_option(Options::IgnoreEmptyResponseDescription) {
+            validate_required_string(&self.description, ctx, format!("{}.description", path));
+        }
         if let Some(headers) = &self.headers {
             for (name, header) in headers {
                 header.validate_with_context(ctx, format!("{}.headers[{}]", path, name));

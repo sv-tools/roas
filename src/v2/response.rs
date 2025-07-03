@@ -12,6 +12,7 @@ use crate::common::reference::RefOr;
 use crate::v2::header::Header;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
+use crate::validation::Options;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Responses {
@@ -37,6 +38,7 @@ pub struct Responses {
 pub struct Response {
     /// **Required** A short description of the response.
     /// [GFM](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#-git-hub-flavored-markdown) syntax can be used for rich text representation.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
 
     /// A definition of the response structure.
@@ -158,7 +160,9 @@ impl<'de> Deserialize<'de> for Responses {
 
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.description, ctx, format!("{}.description", path));
+        if !ctx.is_option(Options::IgnoreEmptyResponseDescription) {
+            validate_required_string(&self.description, ctx, format!("{}.description", path));
+        }
         if let Some(schema) = &self.schema {
             schema.validate_with_context(ctx, format!("{}.schema", path));
         }

@@ -8,6 +8,7 @@ use crate::common::helpers::{
     Context, ValidateWithContext, validate_email, validate_optional_url, validate_required_string,
 };
 use crate::v3_0::spec::Spec;
+use crate::validation::Options;
 
 /// The object provides metadata about the API.
 /// The metadata MAY be used by the clients if needed,
@@ -30,6 +31,7 @@ use crate::v3_0::spec::Spec;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Info {
     /// **Required** The title of the API.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub title: String,
 
     /// A short description of the API.
@@ -52,6 +54,7 @@ pub struct Info {
 
     /// **Required** The version of the OpenAPI document
     /// (which is distinct from the OpenAPI Specification version or the API implementation version).
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
 
     /// This object MAY be extended with Specification Extensions.
@@ -128,8 +131,12 @@ pub struct License {
 
 impl ValidateWithContext<Spec> for Info {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_string(&self.title, ctx, format!("{}.title", path));
-        validate_required_string(&self.version, ctx, format!("{}.version", path));
+        if !ctx.is_option(Options::IgnoreEmptyInfoTitle) {
+            validate_required_string(&self.title, ctx, format!("{}.title", path));
+        }
+        if !ctx.is_option(Options::IgnoreEmptyInfoVersion) {
+            validate_required_string(&self.version, ctx, format!("{}.version", path));
+        }
 
         if let Some(contact) = &self.contact {
             contact.validate_with_context(ctx, format!("{}.contact", path));
