@@ -62,7 +62,7 @@ impl Display for Schema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct StringSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("string"),
+    pub schema_type: MustBe!("string"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,7 +139,7 @@ pub struct StringSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct IntegerSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("integer"),
+    pub schema_type: MustBe!("integer"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -225,7 +225,7 @@ pub struct IntegerSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct NumberSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("number"),
+    pub schema_type: MustBe!("number"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,7 +311,7 @@ pub struct NumberSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct BooleanSchema {
     #[serde(rename = "type")]
-    _type: MustBe!("boolean"),
+    pub schema_type: MustBe!("boolean"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -365,7 +365,7 @@ pub struct BooleanSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ArraySchema {
     #[serde(rename = "type")]
-    _type: MustBe!("array"),
+    pub schema_type: MustBe!("array"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -433,11 +433,11 @@ pub struct ArraySchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ObjectSchema {
     #[serde(rename = "type")]
     #[serde(default)]
-    _type: String,
+    pub schema_type: MustBe!("object"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -526,33 +526,10 @@ pub struct ObjectSchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-impl Default for ObjectSchema {
-    fn default() -> Self {
-        ObjectSchema {
-            _type: "object".to_owned(),
-            title: None,
-            description: None,
-            properties: None,
-            default: None,
-            max_properties: None,
-            min_properties: None,
-            additional_properties: None,
-            required: None,
-            discriminator: None,
-            read_only: None,
-            xml: None,
-            external_docs: None,
-            example: None,
-            all_of: None,
-            extensions: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct NullSchema {
-    #[serde(rename = "null")]
-    _type: MustBe!("string"),
+    #[serde(rename = "type")]
+    pub schema_type: MustBe!("null"),
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -241,6 +241,16 @@ mod tests {
             },
             "deserialize",
         );
+
+        assert_eq!(
+            serde_json::from_value::<Info>(json!({
+              "title": "",
+              "version": ""
+            }))
+            .unwrap(),
+            Info::default(),
+            "deserialize",
+        );
     }
 
     #[test]
@@ -314,6 +324,11 @@ mod tests {
               "title": "Swagger Sample App",
               "version": "1.0.1"
             }),
+            "serialize",
+        );
+        assert_eq!(
+            serde_json::to_value(Info::default()).unwrap(),
+            json!({}),
             "serialize",
         );
     }
@@ -405,7 +420,7 @@ mod tests {
             ..Default::default()
         }
         .validate_with_context(&mut ctx, String::from("contact"));
-        assert_eq!(ctx.errors.len(), 0, "no errors: {:?}", ctx.errors);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
         Contact {
             url: Some(String::from("https://www.example.com/support")),
@@ -413,7 +428,7 @@ mod tests {
             ..Default::default()
         }
         .validate_with_context(&mut ctx, String::from("contact"));
-        assert_eq!(ctx.errors.len(), 0, "no errors: {:?}", ctx.errors);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
         Contact {
             url: Some(String::from("foo - bar")),
@@ -443,14 +458,14 @@ mod tests {
             ..Default::default()
         }
         .validate_with_context(&mut ctx, String::from("license"));
-        assert_eq!(ctx.errors.len(), 0, "no errors: {:?}", ctx.errors);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
         License {
             name: String::from("Apache 2.0"),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, String::from("license"));
-        assert_eq!(ctx.errors.len(), 0, "no errors: {:?}", ctx.errors);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
         ctx = Context::new(&spec, Default::default());
         License {
@@ -495,7 +510,7 @@ mod tests {
             ..Default::default()
         }
         .validate_with_context(&mut ctx, String::from("info"));
-        assert_eq!(ctx.errors.len(), 0, "no errors: {:?}", ctx.errors);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
         Info {
             title: String::from("Swagger Sample App"),
@@ -505,7 +520,7 @@ mod tests {
             ..Default::default()
         }
         .validate_with_context(&mut ctx, String::from("info"));
-        assert_eq!(ctx.errors.len(), 0, "no errors: {:?}", ctx.errors);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
         Info {
             title: String::from("Swagger Sample App"),
@@ -513,7 +528,7 @@ mod tests {
             ..Default::default()
         }
         .validate_with_context(&mut ctx, String::from("info"));
-        assert_eq!(ctx.errors.len(), 0, "no errors: {:?}", ctx.errors);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
         Info {
             title: String::from("Swagger Sample App"),
@@ -531,5 +546,23 @@ mod tests {
         }
         .validate_with_context(&mut ctx, String::from("info"));
         assert_eq!(ctx.errors.len(), 1, "empty title: {:?}", ctx.errors);
+
+        ctx = Context::new(&spec, Options::only(&Options::IgnoreEmptyInfoTitle));
+        Info {
+            title: String::from(""),
+            version: String::from("1.0.1"),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        ctx = Context::new(&spec, Options::only(&Options::IgnoreEmptyInfoVersion));
+        Info {
+            title: String::from("Swagger Sample App"),
+            version: String::from(""),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }

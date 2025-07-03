@@ -199,9 +199,12 @@ impl ValidateWithContext<Spec> for Responses {
 
 #[cfg(test)]
 mod tests {
-    use crate::v2::header::{IntegerHeader, StringHeader};
-
     use super::*;
+    use crate::common::helpers::Context;
+    use crate::common::reference::RefOr;
+    use crate::v2::header::{IntegerHeader, StringHeader};
+    use crate::validation::Options;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_response_deserialize() {
@@ -676,5 +679,76 @@ mod tests {
             }),
             "responses serialization",
         );
+    }
+
+    #[test]
+    fn test_response_validate() {
+        let spec = Spec::default();
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response {
+            description: "A simple response".to_owned(),
+            schema: None,
+            headers: Some({
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "Authorization".to_owned(),
+                    Header::String(StringHeader {
+                        description: Some(
+                            "The bearer token to use in all other requests".to_owned(),
+                        ),
+                        pattern: Some(r#""^Bearer [a-zA-Z0-9-._~+/]+={0,2}$""#.to_string()),
+                        ..Default::default()
+                    }),
+                );
+                map.insert(
+                    "X-Rate-Limit-Limit".to_owned(),
+                    Header::Integer(IntegerHeader {
+                        description: Some(
+                            "The number of allowed requests in the current period".to_owned(),
+                        ),
+                        ..Default::default()
+                    }),
+                );
+                map
+            }),
+            examples: Some({
+                let mut map = BTreeMap::new();
+                map.insert("foo".to_owned(), serde_json::json!("bar"));
+                map.insert("baz".to_owned(), serde_json::json!(42));
+                map
+            }),
+            extensions: Some({
+                let mut map = BTreeMap::new();
+                map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                map
+            }),
+        }
+        .validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response {
+            description: "A simple response".to_owned(),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response::default().validate_with_context(&mut ctx, "response".to_owned());
+        assert!(
+            ctx.errors
+                .contains(&"response.description: must not be empty".to_string()),
+            "expected error: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(
+            &spec,
+            Options::only(&Options::IgnoreEmptyResponseDescription),
+        );
+        Response::default().validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }

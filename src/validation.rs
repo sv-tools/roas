@@ -111,7 +111,7 @@ pub const IGNORE_EMPTY_REQUIRED_FIELDS: EnumSet<Options> = enum_set!(
 );
 
 impl Options {
-    /// /// Creates an empty set of options, representing the strictest validation.
+    /// Creates an empty set of options, representing the strictest validation.
     pub fn new() -> EnumSet<Options> {
         EnumSet::empty()
     }

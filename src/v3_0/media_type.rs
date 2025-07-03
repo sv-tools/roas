@@ -39,7 +39,7 @@ use crate::v3_0::spec::Spec;
 ///     frog:
 ///       $ref: "#/components/examples/frog-example"
 /// ```
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct MediaType {
     /// The schema defining the content of the request, response, or parameter.
     #[serde(skip_serializing_if = "Option::is_none")]

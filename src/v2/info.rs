@@ -172,11 +172,11 @@ mod tests {
             serde_json::from_value::<Info>(json!({
               "title": "Swagger Sample App",
               "description": "This is a sample server Petstore server.",
-              "termsOfService": "https://swagger.io/terms/",
+              "termsOfService": "https://example.com/terms/",
               "contact": {
                 "name": "API Support",
-                "url": "https://www.swagger.io/support",
-                "email": "support@swagger.io"
+                "url": "https://www.example.com/support",
+                "email": "support@example.com"
               },
               "license": {
                 "name": "Apache 2.0",
@@ -188,11 +188,11 @@ mod tests {
             Info {
                 title: String::from("Swagger Sample App"),
                 description: Some(String::from("This is a sample server Petstore server.")),
-                terms_of_service: Some(String::from("https://swagger.io/terms/")),
+                terms_of_service: Some(String::from("https://example.com/terms/")),
                 contact: Some(Contact {
                     name: Some(String::from("API Support")),
-                    url: Some(String::from("https://www.swagger.io/support")),
-                    email: Some(String::from("support@swagger.io")),
+                    url: Some(String::from("https://www.example.com/support")),
+                    email: Some(String::from("support@example.com")),
                     ..Default::default()
                 }),
                 license: Some(License {
@@ -207,6 +207,48 @@ mod tests {
             },
             "deserialize",
         );
+
+        assert_eq!(
+            serde_json::from_value::<Info>(json!({
+              "title": "Swagger Sample App",
+              "description": "This is a sample server Petstore server.",
+              "termsOfService": "https://example.com/terms/",
+              "version": "1.0.1"
+            }))
+            .unwrap(),
+            Info {
+                title: String::from("Swagger Sample App"),
+                description: Some(String::from("This is a sample server Petstore server.")),
+                terms_of_service: Some(String::from("https://example.com/terms/")),
+                version: "1.0.1".to_owned(),
+                ..Default::default()
+            },
+            "deserialize",
+        );
+
+        assert_eq!(
+            serde_json::from_value::<Info>(json!({
+              "title": "Swagger Sample App",
+              "version": "1.0.1"
+            }))
+            .unwrap(),
+            Info {
+                title: String::from("Swagger Sample App"),
+                version: "1.0.1".to_owned(),
+                ..Default::default()
+            },
+            "deserialize",
+        );
+
+        assert_eq!(
+            serde_json::from_value::<Info>(json!({
+              "title": "",
+              "version": ""
+            }))
+            .unwrap(),
+            Info::default(),
+            "deserialize",
+        );
     }
 
     #[test]
@@ -215,11 +257,11 @@ mod tests {
             serde_json::to_value(Info {
                 title: String::from("Swagger Sample App"),
                 description: Some(String::from("This is a sample server Petstore server.")),
-                terms_of_service: Some(String::from("https://swagger.io/terms/")),
+                terms_of_service: Some(String::from("https://example.com/terms/")),
                 contact: Some(Contact {
                     name: Some(String::from("API Support")),
-                    url: Some(String::from("https://www.swagger.io/support")),
-                    email: Some(String::from("support@swagger.io")),
+                    url: Some(String::from("https://www.example.com/support")),
+                    email: Some(String::from("support@example.com")),
                     ..Default::default()
                 }),
                 license: Some(License {
@@ -236,11 +278,11 @@ mod tests {
             json!({
               "title": "Swagger Sample App",
               "description": "This is a sample server Petstore server.",
-              "termsOfService": "https://swagger.io/terms/",
+              "termsOfService": "https://example.com/terms/",
               "contact": {
                 "name": "API Support",
-                "url": "https://www.swagger.io/support",
-                "email": "support@swagger.io"
+                "url": "https://www.example.com/support",
+                "email": "support@example.com"
               },
               "license": {
                 "name": "Apache 2.0",
@@ -250,5 +292,275 @@ mod tests {
             }),
             "serialize",
         );
+
+        assert_eq!(
+            serde_json::to_value(Info {
+                title: String::from("Swagger Sample App"),
+                description: Some(String::from("This is a sample server Petstore server.")),
+                terms_of_service: Some(String::from("https://example.com/terms/")),
+                version: "1.0.1".to_owned(),
+                ..Default::default()
+            })
+            .unwrap(),
+            json!({
+              "title": "Swagger Sample App",
+              "description": "This is a sample server Petstore server.",
+              "termsOfService": "https://example.com/terms/",
+              "version": "1.0.1"
+            }),
+            "serialize",
+        );
+
+        assert_eq!(
+            serde_json::to_value(Info {
+                title: String::from("Swagger Sample App"),
+                version: "1.0.1".to_owned(),
+                ..Default::default()
+            })
+            .unwrap(),
+            json!({
+              "title": "Swagger Sample App",
+              "version": "1.0.1"
+            }),
+            "serialize",
+        );
+        assert_eq!(
+            serde_json::to_value(Info::default()).unwrap(),
+            json!({}),
+            "serialize",
+        );
+    }
+
+    #[test]
+    fn test_contact_deserialize() {
+        assert_eq!(
+            serde_json::from_value::<Contact>(json!({
+                "name": "API Support",
+                "url": "https://www.example.com/support",
+                "email": "support@example.com"
+            }))
+            .unwrap(),
+            Contact {
+                name: Some(String::from("API Support")),
+                url: Some(String::from("https://www.example.com/support")),
+                email: Some(String::from("support@example.com")),
+                ..Default::default()
+            },
+            "deserialize",
+        );
+    }
+
+    #[test]
+    fn test_contact_serialize() {
+        assert_eq!(
+            serde_json::to_value(Contact {
+                name: Some(String::from("API Support")),
+                url: Some(String::from("https://www.example.com/support")),
+                email: Some(String::from("support@example.com")),
+                ..Default::default()
+            })
+            .unwrap(),
+            json!({
+                "name": "API Support",
+                "url": "https://www.example.com/support",
+                "email": "support@example.com"
+            }),
+            "serialize",
+        );
+    }
+
+    #[test]
+    fn test_license_deserialize() {
+        assert_eq!(
+            serde_json::from_value::<License>(json!({
+                "name": "Apache 2.0",
+                "url": "https://www.apache.org/licenses/LICENSE-2.0.html",
+            }))
+            .unwrap(),
+            License {
+                name: String::from("Apache 2.0"),
+                url: Some(String::from(
+                    "https://www.apache.org/licenses/LICENSE-2.0.html"
+                )),
+                ..Default::default()
+            },
+            "deserialize",
+        );
+    }
+
+    #[test]
+    fn test_license_serialize() {
+        assert_eq!(
+            serde_json::to_value(License {
+                name: String::from("Apache 2.0"),
+                url: Some(String::from(
+                    "https://www.apache.org/licenses/LICENSE-2.0.html"
+                )),
+                ..Default::default()
+            })
+            .unwrap(),
+            json!({
+                "name": "Apache 2.0",
+                "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+            }),
+            "serialize",
+        );
+    }
+
+    #[test]
+    fn test_contact_validate() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Default::default());
+        Contact {
+            name: Some(String::from("API Support")),
+            url: Some(String::from("https://www.example.com/support")),
+            email: Some(String::from("support@example.com")),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("contact"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        Contact {
+            url: Some(String::from("https://www.example.com/support")),
+            email: Some(String::from("support@example.com")),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("contact"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        Contact {
+            url: Some(String::from("foo - bar")),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("contact"));
+        assert_eq!(ctx.errors.len(), 1, "incorrect url: {:?}", ctx.errors);
+
+        ctx = Context::new(&spec, Default::default());
+        Contact {
+            email: Some(String::from("foo - bar")),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("contact"));
+        assert_eq!(ctx.errors.len(), 1, "incorrect email: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn test_license_validate() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Default::default());
+        License {
+            name: String::from("Apache 2.0"),
+            url: Some(String::from(
+                "https://www.apache.org/licenses/LICENSE-2.0.html",
+            )),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("license"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        License {
+            name: String::from("Apache 2.0"),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("license"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        ctx = Context::new(&spec, Default::default());
+        License {
+            name: String::from(""),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("license"));
+        assert_eq!(ctx.errors.len(), 1, "empty name: {:?}", ctx.errors);
+
+        ctx = Context::new(&spec, Default::default());
+        License {
+            name: String::from("Apache 2.0"),
+            url: Some(String::from("foo - bar")),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("license"));
+        assert_eq!(ctx.errors.len(), 1, "incorrect url: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn test_info_validate() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Default::default());
+        Info {
+            title: String::from("Swagger Sample App"),
+            description: Some(String::from("This is a sample server Petstore server.")),
+            terms_of_service: Some(String::from("https://example.com/terms/")),
+            contact: Some(Contact {
+                name: Some(String::from("API Support")),
+                url: Some(String::from("https://www.example.com/support")),
+                email: Some(String::from("support@example.com")),
+                ..Default::default()
+            }),
+            license: Some(License {
+                name: String::from("Apache 2.0"),
+                url: Some(String::from(
+                    "https://www.apache.org/licenses/LICENSE-2.0.html",
+                )),
+                ..Default::default()
+            }),
+            version: "1.0.1".to_owned(),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        Info {
+            title: String::from("Swagger Sample App"),
+            description: Some(String::from("This is a sample server Petstore server.")),
+            terms_of_service: Some(String::from("https://example.com/terms/")),
+            version: "1.0.1".to_owned(),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        Info {
+            title: String::from("Swagger Sample App"),
+            version: "1.0.1".to_owned(),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        Info {
+            title: String::from("Swagger Sample App"),
+            version: String::from(""),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert_eq!(ctx.errors.len(), 1, "empty version: {:?}", ctx.errors);
+
+        ctx = Context::new(&spec, Default::default());
+        Info {
+            title: String::from(""),
+            version: String::from("1.0.1"),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert_eq!(ctx.errors.len(), 1, "empty title: {:?}", ctx.errors);
+
+        ctx = Context::new(&spec, Options::only(&Options::IgnoreEmptyInfoTitle));
+        Info {
+            title: String::from(""),
+            version: String::from("1.0.1"),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        ctx = Context::new(&spec, Options::only(&Options::IgnoreEmptyInfoVersion));
+        Info {
+            title: String::from("Swagger Sample App"),
+            version: String::from(""),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("info"));
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }

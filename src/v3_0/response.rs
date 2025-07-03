@@ -243,3 +243,468 @@ impl ValidateWithContext<Spec> for Responses {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v3_0::parameter::InHeaderStyle;
+    use crate::v3_0::schema::{ObjectSchema, Schema, SingleSchema};
+
+    #[test]
+    fn test_response_deserialize() {
+        assert_eq!(
+            serde_json::from_value::<Response>(serde_json::json!({
+                "description": "A simple response",
+                "headers": {
+                    "Authorization": {
+                        "description": "A short description of the header.",
+                        "style": "simple",
+                        "required": true,
+                    },
+                },
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "title": "foo"
+                        }
+                    }
+                },
+                "links": {
+                    "next": {
+                        "operationRef": "getNextPage",
+                        "description": "Get the next page of results"
+                    }
+                },
+                "x-extra": "extension",
+            }))
+            .unwrap(),
+            Response {
+                description: "A simple response".to_owned(),
+                headers: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "Authorization".to_owned(),
+                        RefOr::new_item(Header {
+                            description: Some("A short description of the header.".to_owned()),
+                            required: Some(true),
+                            style: Some(InHeaderStyle::Simple),
+                            ..Default::default()
+                        }),
+                    );
+                    map
+                }),
+                content: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "application/json".to_owned(),
+                        MediaType {
+                            schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                                SingleSchema::Object(ObjectSchema {
+                                    title: Some("foo".to_owned()),
+                                    ..Default::default()
+                                }),
+                            )))),
+                            ..Default::default()
+                        },
+                    );
+                    map
+                }),
+                links: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "next".to_owned(),
+                        RefOr::new_item(Link {
+                            operation_ref: Some("getNextPage".to_owned()),
+                            description: Some("Get the next page of results".to_owned()),
+                            ..Default::default()
+                        }),
+                    );
+                    map
+                }),
+                extensions: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                    map
+                }),
+            },
+            "response deserialization",
+        );
+    }
+
+    #[test]
+    fn test_response_serialization() {
+        assert_eq!(
+            serde_json::to_value(Response {
+                description: "A simple response".to_owned(),
+                headers: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "Authorization".to_owned(),
+                        RefOr::new_item(Header {
+                            description: Some("A short description of the header.".to_owned()),
+                            required: Some(true),
+                            style: Some(InHeaderStyle::Simple),
+                            ..Default::default()
+                        }),
+                    );
+                    map
+                }),
+                content: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "application/json".to_owned(),
+                        MediaType {
+                            schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                                SingleSchema::Object(ObjectSchema {
+                                    title: Some("foo".to_owned()),
+                                    ..Default::default()
+                                }),
+                            )))),
+                            ..Default::default()
+                        },
+                    );
+                    map
+                }),
+                links: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "next".to_owned(),
+                        RefOr::new_item(Link {
+                            operation_ref: Some("getNextPage".to_owned()),
+                            description: Some("Get the next page of results".to_owned()),
+                            ..Default::default()
+                        }),
+                    );
+                    map
+                }),
+                extensions: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                    map
+                }),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "description": "A simple response",
+                "headers": {
+                    "Authorization": {
+                        "description": "A short description of the header.",
+                        "style": "simple",
+                        "required": true,
+                    },
+                },
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "title": "foo"
+                        }
+                    }
+                },
+                "links": {
+                    "next": {
+                        "operationRef": "getNextPage",
+                        "description": "Get the next page of results"
+                    }
+                },
+                "x-extra": "extension",
+            }),
+            "response serialization",
+        );
+    }
+
+    #[test]
+    fn test_responses_deserialize() {
+        assert_eq!(
+            serde_json::from_value::<Responses>(serde_json::json!({
+                "default": {
+                    "description": "A simple response",
+                    "headers": {
+                        "Authorization": {
+                            "description": "A short description of the header.",
+                            "style": "simple",
+                            "required": true,
+                        },
+                    },
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "title": "foo"
+                            }
+                        }
+                    },
+                    "links": {
+                        "next": {
+                            "operationRef": "getNextPage",
+                            "description": "Get the next page of results"
+                        }
+                    },
+                    "x-extra": "extension",
+                },
+                "200": {
+                    "description": "200 OK"
+                },
+                "x-extra": "extension",
+            }))
+            .unwrap(),
+            Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "A simple response".to_owned(),
+                    headers: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "Authorization".to_owned(),
+                            RefOr::new_item(Header {
+                                description: Some("A short description of the header.".to_owned()),
+                                required: Some(true),
+                                style: Some(InHeaderStyle::Simple),
+                                ..Default::default()
+                            }),
+                        );
+                        map
+                    }),
+                    content: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "application/json".to_owned(),
+                            MediaType {
+                                schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                                    SingleSchema::Object(ObjectSchema {
+                                        title: Some("foo".to_owned()),
+                                        ..Default::default()
+                                    }),
+                                )))),
+                                ..Default::default()
+                            },
+                        );
+                        map
+                    }),
+                    links: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "next".to_owned(),
+                            RefOr::new_item(Link {
+                                operation_ref: Some("getNextPage".to_owned()),
+                                description: Some("Get the next page of results".to_owned()),
+                                ..Default::default()
+                            }),
+                        );
+                        map
+                    }),
+                    extensions: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                        map
+                    }),
+                })),
+                responses: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "200".to_owned(),
+                        RefOr::new_item(Response {
+                            description: "200 OK".to_owned(),
+                            ..Default::default()
+                        }),
+                    );
+                    map
+                }),
+                extensions: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                    map
+                }),
+            },
+            "responses deserialization",
+        );
+    }
+
+    #[test]
+    fn test_responses_serialization() {
+        assert_eq!(
+            serde_json::to_value(Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "A simple response".to_owned(),
+                    headers: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "Authorization".to_owned(),
+                            RefOr::new_item(Header {
+                                description: Some("A short description of the header.".to_owned()),
+                                required: Some(true),
+                                style: Some(InHeaderStyle::Simple),
+                                ..Default::default()
+                            }),
+                        );
+                        map
+                    }),
+                    content: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "application/json".to_owned(),
+                            MediaType {
+                                schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                                    SingleSchema::Object(ObjectSchema {
+                                        title: Some("foo".to_owned()),
+                                        ..Default::default()
+                                    }),
+                                )))),
+                                ..Default::default()
+                            },
+                        );
+                        map
+                    }),
+                    links: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            "next".to_owned(),
+                            RefOr::new_item(Link {
+                                operation_ref: Some("getNextPage".to_owned()),
+                                description: Some("Get the next page of results".to_owned()),
+                                ..Default::default()
+                            }),
+                        );
+                        map
+                    }),
+                    extensions: Some({
+                        let mut map = BTreeMap::new();
+                        map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                        map
+                    }),
+                })),
+                responses: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "200".to_owned(),
+                        RefOr::new_item(Response {
+                            description: "200 OK".to_owned(),
+                            ..Default::default()
+                        }),
+                    );
+                    map
+                }),
+                extensions: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                    map
+                }),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "default": {
+                    "description": "A simple response",
+                    "headers": {
+                        "Authorization": {
+                            "description": "A short description of the header.",
+                            "style": "simple",
+                            "required": true,
+                        },
+                    },
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "title": "foo"
+                            }
+                        }
+                    },
+                    "links": {
+                        "next": {
+                            "operationRef": "getNextPage",
+                            "description": "Get the next page of results"
+                        }
+                    },
+                    "x-extra": "extension",
+                },
+                "200": {
+                    "description": "200 OK"
+                },
+                "x-extra": "extension",
+            }),
+            "response serialization",
+        );
+    }
+
+    #[test]
+    fn test_response_validate() {
+        let spec = Spec::default();
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response {
+            description: "A simple response".to_owned(),
+            headers: Some({
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "Authorization".to_owned(),
+                    RefOr::new_item(Header {
+                        description: Some("A short description of the header.".to_owned()),
+                        required: Some(true),
+                        style: Some(InHeaderStyle::Simple),
+                        ..Default::default()
+                    }),
+                );
+                map
+            }),
+            content: Some({
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "application/json".to_owned(),
+                    MediaType {
+                        schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                            SingleSchema::Object(ObjectSchema {
+                                title: Some("foo".to_owned()),
+                                ..Default::default()
+                            }),
+                        )))),
+                        ..Default::default()
+                    },
+                );
+                map
+            }),
+            links: Some({
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "next".to_owned(),
+                    RefOr::new_item(Link {
+                        operation_ref: Some("getNextPage".to_owned()),
+                        description: Some("Get the next page of results".to_owned()),
+                        ..Default::default()
+                    }),
+                );
+                map
+            }),
+            extensions: Some({
+                let mut map = BTreeMap::new();
+                map.insert("x-extra".to_owned(), serde_json::json!("extension"));
+                map
+            }),
+        }
+        .validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response {
+            description: "A simple response".to_owned(),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Response::default().validate_with_context(&mut ctx, "response".to_owned());
+        assert!(
+            ctx.errors
+                .contains(&"response.description: must not be empty".to_string()),
+            "expected error: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(
+            &spec,
+            Options::only(&Options::IgnoreEmptyResponseDescription),
+        );
+        Response::default().validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+}
