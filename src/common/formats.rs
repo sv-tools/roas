@@ -1,8 +1,7 @@
-use std::fmt;
-use std::fmt::Display;
-
 use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
+use std::fmt::Display;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StringFormat {

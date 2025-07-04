@@ -1,12 +1,5 @@
 //! Response Object
 
-use std::collections::BTreeMap;
-use std::fmt;
-
-use serde::de::{Error, MapAccess, Visitor};
-use serde::ser::SerializeMap;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
 use crate::common::reference::RefOr;
 use crate::v3_0::header::Header;
@@ -14,6 +7,11 @@ use crate::v3_0::link::Link;
 use crate::v3_0::media_type::MediaType;
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
+use serde::de::{Error, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
+use std::fmt;
 
 /// A container for the expected responses of an operation.
 /// The container maps a HTTP response code to the expected response.

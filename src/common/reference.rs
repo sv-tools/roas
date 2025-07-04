@@ -1,8 +1,7 @@
 //! Reference Object
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};

@@ -1,18 +1,16 @@
 //! Path Items
 
-use std::collections::BTreeMap;
-use std::fmt;
-
-use serde::de::{Error, MapAccess, Visitor};
-use serde::ser::SerializeMap;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use crate::common::helpers::{Context, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_0::operation::Operation;
 use crate::v3_0::parameter::Parameter;
 use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
+use serde::de::{Error, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
+use std::fmt;
 
 /// Describes the operations available on a single path.
 /// A Path Item may be empty, due to [ACL constraints](https://spec.openapis.org/oas/v3.0.3#securityFiltering).

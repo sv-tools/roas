@@ -1,11 +1,9 @@
 //! External Documentation Object
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, ValidateWithContext, validate_required_url};
 use crate::v2::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Allows referencing an external resource for extended documentation.
 ///

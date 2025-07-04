@@ -1,13 +1,5 @@
 //! The root document object of the OpenAPI v2.0 specification.
 
-use std::collections::BTreeMap;
-use std::fmt;
-use std::fmt::{Display, Formatter};
-
-use enumset::EnumSet;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{
     Context, PushError, ValidateWithContext, validate_not_visited, validate_optional_string_matches,
 };
@@ -21,6 +13,12 @@ use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
 use crate::v2::tag::Tag;
 use crate::validation::{Error, Options, Validate};
+use enumset::EnumSet;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fmt::{Display, Formatter};
 
 /// This is the root document object for the API specification.
 /// It combines what previously was the Resource Listing and API Declaration (version 1.2 and earlier) together into one document.

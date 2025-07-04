@@ -1,13 +1,11 @@
 //! Representing a Server.
 
-use std::collections::{BTreeMap, HashSet};
-
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 
 /// An object representing a Server.
 ///
@@ -146,11 +144,9 @@ impl ValidateWithContext<Spec> for ServerVariable {
 
 #[cfg(test)]
 mod tests {
-    use enumset::EnumSet;
-
-    use crate::validation::Options;
-
     use super::*;
+    use crate::validation::Options;
+    use enumset::EnumSet;
 
     #[test]
     fn test_server_variable_deserialize() {

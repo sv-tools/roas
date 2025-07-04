@@ -1,9 +1,5 @@
 //! Operation Object
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
 use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
@@ -12,6 +8,8 @@ use crate::v2::response::Responses;
 use crate::v2::spec::{Scheme, Spec};
 use crate::v2::tag::Tag;
 use crate::validation::Options;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Operation {
@@ -157,10 +155,9 @@ impl ValidateWithContext<Spec> for Operation {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::v2::parameter::{InPath, StringParameter};
     use crate::v2::response::Response;
-
-    use super::*;
 
     #[test]
     fn deserialize() {

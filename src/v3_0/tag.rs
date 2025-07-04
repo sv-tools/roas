@@ -1,12 +1,10 @@
 //! Tag Object
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, ValidateWithContext, validate_required_string};
 use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Adds metadata to a single tag that is used by the Operation Object.
 /// It is not mandatory to have a Tag Object per tag defined in the Operation Object instances.

@@ -1,11 +1,5 @@
 //! Schema Object
 
-use monostate::MustBe;
-use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
 use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
@@ -13,6 +7,10 @@ use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::spec::Spec;
 use crate::v2::xml::XML;
+use monostate::MustBe;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
@@ -436,7 +434,6 @@ pub struct ArraySchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ObjectSchema {
     #[serde(rename = "type")]
-    #[serde(default)]
     pub schema_type: MustBe!("object"),
 
     /// A title to explain the purpose of the schema.

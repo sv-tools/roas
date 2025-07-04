@@ -1,13 +1,11 @@
 //! XML Object
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{
     Context, ValidateWithContext, validate_optional_url, validate_required_string,
 };
 use crate::v2::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A metadata object that allows for more fine-tuned XML model definitions.
 ///
@@ -128,9 +126,8 @@ impl ValidateWithContext<Spec> for XML {
 
 #[cfg(test)]
 mod tests {
-    use crate::validation::Options;
-
     use super::*;
+    use crate::validation::Options;
 
     #[test]
     fn serialize() {

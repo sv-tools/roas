@@ -1,12 +1,10 @@
 //! Item Object
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
 use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
 use crate::v2::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type")]
