@@ -24,8 +24,15 @@ dependencies-license-file = "dependencies-license.json"
 
 [features]
 default = ["v3_0"]
+# Support for OpenAPI v2
 v2 = []
+
+# Support for OpenAPI v3.0.x
 v3_0 = []
+
+# Support for OpenAPI v3.1.x
+# Feature is experimental and may change in the future
+v3_1 = []
 
 [dependencies]
 enumset = "1.1.6"

@@ -25,3 +25,9 @@ component_management:
         - src/v3_0.rs
         - src/v3_0/**
         - tests/v3_0_test.rs
+    - component_id: v3_1
+      name: v3.1
+      paths:
+        - src/v3_1.rs
+        - src/v3_1/**
+        - tests/v3_1_test.rs
