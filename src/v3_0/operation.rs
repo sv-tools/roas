@@ -1,9 +1,5 @@
 //! Operation Object
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
 use crate::common::reference::RefOr;
 use crate::v3_0::callback::Callback;
@@ -16,6 +12,8 @@ use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
 use crate::v3_0::tag::Tag;
 use crate::validation::Options;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Operation {

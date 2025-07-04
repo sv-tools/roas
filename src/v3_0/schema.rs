@@ -534,7 +534,6 @@ pub struct ArraySchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ObjectSchema {
     #[serde(rename = "type")]
-    #[serde(default)]
     pub schema_type: MustBe!("object"),
 
     /// A title to explain the purpose of the schema.

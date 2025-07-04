@@ -1,17 +1,15 @@
 //! Path Items
 
-use std::collections::BTreeMap;
-use std::fmt;
-
-use serde::de::{Error, MapAccess, Visitor};
-use serde::ser::SerializeMap;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use crate::common::helpers::{Context, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v2::operation::Operation;
 use crate::v2::parameter::Parameter;
 use crate::v2::spec::Spec;
+use serde::de::{Error, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
+use std::fmt;
 
 /// Describes the operations available on a single path.
 /// A Path Item may be empty, due to [ACL constraints](https://swagger.io/specification/v2/#security-filtering).
@@ -206,12 +204,11 @@ impl ValidateWithContext<Spec> for PathItem {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::common::formats::CollectionFormat;
     use crate::v2::items::{Items, StringItem};
     use crate::v2::parameter::{ArrayParameter, InPath};
     use crate::v2::response::{Response, Responses};
-
-    use super::*;
 
     #[test]
     fn test_path_item_deserialize() {

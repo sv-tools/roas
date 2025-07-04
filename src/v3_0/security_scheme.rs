@@ -1,15 +1,13 @@
 //! Security Scheme Object
 
-use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{
     Context, PushError, ValidateWithContext, validate_optional_url, validate_required_string,
     validate_required_url,
 };
 use crate::v3_0::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
 
 /// Defines a security scheme that can be used by the operations.
 /// Supported schemes are HTTP authentication, an API key (either as a header,
@@ -534,11 +532,9 @@ impl ValidateWithContext<Spec> for OpenIdConnectSecurityScheme {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use crate::validation::Options;
-
     use super::*;
+    use crate::validation::Options;
+    use serde_json::json;
 
     #[test]
     fn test_security_scheme_http_deserialize() {

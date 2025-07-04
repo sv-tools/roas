@@ -1,6 +1,5 @@
-use std::fmt::Display;
-
 use enumset::{EnumSet, EnumSetType, enum_set};
+use std::fmt::Display;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Error {

@@ -1,14 +1,12 @@
 //! Security Scheme Object
 
-use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{
     Context, PushError, ValidateWithContext, validate_optional_url, validate_required_string,
 };
 use crate::v2::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
 
 /// Allows the definition of a security scheme that can be used by the operations.
 /// Supported schemes are basic authentication, an API key (either as a header or as a query parameter)
@@ -203,9 +201,8 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_security_scheme_basic_deserialize() {

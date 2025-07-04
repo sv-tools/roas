@@ -1,10 +1,5 @@
 //! Holds a set of reusable objects for different aspects of the OAS.
 
-use std::collections::BTreeMap;
-
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_string_matches};
 use crate::common::reference::RefOr;
 use crate::v3_0::callback::Callback;
@@ -18,6 +13,9 @@ use crate::v3_0::schema::Schema;
 use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Components {

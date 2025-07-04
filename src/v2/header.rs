@@ -1,8 +1,7 @@
 //! Header Object
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
 use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
@@ -281,9 +280,8 @@ impl ValidateWithContext<Spec> for ArrayHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::v2::items::StringItem;
-
     use super::*;
+    use crate::v2::items::StringItem;
 
     #[test]
     fn test_header_deserialize() {

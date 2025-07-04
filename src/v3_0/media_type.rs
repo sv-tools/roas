@@ -1,9 +1,5 @@
 //! Provides schema and examples for the media type
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_0::example::Example;
@@ -11,6 +7,8 @@ use crate::v3_0::header::Header;
 use crate::v3_0::parameter::InQueryStyle;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Each Media Type Object provides schema and examples for the media type identified by its key.
 ///

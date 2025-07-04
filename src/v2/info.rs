@@ -1,14 +1,12 @@
 //! Metadata about the API.
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{
     Context, ValidateWithContext, validate_email, validate_optional_url, validate_required_string,
 };
 use crate::v2::spec::Spec;
 use crate::validation::Options;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The object provides metadata about the API.
 /// The metadata can be used by the clients if needed, and can be presented in the Swagger-UI for convenience.
@@ -162,9 +160,8 @@ impl ValidateWithContext<Spec> for License {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_info_deserialize() {

@@ -1,12 +1,10 @@
 //! Represents a possible design-time link for a response
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The Link object represents a possible design-time link for a response.
 /// The presence of a link does not guarantee the caller’s ability to successfully invoke it,

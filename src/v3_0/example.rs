@@ -1,11 +1,9 @@
 //! Example object.
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_url};
 use crate::v3_0::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Example object.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]

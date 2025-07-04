@@ -1,12 +1,5 @@
 //! The root document object of the OpenAPI v3.0.X specification.
 
-use std::collections::BTreeMap;
-use std::fmt;
-use std::fmt::{Display, Formatter};
-
-use enumset::EnumSet;
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_not_visited};
 use crate::common::reference::{ResolveReference, resolve_in_map};
 use crate::v3_0::callback::Callback;
@@ -25,6 +18,11 @@ use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::server::Server;
 use crate::v3_0::tag::Tag;
 use crate::validation::{Error, Options, Validate};
+use enumset::EnumSet;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fmt::{Display, Formatter};
 
 /// This is the root document object of the OpenAPI document.
 ///

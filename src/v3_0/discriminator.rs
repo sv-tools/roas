@@ -1,13 +1,11 @@
 //! Discriminator Object
 
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
-
 use crate::common::helpers::{Context, ValidateWithContext, validate_required_string};
 use crate::common::reference::RefOr;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::spec::Spec;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// When request bodies or response payloads may be one of a number of different schemas,
 /// a discriminator object can be used to aid in serialization, deserialization, and validation.

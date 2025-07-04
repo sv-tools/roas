@@ -26,12 +26,11 @@
 //!     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 //! }
 //! ```
-use std::collections::BTreeMap;
-use std::fmt;
-
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
+use std::fmt;
 
 pub fn deserialize<'de, D>(
     deserializer: D,
@@ -91,9 +90,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use serde::{Deserialize, Serialize};
-
     use super::*;
+    use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
     pub struct TestExtensions {

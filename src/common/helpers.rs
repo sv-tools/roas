@@ -1,8 +1,7 @@
-use std::collections::HashSet;
-use std::fmt;
-
 use enumset::EnumSet;
 use regex::Regex;
+use std::collections::HashSet;
+use std::fmt;
 
 use crate::validation::{Error, Options};
 
