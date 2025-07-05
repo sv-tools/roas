@@ -2,15 +2,15 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_call:
     secrets:
       CODECOV_TOKEN:
         required: true
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: "0 0 * * 0"
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,11 +18,19 @@ env:
 permissions: read-all
 
 jobs:
-  Build:
+  BuildJob:
+    strategy:
+      matrix:
+        feature: ["v2", "v3_0", "v3_1"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo build --all-features --verbose
+      - run: cargo build --features ${{ matrix.feature }} --no-default-features --verbose
+  Build:
+    needs: BuildJob
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Build Passed"
   Toml-Fmt:
     runs-on: ubuntu-latest
     steps:
@@ -50,7 +58,10 @@ jobs:
       - run: cargo clippy --all-features --verbose -- --deny warnings
       - run: cargo clippy --all-features --quiet --message-format=json | cargo-action-fmt
         if: failure()
-  Tests:
+  TestsJob:
+    strategy:
+      matrix:
+        feature: ["v2", "v3_0", "v3_1"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +71,7 @@ jobs:
           cache-all-crates: true
       - run: cargo tools
       - name: Run tests
-        run: cargo llvm-cov nextest --all-features --all-targets --no-fail-fast --verbose
+        run: cargo llvm-cov nextest --features ${{ matrix.feature }} --no-default-features --no-fail-fast --verbose
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
@@ -74,6 +85,11 @@ jobs:
         uses: codecov/test-results-action@v1
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  Tests:
+    needs: TestsJob
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Tests Passed"
   Deps:
     runs-on: ubuntu-latest
     steps:
