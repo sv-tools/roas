@@ -93,6 +93,10 @@ pub enum Options {
     /// Ignore empty Response.Description field.
     /// Applies for v2.0, v3.0, v3.1
     IgnoreEmptyResponseDescription,
+
+    /// Ignore empty ExternalDocumentation.URL field.
+    /// Applies for v2.0, v3.0, v3.1
+    IgnoreEmptyExternalDocumentationUrl,
 }
 
 /// A set of options to ignore unused objects.
@@ -115,6 +119,7 @@ pub const IGNORE_EMPTY_REQUIRED_FIELDS: EnumSet<Options> = enum_set!(
     Options::IgnoreEmptyInfoTitle
         | Options::IgnoreEmptyInfoVersion
         | Options::IgnoreEmptyResponseDescription
+        | Options::IgnoreEmptyExternalDocumentationUrl
 );
 
 impl Options {

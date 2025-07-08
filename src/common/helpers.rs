@@ -114,7 +114,11 @@ pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path
 /// Validates that the given URL string starts with "http://" or "https://".
 /// If the URL is invalid, records an error in the context.
 pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
-    if ctx.is_option(Options::IgnoreInvalidUrls) {
+    if !ctx.is_option(Options::IgnoreEmptyExternalDocumentationUrl) {
+        validate_required_string(url, ctx, path.clone());
+    }
+    // If the URL is empty or the ignore option is set, skip validation.
+    if url.is_empty() || ctx.is_option(Options::IgnoreInvalidUrls) {
         return;
     }
 

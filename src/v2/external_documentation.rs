@@ -41,6 +41,7 @@ impl ValidateWithContext<Spec> for ExternalDocumentation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::Options;
 
     #[test]
     fn test_external_documentation_deserialize() {
@@ -73,6 +74,79 @@ mod tests {
                 "description": "Find more info here"
             }),
             "serialize",
+        );
+    }
+
+    #[test]
+    fn test_external_documentation_validate() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::empty());
+        let ed = ExternalDocumentation {
+            url: String::from("https://swagger.io"),
+            description: Some(String::from("Find more info here")),
+            ..Default::default()
+        };
+        ed.validate_with_context(&mut ctx, String::from("externalDocs"));
+        assert!(
+            ctx.errors.is_empty(),
+            "Validation should pass: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&spec, Options::empty());
+        let ed = ExternalDocumentation {
+            description: Some(String::from("Find more info here")),
+            ..Default::default()
+        };
+        ed.validate_with_context(&mut ctx, String::from("externalDocs"));
+        assert!(
+            ctx.errors
+                .contains(&"externalDocs.url: must not be empty".to_string()),
+            "Validation should fail: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&spec, Options::empty());
+        let ed = ExternalDocumentation {
+            url: String::from("invalid-url"),
+            description: Some(String::from("Find more info here")),
+            ..Default::default()
+        };
+        ed.validate_with_context(&mut ctx, String::from("externalDocs"));
+        assert!(
+            ctx.errors.contains(
+                &"externalDocs.url: must be a valid URL, found `invalid-url`".to_string()
+            ),
+            "Validation should fail: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(
+            &spec,
+            Options::only(&Options::IgnoreEmptyExternalDocumentationUrl),
+        );
+        let ed = ExternalDocumentation {
+            description: Some(String::from("Find more info here")),
+            ..Default::default()
+        };
+        ed.validate_with_context(&mut ctx, String::from("externalDocs"));
+        assert!(
+            ctx.errors.is_empty(),
+            "Validation should pass: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&spec, Options::only(&Options::IgnoreInvalidUrls));
+        let ed = ExternalDocumentation {
+            url: String::from("invalid-url"),
+            description: Some(String::from("Find more info here")),
+            ..Default::default()
+        };
+        ed.validate_with_context(&mut ctx, String::from("externalDocs"));
+        assert!(
+            ctx.errors.is_empty(),
+            "Validation should pass: {:?}",
+            ctx.errors
         );
     }
 }
