@@ -66,7 +66,7 @@ impl<T> Context<'_, T> {
 }
 
 impl Context<'_, ()> {
-    pub fn new<T>(spec: &T, options: EnumSet<Options>) -> Context<T> {
+    pub fn new<T>(spec: &T, options: EnumSet<Options>) -> Context<'_, T> {
         Context {
             spec,
             visited: HashSet::new(),
@@ -89,13 +89,13 @@ impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
 /// Validates that the given optional email string contains an '@' character.
 /// If the email is present and invalid, records an error in the context.
 pub fn validate_email<T>(email: &Option<String>, ctx: &mut Context<T>, path: String) {
-    if let Some(email) = email {
-        if !email.contains('@') {
-            ctx.error(
-                path,
-                format_args!("must be a valid email address, found `{email}`"),
-            );
-        }
+    if let Some(email) = email
+        && !email.contains('@')
+    {
+        ctx.error(
+            path,
+            format_args!("must be a valid email address, found `{email}`"),
+        );
     }
 }
 

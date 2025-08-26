@@ -66,16 +66,15 @@ pub struct Link {
 
 impl ValidateWithContext<Spec> for Link {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        if let Some(operation_id) = &self.operation_id {
-            if !ctx
+        if let Some(operation_id) = &self.operation_id
+            && !ctx
                 .visited
                 .contains(format!("#/paths/operations/{operation_id}").as_str())
-            {
-                ctx.error(
-                    path.clone(),
-                    format_args!(".operationId: missing operation with id `{operation_id}`"),
-                );
-            }
+        {
+            ctx.error(
+                path.clone(),
+                format_args!(".operationId: missing operation with id `{operation_id}`"),
+            );
         }
         if let Some(server) = &self.server {
             server.validate_with_context(ctx, format!("{path}.server"));

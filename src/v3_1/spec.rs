@@ -421,18 +421,17 @@ impl Validate for Spec {
                 };
                 if let Some(operations) = &item.operations {
                     for (method, operation) in operations.iter() {
-                        if let Some(operation_id) = &operation.operation_id {
-                            if !ctx
+                        if let Some(operation_id) = &operation.operation_id
+                            && !ctx
                                 .visited
                                 .insert(format!("#/paths/operations/{operation_id}"))
-                            {
-                                ctx.error(
+                        {
+                            ctx.error(
                                     "#".to_owned(),
                                     format_args!(
                                         ".paths[{name}].{method}.operationId: `{operation_id}` already in use"
                                     ),
                                 );
-                            }
                         }
                     }
                 }

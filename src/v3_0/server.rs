@@ -128,16 +128,16 @@ impl ValidateWithContext<Spec> for Server {
 impl ValidateWithContext<Spec> for ServerVariable {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.default, ctx, format!("{path}.default"));
-        if let Some(enum_values) = &self.enum_values {
-            if !enum_values.contains(&self.default) {
-                ctx.error(
-                    path,
-                    format!(
-                        ".default: `{}` must be in enum values: {:?}",
-                        self.default, enum_values,
-                    ),
-                );
-            }
+        if let Some(enum_values) = &self.enum_values
+            && !enum_values.contains(&self.default)
+        {
+            ctx.error(
+                path,
+                format!(
+                    ".default: `{}` must be in enum values: {:?}",
+                    self.default, enum_values,
+                ),
+            );
         }
     }
 }

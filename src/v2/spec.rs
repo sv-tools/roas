@@ -293,13 +293,13 @@ impl Validate for Spec {
         let re = Regex::new(r"^[^{}/ :\\]+(?::\d+)?$").unwrap();
         validate_optional_string_matches(&self.host, &re, &mut ctx, "#.host".to_owned());
 
-        if let Some(base_path) = &self.base_path {
-            if !base_path.starts_with('/') {
-                ctx.error(
-                    "#.basePath".to_owned(),
-                    format_args!("must start with `/`, found `{base_path}`"),
-                );
-            }
+        if let Some(base_path) = &self.base_path
+            && !base_path.starts_with('/')
+        {
+            ctx.error(
+                "#.basePath".to_owned(),
+                format_args!("must start with `/`, found `{base_path}`"),
+            );
         }
 
         // validate paths operations
