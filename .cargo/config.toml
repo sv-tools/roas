@@ -1,2 +1,2 @@
 [alias]
-tools = "install cargo-deny cargo-license cargo-llvm-cov cargo-machete cargo-nextest taplo-cli cargo-action-fmt"
+tools = "install cargo-deny cargo-license cargo-llvm-cov cargo-machete cargo-nextest cargo-action-fmt"
