@@ -98,16 +98,15 @@ pub struct Operation {
 
 impl ValidateWithContext<Spec> for Operation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        if let Some(operation_id) = &self.operation_id {
-            if !ctx
+        if let Some(operation_id) = &self.operation_id
+            && !ctx
                 .visited
                 .insert(format!("#/paths/operations/{operation_id}"))
-            {
-                ctx.error(
-                    path.clone(),
-                    format_args!("operationId `{operation_id}` already exists"),
-                );
-            }
+        {
+            ctx.error(
+                path.clone(),
+                format_args!("operationId `{operation_id}` already exists"),
+            );
         }
         if let Some(tags) = &self.tags {
             for (i, tag) in tags.iter().enumerate() {

@@ -161,37 +161,31 @@ impl ValidateWithContext<Spec> for Operation {
                     let reference = format!("#/components/securitySchemes/{name}");
                     let spec_ref = RefOr::<SecurityScheme>::new_ref(reference.clone());
                     spec_ref.validate_with_context(ctx, path.clone());
-                    if !scopes.is_empty() {
-                        if let Ok(SecurityScheme::OAuth2(oauth2)) = spec_ref.get_item(ctx.spec) {
-                            for scope in scopes {
-                                ctx.visit(format!("{reference}/{scope}"));
-                                let mut found = false;
-                                if let Some(flow) = &oauth2.flows.implicit {
-                                    found = found || flow.scopes.contains_key(scope)
-                                }
-                                if !found {
-                                    if let Some(flow) = &oauth2.flows.password {
-                                        found = found || flow.scopes.contains_key(scope)
-                                    }
-                                }
-                                if !found {
-                                    if let Some(flow) = &oauth2.flows.client_credentials {
-                                        found = found || flow.scopes.contains_key(scope)
-                                    }
-                                }
-                                if !found {
-                                    if let Some(flow) = &oauth2.flows.authorization_code {
-                                        found = found || flow.scopes.contains_key(scope)
-                                    }
-                                }
-                                if !found {
-                                    ctx.error(
+                    if !scopes.is_empty()
+                        && let Ok(SecurityScheme::OAuth2(oauth2)) = spec_ref.get_item(ctx.spec)
+                    {
+                        for scope in scopes {
+                            ctx.visit(format!("{reference}/{scope}"));
+                            let mut found = false;
+                            if let Some(flow) = &oauth2.flows.implicit {
+                                found = found || flow.scopes.contains_key(scope)
+                            }
+                            if !found && let Some(flow) = &oauth2.flows.password {
+                                found = found || flow.scopes.contains_key(scope)
+                            }
+                            if !found && let Some(flow) = &oauth2.flows.client_credentials {
+                                found = found || flow.scopes.contains_key(scope)
+                            }
+                            if !found && let Some(flow) = &oauth2.flows.authorization_code {
+                                found = found || flow.scopes.contains_key(scope)
+                            }
+                            if !found {
+                                ctx.error(
                                         path.clone(),
                                         format_args!(
                                             "scope `{scope}` not found in spec by reference `{reference}`"
                                         ),
                                     );
-                                }
                             }
                         }
                     }

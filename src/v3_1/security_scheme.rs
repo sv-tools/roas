@@ -442,13 +442,14 @@ impl ValidateWithContext<Spec> for SecurityScheme {
 
 impl ValidateWithContext<Spec> for HttpSecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        if let Some(bearer_format) = &self.bearer_format {
-            if !bearer_format.is_empty() && self.scheme != HttpScheme::Bearer {
-                ctx.error(
-                    path,
-                    format_args!(".bearerFormat: must be empty for scheme `{}`", self.scheme,),
-                );
-            }
+        if let Some(bearer_format) = &self.bearer_format
+            && !bearer_format.is_empty()
+            && self.scheme != HttpScheme::Bearer
+        {
+            ctx.error(
+                path,
+                format_args!(".bearerFormat: must be empty for scheme `{}`", self.scheme,),
+            );
         }
     }
 }
