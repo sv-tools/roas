@@ -181,11 +181,11 @@ impl ValidateWithContext<Spec> for Operation {
                             }
                             if !found {
                                 ctx.error(
-                                        path.clone(),
-                                        format_args!(
-                                            "scope `{scope}` not found in spec by reference `{reference}`"
-                                        ),
-                                    );
+                                    path.clone(),
+                                    format_args!(
+                                        "scope `{scope}` not found in spec by reference `{reference}`"
+                                    ),
+                                );
                             }
                         }
                     }

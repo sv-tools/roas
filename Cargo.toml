@@ -11,12 +11,12 @@ repository = "https://github.com/sv-tools/roas"
 keywords = ["openapi", "swagger"]
 categories = ["web-programming", "parser-implementations"]
 include = [
-  "src",
-  "Cargo.toml",
-  "README.md",
-  "LICENSE-APACHE",
-  "LICENSE-MIT",
-  "dependencies-license.json",
+    "src",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "dependencies-license.json",
 ]
 
 [package.metadata]
