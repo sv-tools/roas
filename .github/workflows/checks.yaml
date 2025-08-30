@@ -18,16 +18,27 @@ env:
 permissions: read-all
 
 jobs:
+  RustMeta:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.rustmeta.outputs.matrix }}
+      publish: ${{ steps.rustmeta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.5.0
+      - uses: sv-tools/rust-metadata-action@8618602bef8488998677a4ed006f9a9a35cf6756 # v0.1.0
+        id: rustmeta
   BuildJob:
+    needs: RustMeta
     strategy:
       matrix:
-        feature: [ "v2", "v3_0", "v3_1" ]
+        args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.5.0
-      - run: cargo build --features ${{ matrix.feature }} --no-default-features --verbose
+      - run: cargo build ${{ matrix.args }} --no-default-features --verbose
   Build:
     needs: BuildJob
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Check status
@@ -51,9 +62,10 @@ jobs:
       - run: cargo clippy --all-features --quiet --message-format=json | cargo-action-fmt
         if: failure()
   TestsJob:
+    needs: RustMeta
     strategy:
       matrix:
-        feature: [ "v2", "v3_0", "v3_1" ]
+        args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.5.0
@@ -63,7 +75,7 @@ jobs:
           cache-all-crates: true
       - run: cargo tools
       - name: Run tests
-        run: cargo llvm-cov nextest --features ${{ matrix.feature }} --no-default-features --no-fail-fast --verbose
+        run: cargo llvm-cov nextest ${{ matrix.args }} --no-default-features --no-fail-fast --verbose
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
@@ -79,6 +91,7 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
   Tests:
     needs: TestsJob
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Check status
@@ -97,7 +110,11 @@ jobs:
         run: cargo machete
       - name: Deny
         run: cargo deny check all
-  Publish:
+  PublishJob:
+    needs: RustMeta
+    strategy:
+      matrix:
+        package: ${{ fromJSON(needs.RustMeta.outputs.publish) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.5.0
@@ -106,8 +123,20 @@ jobs:
           cache-targets: false
           cache-all-crates: true
       - run: cargo tools
+      - run: cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
       - name: Dry run publish
-        run: |
-          cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
-          cargo publish --all-features --allow-dirty --dry-run --verbose
-          cargo package --all-features --list --allow-dirty
+        run: cargo publish --package ${{ matrix.package }} --all-features --allow-dirty --dry-run --verbose
+      - name: Packaging
+        run: cargo package --package ${{ matrix.package }} --all-features --list --allow-dirty
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.package }}-crate
+          path: target/package/${{ matrix.package }}-*.crate
+  Publish:
+    needs: PublishJob
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check status
+        if: ${{ needs.PublishJob.result != 'success' }}
+        run: exit 1

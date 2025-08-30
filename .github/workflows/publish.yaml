@@ -10,15 +10,30 @@ env:
 permissions: read-all
 
 jobs:
-  build:
+  Build:
     uses: ./.github/workflows/checks.yaml
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-  publish:
-    needs: build
+  RustMeta:
+    needs: Build
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.rustmeta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.5.0
+      - uses: sv-tools/rust-metadata-action@8618602bef8488998677a4ed006f9a9a35cf6756 # v0.1.0
+        id: rustmeta
+  Publish:
+    needs:
+      - Build
+      - RustMeta
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.RustMeta.outputs.publish) }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.5.0
       - run: cargo install cargo-license
@@ -28,4 +43,4 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish --all-features --allow-dirty --verbose
+        run: cargo publish --package ${{ matrix.package }} --all-features --allow-dirty --verbose
