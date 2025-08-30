@@ -393,11 +393,11 @@ impl Validate for Spec {
                             .insert(format!("#/paths/operations/{operation_id}"))
                     {
                         ctx.error(
-                                "#".to_owned(),
-                                format!(
-                                    ".paths[{name}].{method}.operationId: `{operation_id}` already in use"
-                                ),
-                            );
+                            "#".to_owned(),
+                            format!(
+                                ".paths[{name}].{method}.operationId: `{operation_id}` already in use"
+                            ),
+                        );
                     }
                 }
             }
