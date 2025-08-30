@@ -12,10 +12,12 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-#    groups:
-#      rust-serde: # group updates of all serde crates together
-#        patterns:
-#          - "serde*"
-#      rust: # group updates of all other crates together
-#        patterns:
-#          - "*"
+    groups:
+      rust-serde: # group updates of all serde crates together
+        patterns:
+          - "serde*"
+        update-types: [ "major", "minor", "patch" ]
+      rust: # group updates of all other crates together
+        patterns:
+          - "*"
+        update-types: [ "major", "minor", "patch" ]
