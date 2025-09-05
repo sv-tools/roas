@@ -54,7 +54,7 @@ pub enum Options {
     /// Applies for v2.0, v3.0, v3.1
     IgnoreUnusedResponses,
 
-    /// Ignore unused security definitions.
+    /// Ignore unused server variables.
     /// Applies for v3.0, v3.1
     IgnoreUnusedServerVariables,
 
