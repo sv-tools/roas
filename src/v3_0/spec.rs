@@ -465,7 +465,7 @@ mod tests {
             .unwrap()
             .openapi,
             Version::V3_0_4,
-            "3.0.0 spec.openapi",
+            "3.0.4 spec.openapi",
         );
         assert_eq!(
             serde_json::from_value::<Spec>(serde_json::json!({
