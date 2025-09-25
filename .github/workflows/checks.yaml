@@ -9,6 +9,8 @@ on:
     secrets:
       CODECOV_TOKEN:
         required: true
+    outputs:
+      publish: ${{ jobs.RustMeta.outputs.publish }}
   schedule:
     - cron: "0 0 * * 0"
 
