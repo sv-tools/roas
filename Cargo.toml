@@ -1,6 +1,6 @@
 [package]
 name = "roas"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 description = "Rust OpenAPI Specification"
