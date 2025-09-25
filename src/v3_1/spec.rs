@@ -154,7 +154,7 @@ pub struct Spec {
     /// the OpenAPI document.
     /// This is not related to the API info.version string.
     ///
-    /// The value MUST be one of ["3.1.0"].
+    /// The value MUST be one of ["3.1.0", "3.1.1", "3.1.2"].
     pub openapi: Version,
 
     /// **Required** Provides metadata about the API.
@@ -284,15 +284,25 @@ pub struct Spec {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub enum Version {
     /// `3.1.0` version
-    #[default]
     #[serde(rename = "3.1.0")]
     V3_1_0,
+
+    /// `3.1.1` version
+    #[serde(rename = "3.1.1")]
+    V3_1_1,
+
+    /// `3.1.2` version
+    #[default]
+    #[serde(rename = "3.1.2", alias = "3.1")]
+    V3_1_2,
 }
 
 impl Display for Version {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             Self::V3_1_0 => write!(f, "3.1.0"),
+            Self::V3_1_1 => write!(f, "3.1.1"),
+            Self::V3_1_2 => write!(f, "3.1.2"),
         }
     }
 }
@@ -484,105 +494,99 @@ impl Validate for Spec {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//
-//     #[test]
-//     fn test_swagger_version_deserialize() {
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "2.0",
-//                 "info": {
-//                     "title": "foo",
-//                     "version": "1",
-//                 },
-//                 "paths": {},
-//             }))
-//             .unwrap(),
-//             Spec {
-//                 swagger: Version::V2_0,
-//                 info: Info {
-//                     title: String::from("foo"),
-//                     version: String::from("1"),
-//                     ..Default::default()
-//                 },
-//                 ..Default::default()
-//             },
-//             "correct swagger version",
-//         );
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "",
-//                 "info": {
-//                     "title": "foo",
-//                     "version": "1",
-//                 },
-//                 "paths": {},
-//             }))
-//             .unwrap_err()
-//             .to_string(),
-//             "unknown variant ``, expected `2.0`",
-//             "empty swagger version",
-//         );
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "foo",
-//                 "info": {
-//                     "title": "foo",
-//                     "version":"1",
-//                 }
-//             }))
-//             .unwrap_err()
-//             .to_string(),
-//             "unknown variant `foo`, expected `2.0`",
-//             "foo as swagger version",
-//         );
-//     }
-//
-//     #[test]
-//     fn test_swagger_version_serialize() {
-//         #[derive(Deserialize)]
-//         struct TestVersion {
-//             pub swagger: String,
-//         }
-//         assert_eq!(
-//             serde_json::from_str::<TestVersion>(
-//                 serde_json::to_string(&Spec {
-//                     swagger: Version::V2_0,
-//                     info: Info {
-//                         title: String::from("foo"),
-//                         version: String::from("1"),
-//                         ..Default::default()
-//                     },
-//                     ..Default::default()
-//                 })
-//                 .unwrap()
-//                 .as_str(),
-//             )
-//             .unwrap()
-//             .swagger,
-//             "2.0",
-//         );
-//         assert_eq!(
-//             serde_json::from_str::<TestVersion>(
-//                 serde_json::to_string(&Spec {
-//                     info: Info {
-//                         title: String::from("foo"),
-//                         version: String::from("1"),
-//                         ..Default::default()
-//                     },
-//                     ..Default::default()
-//                 })
-//                 .unwrap()
-//                 .as_str(),
-//             )
-//             .unwrap()
-//             .swagger,
-//             "2.0",
-//         );
-//     }
-//
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_deserialize() {
+        assert_eq!(
+            serde_json::from_value::<Version>(serde_json::json!("3.1.0")).unwrap(),
+            Version::V3_1_0,
+            "correct openapi version",
+        );
+        assert_eq!(
+            serde_json::from_value::<Version>(serde_json::json!("3.1")).unwrap(),
+            Version::V3_1_2,
+            "3.1 openapi version",
+        );
+        assert_eq!(
+            serde_json::from_value::<Version>(serde_json::json!("foo"))
+                .unwrap_err()
+                .to_string(),
+            "unknown variant `foo`, expected one of `3.1.0`, `3.1.1`, `3.1`, `3.1.2`",
+            "foo as openapi version",
+        );
+        assert_eq!(
+            serde_json::from_value::<Spec>(serde_json::json!({
+                "openapi": "3.1.2",
+                "info": {
+                    "title": "foo",
+                    "version": "1",
+                },
+                "paths": {},
+            }))
+            .unwrap()
+            .openapi,
+            Version::V3_1_2,
+            "3.1.2 spec.openapi",
+        );
+        assert_eq!(
+            serde_json::from_value::<Spec>(serde_json::json!({
+                "openapi": "3.1",
+                "info": {
+                    "title": "foo",
+                    "version": "1",
+                },
+                "paths": {},
+            }))
+            .unwrap()
+            .openapi,
+            Version::V3_1_2,
+            "3.1 spec.openapi",
+        );
+        assert_eq!(
+            serde_json::from_value::<Spec>(serde_json::json!({
+                "openapi": "",
+                "info": {
+                    "title": "foo",
+                    "version": "1",
+                },
+                "paths": {},
+            }))
+            .unwrap_err()
+            .to_string(),
+            "unknown variant ``, expected one of `3.1.0`, `3.1.1`, `3.1`, `3.1.2`",
+            "empty spec.openapi",
+        );
+        assert_eq!(
+            serde_json::from_value::<Spec>(serde_json::json!({
+                "info": {
+                    "title": "foo",
+                    "version": "1",
+                },
+                "paths": {},
+            }))
+            .unwrap_err()
+            .to_string(),
+            "missing field `openapi`",
+            "missing spec.openapi",
+        );
+    }
+
+    #[test]
+    fn test_version_serialize() {
+        assert_eq!(
+            serde_json::to_string(&Version::V3_1_0).unwrap(),
+            r#""3.1.0""#,
+        );
+        assert_eq!(
+            serde_json::to_string(&Version::default()).unwrap(),
+            r#""3.1.2""#,
+        );
+    }
+}
+
 //     #[test]
 //     fn test_scheme_deserialize() {
 //         assert_eq!(
