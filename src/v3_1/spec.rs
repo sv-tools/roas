@@ -14,6 +14,7 @@ use crate::v3_1::external_documentation::ExternalDocumentation;
 use crate::v3_1::header::Header;
 use crate::v3_1::info::Info;
 use crate::v3_1::link::Link;
+use crate::v3_1::operation::Operation;
 use crate::v3_1::parameter::Parameter;
 use crate::v3_1::path_item::{PathItem, Paths};
 use crate::v3_1::request_body::RequestBody;
@@ -299,7 +300,7 @@ pub enum Version {
 
     /// `3.1.2` version
     #[default]
-    #[serde(rename = "3.1.2", alias = "3.1")]
+    #[serde(rename = "3.1.2")]
     V3_1_2,
 }
 
@@ -617,6 +618,43 @@ impl ResolveReference<Tag> for Spec {
     }
 }
 
+/// Append every `&Operation` reachable from `item` (and recursively from
+/// each Operation's `callbacks`) to `out`, tagging it with a display
+/// `location`. `seen_cb` deduplicates `Callback` payloads so two refs to
+/// the same components.callbacks entry don't double-count its operations.
+fn walk_path_item_ops<'a>(
+    item: &'a PathItem,
+    location: String,
+    spec: &'a Spec,
+    out: &mut Vec<(&'a Operation, String)>,
+    seen_cb: &mut std::collections::HashSet<*const Callback>,
+) {
+    let Some(operations) = &item.operations else {
+        return;
+    };
+    for (method, op) in operations {
+        let op_loc = format!("{location}.{method}");
+        out.push((op, op_loc.clone()));
+        if let Some(cbs) = &op.callbacks {
+            for (cb_name, cb_ref) in cbs {
+                if let Ok(cb) = cb_ref.get_item(spec)
+                    && seen_cb.insert(cb as *const Callback)
+                {
+                    for (expr, pi) in &cb.paths {
+                        walk_path_item_ops(
+                            pi,
+                            format!("{op_loc}.callbacks[{cb_name}][{expr}]"),
+                            spec,
+                            out,
+                            seen_cb,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
@@ -640,61 +678,74 @@ impl Validate for Spec {
             }
         }
 
-        // Memorize all operation ids across BOTH paths AND webhooks first
-        // (3.1 added webhooks; both are reachable Operation containers).
-        // Spec: operationId MUST be unique across the whole document.
-        let collect_op_ids = |container: &Paths, section: &str, ctx: &mut Context<Spec>| {
-            for (name, item) in container.iter() {
-                if let Some(operations) = &item.operations {
-                    for (method, operation) in operations.iter() {
-                        if let Some(operation_id) = &operation.operation_id
-                            && !ctx
-                                .visited
-                                .insert(format!("#/paths/operations/{operation_id}"))
-                        {
-                            ctx.error(
-                                "#".to_owned(),
-                                format_args!(
-                                    ".{section}[{name}].{method}.operationId: `{operation_id}` already in use"
-                                ),
+        // OAS 3.1.2: operationId MUST be unique across the whole document.
+        // Gather upfront so Link.operationId/operationRef can resolve
+        // targets in containers Components hasn't been recursed into yet.
+        let mut found: Vec<(&Operation, String)> = Vec::new();
+        let mut seen_cb: std::collections::HashSet<*const Callback> =
+            std::collections::HashSet::new();
+        if let Some(paths) = &self.paths {
+            for (name, item) in paths.iter() {
+                walk_path_item_ops(
+                    item,
+                    format!("paths[{name}]"),
+                    self,
+                    &mut found,
+                    &mut seen_cb,
+                );
+            }
+        }
+        if let Some(webhooks) = &self.webhooks {
+            for (name, item) in webhooks.iter() {
+                walk_path_item_ops(
+                    item,
+                    format!("webhooks[{name}]"),
+                    self,
+                    &mut found,
+                    &mut seen_cb,
+                );
+            }
+        }
+        if let Some(components) = &self.components {
+            if let Some(map) = &components.path_items {
+                for (name, item) in map.iter() {
+                    walk_path_item_ops(
+                        item,
+                        format!("components.pathItems[{name}]"),
+                        self,
+                        &mut found,
+                        &mut seen_cb,
+                    );
+                }
+            }
+            if let Some(cbs) = &components.callbacks {
+                for (cb_name, cb_ref) in cbs {
+                    if let Ok(cb) = cb_ref.get_item(self)
+                        && seen_cb.insert(cb as *const Callback)
+                    {
+                        for (expr, pi) in &cb.paths {
+                            walk_path_item_ops(
+                                pi,
+                                format!("components.callbacks[{cb_name}][{expr}]"),
+                                self,
+                                &mut found,
+                                &mut seen_cb,
                             );
                         }
                     }
                 }
             }
-        };
-        if let Some(paths) = &self.paths {
-            collect_op_ids(paths, "paths", &mut ctx);
         }
-        if let Some(webhooks) = &self.webhooks {
-            collect_op_ids(webhooks, "webhooks", &mut ctx);
-        }
-        // Also collect op-ids from `components.pathItems` upfront — those
-        // operations are reachable (e.g. via `Link.operationId` or
-        // `Link.operationRef`) and Link validation runs *before* the
-        // components validate pass would otherwise visit them. Without
-        // this, a Link referencing an op-id defined only inside
-        // `components.pathItems` would be reported as missing.
-        if let Some(components) = &self.components
-            && let Some(map) = &components.path_items
-        {
-            for (name, item) in map.iter() {
-                if let Some(operations) = &item.operations {
-                    for (method, operation) in operations.iter() {
-                        if let Some(operation_id) = &operation.operation_id
-                            && !ctx
-                                .visited
-                                .insert(format!("#/paths/operations/{operation_id}"))
-                        {
-                            ctx.error(
-                                "#".to_owned(),
-                                format_args!(
-                                    ".components.pathItems[{name}].{method}.operationId: `{operation_id}` already in use"
-                                ),
-                            );
-                        }
-                    }
-                }
+        for (op, location) in found {
+            if let Some(operation_id) = &op.operation_id
+                && !ctx
+                    .visited
+                    .insert(format!("#/paths/operations/{operation_id}"))
+            {
+                ctx.error(
+                    "#".to_owned(),
+                    format_args!(".{location}.operationId: `{operation_id}` already in use"),
+                );
             }
         }
 
@@ -768,16 +819,15 @@ mod tests {
             Version::V3_1_0,
             "correct openapi version",
         );
-        assert_eq!(
-            serde_json::from_value::<Version>(serde_json::json!("3.1")).unwrap(),
-            Version::V3_1_2,
-            "3.1 openapi version",
+        assert!(
+            serde_json::from_value::<Version>(serde_json::json!("3.1")).is_err(),
+            "non-semver `3.1` must be rejected",
         );
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("foo"))
                 .unwrap_err()
                 .to_string(),
-            "unknown variant `foo`, expected one of `3.1.0`, `3.1.1`, `3.1`, `3.1.2`",
+            "unknown variant `foo`, expected one of `3.1.0`, `3.1.1`, `3.1.2`",
             "foo as openapi version",
         );
         assert_eq!(
@@ -794,19 +844,14 @@ mod tests {
             Version::V3_1_2,
             "3.1.2 spec.openapi",
         );
-        assert_eq!(
+        assert!(
             serde_json::from_value::<Spec>(serde_json::json!({
                 "openapi": "3.1",
-                "info": {
-                    "title": "foo",
-                    "version": "1",
-                },
+                "info": {"title": "foo", "version": "1"},
                 "paths": {},
             }))
-            .unwrap()
-            .openapi,
-            Version::V3_1_2,
-            "3.1 spec.openapi",
+            .is_err(),
+            "non-semver `3.1` must be rejected at the Spec level too",
         );
         assert_eq!(
             serde_json::from_value::<Spec>(serde_json::json!({
@@ -819,7 +864,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string(),
-            "unknown variant ``, expected one of `3.1.0`, `3.1.1`, `3.1`, `3.1.2`",
+            "unknown variant ``, expected one of `3.1.0`, `3.1.1`, `3.1.2`",
             "empty spec.openapi",
         );
         assert_eq!(
@@ -1623,6 +1668,163 @@ mod tests {
             assert!(
                 e.errors.iter().all(|s| !s.contains("collapse to the same")),
                 "webhook templates wrongly flagged: {:?}",
+                e.errors
+            );
+        }
+    }
+
+    #[test]
+    fn operation_id_uniqueness_descends_into_callbacks() {
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::{PathItem, Paths};
+        use crate::v3_1::response::{Response, Responses};
+
+        let make_op = |id: &str| Operation {
+            operation_id: Some(id.to_owned()),
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert(
+            "expr".to_owned(),
+            PathItem {
+                operations: Some(BTreeMap::from([("post".to_owned(), make_op("dup"))])),
+                ..Default::default()
+            },
+        );
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert(
+            "ping".to_owned(),
+            RefOr::new_item(Callback {
+                paths: cb_paths,
+                ..Default::default()
+            }),
+        );
+        let outer = Operation {
+            operation_id: Some("dup".to_owned()),
+            responses: make_op("ignored").responses,
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), outer);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("operationId") && e.contains("`dup`")),
+            "expected duplicate-id across callback boundary: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn link_operation_id_resolves_in_inline_callback() {
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::link::Link;
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::{PathItem, Paths};
+        use crate::v3_1::response::{Response, Responses};
+
+        let make_op = |id: Option<&str>| Operation {
+            operation_id: id.map(str::to_owned),
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert(
+            "expr".to_owned(),
+            PathItem {
+                operations: Some(BTreeMap::from([(
+                    "post".to_owned(),
+                    make_op(Some("inCallback")),
+                )])),
+                ..Default::default()
+            },
+        );
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert(
+            "ping".to_owned(),
+            RefOr::new_item(Callback {
+                paths: cb_paths,
+                ..Default::default()
+            }),
+        );
+        let mut links = BTreeMap::new();
+        links.insert(
+            "next".to_owned(),
+            RefOr::new_item(Link {
+                operation_id: Some("inCallback".to_owned()),
+                ..Default::default()
+            }),
+        );
+        let outer = Operation {
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        links: Some(links),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), outer);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let res = spec.validate(Options::new());
+        if let Err(e) = res {
+            assert!(
+                e.errors.iter().all(|s| !s.contains("inCallback")),
+                "Link.operationId in callback must resolve: {:?}",
                 e.errors
             );
         }

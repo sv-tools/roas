@@ -6,6 +6,7 @@ use crate::v3_1::operation::Operation;
 use crate::v3_1::parameter::Parameter;
 use crate::v3_1::server::Server;
 use crate::v3_1::spec::Spec;
+use crate::validation::Options;
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -203,19 +204,18 @@ impl<'de> Deserialize<'de> for PathItem {
                         extensions.insert(key, map.next_value()?);
                     } else {
                         // OAS 3.1.2 fixes the Operation field set to these
-                        // eight method names; anything else is a typo or
-                        // unsupported method, not a custom operation.
-                        let lowered = key.to_lowercase();
+                        // eight lowercase method names. Field names are
+                        // case-sensitive: `GET` is not a fixed field.
                         const HTTP_METHODS: &[&str] = &[
                             "get", "put", "post", "delete", "options", "head", "patch", "trace",
                         ];
-                        if !HTTP_METHODS.contains(&lowered.as_str()) {
+                        if !HTTP_METHODS.contains(&key.as_str()) {
                             return Err(Error::unknown_field(key.as_str(), FIELDS));
                         }
-                        if operations.contains_key(lowered.as_str()) {
-                            return Err(Error::custom(format!("duplicate field '{lowered}'")));
+                        if operations.contains_key(key.as_str()) {
+                            return Err(Error::custom(format!("duplicate field '{key}'")));
                         }
-                        operations.insert(lowered, map.next_value()?);
+                        operations.insert(key, map.next_value()?);
                     }
                 }
                 if !operations.is_empty() {
@@ -234,10 +234,22 @@ impl<'de> Deserialize<'de> for PathItem {
 
 impl ValidateWithContext<Spec> for PathItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        if let Some(r) = &self.reference
-            && r.is_empty()
-        {
-            ctx.error(path.clone(), ".$ref: must not be empty");
+        if let Some(r) = &self.reference {
+            if r.is_empty() {
+                ctx.error(path.clone(), ".$ref: must not be empty");
+            } else if r.starts_with("#/") {
+                if !internal_path_item_ref_target_exists(ctx.spec, r) {
+                    ctx.error(
+                        path.clone(),
+                        format_args!(".$ref: target `{r}` is not declared in this document"),
+                    );
+                }
+            } else if !ctx.is_option(Options::IgnoreExternalReferences) {
+                ctx.error(
+                    path.clone(),
+                    format_args!(".$ref: external reference `{r}` is not supported"),
+                );
+            }
         }
 
         if let Some(operations) = &self.operations {
@@ -257,6 +269,48 @@ impl ValidateWithContext<Spec> for PathItem {
                 parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
             }
         }
+    }
+}
+
+/// Decode one JSON Pointer reference token (RFC 6901): `~1` → `/`,
+/// `~0` → `~`. Order matters so `~01` round-trips to `~1`.
+fn unescape_pointer_token(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+/// True if `reference` (an internal `#/...` pointer) names a `PathItem`
+/// declared anywhere in the document. PathItem `$ref`s may target the
+/// three containers that store path items: `#/paths`, `#/webhooks`, and
+/// `#/components/pathItems`.
+fn internal_path_item_ref_target_exists(spec: &Spec, reference: &str) -> bool {
+    let one_token = |after: &str| -> Option<String> {
+        if after.contains('/') {
+            None
+        } else {
+            Some(unescape_pointer_token(after))
+        }
+    };
+    if let Some(after) = reference.strip_prefix("#/paths/") {
+        one_token(after).is_some_and(|k| {
+            spec.paths
+                .as_ref()
+                .is_some_and(|p| p.paths.contains_key(&k))
+        })
+    } else if let Some(after) = reference.strip_prefix("#/webhooks/") {
+        one_token(after).is_some_and(|k| {
+            spec.webhooks
+                .as_ref()
+                .is_some_and(|w| w.paths.contains_key(&k))
+        })
+    } else if let Some(after) = reference.strip_prefix("#/components/pathItems/") {
+        one_token(after).is_some_and(|k| {
+            spec.components
+                .as_ref()
+                .and_then(|c| c.path_items.as_ref())
+                .is_some_and(|m| m.contains_key(&k))
+        })
+    } else {
+        false
     }
 }
 
@@ -423,6 +477,86 @@ mod tests {
     }
 
     #[test]
+    fn dangling_internal_ref_reported() {
+        let pi = PathItem {
+            reference: Some("#/components/pathItems/Missing".into()),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in this document")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn external_ref_reported_unless_ignored() {
+        let pi = PathItem {
+            reference: Some("https://example.com/spec#/paths/~1pets".into()),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("external reference")),
+            "errors: {:?}",
+            ctx.errors
+        );
+        let mut ctx = Context::new(&spec, Options::IgnoreExternalReferences.only());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("external reference")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_ref_resolved_against_each_container() {
+        let mut paths = Paths::default();
+        paths.paths.insert("/pets".to_owned(), PathItem::default());
+        let mut webhooks = Paths::default();
+        webhooks
+            .paths
+            .insert("petCreated".to_owned(), PathItem::default());
+        let mut cp = BTreeMap::new();
+        cp.insert("Reusable".to_owned(), PathItem::default());
+        let comp = crate::v3_1::components::Components {
+            path_items: Some(cp),
+            ..Default::default()
+        };
+        let spec = Spec {
+            paths: Some(paths),
+            webhooks: Some(webhooks),
+            components: Some(comp),
+            ..Default::default()
+        };
+        for r in [
+            "#/paths/~1pets",
+            "#/webhooks/petCreated",
+            "#/components/pathItems/Reusable",
+        ] {
+            let pi = PathItem {
+                reference: Some(r.into()),
+                ..Default::default()
+            };
+            let mut ctx = Context::new(&spec, crate::validation::Options::new());
+            pi.validate_with_context(&mut ctx, "p".into());
+            assert!(
+                ctx.errors.iter().all(|e| !e.contains("not declared")),
+                "{r} should resolve: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
     fn paths_struct_round_trip_extensions() {
         let v = json!({
             "/pets": {"get": {"responses": {"200": {"description": "ok"}}}},
@@ -462,13 +596,13 @@ mod tests {
     }
 
     #[test]
-    fn known_methods_case_insensitive_accepted() {
+    fn uppercase_method_rejected() {
         let raw = r#"{"GET": {"responses": {"200": {"description": "ok"}}}}"#;
-        let pi: PathItem = serde_json::from_str(raw).unwrap();
+        let err = serde_json::from_str::<PathItem>(raw)
+            .expect_err("expected unknown-field error for uppercase method");
         assert!(
-            pi.operations
-                .as_ref()
-                .is_some_and(|m| m.contains_key("get"))
+            err.to_string().contains("unknown field") && err.to_string().contains("GET"),
+            "unexpected error: {err}"
         );
     }
 }

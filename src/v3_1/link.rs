@@ -27,17 +27,17 @@ enum OperationRefResolution {
 
 /// Resolve an internal operationRef. Per OAS 3.1, an operationRef is a
 /// URI Reference that "MAY point to any Operation Object in the OpenAPI
-/// definition." Supported in-document containers:
+/// definition." Supported tail shapes:
 ///
 /// - `#/paths/<encoded path>/<method>`
 /// - `#/webhooks/<name>/<method>`
 /// - `#/components/pathItems/<name>/<method>`
-/// - `#/components/callbacks/<name>/<encoded expression>/<method>` —
-///   reusable callback Operations are still Operation Objects.
+/// - `#/components/callbacks/<name>/<encoded expression>/<method>`
 ///
-/// Follows internal PathItem `$ref` chains (with cycle detection) so a
-/// referencing PathItem with `{"$ref": "#/paths/~1canonical-pets"}` still
-/// resolves correctly.
+/// Any of those may be followed by `/callbacks/<name>/<encoded expression>/<method>`
+/// segments to address Operations declared inside inline `Operation.callbacks`
+/// (recursively). Internal PathItem `$ref` chains are followed with cycle
+/// detection at every PathItem level.
 fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefResolution {
     enum Container {
         Paths,
@@ -45,127 +45,187 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         ComponentPathItems,
         ComponentCallbacks,
     }
-    let (container, after, expected_tokens, schema_hint) = if let Some(rest) =
-        reference.strip_prefix("#/paths/")
-    {
-        (Container::Paths, rest, 2usize, "<encoded path>/<method>")
+    let (container, after) = if let Some(rest) = reference.strip_prefix("#/paths/") {
+        (Container::Paths, rest)
     } else if let Some(rest) = reference.strip_prefix("#/webhooks/") {
-        (Container::Webhooks, rest, 2usize, "<name>/<method>")
+        (Container::Webhooks, rest)
     } else if let Some(rest) = reference.strip_prefix("#/components/pathItems/") {
-        (
-            Container::ComponentPathItems,
-            rest,
-            2usize,
-            "<name>/<method>",
-        )
+        (Container::ComponentPathItems, rest)
     } else if let Some(rest) = reference.strip_prefix("#/components/callbacks/") {
-        (
-            Container::ComponentCallbacks,
-            rest,
-            3usize,
-            "<name>/<encoded expression>/<method>",
-        )
+        (Container::ComponentCallbacks, rest)
     } else {
         return OperationRefResolution::Err(format!(
             "must start with `#/paths/`, `#/webhooks/`, `#/components/pathItems/`, or `#/components/callbacks/`, found `{reference}`"
         ));
     };
 
-    // Per RFC 6901, each token's `/` is encoded as `~1`, so the number of
-    // unescaped `/` separators must equal `expected_tokens - 1`.
     let parts: Vec<&str> = after.split('/').collect();
-    if parts.len() != expected_tokens || parts.iter().any(|p| p.is_empty()) {
+    if parts.iter().any(|p| p.is_empty()) {
         return OperationRefResolution::Err(format!(
-            "malformed JSON Pointer: must point to `#/<container>/{schema_hint}` where each token with embedded `/` is encoded as `~1`, found `{reference}`"
+            "malformed JSON Pointer: empty token in `{reference}`; each token with embedded `/` MUST be encoded as `~1`"
         ));
     }
 
-    let (entry_path, item, method) = match container {
-        Container::Paths => {
-            let path = unescape_pointer_token(parts[0]);
-            let Some(item) = spec.paths.as_ref().and_then(|p| p.paths.get(&path)) else {
-                return OperationRefResolution::Err(format!(
-                    "path `{path}` not declared in `#/paths`"
-                ));
-            };
-            (path, item, parts[1])
-        }
-        Container::Webhooks => {
-            let name = unescape_pointer_token(parts[0]);
-            let Some(item) = spec.webhooks.as_ref().and_then(|w| w.paths.get(&name)) else {
-                return OperationRefResolution::Err(format!(
-                    "webhook `{name}` not declared in `#/webhooks`"
-                ));
-            };
-            (name, item, parts[1])
-        }
-        Container::ComponentPathItems => {
-            let name = unescape_pointer_token(parts[0]);
-            let Some(item) = spec
-                .components
-                .as_ref()
-                .and_then(|c| c.path_items.as_ref())
-                .and_then(|m| m.get(&name))
-            else {
-                return OperationRefResolution::Err(format!(
-                    "path item `{name}` not declared in `#/components/pathItems`"
-                ));
-            };
-            (name, item, parts[1])
-        }
-        Container::ComponentCallbacks => {
-            let cb_name = unescape_pointer_token(parts[0]);
-            let expr = unescape_pointer_token(parts[1]);
-            let Some(cb_ref) = spec
-                .components
-                .as_ref()
-                .and_then(|c| c.callbacks.as_ref())
-                .and_then(|m| m.get(&cb_name))
-            else {
-                return OperationRefResolution::Err(format!(
-                    "callback `{cb_name}` not declared in `#/components/callbacks`"
-                ));
-            };
-            // External callback refs route through ExternalPathItemRef so
-            // callers can honor `IgnoreExternalReferences`.
-            let cb = match cb_ref.get_item(spec) {
-                Ok(cb) => cb,
-                Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
-                    return OperationRefResolution::ExternalPathItemRef(target);
+    let (entry_path, mut item, mut consumed): (String, &crate::v3_1::path_item::PathItem, usize) =
+        match container {
+            Container::Paths => {
+                if parts.len() < 2 {
+                    return malformed_pointer(reference);
                 }
-                Err(crate::common::reference::ResolveError::NotFound(t)) => {
+                let path = unescape_pointer_token(parts[0]);
+                let Some(item) = spec.paths.as_ref().and_then(|p| p.paths.get(&path)) else {
                     return OperationRefResolution::Err(format!(
-                        "callback `{cb_name}` is a `$ref` to `{t}`, which is not declared"
+                        "path `{path}` not declared in `#/paths`"
                     ));
+                };
+                (path, item, 1)
+            }
+            Container::Webhooks => {
+                if parts.len() < 2 {
+                    return malformed_pointer(reference);
                 }
-            };
-            let Some(item) = cb.paths.get(&expr) else {
-                return OperationRefResolution::Err(format!(
-                    "expression `{expr}` not declared on callback `{cb_name}`"
-                ));
-            };
-            (format!("{cb_name}/{expr}"), item, parts[2])
-        }
-    };
-
-    let mut seen = std::collections::BTreeSet::from([entry_path.clone()]);
-    let (target_path, target_item) =
-        match resolve_path_item_ref_chain(spec, &entry_path, item, &mut seen) {
-            Ok(t) => t,
-            Err(err) => return err,
+                let name = unescape_pointer_token(parts[0]);
+                let Some(item) = spec.webhooks.as_ref().and_then(|w| w.paths.get(&name)) else {
+                    return OperationRefResolution::Err(format!(
+                        "webhook `{name}` not declared in `#/webhooks`"
+                    ));
+                };
+                (name, item, 1)
+            }
+            Container::ComponentPathItems => {
+                if parts.len() < 2 {
+                    return malformed_pointer(reference);
+                }
+                let name = unescape_pointer_token(parts[0]);
+                let Some(item) = spec
+                    .components
+                    .as_ref()
+                    .and_then(|c| c.path_items.as_ref())
+                    .and_then(|m| m.get(&name))
+                else {
+                    return OperationRefResolution::Err(format!(
+                        "path item `{name}` not declared in `#/components/pathItems`"
+                    ));
+                };
+                (name, item, 1)
+            }
+            Container::ComponentCallbacks => {
+                if parts.len() < 3 {
+                    return malformed_pointer(reference);
+                }
+                let cb_name = unescape_pointer_token(parts[0]);
+                let expr = unescape_pointer_token(parts[1]);
+                let Some(cb_ref) = spec
+                    .components
+                    .as_ref()
+                    .and_then(|c| c.callbacks.as_ref())
+                    .and_then(|m| m.get(&cb_name))
+                else {
+                    return OperationRefResolution::Err(format!(
+                        "callback `{cb_name}` not declared in `#/components/callbacks`"
+                    ));
+                };
+                let cb = match cb_ref.get_item(spec) {
+                    Ok(cb) => cb,
+                    Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
+                        return OperationRefResolution::ExternalPathItemRef(target);
+                    }
+                    Err(crate::common::reference::ResolveError::NotFound(t)) => {
+                        return OperationRefResolution::Err(format!(
+                            "callback `{cb_name}` is a `$ref` to `{t}`, which is not declared"
+                        ));
+                    }
+                };
+                let Some(item) = cb.paths.get(&expr) else {
+                    return OperationRefResolution::Err(format!(
+                        "expression `{expr}` not declared on callback `{cb_name}`"
+                    ));
+                };
+                (format!("{cb_name}/{expr}"), item, 2)
+            }
         };
 
+    let mut seen = std::collections::BTreeSet::from([entry_path.clone()]);
+    let mut display_path = entry_path;
+    item = match resolve_path_item_ref_chain(spec, &display_path, item, &mut seen) {
+        Ok((p, t)) => {
+            display_path = p;
+            t
+        }
+        Err(err) => return err,
+    };
+
+    if consumed >= parts.len() {
+        return malformed_pointer(reference);
+    }
+    let mut method = parts[consumed];
+    consumed += 1;
+
+    while consumed < parts.len() {
+        if parts.len() - consumed < 4 || parts[consumed] != "callbacks" {
+            return OperationRefResolution::Err(format!(
+                "malformed deep pointer: expected `/callbacks/<name>/<expr>/<method>` continuation, found `{reference}`"
+            ));
+        }
+        let method_lower = method.to_lowercase();
+        let Some(op) = item.operations.as_ref().and_then(|m| m.get(&method_lower)) else {
+            return OperationRefResolution::Err(format!(
+                "method `{method}` not declared on path `{display_path}`"
+            ));
+        };
+        let cb_name = parts[consumed + 1];
+        let expr = unescape_pointer_token(parts[consumed + 2]);
+        let next_method = parts[consumed + 3];
+        let Some(cb_ref) = op.callbacks.as_ref().and_then(|m| m.get(cb_name)) else {
+            return OperationRefResolution::Err(format!(
+                "callback `{cb_name}` not declared on `{display_path}.{method_lower}`"
+            ));
+        };
+        let cb = match cb_ref.get_item(spec) {
+            Ok(cb) => cb,
+            Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
+                return OperationRefResolution::ExternalPathItemRef(target);
+            }
+            Err(crate::common::reference::ResolveError::NotFound(t)) => {
+                return OperationRefResolution::Err(format!(
+                    "callback `{cb_name}` is a `$ref` to `{t}`, which is not declared"
+                ));
+            }
+        };
+        let Some(next_item) = cb.paths.get(&expr) else {
+            return OperationRefResolution::Err(format!(
+                "expression `{expr}` not declared on callback `{cb_name}`"
+            ));
+        };
+        display_path = format!("{display_path}.{method_lower}.callbacks[{cb_name}][{expr}]");
+        item = match resolve_path_item_ref_chain(spec, &display_path, next_item, &mut seen) {
+            Ok((p, t)) => {
+                display_path = p;
+                t
+            }
+            Err(err) => return err,
+        };
+        method = next_method;
+        consumed += 4;
+    }
+
     let method_lower = method.to_lowercase();
-    let exists = target_item
+    if !item
         .operations
         .as_ref()
-        .is_some_and(|m| m.contains_key(&method_lower));
-    if !exists {
+        .is_some_and(|m| m.contains_key(&method_lower))
+    {
         return OperationRefResolution::Err(format!(
-            "method `{method}` not declared on path `{target_path}`"
+            "method `{method}` not declared on path `{display_path}`"
         ));
     }
     OperationRefResolution::Ok
+}
+
+fn malformed_pointer(reference: &str) -> OperationRefResolution {
+    OperationRefResolution::Err(format!(
+        "malformed JSON Pointer: each token with embedded `/` MUST be encoded as `~1`, found `{reference}`"
+    ))
 }
 
 fn resolve_path_item_ref_chain<'a>(
@@ -864,6 +924,87 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("callback `Missing` not declared")),
             "expected dangling-callback error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_into_inline_path_op_callback() {
+        use crate::v3_1::callback::Callback;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("{$request.query.callbackUrl}".to_owned(), pi_with_get());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert("myCb".to_owned(), RefOr::new_item(cb));
+        let op = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/subscribe".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some(
+                "#/paths/~1subscribe/post/callbacks/myCb/{$request.query.callbackUrl}/get".into(),
+            ),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "deep callback target should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_inline_callback_unknown_callback_errors() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get/callbacks/missing/expr/post".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("callback `missing` not declared on")),
+            "expected unknown-inline-callback error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_deep_pointer_malformed_continuation_errors() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get/extra".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("malformed deep pointer")),
+            "expected malformed-deep-pointer error: {:?}",
             ctx.errors
         );
     }
