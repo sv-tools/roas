@@ -139,6 +139,34 @@ pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path
     }
 }
 
+/// Validates an optional URI reference (RFC 3986). More permissive than
+/// `validate_optional_url`: accepts any scheme (`scheme:rest...`), absolute
+/// or relative URI references including same-document fragments
+/// (`#/foo`) and rootless paths. Used for fields like `jsonSchemaDialect`
+/// where JSON Schema dialect URIs may be opaque (e.g.
+/// `urn:example:dialect`) and not necessarily HTTP(S).
+pub fn validate_optional_uri<T>(uri: &Option<String>, ctx: &mut Context<T>, path: String) {
+    let Some(uri) = uri else { return };
+    if ctx.is_option(Options::IgnoreInvalidUrls) {
+        return;
+    }
+    // Present-but-empty is invalid: the field was set, so it must hold
+    // a real URI. (Absent is fine — the caller used `Option`.)
+    if uri.is_empty() {
+        ctx.error(path, "must be a valid URI, found ``");
+        return;
+    }
+    // Reject obviously broken forms: any ASCII whitespace or control
+    // character (C0 0x00..0x1F or DEL 0x7F). The full RFC 3986 grammar
+    // is wide enough that everything else is best left to a parser.
+    if uri
+        .bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        ctx.error(path, format_args!("must be a valid URI, found `{uri}`"));
+    }
+}
+
 /// Validates that the given URL string starts with "http://" or "https://".
 /// If the URL is invalid, records an error in the context.
 pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
@@ -289,6 +317,28 @@ mod tests {
             &Some(String::from("foo-bar")),
             &mut ctx,
             String::from("test_url"),
+        );
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn validate_optional_uri_rejects_control_chars_and_whitespace() {
+        // Tab, newline, DEL, and other C0 / DEL controls each fail.
+        for s in ["bad\turi", "with\nnewline", "with\x01ctl", "with\x7fdel"] {
+            let mut ctx = Context::new(&(), Options::new());
+            validate_optional_uri(&Some(s.to_owned()), &mut ctx, "u".to_owned());
+            assert!(
+                ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
+                "expected error for `{s:?}`: {:?}",
+                ctx.errors
+            );
+        }
+        // A clean URI passes.
+        let mut ctx = Context::new(&(), Options::new());
+        validate_optional_uri(
+            &Some("urn:example:dialect".to_owned()),
+            &mut ctx,
+            "u".to_owned(),
         );
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }

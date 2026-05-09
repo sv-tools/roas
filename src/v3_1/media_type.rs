@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_1::example::Example;
 use crate::v3_1::header::Header;
@@ -177,6 +177,9 @@ pub struct Encoding {
 
 impl ValidateWithContext<Spec> for MediaType {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if self.example.is_some() && self.examples.is_some() {
+            ctx.error(path.clone(), "example and examples are mutually exclusive");
+        }
         if let Some(schema) = &self.schema {
             schema.validate_with_context(ctx, format!("{path}.schema"));
         }
@@ -200,5 +203,124 @@ impl ValidateWithContext<Spec> for Encoding {
                 header.validate_with_context(ctx, format!("{path}.headers[{name}]"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::validation::Options;
+
+    #[test]
+    fn media_type_round_trip_full() {
+        let v = serde_json::json!({
+            "schema": {"type": "object"},
+            "example": {"a": 1},
+            "encoding": {
+                "field": {
+                    "contentType": "image/png, image/jpeg",
+                    "headers": {
+                        "X-Custom": {"description": "h", "schema": {"type": "string"}}
+                    },
+                    "style": "form",
+                    "explode": true,
+                    "allowReserved": false
+                }
+            },
+            "x-extra": "yes"
+        });
+        let mt: MediaType = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&mt).unwrap(), v);
+    }
+
+    #[test]
+    fn validate_walks_examples_and_encoding_headers() {
+        // Examples and encoding-headers should each invoke their nested
+        // validators (covered branches at media_type.rs:191-205).
+        use crate::v3_1::header::Header;
+        use crate::v3_1::schema::{ObjectSchema, Schema, SingleSchema};
+        let mut examples = BTreeMap::new();
+        examples.insert(
+            "ex1".to_owned(),
+            RefOr::new_item(crate::v3_1::example::Example {
+                value: Some(serde_json::json!(1)),
+                external_value: Some("https://example.com/x.json".into()),
+                ..Default::default()
+            }),
+        );
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "X-Bad".to_owned(),
+            RefOr::new_item(Header {
+                example: Some(serde_json::json!(1)),
+                examples: Some(BTreeMap::from([(
+                    "a".into(),
+                    RefOr::new_item(crate::v3_1::example::Example::default()),
+                )])),
+                schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                    SingleSchema::Object(ObjectSchema::default()),
+                )))),
+                ..Default::default()
+            }),
+        );
+        let mut encoding = BTreeMap::new();
+        encoding.insert(
+            "field".to_owned(),
+            Encoding {
+                content_type: None,
+                headers: Some(headers),
+                style: None,
+                explode: None,
+                allow_reserved: None,
+                extensions: None,
+            },
+        );
+        let mt = MediaType {
+            schema: None,
+            example: None,
+            examples: Some(examples),
+            encoding: Some(encoding),
+            extensions: None,
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        mt.validate_with_context(&mut ctx, "mt".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("examples[ex1]")),
+            "expected nested example error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("encoding[field].headers[X-Bad]")),
+            "expected nested header error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_example_examples_xor() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let mut examples = BTreeMap::new();
+        examples.insert(
+            "a".to_owned(),
+            RefOr::new_item(crate::v3_1::example::Example::default()),
+        );
+        MediaType {
+            example: Some(serde_json::json!("e")),
+            examples: Some(examples),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "mt".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 }

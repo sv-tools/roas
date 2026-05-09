@@ -7,9 +7,10 @@ Rust OpenAPI Specification (v2.0, v3.0.X and v3.1.X)
 
 Parsing and generating OpenAPI Specification:
 
-* [x] OpenAPI Specification v2.0 (**v2**: old specification, disabled by default)
-* [x] OpenAPI Specification v3.0.x (**v3_0**: default feature)
-* [x] OpenAPI Specification v3.1.x (**v3_1**:; experimental and disabled by default)
+* [x] OpenAPI Specification [v2.0](https://spec.openapis.org/oas/v2.0.html)
+* [x] OpenAPI Specification [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)
+* [x] OpenAPI Specification [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html) (**default**)
+* [ ] OpenAPI Specification [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html) (in progress)
 
 > [!CAUTION]
 > The project is in early development stage, so the API may change in the future.
@@ -27,20 +28,20 @@ or manually add the following lines:
 
 ```toml
 [dependencies]
-roas = "0.6"
+roas = "0.7"
 ```
 
-The default feature is `v3_0`. To parse v2.0 or v3.1 specs, enable the
+The default feature is `v3_1`. To parse v2.0 or v3.0 specs, enable the
 corresponding feature:
 
 ```toml
 [dependencies]
-roas = { version = "0.6", default-features = false, features = ["v3_1"] }
+roas = { version = "0.7", default-features = false, features = ["v3_0"] }
 ```
 
 ## Examples
 
-The default feature is `v3_0`. The example below also uses `serde_json`
+The default feature is `v3_1`. The example below also uses `serde_json`
 directly, so add both crates:
 
 ```shell
@@ -48,12 +49,10 @@ cargo add roas serde_json
 ```
 
 ```rust
-use roas::v3_0::spec::Spec;
+use roas::v3_1::spec::Spec;
 use roas::validation::{Options, Validate};
 
-let raw_json = r#"{ "openapi": "3.0.4", "info": { "title": "demo", "version": "1" }, "paths": {} }"#;
+let raw_json = r#"{ "openapi": "3.1.2", "info": { "title": "demo", "version": "1" }, "paths": {} }"#;
 let spec: Spec = serde_json::from_str(raw_json).unwrap();
 spec.validate(Options::IgnoreMissingTags | Options::IgnoreExternalReferences).unwrap();
 ```
-
-For v3.1 (experimental), enable the `v3_1` feature and import from `roas::v3_1`.

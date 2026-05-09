@@ -1,7 +1,7 @@
 //! Reference Object
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
@@ -166,6 +166,23 @@ impl Ref {
     }
 }
 
+/// Resolve a `$ref` against a `Components`-style map, following alias
+/// chains iteratively with cycle detection.
+///
+/// Behavior:
+/// * `reference` MUST start with `prefix` — if not, the lookup returns
+///   `None` rather than silently using the unstripped string (this is
+///   stricter than the previous `trim_start_matches` behavior, which
+///   could fold a wrong-prefix `#/components/parameters/X` reference into
+///   the schemas map and produce confusing results).
+/// * If the matched entry is itself a `RefOr::Ref` whose target lies in
+///   the same map (`prefix`-anchored), the chain is followed iteratively.
+/// * A `BTreeSet` of already-visited references prevents infinite
+///   recursion when the chain loops (`A → B → A`); on a cycle the lookup
+///   returns `None` and the caller surfaces the usual "not found" error.
+/// * Cross-map `$ref`s (e.g. a parameter that refs a schema) are resolved
+///   via `RefOr::get_item`'s spec-wide path, so their cycle handling falls
+///   to the spec resolver.
 pub fn resolve_in_map<'a, T, D>(
     spec: &'a T,
     reference: &str,
@@ -175,9 +192,28 @@ pub fn resolve_in_map<'a, T, D>(
 where
     T: ResolveReference<D>,
 {
-    map.as_ref()
-        .and_then(|x| x.get(reference.trim_start_matches(prefix)))
-        .and_then(move |x| x.get_item(spec).ok())
+    let map = map.as_ref()?;
+    let mut current = reference;
+    let mut visited: BTreeSet<&str> = BTreeSet::new();
+
+    loop {
+        let key = current.strip_prefix(prefix)?;
+        let item = map.get(key)?;
+
+        match item {
+            RefOr::Item(d) => return Some(d),
+            RefOr::Ref(r) => {
+                if !r.reference.starts_with(prefix) {
+                    // Cross-map ref: hand off to spec-wide resolver.
+                    return item.get_item(spec).ok();
+                }
+                if !visited.insert(r.reference.as_str()) {
+                    return None;
+                }
+                current = &r.reference;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -52,3 +52,44 @@ impl ValidateWithContext<Spec> for Example {
         validate_optional_url(&self.external_value, ctx, format!("{path}.externalValue"));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::validation::Options;
+    use serde_json::json;
+
+    #[test]
+    fn xor_value_and_external_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Example {
+            value: Some(json!(1)),
+            external_value: Some("https://example.com/x.json".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "ex".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn external_value_url_validated() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Example {
+            external_value: Some("not-a-url".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "ex".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+}

@@ -30,9 +30,82 @@ impl ValidateWithContext<Spec> for Discriminator {
 
         if let Some(mapping) = &self.mapping {
             for (k, v) in mapping {
-                let schema_ref = RefOr::<Schema>::new_ref(format!("#/components/schemas/{v}"));
+                // Per OAS 3.1, mapping values are EITHER component schema
+                // *names* (resolved against `#/components/schemas/<name>`)
+                // OR URI references per RFC 3986. We distinguish by the
+                // shape of valid component names: per
+                // `Components.<map>` keys, names match
+                // `^[a-zA-Z0-9._-]+$` — no `/`, no `#`, no `:`. So any
+                // value containing `/`, `#`, or `:` is treated as a URI
+                // reference and used as-is. Anything else is taken as a
+                // component schema name.
+                let is_uri_ref = v.contains('/') || v.starts_with('#') || v.contains(':');
+                let reference = if is_uri_ref {
+                    v.clone()
+                } else {
+                    format!("#/components/schemas/{v}")
+                };
+                let schema_ref = RefOr::<Schema>::new_ref(reference);
                 schema_ref.validate_with_context(ctx, format!("{path}.mapping[{k}]"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::v3_1::schema::{ObjectSchema, SingleSchema};
+    use crate::validation::Options;
+
+    #[test]
+    fn round_trip_with_mapping() {
+        let json = serde_json::json!({
+            "propertyName": "type",
+            "mapping": {"cat": "Cat", "dog": "Dog"}
+        });
+        let d: Discriminator = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(d.property_name, "type");
+        assert_eq!(d.mapping.as_ref().unwrap().len(), 2);
+        assert_eq!(serde_json::to_value(&d).unwrap(), json);
+    }
+
+    #[test]
+    fn validate_empty_property_name_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Discriminator::default().validate_with_context(&mut ctx, "d".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("propertyName") && e.contains("must not be empty")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn mapping_resolves_against_components() {
+        let mut spec = Spec::default();
+        spec.define_schema(
+            "Cat",
+            Schema::Single(Box::new(SingleSchema::Object(ObjectSchema::default()))),
+        )
+        .unwrap();
+        let d = Discriminator {
+            property_name: "type".into(),
+            mapping: Some(BTreeMap::from([
+                ("cat".to_owned(), "Cat".to_owned()),
+                ("missing".to_owned(), "Missing".to_owned()),
+            ])),
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        d.validate_with_context(&mut ctx, "d".to_owned());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("Missing")),
+            "expected missing schema error: {:?}",
+            ctx.errors
+        );
     }
 }

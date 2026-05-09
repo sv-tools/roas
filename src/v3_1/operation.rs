@@ -7,7 +7,6 @@ use crate::v3_1::external_documentation::ExternalDocumentation;
 use crate::v3_1::parameter::Parameter;
 use crate::v3_1::request_body::RequestBody;
 use crate::v3_1::response::Responses;
-use crate::v3_1::security_scheme::SecurityScheme;
 use crate::v3_1::server::Server;
 use crate::v3_1::spec::Spec;
 use crate::v3_1::tag::Tag;
@@ -63,7 +62,9 @@ pub struct Operation {
     #[serde(rename = "requestBody")]
     pub request_body: Option<RefOr<RequestBody>>,
 
-    /// The list of possible responses as they are returned from executing this operation.
+    /// **Required** by OAS 3.1.2 — but stored as `Option<Responses>` so
+    /// real-world specs that elide the field still deserialize, with the
+    /// missing-field surfaced at validate-time rather than parse-time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub responses: Option<Responses>,
 
@@ -95,9 +96,39 @@ pub struct Operation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub servers: Option<Vec<Server>>,
 
+    /// ReDoc/Redocly extension with code samples associated with this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-codeSamples", alias = "x-code-samples")]
+    pub x_code_samples: Option<Vec<CodeSample>>,
+
+    /// Codegen/documentation extension with extra operation tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-tags")]
+    pub x_tags: Option<Vec<String>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc/Redocly `x-codeSamples` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct CodeSample {
+    /// **Required** Code sample language.
+    pub lang: String,
+
+    /// Optional display label for the language tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// **Required** Code sample source code.
+    pub source: String,
+
+    /// Allows extensions on the code sample extension object.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,57 +173,218 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
+        if let Some(samples) = &self.x_code_samples {
+            for (i, sample) in samples.iter().enumerate() {
+                sample.validate_with_context(ctx, format!("{path}.x-codeSamples[{i}]"));
+            }
+        }
+
+        if let Some(tags) = &self.x_tags {
+            for (i, tag) in tags.iter().enumerate() {
+                validate_required_string(tag, ctx, format!("{path}.x-tags[{i}]"));
+            }
+        }
+
         if let Some(callbacks) = &self.callbacks {
             for (k, v) in callbacks {
                 v.validate_with_context(ctx, format!("{path}.callbacks[{k}]"));
             }
         }
 
-        if let Some(responses) = &self.responses {
-            responses.validate_with_context(ctx, format!("{path}.responses"));
+        // Spec: Operation.responses is required.
+        match &self.responses {
+            Some(r) => r.validate_with_context(ctx, format!("{path}.responses")),
+            None => ctx.error(path.clone(), ".responses: required field is missing"),
         }
 
         if let Some(external_doc) = &self.external_docs {
             external_doc.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
 
-        if let Some(security) = &self.security {
-            for (i, security) in security.iter().enumerate() {
-                for (name, scopes) in security {
-                    let path = format!("{path}.security[{i}][{name}]");
-                    let reference = format!("#/components/securitySchemes/{name}");
-                    let spec_ref = RefOr::<SecurityScheme>::new_ref(reference.clone());
-                    spec_ref.validate_with_context(ctx, path.clone());
-                    if !scopes.is_empty()
-                        && let Ok(SecurityScheme::OAuth2(oauth2)) = spec_ref.get_item(ctx.spec)
-                    {
-                        for scope in scopes {
-                            ctx.visit(format!("{reference}/{scope}"));
-                            let mut found = false;
-                            if let Some(flow) = &oauth2.flows.implicit {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.password {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.client_credentials {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.authorization_code {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found {
-                                ctx.error(
-                                    path.clone(),
-                                    format_args!(
-                                        "scope `{scope}` not found in spec by reference `{reference}`"
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+        // Operation-level `security`: validated here so it runs everywhere
+        // an Operation is reached (including operations nested inside
+        // `Callback` and `Webhooks` path items). The shared helper resolves
+        // `oauth2` scopes against the scheme's flows and accepts free-form
+        // role-name arrays for the other scheme types per OAS 3.1.
+        if let Some(sec) = &self.security {
+            crate::v3_1::validation::validate_security_requirements(
+                ctx,
+                &format!("{path}.security"),
+                sec,
+            );
         }
+    }
+}
+
+impl ValidateWithContext<Spec> for CodeSample {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_string(&self.lang, ctx, format!("{path}.lang"));
+        validate_required_string(&self.source, ctx, format!("{path}.source"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::v3_1::response::{Response, Responses};
+    use crate::v3_1::tag::Tag;
+
+    fn ok_responses() -> Responses {
+        Responses {
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                }),
+            )])),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn missing_responses_required_field_reported() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Operation::default().validate_with_context(&mut ctx, "op".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("op.responses: required field is missing")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_walks_tags_servers_external_docs() {
+        let spec = Spec {
+            tags: Some(vec![Tag {
+                name: "pets".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        let op = Operation {
+            tags: Some(vec!["pets".into(), "".into(), "missing".into()]),
+            servers: Some(vec![Server {
+                url: "".into(),
+                ..Default::default()
+            }]),
+            external_docs: Some(ExternalDocumentation {
+                url: "".into(),
+                description: None,
+                extensions: None,
+            }),
+            responses: Some(ok_responses()),
+            ..Default::default()
+        };
+
+        let mut ctx = Context::new(&spec, Options::new());
+        op.validate_with_context(&mut ctx, "op".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("op.tags[1]") && e.contains("must not be empty")),
+            "empty tag: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`missing` not found in spec")),
+            "missing tag: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("op.servers[0].url")),
+            "server.url: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("op.externalDocs.url")),
+            "externalDocs.url: {:?}",
+            ctx.errors
+        );
+
+        // With IgnoreMissingTags, the missing-tag error is silenced.
+        let mut ctx = Context::new(&spec, Options::IgnoreMissingTags.only());
+        op.validate_with_context(&mut ctx, "op".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("not found in spec")),
+            "missing-tags should be silenced: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn op_level_security_runs_through_helper() {
+        let spec = Spec::default();
+        let op = Operation {
+            responses: Some(ok_responses()),
+            security: Some(vec![{
+                let mut req = BTreeMap::new();
+                req.insert("missing-scheme".to_owned(), vec![]);
+                req
+            }]),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        op.validate_with_context(&mut ctx, "op".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("op.security") && e.contains("missing-scheme")),
+            "expected op-level security error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn documentation_extensions_round_trip_and_validate() {
+        let value = serde_json::json!({
+            "responses": {
+                "200": {
+                    "description": "OK"
+                }
+            },
+            "x-codeSamples": [
+                {
+                    "lang": "curl",
+                    "label": "cURL",
+                    "source": "curl https://example.com/pets"
+                }
+            ],
+            "x-tags": ["sdk", "docs"]
+        });
+        let operation: Operation = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&operation).unwrap(), value);
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        operation.validate_with_context(&mut ctx, "operation".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let alias_value = serde_json::json!({
+            "responses": {
+                "200": {
+                    "description": "OK"
+                }
+            },
+            "x-code-samples": [
+                {
+                    "lang": "rust",
+                    "source": "println!(\"ok\");"
+                }
+            ]
+        });
+        let operation: Operation = serde_json::from_value(alias_value).unwrap();
+        assert_eq!(operation.x_code_samples.as_ref().unwrap()[0].lang, "rust");
+
+        let mut ctx = Context::new(&spec, Options::new());
+        CodeSample::default().validate_with_context(&mut ctx, "sample".to_owned());
+        assert_eq!(ctx.errors.len(), 2, "expected lang/source errors");
     }
 }

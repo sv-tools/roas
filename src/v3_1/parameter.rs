@@ -427,6 +427,7 @@ impl ValidateWithContext<Spec> for InPath {
         must_be_required(&Some(self.required), ctx, path.clone(), self.name.clone());
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -435,6 +436,7 @@ impl ValidateWithContext<Spec> for InQuery {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -443,6 +445,7 @@ impl ValidateWithContext<Spec> for InHeader {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -451,6 +454,29 @@ impl ValidateWithContext<Spec> for InCookie {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
+    }
+}
+
+fn walk_schema_examples_content(
+    ctx: &mut Context<Spec>,
+    schema: &Option<RefOr<Schema>>,
+    examples: &Option<BTreeMap<String, RefOr<Example>>>,
+    content: &Option<BTreeMap<String, MediaType>>,
+    path: &str,
+) {
+    if let Some(schema) = schema {
+        schema.validate_with_context(ctx, format!("{path}.schema"));
+    }
+    if let Some(examples) = examples {
+        for (k, v) in examples {
+            v.validate_with_context(ctx, format!("{path}.examples[{k}]"));
+        }
+    }
+    if let Some(content) = content {
+        for (k, v) in content {
+            v.validate_with_context(ctx, format!("{path}.content[{k}]"));
+        }
     }
 }
 
@@ -477,7 +503,155 @@ fn either_schema_or_content(
     content: &Option<BTreeMap<String, MediaType>>,
     path: String,
 ) {
-    if schema.is_some() && content.is_some() {
-        ctx.error(path, "schema and content are mutually exclusive");
+    // Spec: "A parameter MUST contain either a schema property, or a content
+    // property, but not both."
+    match (schema.is_some(), content.is_some()) {
+        (true, true) => ctx.error(path.clone(), "schema and content are mutually exclusive"),
+        (false, false) => ctx.error(path.clone(), "must define either `schema` or `content`"),
+        _ => {}
+    }
+    // Spec: "The map MUST only contain one entry."
+    if let Some(content) = content
+        && content.len() != 1
+    {
+        ctx.error(
+            path,
+            format_args!(
+                ".content: must contain exactly one media type entry, found {}",
+                content.len()
+            ),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::validation::Options;
+
+    #[test]
+    fn validate_path_param_must_be_required() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Path(InPath {
+            name: "id".into(),
+            description: None,
+            required: false,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(RefOr::new_item(crate::v3_1::schema::Schema::Single(
+                Box::new(crate::v3_1::schema::SingleSchema::Object(
+                    crate::v3_1::schema::ObjectSchema::default(),
+                )),
+            ))),
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must be required")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn parameter_must_define_schema_or_content() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Query(InQuery {
+            name: "q".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must define either `schema` or `content`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn content_size_must_be_one() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let mut content = BTreeMap::new();
+        content.insert("application/json".to_owned(), MediaType::default());
+        content.insert("text/plain".to_owned(), MediaType::default());
+        let p = Parameter::Query(InQuery {
+            name: "q".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: Some(content),
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must contain exactly one media type entry")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn parameter_walks_schema_examples_content() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Query(InQuery {
+            name: "q".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: Some(RefOr::new_ref("".into())),
+            example: None,
+            examples: Some(BTreeMap::from([(
+                "ex".to_owned(),
+                RefOr::new_ref("".into()),
+            )])),
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("p.schema")),
+            "expected p.schema error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("p.examples[ex]")),
+            "expected p.examples[ex] error: {:?}",
+            ctx.errors
+        );
     }
 }

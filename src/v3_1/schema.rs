@@ -2,7 +2,9 @@
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
+use crate::common::helpers::{
+    Context, PushError, ValidateWithContext, validate_pattern, validate_required_string,
+};
 use crate::common::reference::RefOr;
 use crate::v3_1::discriminator::Discriminator;
 use crate::v3_1::external_documentation::ExternalDocumentation;
@@ -16,12 +18,23 @@ use std::fmt::{Display, Formatter};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
+    /// JSON Schema 2020-12 boolean schema: `true` matches anything,
+    /// `false` matches nothing. Must be first so a bare boolean JSON value
+    /// dispatches here before the typed variants try (and fail) to parse it
+    /// as an object.
+    Bool(bool),
     AllOf(Box<AllOfSchema>),
     AnyOf(Box<AnyOfSchema>),
     OneOf(Box<OneOfSchema>),
     Not(Box<NotSchema>),
     Multi(Box<MultiSchema>),
     Single(Box<SingleSchema>), // must be last
+}
+
+impl From<bool> for Schema {
+    fn from(b: bool) -> Self {
+        Schema::Bool(b)
+    }
 }
 
 impl Default for Schema {
@@ -328,6 +341,11 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
 
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
+
     /// Declares the maximum length of the parameter value.
     #[serde(rename = "maxLength")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -352,6 +370,17 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -412,6 +441,11 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<i64>>,
 
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
+
     /// Inclusive lower bound for the value.
     /// Per JSON Schema 2020-12 §6.2.4, this keyword is any number even when
     /// the parent schema's `type` is `"integer"`, so a fractional bound such
@@ -455,6 +489,17 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -515,6 +560,11 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<f64>>,
 
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
+
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum: Option<f64>,
@@ -550,6 +600,17 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -611,6 +672,17 @@ pub struct BooleanSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -689,6 +761,17 @@ pub struct ArraySchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -799,6 +882,16 @@ pub struct ObjectSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub property_names: Option<RefOr<Schema>>,
 
+    /// Codegen/documentation extension with tags associated with this schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-tags")]
+    pub x_tags: Option<Vec<String>>,
+
+    /// Codegen extension overriding the discriminator value for this schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-discriminator-value")]
+    pub x_discriminator_value: Option<String>,
+
     /// A list of required properties.
     /// If the object is defined at the root of the document,
     /// the `required` property MUST be omitted.
@@ -815,6 +908,17 @@ pub struct ObjectSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -870,6 +974,17 @@ pub struct NullSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -947,6 +1062,17 @@ pub struct MultiSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
@@ -975,9 +1101,17 @@ pub struct MultiSchema {
 impl ValidateWithContext<Spec> for Schema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         match self {
+            // A boolean schema (true / false) has no fields to validate.
+            Schema::Bool(_) => {}
             Schema::Single(s) => s.validate_with_context(ctx, path),
             Schema::Multi(s) => s.validate_with_context(ctx, path),
             Schema::AllOf(s) => {
+                // JSON Schema 2020-12 §10.2.1.1: `allOf` MUST be a non-empty
+                // array. The same MUST applies to `anyOf` (§10.2.1.2) and
+                // `oneOf` (§10.2.1.3).
+                if s.all_of.is_empty() {
+                    ctx.error(path.clone(), "`allOf` must be a non-empty array");
+                }
                 for (i, schema) in s.all_of.iter().enumerate() {
                     schema.validate_with_context(ctx, format!("{path}.allOf[{i}]"));
                 }
@@ -986,6 +1120,9 @@ impl ValidateWithContext<Spec> for Schema {
                 }
             }
             Schema::AnyOf(s) => {
+                if s.any_of.is_empty() {
+                    ctx.error(path.clone(), "`anyOf` must be a non-empty array");
+                }
                 for (i, schema) in s.any_of.iter().enumerate() {
                     schema.validate_with_context(ctx, format!("{path}.anyOf[{i}]"));
                 }
@@ -994,6 +1131,9 @@ impl ValidateWithContext<Spec> for Schema {
                 }
             }
             Schema::OneOf(s) => {
+                if s.one_of.is_empty() {
+                    ctx.error(path.clone(), "`oneOf` must be a non-empty array");
+                }
                 for (i, schema) in s.one_of.iter().enumerate() {
                     schema.validate_with_context(ctx, format!("{path}.oneOf[{i}]"));
                 }
@@ -1010,6 +1150,24 @@ impl ValidateWithContext<Spec> for Schema {
 
 impl ValidateWithContext<Spec> for SingleSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Spec: `readOnly` and `writeOnly` MUST NOT both be true on the same
+        // schema. Centralised here so every variant goes through it.
+        let (read_only, write_only) = match self {
+            SingleSchema::String(s) => (s.read_only, s.write_only),
+            SingleSchema::Integer(s) => (s.read_only, s.write_only),
+            SingleSchema::Number(s) => (s.read_only, s.write_only),
+            SingleSchema::Boolean(s) => (s.read_only, s.write_only),
+            SingleSchema::Array(s) => (s.read_only, s.write_only),
+            SingleSchema::Object(s) => (s.read_only, s.write_only),
+            SingleSchema::Null(s) => (s.read_only, s.write_only),
+        };
+        if read_only == Some(true) && write_only == Some(true) {
+            ctx.error(
+                path.clone(),
+                ".readOnly and .writeOnly are mutually exclusive",
+            );
+        }
+
         match self {
             SingleSchema::String(s) => s.validate_with_context(ctx, path),
             SingleSchema::Integer(s) => s.validate_with_context(ctx, path),
@@ -1022,6 +1180,33 @@ impl ValidateWithContext<Spec> for SingleSchema {
     }
 }
 
+fn validate_enum_descriptions_len(
+    enum_len: Option<usize>,
+    descriptions: Option<&Vec<String>>,
+    ctx: &mut Context<Spec>,
+    path: &str,
+) {
+    if let (Some(enum_len), Some(descriptions)) = (enum_len, descriptions)
+        && descriptions.len() != enum_len
+    {
+        ctx.error(
+            format!("{path}.x-enumDescriptions"),
+            format_args!(
+                "must contain exactly one description per enum value ({enum_len} expected, {} found)",
+                descriptions.len()
+            ),
+        );
+    }
+}
+
+fn validate_extension_tags(tags: &Option<Vec<String>>, ctx: &mut Context<Spec>, path: &str) {
+    if let Some(tags) = tags {
+        for (i, tag) in tags.iter().enumerate() {
+            validate_required_string(tag, ctx, format!("{path}.x-tags[{i}]"));
+        }
+    }
+}
+
 impl ValidateWithContext<Spec> for StringSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
@@ -1030,6 +1215,21 @@ impl ValidateWithContext<Spec> for StringSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        // Spec: minLength MUST be ≤ maxLength when both are present.
+        if let (Some(min), Some(max)) = (self.min_length, self.max_length)
+            && min > max
+        {
+            ctx.error(
+                path.clone(),
+                format_args!("`minLength` ({min}) must be ≤ `maxLength` ({max})"),
+            );
+        }
+        validate_enum_descriptions_len(
+            self.enum_values.as_ref().map(Vec::len),
+            self.x_enum_descriptions.as_ref(),
+            ctx,
+            &path,
+        );
     }
 }
 
@@ -1041,6 +1241,18 @@ impl ValidateWithContext<Spec> for IntegerSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        // Spec: multipleOf MUST be > 0 (JSON Schema 2020-12 §6.2.1).
+        if let Some(m) = self.multiple_of
+            && m <= 0.0
+        {
+            ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
+        }
+        validate_enum_descriptions_len(
+            self.enum_values.as_ref().map(Vec::len),
+            self.x_enum_descriptions.as_ref(),
+            ctx,
+            &path,
+        );
     }
 }
 
@@ -1052,6 +1264,17 @@ impl ValidateWithContext<Spec> for NumberSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        if let Some(m) = self.multiple_of
+            && m <= 0.0
+        {
+            ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
+        }
+        validate_enum_descriptions_len(
+            self.enum_values.as_ref().map(Vec::len),
+            self.x_enum_descriptions.as_ref(),
+            ctx,
+            &path,
+        );
     }
 }
 
@@ -1078,6 +1301,16 @@ impl ValidateWithContext<Spec> for ArraySchema {
         if let Some(items) = &self.items {
             items.validate_with_context(ctx, format!("{path}.items"));
         }
+
+        // Spec: minItems MUST be ≤ maxItems when both are present.
+        if let (Some(min), Some(max)) = (self.min_items, self.max_items)
+            && min > max
+        {
+            ctx.error(
+                path.clone(),
+                format_args!("`minItems` ({min}) must be ≤ `maxItems` ({max})"),
+            );
+        }
     }
 }
 
@@ -1088,6 +1321,16 @@ impl ValidateWithContext<Spec> for ObjectSchema {
         }
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
+        }
+
+        // Spec: minProperties MUST be ≤ maxProperties when both are present.
+        if let (Some(min), Some(max)) = (self.min_properties, self.max_properties)
+            && min > max
+        {
+            ctx.error(
+                path.clone(),
+                format_args!("`minProperties` ({min}) must be ≤ `maxProperties` ({max})"),
+            );
         }
 
         if let Some(properties) = &self.properties {
@@ -1125,6 +1368,10 @@ impl ValidateWithContext<Spec> for ObjectSchema {
         if let Some(property_names) = &self.property_names {
             property_names.validate_with_context(ctx, format!("{path}.propertyNames"));
         }
+        validate_extension_tags(&self.x_tags, ctx, &path);
+        if let Some(value) = &self.x_discriminator_value {
+            validate_required_string(value, ctx, format!("{path}.x-discriminator-value"));
+        }
     }
 }
 
@@ -1141,6 +1388,11 @@ impl ValidateWithContext<Spec> for NullSchema {
 
 impl ValidateWithContext<Spec> for MultiSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // JSON Schema 2020-12 §6.1.1: when `type` is an array it MUST contain
+        // at least one element. An empty `type: []` is not a valid schema.
+        if self.schema_types.is_empty() {
+            ctx.error(format!("{path}.type"), "must contain at least one element");
+        }
         let allowed_types: HashSet<String> = HashSet::from_iter(vec![
             "string".into(),
             "number".into(),
@@ -1816,5 +2068,336 @@ mod tests {
         });
         assert_eq!(serde_json::to_value(&spec).unwrap(), value);
         assert_eq!(serde_json::from_value::<Schema>(value).unwrap(), spec);
+    }
+
+    #[test]
+    fn boolean_schema_true_and_false_round_trip() {
+        // JSON Schema 2020-12 boolean schemas.
+        let t: Schema = serde_json::from_value(serde_json::json!(true)).unwrap();
+        assert!(matches!(t, Schema::Bool(true)));
+        assert_eq!(serde_json::to_value(&t).unwrap(), serde_json::json!(true));
+
+        let f: Schema = serde_json::from_value(serde_json::json!(false)).unwrap();
+        assert!(matches!(f, Schema::Bool(false)));
+        assert_eq!(serde_json::to_value(&f).unwrap(), serde_json::json!(false));
+
+        // Validate is a no-op on Bool.
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        Schema::Bool(true).validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn schema_from_bool_helper() {
+        let _: Schema = true.into();
+        let _: Schema = false.into();
+    }
+
+    #[test]
+    fn from_conversions_each_variant() {
+        // Cover the From impls + Default impls that are otherwise only
+        // exercised through serde dispatch.
+        let _: Schema = SingleSchema::from(StringSchema::default()).into();
+        let _: Schema = SingleSchema::from(IntegerSchema::default()).into();
+        let _: Schema = SingleSchema::from(NumberSchema::default()).into();
+        let _: Schema = SingleSchema::from(BooleanSchema::default()).into();
+        let _: Schema = SingleSchema::from(ArraySchema::default()).into();
+        let _: Schema = SingleSchema::from(ObjectSchema::default()).into();
+        let _: Schema = SingleSchema::from(NullSchema::default()).into();
+
+        let _: Schema = AllOfSchema::default().into();
+        let _: Schema = AnyOfSchema::default().into();
+        let _: Schema = OneOfSchema::default().into();
+        let _: Schema = NotSchema {
+            not: RefOr::new_item(Schema::default()),
+            external_docs: None,
+            example: None,
+            examples: None,
+            extensions: None,
+        }
+        .into();
+        let _: Schema = MultiSchema::default().into();
+
+        // Defaults
+        assert!(matches!(Schema::default(), Schema::Single(_)));
+        assert!(matches!(SingleSchema::default(), SingleSchema::Object(_)));
+    }
+
+    #[test]
+    fn single_schema_display_each_variant() {
+        assert_eq!(
+            SingleSchema::String(StringSchema::default()).to_string(),
+            "string"
+        );
+        assert_eq!(
+            SingleSchema::Integer(IntegerSchema::default()).to_string(),
+            "integer"
+        );
+        assert_eq!(
+            SingleSchema::Number(NumberSchema::default()).to_string(),
+            "number"
+        );
+        assert_eq!(
+            SingleSchema::Boolean(BooleanSchema::default()).to_string(),
+            "boolean"
+        );
+        assert_eq!(
+            SingleSchema::Array(ArraySchema::default()).to_string(),
+            "array"
+        );
+        assert_eq!(
+            SingleSchema::Object(ObjectSchema::default()).to_string(),
+            "object"
+        );
+        assert_eq!(
+            SingleSchema::Null(NullSchema::default()).to_string(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn composition_validate_dispatches_with_discriminator() {
+        // Each composition variant's validate dispatch + discriminator walk
+        // (lines 1085-1107).
+        let spec = crate::v3_1::spec::Spec::default();
+
+        let bad_disc = || crate::v3_1::discriminator::Discriminator::default();
+        for s in [
+            Schema::AllOf(Box::new(AllOfSchema {
+                all_of: vec![],
+                discriminator: Some(bad_disc()),
+                ..Default::default()
+            })),
+            Schema::AnyOf(Box::new(AnyOfSchema {
+                any_of: vec![],
+                discriminator: Some(bad_disc()),
+                ..Default::default()
+            })),
+            Schema::OneOf(Box::new(OneOfSchema {
+                one_of: vec![],
+                discriminator: Some(bad_disc()),
+                ..Default::default()
+            })),
+        ] {
+            let mut ctx =
+                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains("propertyName") && e.contains("must not be empty")),
+                "expected discriminator empty-propertyName error: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn boolean_and_null_variants_validate() {
+        // BooleanSchema and NullSchema have no consistency rules to fire,
+        // but the dispatch path still needs to walk them — exercised via
+        // an external_docs URL coming back invalid.
+        let spec = crate::v3_1::spec::Spec::default();
+        let bad_docs = || crate::v3_1::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        for s in [
+            Schema::Single(Box::new(SingleSchema::Boolean(BooleanSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            }))),
+            Schema::Single(Box::new(SingleSchema::Null(NullSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            }))),
+        ] {
+            let mut ctx =
+                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors.iter().any(|e| e.contains("externalDocs.url")),
+                "expected externalDocs walk: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn keyword_consistency_violations_reported() {
+        let spec = crate::v3_1::spec::Spec::default();
+
+        let cases: Vec<(&str, Schema, &str)> = vec![
+            (
+                "string min/max",
+                Schema::Single(Box::new(SingleSchema::String(StringSchema {
+                    min_length: Some(10),
+                    max_length: Some(5),
+                    ..Default::default()
+                }))),
+                "minLength",
+            ),
+            (
+                "integer multipleOf <= 0",
+                Schema::Single(Box::new(SingleSchema::Integer(IntegerSchema {
+                    multiple_of: Some(0.0),
+                    ..Default::default()
+                }))),
+                "multipleOf",
+            ),
+            (
+                "number multipleOf < 0",
+                Schema::Single(Box::new(SingleSchema::Number(NumberSchema {
+                    multiple_of: Some(-1.0),
+                    ..Default::default()
+                }))),
+                "multipleOf",
+            ),
+            (
+                "array min/max items",
+                Schema::Single(Box::new(SingleSchema::Array(ArraySchema {
+                    min_items: Some(10),
+                    max_items: Some(5),
+                    ..Default::default()
+                }))),
+                "minItems",
+            ),
+            (
+                "object min/max properties",
+                Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+                    min_properties: Some(10),
+                    max_properties: Some(5),
+                    ..Default::default()
+                }))),
+                "minProperties",
+            ),
+        ];
+        for (label, schema, needle) in cases {
+            let mut ctx =
+                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            schema.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors.iter().any(|e| e.contains(needle)),
+                "case `{label}`: expected `{needle}` error: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_write_only_mutex() {
+        // OAS spec rule (also a JSON Schema interaction): both flags
+        // MUST NOT be true on the same schema. Centralised in
+        // SingleSchema dispatch.
+        let json = serde_json::json!({
+            "type": "string",
+            "readOnly": true,
+            "writeOnly": true,
+        });
+        let s: Schema = serde_json::from_value(json).unwrap();
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("readOnly and .writeOnly are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn composition_arrays_must_be_non_empty() {
+        let spec = crate::v3_1::spec::Spec::default();
+        for (json, kw) in [
+            (serde_json::json!({"allOf": []}), "allOf"),
+            (serde_json::json!({"anyOf": []}), "anyOf"),
+            (serde_json::json!({"oneOf": []}), "oneOf"),
+        ] {
+            let s: Schema = serde_json::from_value(json).unwrap();
+            let mut ctx =
+                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains(&format!("`{kw}` must be a non-empty array"))),
+                "{kw} errors: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn multi_schema_type_array_must_be_non_empty() {
+        // Build via the struct: `serde_json::from_value` on `{"type": []}`
+        // would not route to `MultiSchema`.
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let m = MultiSchema {
+            schema_types: vec![],
+            ..Default::default()
+        };
+        let s = Schema::Multi(Box::new(m));
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("s.type") && e.contains("must contain at least one element")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn common_codegen_extensions_round_trip_and_validate() {
+        let enum_json = serde_json::json!({
+            "type": "string",
+            "enum": ["open", "closed"],
+            "x-enumDescriptions": ["Open state", "Closed state"]
+        });
+        let schema: Schema = serde_json::from_value(enum_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&schema).unwrap(), enum_json);
+
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let object_json = serde_json::json!({
+            "type": "object",
+            "x-tags": ["models"],
+            "x-discriminator-value": "pet"
+        });
+        let schema: Schema = serde_json::from_value(object_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&schema).unwrap(), object_json);
+
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let schema = Schema::Single(Box::new(SingleSchema::String(StringSchema {
+            enum_values: Some(vec!["open".to_owned(), "closed".to_owned()]),
+            x_enum_descriptions: Some(vec!["Open state".to_owned()]),
+            ..Default::default()
+        })));
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("s.x-enumDescriptions")),
+            "enum descriptions length: {:?}",
+            ctx.errors
+        );
     }
 }

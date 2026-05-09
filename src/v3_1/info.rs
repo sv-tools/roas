@@ -1,7 +1,8 @@
 //! Provides metadata about the API.
 
 use crate::common::helpers::{
-    Context, ValidateWithContext, validate_email, validate_optional_url, validate_required_string,
+    Context, PushError, ValidateWithContext, validate_email, validate_optional_url,
+    validate_required_string, validate_required_url,
 };
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
@@ -29,8 +30,11 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Info {
     /// **Required** The title of the API.
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub title: String,
+
+    /// A short summary of the API. Added in OAS 3.1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 
     /// A short description of the API.
     /// [CommonMark](https://spec.commonmark.org) syntax MAY be used for rich text representation.
@@ -52,8 +56,12 @@ pub struct Info {
 
     /// **Required** The version of the OpenAPI document
     /// (which is distinct from the OpenAPI Specification version or the API implementation version).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
+
+    /// ReDoc/Redocly extension that configures the API logo in generated documentation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-logo")]
+    pub x_logo: Option<Logo>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -113,14 +121,46 @@ pub struct License {
     /// **Required** The license name used for the API.
     pub name: String,
 
+    /// SPDX license expression. Added in OAS 3.1.
+    /// **Mutually exclusive with `url`.**
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
+
     /// A URL to the license used for the API.
     /// MUST be in the format of a URL.
+    /// **Mutually exclusive with `identifier`.**
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc/Redocly `x-logo` extension object.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Logo {
+    /// **Required** URL pointing to the logo image.
+    pub url: String,
+
+    /// Optional background color, commonly a hex RGB value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<String>,
+
+    /// Optional alt text for the logo image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_text: Option<String>,
+
+    /// Optional link target for the logo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+
+    /// Allows extensions on the logo extension object.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,6 +183,10 @@ impl ValidateWithContext<Spec> for Info {
         if let Some(license) = &self.license {
             license.validate_with_context(ctx, format!("{path}.license"));
         }
+
+        if let Some(logo) = &self.x_logo {
+            logo.validate_with_context(ctx, format!("{path}.x-logo"));
+        }
     }
 }
 
@@ -156,7 +200,25 @@ impl ValidateWithContext<Spec> for Contact {
 impl ValidateWithContext<Spec> for License {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
+        if self.identifier.is_some() && self.url.is_some() {
+            ctx.error(
+                path.clone(),
+                "`identifier` and `url` are mutually exclusive (OAS 3.1)",
+            );
+        }
+        // `identifier` is an SPDX expression; when present it must be
+        // non-empty, otherwise the field carries no information.
+        if let Some(id) = &self.identifier {
+            validate_required_string(id, ctx, format!("{path}.identifier"));
+        }
         validate_optional_url(&self.url, ctx, format!("{path}.url"));
+    }
+}
+
+impl ValidateWithContext<Spec> for Logo {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_url(&self.href, ctx, format!("{path}.href"));
     }
 }
 
@@ -325,7 +387,10 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(Info::default()).unwrap(),
-            json!({}),
+            json!({
+              "title": "",
+              "version": ""
+            }),
             "serialize",
         );
     }
@@ -480,6 +545,22 @@ mod tests {
         }
         .validate_with_context(&mut ctx, String::from("license"));
         assert_eq!(ctx.errors.len(), 1, "incorrect url: {:?}", ctx.errors);
+
+        // Present-but-empty `identifier` is invalid (OAS 3.1 SPDX field).
+        ctx = Context::new(&spec, Default::default());
+        License {
+            name: String::from("Apache 2.0"),
+            identifier: Some(String::new()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("license"));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("license.identifier") && e.contains("must not be empty")),
+            "empty identifier: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]
@@ -561,5 +642,45 @@ mod tests {
         }
         .validate_with_context(&mut ctx, String::from("info"));
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn x_logo_round_trip_and_validate() {
+        let info: Info = serde_json::from_value(json!({
+            "title": "Swagger Sample App",
+            "version": "1.0.1",
+            "x-logo": {
+                "url": "https://example.com/logo.png",
+                "altText": "Example",
+                "href": "https://example.com"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&info).unwrap(),
+            json!({
+                "title": "Swagger Sample App",
+                "version": "1.0.1",
+                "x-logo": {
+                    "url": "https://example.com/logo.png",
+                    "altText": "Example",
+                    "href": "https://example.com"
+                }
+            })
+        );
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Default::default());
+        info.validate_with_context(&mut ctx, "info".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Default::default());
+        Logo::default().validate_with_context(&mut ctx, "info.x-logo".to_owned());
+        assert_eq!(
+            ctx.errors,
+            vec!["info.x-logo.url: must not be empty"],
+            "logo url: {:?}",
+            ctx.errors
+        );
     }
 }
