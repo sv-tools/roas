@@ -21,6 +21,7 @@ use crate::v2::path_item::PathItem;
 use crate::v2::reference::RefOr;
 use crate::v2::security_scheme::{SecurityScheme, SecuritySchemeOAuth2Flow};
 use crate::v2::spec::Spec;
+use crate::validation::Options;
 
 /// Resolve a `RefOr<Parameter>` against the spec's `#/parameters/...` pool.
 fn resolve_parameter<'a>(spec: &'a Spec, p: &'a RefOr<Parameter>) -> Option<&'a Parameter> {
@@ -321,14 +322,18 @@ pub fn validate_security_requirements(
     }
 }
 
-/// Walk `security_definitions` and run each scheme's per-scheme validator
-/// (URL-required-by-flow rules, etc.). Unused-scheme detection is wired up
-/// from `Spec::validate` via `validate_not_visited`.
+/// Walk `security_definitions`: run each scheme's per-scheme validator
+/// (URL-required-by-flow rules, etc.) and report unused schemes — those
+/// not referenced by any `security` requirement at the top level or any
+/// operation level — unless `Options::IgnoreUnusedSecuritySchemes` is set.
+///
+/// Must run AFTER `validate_security_requirements` has marked used
+/// schemes via `ctx.visit("#/securityDefinitions/{name}")`.
 ///
 /// We pre-collect the names so the `&mut Context` borrow used by each
 /// `validate_with_context` call doesn't overlap with the immutable borrow
-/// of `ctx.spec.security_definitions`. The schemes themselves are *not*
-/// cloned — they're looked up by reference per iteration.
+/// of `ctx.spec.security_definitions`. Each scheme is cloned once per
+/// iteration (a small enum), which is cheaper than cloning the whole map.
 pub fn validate_security_definitions(ctx: &mut Context<Spec>) {
     let names: Vec<String> = ctx
         .spec
@@ -338,9 +343,6 @@ pub fn validate_security_definitions(ctx: &mut Context<Spec>) {
         .unwrap_or_default();
     for name in names {
         let p = format!("#/securityDefinitions/{name}");
-        // Snapshot the scheme into an owned value: cloning a single
-        // `SecurityScheme` (a small enum) is cheaper than refactoring
-        // `ValidateWithContext` to split the &mut Context borrow.
         let Some(scheme) = ctx
             .spec
             .security_definitions
@@ -350,7 +352,10 @@ pub fn validate_security_definitions(ctx: &mut Context<Spec>) {
         else {
             continue;
         };
-        crate::common::helpers::ValidateWithContext::validate_with_context(&scheme, ctx, p);
+        crate::common::helpers::ValidateWithContext::validate_with_context(&scheme, ctx, p.clone());
+        if !ctx.is_visited(&p) && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes) {
+            ctx.error(p, "unused");
+        }
     }
 }
 
@@ -827,6 +832,67 @@ mod tests {
         let mut ctx = Context::new(spec, Options::new());
         validate_security_definitions(&mut ctx);
         assert!(ctx.errors.is_empty());
+    }
+
+    #[test]
+    fn unused_scheme_is_reported() {
+        // A scheme that is not referenced from any security requirement
+        // should be flagged as unused (matching v3 Components behavior).
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "orphan".to_owned(),
+            SecurityScheme::Basic(BasicSecurityScheme::default()),
+        );
+        let spec = spec_with_security_definitions(defs);
+        let spec: &'static Spec = Box::leak(Box::new(spec));
+        let mut ctx = Context::new(spec, Options::new());
+        validate_security_definitions(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("#/securityDefinitions/orphan") && e.contains("unused")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn unused_scheme_silenced_by_option() {
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "orphan".to_owned(),
+            SecurityScheme::Basic(BasicSecurityScheme::default()),
+        );
+        let spec = spec_with_security_definitions(defs);
+        let spec: &'static Spec = Box::leak(Box::new(spec));
+        let mut ctx = Context::new(spec, Options::IgnoreUnusedSecuritySchemes.only());
+        validate_security_definitions(&mut ctx);
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("unused")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn used_scheme_is_not_flagged_as_unused() {
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "used".to_owned(),
+            SecurityScheme::Basic(BasicSecurityScheme::default()),
+        );
+        let spec = spec_with_security_definitions(defs);
+        let spec: &'static Spec = Box::leak(Box::new(spec));
+        let mut ctx = Context::new(spec, Options::new());
+        // Mark as used, simulating what `validate_security_requirements`
+        // would do when processing `Spec.security` or operation-level security.
+        ctx.visit("#/securityDefinitions/used".to_owned());
+        validate_security_definitions(&mut ctx);
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("unused")),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]
