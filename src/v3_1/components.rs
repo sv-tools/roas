@@ -151,16 +151,28 @@ impl ValidateWithContext<Spec> for Components {
                 }
                 validate_string_matches(name, re, ctx, format!("{path}.securitySchemes[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.securitySchemes[{name}]"));
-                if let Ok(SecurityScheme::OAuth2(oauth2)) = obj.get_item(ctx.spec)
-                    && let Some(flow) = &oauth2.flows.implicit
-                {
-                    for scope in flow.scopes.keys() {
-                        let reference = format!("{reference}/{scope}");
-                        if !ctx.is_visited(&reference)
-                            && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
-                        {
-                            ctx.error(reference, "unused");
+                if let Ok(SecurityScheme::OAuth2(oauth2)) = obj.get_item(ctx.spec) {
+                    let mut check_unused = |scopes: &BTreeMap<String, String>| {
+                        for scope in scopes.keys() {
+                            let r = format!("{reference}/{scope}");
+                            if !ctx.is_visited(&r)
+                                && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes)
+                            {
+                                ctx.error(r, "unused");
+                            }
                         }
+                    };
+                    if let Some(flow) = &oauth2.flows.implicit {
+                        check_unused(&flow.scopes);
+                    }
+                    if let Some(flow) = &oauth2.flows.password {
+                        check_unused(&flow.scopes);
+                    }
+                    if let Some(flow) = &oauth2.flows.client_credentials {
+                        check_unused(&flow.scopes);
+                    }
+                    if let Some(flow) = &oauth2.flows.authorization_code {
+                        check_unused(&flow.scopes);
                     }
                 }
             }

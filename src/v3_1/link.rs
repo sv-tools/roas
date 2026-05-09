@@ -3,8 +3,178 @@
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::v3_1::server::Server;
 use crate::v3_1::spec::Spec;
+use crate::validation::Options;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Decode one JSON Pointer reference token (`~1` → `/`, `~0` → `~`).
+fn unescape_pointer_token(token: &str) -> String {
+    // Per RFC 6901, `~1` decodes to `/` and `~0` decodes to `~`. Order
+    // matters: a literal `~01` must round-trip to `~1`, so substitute
+    // `~1` first then `~0`.
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+/// Outcome of attempting to resolve an internal `#/paths/...` operationRef.
+enum OperationRefResolution {
+    Ok,
+    Err(String),
+    /// The PathItem reached has a `$ref` that points outside this document;
+    /// caller decides whether that's an error based on
+    /// `IgnoreExternalReferences`.
+    ExternalPathItemRef(String),
+}
+
+/// Resolve an internal `#/paths/...` operationRef against `Spec.paths`.
+/// Follows internal PathItem `$ref` chains (with cycle detection) so a
+/// `Link.operationRef` like `#/paths/~1pets/get` still validates when
+/// `/pets` is `{ "$ref": "#/paths/~1canonical-pets" }`.
+fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefResolution {
+    let after = match reference.strip_prefix("#/paths/") {
+        Some(rest) => rest,
+        None => {
+            return OperationRefResolution::Err(format!(
+                "must start with `#/paths/`, found `{reference}`"
+            ));
+        }
+    };
+    // Per RFC 6901 the path is a single JSON Pointer reference token: `/`
+    // inside the path MUST be escaped as `~1`. So between `#/paths/` and the
+    // method there must be exactly one `/` separator. Refs like
+    // `#/paths//pets/get` (unescaped slash) are malformed and rejected.
+    let slash_count = after.bytes().filter(|b| *b == b'/').count();
+    let (path_token, method) = match (slash_count, after.split_once('/')) {
+        (1, Some((p, m))) => (p, m),
+        (0, _) => {
+            return OperationRefResolution::Err(format!(
+                "must point to `#/paths/<encoded path>/<method>`, found `{reference}`"
+            ));
+        }
+        _ => {
+            return OperationRefResolution::Err(format!(
+                "malformed JSON Pointer: the encoded path token must use `~1` for `/`, found `{reference}`"
+            ));
+        }
+    };
+    let path = unescape_pointer_token(path_token);
+    let Some(paths) = spec.paths.as_ref() else {
+        return OperationRefResolution::Err(format!(
+            "spec has no `paths` to resolve `{reference}` against"
+        ));
+    };
+    let Some(item_or) = paths.paths.get(&path) else {
+        return OperationRefResolution::Err(format!("path `{path}` not declared in `#/paths`"));
+    };
+    // The map value is `RefOr<PathItem>`. If it's a Ref we treat it as
+    // PathItem-level redirection; if it's an inline Item we may follow
+    // `PathItem.reference` chains as in v3.0.
+    use crate::common::reference::RefOr;
+    let mut seen = std::collections::BTreeSet::from([path.clone()]);
+    let item = match item_or {
+        RefOr::Item(item) => item,
+        RefOr::Ref(r) => {
+            if let Some(after_paths) = r.reference.strip_prefix("#/paths/") {
+                let target = unescape_pointer_token(after_paths);
+                if !seen.insert(target.clone()) {
+                    return OperationRefResolution::Err(format!(
+                        "path `{path}` has a cyclic `$ref` chain through `{}`",
+                        r.reference
+                    ));
+                }
+                match paths.paths.get(&target).and_then(|x| match x {
+                    RefOr::Item(it) => Some(it),
+                    RefOr::Ref(_) => None,
+                }) {
+                    Some(it) => it,
+                    None => {
+                        return OperationRefResolution::Err(format!(
+                            "path `{path}` is a `$ref` to `{}`, which is not declared in `#/paths` (or chains further)",
+                            r.reference
+                        ));
+                    }
+                }
+            } else {
+                return OperationRefResolution::ExternalPathItemRef(r.reference.clone());
+            }
+        }
+    };
+
+    let (target_path, target_item) = match resolve_path_item_ref_chain(spec, &path, item, &mut seen)
+    {
+        Ok(t) => t,
+        Err(err) => return err,
+    };
+
+    let method_lower = method.to_lowercase();
+    let exists = target_item
+        .operations
+        .as_ref()
+        .is_some_and(|m| m.contains_key(&method_lower));
+    if !exists {
+        return OperationRefResolution::Err(format!(
+            "method `{method}` not declared on path `{target_path}`"
+        ));
+    }
+    OperationRefResolution::Ok
+}
+
+fn resolve_path_item_ref_chain<'a>(
+    spec: &'a Spec,
+    path: &str,
+    item: &'a crate::v3_1::path_item::PathItem,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> Result<(String, &'a crate::v3_1::path_item::PathItem), OperationRefResolution> {
+    let Some(ref_str) = &item.reference else {
+        return Ok((path.to_owned(), item));
+    };
+
+    if ref_str.is_empty() {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` carries an empty `$ref`"
+        )));
+    }
+
+    let Some(after_paths) = ref_str.strip_prefix("#/paths/") else {
+        return Err(OperationRefResolution::ExternalPathItemRef(ref_str.clone()));
+    };
+
+    if after_paths.contains('/') {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` is a `$ref` to malformed JSON Pointer `{ref_str}`: the encoded path token must use `~1` for `/`"
+        )));
+    }
+
+    let target_path = unescape_pointer_token(after_paths);
+    if !seen.insert(target_path.clone()) {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
+        )));
+    }
+
+    use crate::common::reference::RefOr;
+    let Some(paths) = spec.paths.as_ref() else {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` has a `$ref` to `{ref_str}` but spec has no `paths`"
+        )));
+    };
+    let target_item = match paths.paths.get(&target_path) {
+        Some(RefOr::Item(it)) => it,
+        Some(RefOr::Ref(r)) => {
+            // Recursively follow Spec.paths-level RefOr<PathItem>.
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` chains to `{}`, which is itself a Reference at the Spec.paths slot — multi-level Reference not supported",
+                r.reference
+            )));
+        }
+        None => {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/paths`"
+            )));
+        }
+    };
+
+    resolve_path_item_ref_chain(spec, &target_path, target_item, seen)
+}
 
 /// The Link object represents a possible design-time link for a response.
 /// The presence of a link does not guarantee the caller’s ability to successfully invoke it,
@@ -66,6 +236,20 @@ pub struct Link {
 
 impl ValidateWithContext<Spec> for Link {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Spec: a Link MUST identify the linked operation via operationRef
+        // or operationId, and the two are mutually exclusive.
+        match (&self.operation_ref, &self.operation_id) {
+            (Some(_), Some(_)) => ctx.error(
+                path.clone(),
+                "operationRef and operationId are mutually exclusive",
+            ),
+            (None, None) => ctx.error(
+                path.clone(),
+                "must specify exactly one of operationRef or operationId",
+            ),
+            _ => {}
+        }
+
         if let Some(operation_id) = &self.operation_id
             && !ctx
                 .visited
@@ -76,8 +260,275 @@ impl ValidateWithContext<Spec> for Link {
                 format_args!(".operationId: missing operation with id `{operation_id}`"),
             );
         }
+
+        if let Some(operation_ref) = &self.operation_ref {
+            if operation_ref.is_empty() {
+                ctx.error(path.clone(), ".operationRef: must not be empty");
+            } else if operation_ref.starts_with("#/") {
+                match resolve_internal_operation_ref(ctx.spec, operation_ref) {
+                    OperationRefResolution::Ok => {}
+                    OperationRefResolution::Err(msg) => {
+                        ctx.error(path.clone(), format_args!(".operationRef: {msg}"));
+                    }
+                    OperationRefResolution::ExternalPathItemRef(target)
+                        if !ctx.is_option(Options::IgnoreExternalReferences) =>
+                    {
+                        ctx.error(
+                            path.clone(),
+                            format_args!(
+                                ".operationRef: target PathItem is a `$ref` to external document `{target}`, which is not supported"
+                            ),
+                        );
+                    }
+                    OperationRefResolution::ExternalPathItemRef(_) => {}
+                }
+            } else if !ctx.is_option(Options::IgnoreExternalReferences) {
+                ctx.error(
+                    path.clone(),
+                    format_args!(
+                        ".operationRef: external reference `{operation_ref}` is not supported"
+                    ),
+                );
+            }
+        }
+
         if let Some(server) = &self.server {
             server.validate_with_context(ctx, format!("{path}.server"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::common::reference::RefOr;
+    use crate::v3_1::operation::Operation;
+    use crate::v3_1::path_item::{PathItem, Paths};
+    use crate::v3_1::response::{Response, Responses};
+    use serde_json::json;
+
+    fn spec_with_pets_get() -> Spec {
+        let op = Operation {
+            responses: Some(Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op);
+        let item = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths
+            .paths
+            .insert("/pets".to_owned(), RefOr::new_item(item));
+        Spec {
+            paths: Some(paths),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn round_trip_full() {
+        let v = json!({
+            "operationId": "getPet",
+            "parameters": {"id": "$response.body#/id"},
+            "requestBody": {"name": "fluffy"},
+            "description": "Linked",
+            "server": {"url": "https://example.com"},
+            "x-internal": true
+        });
+        let l: Link = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&l).unwrap(), v);
+    }
+
+    #[test]
+    fn xor_both_present_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("ref".into()),
+            operation_id: Some("id".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn xor_neither_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link::default().validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must specify exactly one")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn missing_operation_id_reported() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_id: Some("nonexistent".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("missing operation with id `nonexistent`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_internal_resolves() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "valid ref should not error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_unknown_path_errors() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1users/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".operationRef") && e.contains("`/users` not declared")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_unknown_method_errors() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/post".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("method `post`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_bad_prefix_errors() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/schemas/Foo".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must start with `#/paths/`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_unescaped_slash_malformed() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths//pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("malformed JSON Pointer")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_external_unsupported() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("https://example.com/spec.yaml#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("external reference") && e.contains("not supported")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&spec, Options::IgnoreExternalReferences.only());
+        Link {
+            operation_ref: Some("https://example.com/spec.yaml#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("external reference")),
+            "with option: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_empty_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".operationRef") && e.contains("must not be empty")),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 }

@@ -66,6 +66,11 @@ pub enum SecurityScheme {
     /// OpenIdConnect Authentication Type
     #[serde(rename = "openIdConnect")]
     OpenIdConnect(Box<OpenIdConnectSecurityScheme>),
+
+    /// Mutual TLS Authentication — added in OAS 3.1.
+    /// Uses client certificates; carries no scheme-specific required fields.
+    #[serde(rename = "mutualTLS")]
+    MutualTLS(Box<MutualTLSSecurityScheme>),
 }
 
 impl Display for SecurityScheme {
@@ -75,8 +80,23 @@ impl Display for SecurityScheme {
             SecurityScheme::ApiKey(_) => write!(f, "apiKey"),
             SecurityScheme::OAuth2(_) => write!(f, "oauth2"),
             SecurityScheme::OpenIdConnect(_) => write!(f, "openIdConnect"),
+            SecurityScheme::MutualTLS(_) => write!(f, "mutualTLS"),
         }
     }
+}
+
+/// Mutual TLS security scheme (OAS 3.1+).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct MutualTLSSecurityScheme {
+    /// A short description for security scheme. CommonMark allowed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// `^x-` Specification Extensions.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
@@ -436,7 +456,15 @@ impl ValidateWithContext<Spec> for SecurityScheme {
             SecurityScheme::OpenIdConnect(open_id_connect) => {
                 open_id_connect.validate_with_context(ctx, path)
             }
+            SecurityScheme::MutualTLS(mtls) => mtls.validate_with_context(ctx, path),
         }
+    }
+}
+
+impl ValidateWithContext<Spec> for MutualTLSSecurityScheme {
+    fn validate_with_context(&self, _ctx: &mut Context<Spec>, _path: String) {
+        // No scheme-specific fields beyond description / extensions; nothing
+        // to validate here.
     }
 }
 
@@ -1380,5 +1408,24 @@ mod tests {
             "OAuth2.authorization_code.(authorization_url, token_url, refresh_url): three errors: {:?}",
             ctx.errors
         );
+    }
+
+    #[test]
+    fn mutual_tls_round_trip_and_validate() {
+        // OAS 3.1 added the mutualTLS scheme. It carries no scheme-specific
+        // required fields (only optional `description` + `^x-` extensions).
+        let v = serde_json::json!({
+            "type": "mutualTLS",
+            "description": "client cert auth",
+            "x-tra": "yes"
+        });
+        let s: SecurityScheme = serde_json::from_value(v.clone()).unwrap();
+        assert!(matches!(s, SecurityScheme::MutualTLS(_)));
+        assert_eq!(serde_json::to_value(&s).unwrap(), v);
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        s.validate_with_context(&mut ctx, "mtls".into());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }

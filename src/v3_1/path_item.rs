@@ -1,6 +1,6 @@
 //! Path Items
 
-use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_1::operation::Operation;
 use crate::v3_1::parameter::Parameter;
@@ -52,6 +52,20 @@ use std::fmt;
 /// ```
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct PathItem {
+    /// Allows for a referenced definition of this path item. Per OAS 3.1
+    /// this points to another path item; in 3.1 the entry MAY also carry
+    /// `summary` and `description`. Adjacent operation fields' behavior
+    /// when a `$ref` is present is implementation-defined.
+    pub reference: Option<String>,
+
+    /// An optional, string summary intended to apply to all operations in
+    /// this path. Added in OAS 3.1.
+    pub summary: Option<String>,
+
+    /// An optional, CommonMark description intended to apply to all
+    /// operations in this path.
+    pub description: Option<String>,
+
     /// A definition of the operations on this path.
     ///
     /// Any map items that can be converted to an `Operation` object will be stored here.
@@ -67,8 +81,7 @@ pub struct PathItem {
     /// The list MUST NOT include duplicated parameters.
     /// A unique parameter is defined by a combination of a name and location.
     /// The list can use the [Reference Object](crate::common::reference::Ref) to link to parameters
-    /// that are defined at the [Swagger Object's](crate::v3_0::spec::Spec::parameters) parameters.
-    /// There can be one "body" parameter at most.
+    /// that are defined at the [Swagger Object's](crate::v3_1::spec::Spec) parameters.
     pub parameters: Option<Vec<RefOr<Parameter>>>,
 
     /// Allows extensions to the Swagger Schema.
@@ -83,6 +96,16 @@ impl Serialize for PathItem {
         S: Serializer,
     {
         let mut map = serializer.serialize_map(None)?;
+
+        if let Some(r) = &self.reference {
+            map.serialize_entry("$ref", r)?;
+        }
+        if let Some(s) = &self.summary {
+            map.serialize_entry("summary", s)?;
+        }
+        if let Some(d) = &self.description {
+            map.serialize_entry("description", d)?;
+        }
 
         if let Some(o) = &self.operations {
             for (k, v) in o {
@@ -116,6 +139,9 @@ impl<'de> Deserialize<'de> for PathItem {
         D: Deserializer<'de>,
     {
         const FIELDS: &[&str] = &[
+            "$ref",
+            "summary",
+            "description",
             "parameters",
             "servers",
             "get",
@@ -147,7 +173,22 @@ impl<'de> Deserialize<'de> for PathItem {
                 let mut operations: BTreeMap<String, Operation> = BTreeMap::new();
                 let mut extensions: BTreeMap<String, serde_json::Value> = BTreeMap::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if key == "parameters" {
+                    if key == "$ref" {
+                        if res.reference.is_some() {
+                            return Err(Error::duplicate_field("$ref"));
+                        }
+                        res.reference = Some(map.next_value()?);
+                    } else if key == "summary" {
+                        if res.summary.is_some() {
+                            return Err(Error::duplicate_field("summary"));
+                        }
+                        res.summary = Some(map.next_value()?);
+                    } else if key == "description" {
+                        if res.description.is_some() {
+                            return Err(Error::duplicate_field("description"));
+                        }
+                        res.description = Some(map.next_value()?);
+                    } else if key == "parameters" {
                         if res.parameters.is_some() {
                             return Err(Error::duplicate_field("parameters"));
                         }
@@ -186,6 +227,12 @@ impl<'de> Deserialize<'de> for PathItem {
 
 impl ValidateWithContext<Spec> for PathItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if let Some(r) = &self.reference
+            && r.is_empty()
+        {
+            ctx.error(path.clone(), ".$ref: must not be empty");
+        }
+
         if let Some(operations) = &self.operations {
             for (method, operation) in operations.iter() {
                 operation.validate_with_context(ctx, format!("{path}.{method}"));
@@ -203,5 +250,193 @@ impl ValidateWithContext<Spec> for PathItem {
                 parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
             }
         }
+    }
+}
+
+/// The Paths Object (and Webhooks shape, structurally identical):
+/// holds the relative paths to the individual endpoints (or webhook
+/// expressions) and supports `^x-` Specification Extensions per OAS 3.1.2.
+///
+/// In 3.1 the value is `RefOr<PathItem>` because both Paths and Webhooks
+/// allow a Reference Object pointing at a reusable Path Item (likely living
+/// in `components.pathItems`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Paths {
+    /// Map from path / webhook key to its `RefOr<PathItem>`.
+    pub paths: BTreeMap<String, RefOr<PathItem>>,
+
+    /// `^x-` Specification Extensions on the Paths / Webhooks Object itself.
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+impl Paths {
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, RefOr<PathItem>> {
+        self.paths.iter()
+    }
+}
+
+impl<S, K> From<S> for Paths
+where
+    S: IntoIterator<Item = (K, RefOr<PathItem>)>,
+    K: Into<String>,
+{
+    fn from(iter: S) -> Self {
+        Paths {
+            paths: iter.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            extensions: None,
+        }
+    }
+}
+
+impl Serialize for Paths {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let ext_x_count = self
+            .extensions
+            .as_ref()
+            .map(|e| e.keys().filter(|k| k.starts_with("x-")).count())
+            .unwrap_or(0);
+        let total = self.paths.len() + ext_x_count;
+        let mut map = serializer.serialize_map(Some(total))?;
+        for (k, v) in &self.paths {
+            map.serialize_entry(k, v)?;
+        }
+        if let Some(ext) = &self.extensions {
+            for (k, v) in ext {
+                if k.starts_with("x-") {
+                    map.serialize_entry(k, v)?;
+                }
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Paths {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PathsVisitor;
+        impl<'de> Visitor<'de> for PathsVisitor {
+            type Value = Paths;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a Paths or Webhooks object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Paths, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut paths: BTreeMap<String, RefOr<PathItem>> = BTreeMap::new();
+                let mut ext: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key.starts_with("x-") {
+                        if ext.contains_key(&key) {
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
+                        }
+                        ext.insert(key, map.next_value()?);
+                    } else {
+                        if paths.contains_key(&key) {
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
+                        }
+                        paths.insert(key, map.next_value()?);
+                    }
+                }
+                Ok(Paths {
+                    paths,
+                    extensions: if ext.is_empty() { None } else { Some(ext) },
+                })
+            }
+        }
+        deserializer.deserialize_map(PathsVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn path_item_round_trip_with_3_1_fixed_fields() {
+        let v = json!({
+            "$ref": "#/components/pathItems/Common",
+            "summary": "Pets path",
+            "description": "All pet operations",
+            "get": {"responses": {"200": {"description": "ok"}}},
+            "parameters": [
+                {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+            ],
+            "servers": [{"url": "https://api.example.com"}],
+            "x-internal": "yes"
+        });
+        let pi: PathItem = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(
+            pi.reference.as_deref(),
+            Some("#/components/pathItems/Common")
+        );
+        assert_eq!(pi.summary.as_deref(), Some("Pets path"));
+        assert_eq!(pi.description.as_deref(), Some("All pet operations"));
+        let back = serde_json::to_value(&pi).unwrap();
+        let re: PathItem = serde_json::from_value(back).unwrap();
+        assert_eq!(re, pi);
+    }
+
+    #[test]
+    fn empty_ref_reported() {
+        let pi = PathItem {
+            reference: Some("".into()),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".$ref: must not be empty")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn paths_struct_round_trip_extensions() {
+        let v = json!({
+            "/pets": {"get": {"responses": {"200": {"description": "ok"}}}},
+            "x-key": "value"
+        });
+        let p: Paths = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!(p.extensions.is_some());
+        let back = serde_json::to_value(&p).unwrap();
+        let re: Paths = serde_json::from_value(back).unwrap();
+        assert_eq!(re, p);
+    }
+
+    #[test]
+    fn paths_dup_path_errors() {
+        let raw = r#"{"/a": {}, "/a": {}}"#;
+        let res: Result<Paths, _> = serde_json::from_str(raw);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn paths_iter_and_from() {
+        let p: Paths = [("/a", RefOr::new_item(PathItem::default()))].into();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p.iter().count(), 1);
     }
 }

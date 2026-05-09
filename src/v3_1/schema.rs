@@ -16,12 +16,23 @@ use std::fmt::{Display, Formatter};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
+    /// JSON Schema 2020-12 boolean schema: `true` matches anything,
+    /// `false` matches nothing. Must be first so a bare boolean JSON value
+    /// dispatches here before the typed variants try (and fail) to parse it
+    /// as an object.
+    Bool(bool),
     AllOf(Box<AllOfSchema>),
     AnyOf(Box<AnyOfSchema>),
     OneOf(Box<OneOfSchema>),
     Not(Box<NotSchema>),
     Multi(Box<MultiSchema>),
     Single(Box<SingleSchema>), // must be last
+}
+
+impl From<bool> for Schema {
+    fn from(b: bool) -> Self {
+        Schema::Bool(b)
+    }
 }
 
 impl Default for Schema {
@@ -353,6 +364,17 @@ pub struct StringSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
     /// Adds Additional metadata to describe the XML representation format of this property.
@@ -456,6 +478,17 @@ pub struct IntegerSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
     /// Adds Additional metadata to describe the XML representation format of this property.
@@ -551,6 +584,17 @@ pub struct NumberSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
     /// Adds Additional metadata to describe the XML representation format of this property.
@@ -611,6 +655,17 @@ pub struct BooleanSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -689,6 +744,17 @@ pub struct ArraySchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -816,6 +882,17 @@ pub struct ObjectSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
     /// Adds Additional metadata to describe the XML representation format of this property.
@@ -870,6 +947,17 @@ pub struct NullSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -947,6 +1035,17 @@ pub struct MultiSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only". Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "externalDocs")]
@@ -975,6 +1074,8 @@ pub struct MultiSchema {
 impl ValidateWithContext<Spec> for Schema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         match self {
+            // A boolean schema (true / false) has no fields to validate.
+            Schema::Bool(_) => {}
             Schema::Single(s) => s.validate_with_context(ctx, path),
             Schema::Multi(s) => s.validate_with_context(ctx, path),
             Schema::AllOf(s) => {
@@ -1010,6 +1111,24 @@ impl ValidateWithContext<Spec> for Schema {
 
 impl ValidateWithContext<Spec> for SingleSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Spec: `readOnly` and `writeOnly` MUST NOT both be true on the same
+        // schema. Centralised here so every variant goes through it.
+        let (read_only, write_only) = match self {
+            SingleSchema::String(s) => (s.read_only, s.write_only),
+            SingleSchema::Integer(s) => (s.read_only, s.write_only),
+            SingleSchema::Number(s) => (s.read_only, s.write_only),
+            SingleSchema::Boolean(s) => (s.read_only, s.write_only),
+            SingleSchema::Array(s) => (s.read_only, s.write_only),
+            SingleSchema::Object(s) => (s.read_only, s.write_only),
+            SingleSchema::Null(s) => (s.read_only, s.write_only),
+        };
+        if read_only == Some(true) && write_only == Some(true) {
+            ctx.error(
+                path.clone(),
+                ".readOnly and .writeOnly are mutually exclusive",
+            );
+        }
+
         match self {
             SingleSchema::String(s) => s.validate_with_context(ctx, path),
             SingleSchema::Integer(s) => s.validate_with_context(ctx, path),
@@ -1816,5 +1935,54 @@ mod tests {
         });
         assert_eq!(serde_json::to_value(&spec).unwrap(), value);
         assert_eq!(serde_json::from_value::<Schema>(value).unwrap(), spec);
+    }
+
+    #[test]
+    fn boolean_schema_true_and_false_round_trip() {
+        // JSON Schema 2020-12 boolean schemas.
+        let t: Schema = serde_json::from_value(serde_json::json!(true)).unwrap();
+        assert!(matches!(t, Schema::Bool(true)));
+        assert_eq!(serde_json::to_value(&t).unwrap(), serde_json::json!(true));
+
+        let f: Schema = serde_json::from_value(serde_json::json!(false)).unwrap();
+        assert!(matches!(f, Schema::Bool(false)));
+        assert_eq!(serde_json::to_value(&f).unwrap(), serde_json::json!(false));
+
+        // Validate is a no-op on Bool.
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        Schema::Bool(true).validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn schema_from_bool_helper() {
+        let _: Schema = true.into();
+        let _: Schema = false.into();
+    }
+
+    #[test]
+    fn read_only_write_only_mutex() {
+        // OAS spec rule (also a JSON Schema interaction): both flags
+        // MUST NOT be true on the same schema. Centralised in
+        // SingleSchema dispatch.
+        let json = serde_json::json!({
+            "type": "string",
+            "readOnly": true,
+            "writeOnly": true,
+        });
+        let s: Schema = serde_json::from_value(json).unwrap();
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("readOnly and .writeOnly are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 }

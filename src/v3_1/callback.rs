@@ -1,4 +1,5 @@
 use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::reference::RefOr;
 use crate::v3_1::path_item::PathItem;
 use crate::v3_1::spec::Spec;
 use serde::de::{Error, MapAccess, Visitor};
@@ -45,8 +46,10 @@ use std::fmt;
 /// ```
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Callback {
-    /// A Path Item Object used to define a callback request and expected responses.
-    pub paths: BTreeMap<String, PathItem>,
+    /// A `Path Item` (or a Reference to one) describing the callback request
+    /// and its expected responses. Per OAS 3.1, a callback's path-item slot
+    /// can be a Reference, so the value type is `RefOr<PathItem>`.
+    pub paths: BTreeMap<String, RefOr<PathItem>>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -135,5 +138,62 @@ impl ValidateWithContext<Spec> for Callback {
         for (name, path_item) in &self.paths {
             path_item.validate_with_context(ctx, format!("{path}[{name}]"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::validation::Options;
+    use serde_json::json;
+
+    #[test]
+    fn round_trip_paths_and_extensions() {
+        let v = json!({
+            "{$request.body#/callbackUrl}": {
+                "post": {"responses": {"200": {"description": "ok"}}}
+            },
+            "x-internal": "yes"
+        });
+        let cb: Callback = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(cb.paths.len(), 1);
+        assert!(cb.extensions.is_some());
+        // Round-trip via reparse to be order-tolerant.
+        let back = serde_json::to_value(&cb).unwrap();
+        let re: Callback = serde_json::from_value(back).unwrap();
+        assert_eq!(re, cb);
+    }
+
+    #[test]
+    fn callback_path_value_can_be_ref() {
+        // OAS 3.1 allows the callback path-item slot to be a Reference.
+        let v = json!({
+            "{$request.body#/callbackUrl}": {"$ref": "#/components/pathItems/Hook"}
+        });
+        let cb: Callback = serde_json::from_value(v).unwrap();
+        let entry = cb.paths.get("{$request.body#/callbackUrl}").expect("entry");
+        assert!(matches!(entry, RefOr::Ref(_)));
+    }
+
+    #[test]
+    fn callback_validate_walks_path_items() {
+        // PathItem with operation that has empty responses → triggers
+        // "must declare at least one response".
+        let cb: Callback = serde_json::from_value(json!({
+            "{$request.body#/cb}": {
+                "post": {"responses": {}}
+            }
+        }))
+        .unwrap();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        cb.validate_with_context(&mut ctx, "cb".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must declare at least one response")),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 }

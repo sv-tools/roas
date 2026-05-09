@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_1::example::Example;
 use crate::v3_1::header::Header;
@@ -177,6 +177,9 @@ pub struct Encoding {
 
 impl ValidateWithContext<Spec> for MediaType {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if self.example.is_some() && self.examples.is_some() {
+            ctx.error(path.clone(), "example and examples are mutually exclusive");
+        }
         if let Some(schema) = &self.schema {
             schema.validate_with_context(ctx, format!("{path}.schema"));
         }
@@ -200,5 +203,36 @@ impl ValidateWithContext<Spec> for Encoding {
                 header.validate_with_context(ctx, format!("{path}.headers[{name}]"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::validation::Options;
+
+    #[test]
+    fn validate_example_examples_xor() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let mut examples = BTreeMap::new();
+        examples.insert(
+            "a".to_owned(),
+            RefOr::new_item(crate::v3_1::example::Example::default()),
+        );
+        MediaType {
+            example: Some(serde_json::json!("e")),
+            examples: Some(examples),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "mt".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 }

@@ -7,7 +7,6 @@ use crate::v3_1::external_documentation::ExternalDocumentation;
 use crate::v3_1::parameter::Parameter;
 use crate::v3_1::request_body::RequestBody;
 use crate::v3_1::response::Responses;
-use crate::v3_1::security_scheme::SecurityScheme;
 use crate::v3_1::server::Server;
 use crate::v3_1::spec::Spec;
 use crate::v3_1::tag::Tag;
@@ -156,43 +155,18 @@ impl ValidateWithContext<Spec> for Operation {
             external_doc.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
 
-        if let Some(security) = &self.security {
-            for (i, security) in security.iter().enumerate() {
-                for (name, scopes) in security {
-                    let path = format!("{path}.security[{i}][{name}]");
-                    let reference = format!("#/components/securitySchemes/{name}");
-                    let spec_ref = RefOr::<SecurityScheme>::new_ref(reference.clone());
-                    spec_ref.validate_with_context(ctx, path.clone());
-                    if !scopes.is_empty()
-                        && let Ok(SecurityScheme::OAuth2(oauth2)) = spec_ref.get_item(ctx.spec)
-                    {
-                        for scope in scopes {
-                            ctx.visit(format!("{reference}/{scope}"));
-                            let mut found = false;
-                            if let Some(flow) = &oauth2.flows.implicit {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.password {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.client_credentials {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.authorization_code {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found {
-                                ctx.error(
-                                    path.clone(),
-                                    format_args!(
-                                        "scope `{scope}` not found in spec by reference `{reference}`"
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+        // Operation-level `security`: validated here so it runs everywhere
+        // an Operation is reached (including operations nested inside
+        // `Callback` and `Webhooks` path items). The shared helper enforces
+        // the scope-by-scheme-type rule (apiKey / http / mutualTLS must
+        // carry empty scopes; oauth2 across all four flows; openIdConnect
+        // accepts any).
+        if let Some(sec) = &self.security {
+            crate::v3_1::validation::validate_security_requirements(
+                ctx,
+                &format!("{path}.security"),
+                sec,
+            );
         }
     }
 }

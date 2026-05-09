@@ -84,8 +84,12 @@ impl ValidateWithContext<Spec> for Header {
         if self.example.is_some() && self.examples.is_some() {
             ctx.error(path.clone(), "example and examples are mutually exclusive");
         }
-        if self.schema.is_some() && self.content.is_some() {
-            ctx.error(path.clone(), "schema and content are mutually exclusive");
+        // Spec: a Header MUST contain either `schema` or `content` (the same
+        // exactly-one rule as a Parameter).
+        match (self.schema.is_some(), self.content.is_some()) {
+            (true, true) => ctx.error(path.clone(), "schema and content are mutually exclusive"),
+            (false, false) => ctx.error(path.clone(), "must define either `schema` or `content`"),
+            _ => {}
         }
         if let Some(examples) = &self.examples {
             for (k, v) in examples {
@@ -93,6 +97,15 @@ impl ValidateWithContext<Spec> for Header {
             }
         }
         if let Some(content) = &self.content {
+            if content.len() != 1 {
+                ctx.error(
+                    path.clone(),
+                    format_args!(
+                        ".content: must contain exactly one media type entry, found {}",
+                        content.len()
+                    ),
+                );
+            }
             for (k, v) in content {
                 v.validate_with_context(ctx, format!("{path}.content[{k}]"));
             }
@@ -159,6 +172,41 @@ mod tests {
                 "x-extra": "extension",
             }),
             "serialize string",
+        );
+    }
+
+    #[test]
+    fn header_must_define_schema_or_content() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Header::default().validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must define either `schema` or `content`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn header_content_size_must_be_one() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let mut content = BTreeMap::new();
+        content.insert("application/json".to_owned(), MediaType::default());
+        content.insert("text/plain".to_owned(), MediaType::default());
+        Header {
+            content: Some(content),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must contain exactly one media type entry")),
+            "errors: {:?}",
+            ctx.errors
         );
     }
 }

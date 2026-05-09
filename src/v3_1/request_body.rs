@@ -55,6 +55,12 @@ pub struct RequestBody {
     /// Defaults to `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<bool>,
+
+    /// `^x-` Specification Extensions.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 impl ValidateWithContext<Spec> for RequestBody {
@@ -62,5 +68,27 @@ impl ValidateWithContext<Spec> for RequestBody {
         for (k, v) in &self.content {
             v.validate_with_context(ctx, format!("{path}.content[{k}]"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn round_trip_with_extensions() {
+        let v = json!({
+            "description": "A user",
+            "required": true,
+            "content": {
+                "application/json": {"schema": {"type": "object"}}
+            },
+            "x-internal": "yes"
+        });
+        let rb: RequestBody = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(rb.required, Some(true));
+        assert!(rb.extensions.is_some());
+        assert_eq!(serde_json::to_value(&rb).unwrap(), v);
     }
 }

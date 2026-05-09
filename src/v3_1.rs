@@ -1,6 +1,12 @@
-//! Implementation of OpenAPI v3.0.X Specification
+//! Implementation of OpenAPI v3.1.X Specification
 //!
-//! Full specification can be found [here](https://spec.openapis.org/oas/v3.0.3).
+//! Full specification can be found [here](https://spec.openapis.org/oas/v3.1.2.html).
+//!
+//! # Intentional permissive deviations
+//!
+//! * `PathItem` accepts arbitrary HTTP method names (e.g. `search`)
+//!   in addition to the closed
+//!   `get/put/post/delete/options/head/patch/trace` set defined in the spec.
 pub mod callback;
 pub mod components;
 pub mod discriminator;
@@ -20,4 +26,5 @@ pub mod security_scheme;
 pub mod server;
 pub mod spec;
 pub mod tag;
+pub(crate) mod validation;
 pub mod xml;

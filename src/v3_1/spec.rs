@@ -1,9 +1,10 @@
 //! The root document object of the OpenAPI v3.1.X specification.
 //!
-//! https://spec.openapis.org/oas/v3.1.0
+//! https://spec.openapis.org/oas/v3.1.2
 
 use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
+    validate_not_visited,
 };
 use crate::common::reference::{RefOr, ResolveReference, resolve_in_map};
 use crate::v3_1::callback::Callback;
@@ -14,13 +15,17 @@ use crate::v3_1::header::Header;
 use crate::v3_1::info::Info;
 use crate::v3_1::link::Link;
 use crate::v3_1::parameter::Parameter;
-use crate::v3_1::path_item::PathItem;
+use crate::v3_1::path_item::{PathItem, Paths};
 use crate::v3_1::request_body::RequestBody;
 use crate::v3_1::response::Response;
 use crate::v3_1::schema::Schema;
 use crate::v3_1::security_scheme::SecurityScheme;
 use crate::v3_1::server::Server;
 use crate::v3_1::tag::Tag;
+use crate::v3_1::validation::{
+    validate_path_item, validate_path_template_uniqueness, validate_security_requirements,
+    validate_tag_uniqueness,
+};
 use crate::validation::{Error, Options, Validate};
 use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
@@ -174,7 +179,8 @@ pub struct Spec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub servers: Option<Vec<Server>>,
 
-    /// **Required** The available paths and operations for the API.
+    /// The available paths and operations for the API.
+    /// Optional in OAS 3.1 (was required in 3.0).
     ///
     /// A relative path to an individual endpoint.
     /// The field name MUST begin with a forward slash (`/`).
@@ -186,8 +192,6 @@ pub struct Spec {
     /// Templated paths with the same hierarchy but different templated names MUST NOT exist
     /// as they are identical.
     /// In case of ambiguous matching, it’s up to the tooling to decide which one to use.
-    ///
-    /// Support of extensions is dropped for simplicity.
     ///
     /// Specification example:
     ///
@@ -206,7 +210,7 @@ pub struct Spec {
     ///                 $ref: '#/components/schemas/pet'
     /// ```
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub paths: Option<BTreeMap<String, RefOr<PathItem>>>,
+    pub paths: Option<Paths>,
 
     /// The incoming webhooks that MAY be received as part of this API and
     /// that the API consumer MAY choose to implement.
@@ -236,7 +240,7 @@ pub struct Spec {
     ///           description: Return a 200 status to indicate that the data was received successfully
     /// ```
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub webhooks: Option<BTreeMap<String, RefOr<PathItem>>>,
+    pub webhooks: Option<Paths>,
 
     /// An element to hold various schemas for the specification.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -614,13 +618,15 @@ impl Validate for Spec {
             }
         }
 
-        // memorize all operation ids for all paths first, so we can check the links
-        if let Some(paths) = &self.paths {
-            for (name, r) in paths.iter() {
+        // Memorize all operation ids across BOTH paths AND webhooks first
+        // (3.1 added webhooks; both are reachable Operation containers).
+        // Spec: operationId MUST be unique across the whole document.
+        let collect_op_ids = |container: &Paths, section: &str, ctx: &mut Context<Spec>| {
+            for (name, r) in container.iter() {
                 let item = match r.get_item(ctx.spec) {
                     Ok(i) => i,
                     Err(e) => {
-                        ctx.error("#".to_owned(), format_args!(".paths[{name}]: `{e}`"));
+                        ctx.error("#".to_owned(), format_args!(".{section}[{name}]: `{e}`"));
                         continue;
                     }
                 };
@@ -634,24 +640,53 @@ impl Validate for Spec {
                             ctx.error(
                                 "#".to_owned(),
                                 format_args!(
-                                    ".paths[{name}].{method}.operationId: `{operation_id}` already in use"
+                                    ".{section}[{name}].{method}.operationId: `{operation_id}` already in use"
                                 ),
                             );
                         }
                     }
                 }
             }
+        };
+        if let Some(paths) = &self.paths {
+            collect_op_ids(paths, "paths", &mut ctx);
+        }
+        if let Some(webhooks) = &self.webhooks {
+            collect_op_ids(webhooks, "webhooks", &mut ctx);
+        }
 
-            for (name, item) in paths.iter() {
+        // Top-level Spec.security: visit referenced schemes (so unused-detection
+        // doesn't flag legitimately-required schemes) and run scope-by-scheme-type
+        // checks (oauth2 + openIdConnect may carry scopes; apiKey / http /
+        // mutualTLS must have empty arrays).
+        if let Some(sec) = &self.security {
+            validate_security_requirements(&mut ctx, "#.security", sec);
+        }
+
+        if let Some(paths) = &self.paths {
+            // Equivalent-template detection per OAS spec: `/pets/{id}` and
+            // `/pets/{name}` collapse to the same canonical shape.
+            validate_path_template_uniqueness(&mut ctx, "#.paths", &paths.paths);
+
+            for (name, r) in paths.iter() {
                 let path = format!("#.paths[{name}]");
                 if !name.starts_with('/') {
                     ctx.error(path.clone(), "must start with `/`");
                 }
-                item.validate_with_context(&mut ctx, path);
+                r.validate_with_context(&mut ctx, path.clone());
+                if let Ok(item) = r.get_item(ctx.spec) {
+                    validate_path_item(&mut ctx, name, &path, item);
+                }
             }
         }
 
         if let Some(webhooks) = &self.webhooks {
+            // Webhook keys are arbitrary names (not URL paths), so the
+            // path-template / starts-with-`/` checks don't apply. We still
+            // run equivalent-template detection in case the user used
+            // templates inside webhook keys.
+            validate_path_template_uniqueness(&mut ctx, "#.webhooks", &webhooks.paths);
+
             for (name, item) in webhooks.iter() {
                 let path = format!("#.webhooks[{name}]");
                 item.validate_with_context(&mut ctx, path);
@@ -674,14 +709,10 @@ impl Validate for Spec {
         }
 
         if let Some(tags) = &self.tags {
+            validate_tag_uniqueness(&mut ctx, tags);
             for tag in tags.iter() {
                 let path = format!("#/tags/{}", tag.name);
-                if ctx.visit(path.clone()) {
-                    if !ctx.is_option(Options::IgnoreUnusedTags) {
-                        ctx.error(path.clone(), "unused");
-                    }
-                    tag.validate_with_context(&mut ctx, path)
-                }
+                validate_not_visited(tag, &mut ctx, Options::IgnoreUnusedTags, path);
             }
         }
 
@@ -778,6 +809,198 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Version::default()).unwrap(),
             r#""3.1.2""#,
+        );
+    }
+
+    #[test]
+    fn full_spec_validate_drives_path_template_uniqueness() {
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::Paths;
+        use crate::v3_1::response::Responses;
+
+        let make_op = || Operation {
+            responses: Some(Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut ops_a: BTreeMap<String, Operation> = BTreeMap::new();
+        ops_a.insert("get".to_owned(), make_op());
+        let mut ops_b: BTreeMap<String, Operation> = BTreeMap::new();
+        ops_b.insert("get".to_owned(), make_op());
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets/{id}".into(),
+            RefOr::new_item(PathItem {
+                operations: Some(ops_a),
+                ..Default::default()
+            }),
+        );
+        paths.paths.insert(
+            "/pets/{name}".into(),
+            RefOr::new_item(PathItem {
+                operations: Some(ops_b),
+                ..Default::default()
+            }),
+        );
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("collapse to the same shape")),
+            "expected equivalent-template error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn webhooks_validation_runs() {
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::Paths;
+        use crate::v3_1::response::Responses;
+
+        let mut ops: BTreeMap<String, Operation> = BTreeMap::new();
+        ops.insert(
+            "post".to_owned(),
+            Operation {
+                responses: Some(Responses {
+                    default: Some(RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }),
+                security: Some(vec![{
+                    let mut req = BTreeMap::new();
+                    req.insert("missing-scheme".to_owned(), vec![]);
+                    req
+                }]),
+                ..Default::default()
+            },
+        );
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert(
+            "newPet".to_owned(),
+            RefOr::new_item(PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            }),
+        );
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("missing-scheme") && e.contains("post.security")),
+            "expected webhook-nested security validation: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn operation_id_unique_across_paths_and_webhooks() {
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::Paths;
+        use crate::v3_1::response::Responses;
+
+        let make_op = |id: &str| Operation {
+            operation_id: Some(id.to_owned()),
+            responses: Some(Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut path_ops: BTreeMap<String, Operation> = BTreeMap::new();
+        path_ops.insert("get".to_owned(), make_op("dup"));
+        let mut webhook_ops: BTreeMap<String, Operation> = BTreeMap::new();
+        webhook_ops.insert("post".to_owned(), make_op("dup"));
+
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            RefOr::new_item(PathItem {
+                operations: Some(path_ops),
+                ..Default::default()
+            }),
+        );
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert(
+            "petCreated".to_owned(),
+            RefOr::new_item(PathItem {
+                operations: Some(webhook_ops),
+                ..Default::default()
+            }),
+        );
+
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths: Some(paths),
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("`dup` already in use")),
+            "expected operationId duplicate across paths/webhooks: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn license_identifier_url_mutex() {
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                license: Some(crate::v3_1::info::License {
+                    name: "MIT".into(),
+                    identifier: Some("MIT".into()),
+                    url: Some("https://example.com/license".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("`identifier` and `url` are mutually exclusive")),
+            "expected license mutex error: {:?}",
+            err.errors
         );
     }
 }

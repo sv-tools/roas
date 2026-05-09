@@ -1,7 +1,8 @@
 //! Provides metadata about the API.
 
 use crate::common::helpers::{
-    Context, ValidateWithContext, validate_email, validate_optional_url, validate_required_string,
+    Context, PushError, ValidateWithContext, validate_email, validate_optional_url,
+    validate_required_string,
 };
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
@@ -29,8 +30,11 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Info {
     /// **Required** The title of the API.
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub title: String,
+
+    /// A short summary of the API. Added in OAS 3.1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 
     /// A short description of the API.
     /// [CommonMark](https://spec.commonmark.org) syntax MAY be used for rich text representation.
@@ -52,7 +56,6 @@ pub struct Info {
 
     /// **Required** The version of the OpenAPI document
     /// (which is distinct from the OpenAPI Specification version or the API implementation version).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
 
     /// This object MAY be extended with Specification Extensions.
@@ -113,8 +116,14 @@ pub struct License {
     /// **Required** The license name used for the API.
     pub name: String,
 
+    /// SPDX license expression. Added in OAS 3.1.
+    /// **Mutually exclusive with `url`.**
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
+
     /// A URL to the license used for the API.
     /// MUST be in the format of a URL.
+    /// **Mutually exclusive with `identifier`.**
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
@@ -156,6 +165,12 @@ impl ValidateWithContext<Spec> for Contact {
 impl ValidateWithContext<Spec> for License {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
+        if self.identifier.is_some() && self.url.is_some() {
+            ctx.error(
+                path.clone(),
+                "`identifier` and `url` are mutually exclusive (OAS 3.1)",
+            );
+        }
         validate_optional_url(&self.url, ctx, format!("{path}.url"));
     }
 }
@@ -325,7 +340,10 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(Info::default()).unwrap(),
-            json!({}),
+            json!({
+              "title": "",
+              "version": ""
+            }),
             "serialize",
         );
     }
