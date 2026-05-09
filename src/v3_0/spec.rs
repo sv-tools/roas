@@ -4,7 +4,7 @@ use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
     validate_not_visited,
 };
-use crate::common::reference::{RefOr, ResolveReference, resolve_in_map};
+use crate::common::reference::ResolveReference;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
 use crate::v3_0::example::Example;
@@ -13,13 +13,18 @@ use crate::v3_0::header::Header;
 use crate::v3_0::info::Info;
 use crate::v3_0::link::Link;
 use crate::v3_0::parameter::Parameter;
-use crate::v3_0::path_item::PathItem;
+use crate::v3_0::path_item::Paths;
+use crate::v3_0::reference::{RefOr, resolve_in_map};
 use crate::v3_0::request_body::RequestBody;
 use crate::v3_0::response::Response;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::server::Server;
 use crate::v3_0::tag::Tag;
+use crate::v3_0::validation::{
+    validate_path_item, validate_path_template_uniqueness, validate_security_requirements,
+    validate_tag_uniqueness,
+};
 use crate::validation::{Error, Options, Validate};
 use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
@@ -181,8 +186,6 @@ pub struct Spec {
     /// as they are identical.
     /// In case of ambiguous matching, it’s up to the tooling to decide which one to use.
     ///
-    /// Support of extensions is dropped for simplicity.
-    ///
     /// Specification example:
     ///
     /// ```yaml
@@ -199,7 +202,7 @@ pub struct Spec {
     ///               items:
     ///                 $ref: '#/components/schemas/pet'
     /// ```
-    pub paths: BTreeMap<String, PathItem>,
+    pub paths: Paths,
 
     /// An element to hold various schemas for the specification.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -580,12 +583,24 @@ impl Validate for Spec {
             }
         }
 
+        // Top-level security: visit referenced schemes (so unused-detection
+        // doesn't fault on schemes the API actually requires) and run the
+        // scope-by-scheme-type checks.
+        if let Some(sec) = &self.security {
+            validate_security_requirements(&mut ctx, "#.security", sec);
+        }
+
+        // Equivalent-template detection: `/pets/{id}` and `/pets/{name}`
+        // collapse to the same canonical shape.
+        validate_path_template_uniqueness(&mut ctx, &self.paths.paths);
+
         for (name, item) in self.paths.iter() {
             let path = format!("#.paths[{name}]");
             if !name.starts_with('/') {
                 ctx.error(path.clone(), "must start with `/`");
             }
-            item.validate_with_context(&mut ctx, path);
+            item.validate_with_context(&mut ctx, path.clone());
+            validate_path_item(&mut ctx, name, &path, item);
         }
 
         if let Some(components) = &self.components {
@@ -597,6 +612,7 @@ impl Validate for Spec {
         }
 
         if let Some(tags) = &self.tags {
+            validate_tag_uniqueness(&mut ctx, tags);
             for tag in tags.iter() {
                 let path = format!("#/tags/{}", tag.name);
                 validate_not_visited(tag, &mut ctx, Options::IgnoreUnusedTags, path);

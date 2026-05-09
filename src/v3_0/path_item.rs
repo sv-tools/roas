@@ -1,7 +1,7 @@
 //! Path Items
 
 use crate::common::helpers::{Context, ValidateWithContext};
-use crate::common::reference::RefOr;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::operation::Operation;
 use crate::v3_0::parameter::Parameter;
 use crate::v3_0::server::Server;
@@ -203,5 +203,115 @@ impl ValidateWithContext<Spec> for PathItem {
                 parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
             }
         }
+    }
+}
+
+/// The Paths Object: holds the relative paths to the individual endpoints.
+///
+/// In addition to the path-keyed entries, this object supports
+/// Specification Extensions (`^x-` keys) per the OAS 3.0.4 spec.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Paths {
+    /// Map from a path (which MUST begin with `/`) to its `PathItem`.
+    pub paths: BTreeMap<String, PathItem>,
+
+    /// `^x-` Specification Extensions on the Paths Object itself.
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+impl Paths {
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, PathItem> {
+        self.paths.iter()
+    }
+}
+
+impl<S, K> From<S> for Paths
+where
+    S: IntoIterator<Item = (K, PathItem)>,
+    K: Into<String>,
+{
+    fn from(iter: S) -> Self {
+        Paths {
+            paths: iter.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            extensions: None,
+        }
+    }
+}
+
+impl Serialize for Paths {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Only `x-` keys are emitted from `extensions`; size hint must
+        // count only those.
+        let ext_x_count = self
+            .extensions
+            .as_ref()
+            .map(|e| e.keys().filter(|k| k.starts_with("x-")).count())
+            .unwrap_or(0);
+        let total = self.paths.len() + ext_x_count;
+        let mut map = serializer.serialize_map(Some(total))?;
+        for (k, v) in &self.paths {
+            map.serialize_entry(k, v)?;
+        }
+        if let Some(ext) = &self.extensions {
+            for (k, v) in ext {
+                if k.starts_with("x-") {
+                    map.serialize_entry(k, v)?;
+                }
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Paths {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PathsVisitor;
+        impl<'de> Visitor<'de> for PathsVisitor {
+            type Value = Paths;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a Paths object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Paths, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut paths: BTreeMap<String, PathItem> = BTreeMap::new();
+                let mut ext: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key.starts_with("x-") {
+                        if ext.contains_key(&key) {
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
+                        }
+                        ext.insert(key, map.next_value()?);
+                    } else {
+                        if paths.contains_key(&key) {
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
+                        }
+                        paths.insert(key, map.next_value()?);
+                    }
+                }
+                Ok(Paths {
+                    paths,
+                    extensions: if ext.is_empty() { None } else { Some(ext) },
+                })
+            }
+        }
+        deserializer.deserialize_map(PathsVisitor)
     }
 }

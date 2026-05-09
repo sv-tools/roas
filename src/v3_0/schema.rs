@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
 use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
-use crate::common::reference::RefOr;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::discriminator::Discriminator;
 use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::spec::Spec;
@@ -281,6 +281,25 @@ pub struct StringSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only", meaning it MAY be sent as part
+    /// of a request but MUST NOT be sent as part of a response.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Allows the value to be `null` in addition to its declared type.
+    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
     /// Adds Additional metadata to describe the XML representation format of this property.
@@ -374,6 +393,25 @@ pub struct IntegerSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only", meaning it MAY be sent as part
+    /// of a request but MUST NOT be sent as part of a response.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Allows the value to be `null` in addition to its declared type.
+    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
     /// Adds Additional metadata to describe the XML representation format of this property.
@@ -460,6 +498,25 @@ pub struct NumberSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only", meaning it MAY be sent as part
+    /// of a request but MUST NOT be sent as part of a response.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Allows the value to be `null` in addition to its declared type.
+    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
     /// Adds Additional metadata to describe the XML representation format of this property.
@@ -513,6 +570,25 @@ pub struct BooleanSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only", meaning it MAY be sent as part
+    /// of a request but MUST NOT be sent as part of a response.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Allows the value to be `null` in addition to its declared type.
+    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -584,6 +660,25 @@ pub struct ArraySchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only", meaning it MAY be sent as part
+    /// of a request but MUST NOT be sent as part of a response.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Allows the value to be `null` in addition to its declared type.
+    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
@@ -662,6 +757,25 @@ pub struct ObjectSchema {
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
 
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only", meaning it MAY be sent as part
+    /// of a request but MUST NOT be sent as part of a response.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Allows the value to be `null` in addition to its declared type.
+    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.
     /// Adds Additional metadata to describe the XML representation format of this property.
@@ -709,6 +823,25 @@ pub struct NullSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "readOnly")]
     pub read_only: Option<bool>,
+
+    /// Relevant only for Schema "properties" definitions.
+    /// Declares the property as "write only", meaning it MAY be sent as part
+    /// of a request but MUST NOT be sent as part of a response.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+
+    /// Allows the value to be `null` in addition to its declared type.
+    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
+    /// Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+
+    /// Specifies that the schema is deprecated and SHOULD be transitioned out
+    /// of usage. Default value is `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
 
     /// This MAY be used only on properties schemas.
     /// It has no effect on root schemas.

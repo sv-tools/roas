@@ -66,6 +66,20 @@ pub struct Link {
 
 impl ValidateWithContext<Spec> for Link {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Spec: a Link MUST identify the linked operation via operationRef
+        // or operationId, and the two are mutually exclusive.
+        match (&self.operation_ref, &self.operation_id) {
+            (Some(_), Some(_)) => ctx.error(
+                path.clone(),
+                "operationRef and operationId are mutually exclusive",
+            ),
+            (None, None) => ctx.error(
+                path.clone(),
+                "must specify exactly one of operationRef or operationId",
+            ),
+            _ => {}
+        }
+
         if let Some(operation_id) = &self.operation_id
             && !ctx
                 .visited

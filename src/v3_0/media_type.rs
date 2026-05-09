@@ -1,7 +1,7 @@
 //! Provides schema and examples for the media type
 
-use crate::common::helpers::{Context, ValidateWithContext};
-use crate::common::reference::RefOr;
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::header::Header;
 use crate::v3_0::parameter::InQueryStyle;
@@ -175,6 +175,9 @@ pub struct Encoding {
 
 impl ValidateWithContext<Spec> for MediaType {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if self.example.is_some() && self.examples.is_some() {
+            ctx.error(path.clone(), "example and examples are mutually exclusive");
+        }
         if let Some(schema) = &self.schema {
             schema.validate_with_context(ctx, format!("{path}.schema"));
         }

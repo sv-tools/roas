@@ -1,7 +1,7 @@
 //! Describes a single operation parameter.
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
-use crate::common::reference::RefOr;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::media_type::MediaType;
 use crate::v3_0::schema::Schema;
@@ -478,6 +478,18 @@ fn either_schema_or_content(
     path: String,
 ) {
     if schema.is_some() && content.is_some() {
-        ctx.error(path, "schema and content are mutually exclusive");
+        ctx.error(path.clone(), "schema and content are mutually exclusive");
+    }
+    // Spec: "The map MUST only contain one entry."
+    if let Some(content) = content
+        && content.len() != 1
+    {
+        ctx.error(
+            path,
+            format_args!(
+                ".content: must contain exactly one media type entry, found {}",
+                content.len()
+            ),
+        );
     }
 }

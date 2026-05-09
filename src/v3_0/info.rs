@@ -29,7 +29,6 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Info {
     /// **Required** The title of the API.
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub title: String,
 
     /// A short description of the API.
@@ -52,7 +51,6 @@ pub struct Info {
 
     /// **Required** The version of the OpenAPI document
     /// (which is distinct from the OpenAPI Specification version or the API implementation version).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
 
     /// This object MAY be extended with Specification Extensions.
@@ -323,9 +321,12 @@ mod tests {
             }),
             "serialize",
         );
+        // `title` and `version` are required fields per OAS 3.0; we no longer
+        // skip them when empty so `Info::default` round-trips with explicit
+        // empty strings.
         assert_eq!(
             serde_json::to_value(Info::default()).unwrap(),
-            json!({}),
+            json!({"title": "", "version": ""}),
             "serialize",
         );
     }

@@ -1,7 +1,7 @@
 //! Header Object
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
-use crate::common::reference::RefOr;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::media_type::MediaType;
 use crate::v3_0::parameter::InHeaderStyle;
@@ -93,6 +93,15 @@ impl ValidateWithContext<Spec> for Header {
             }
         }
         if let Some(content) = &self.content {
+            if content.len() != 1 {
+                ctx.error(
+                    path.clone(),
+                    format_args!(
+                        ".content: must contain exactly one media type entry, found {}",
+                        content.len()
+                    ),
+                );
+            }
             for (k, v) in content {
                 v.validate_with_context(ctx, format!("{path}.content[{k}]"));
             }
