@@ -3,8 +3,52 @@
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
+use crate::validation::Options;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Decode one JSON Pointer reference token (`~1` → `/`, `~0` → `~`).
+fn unescape_pointer_token(token: &str) -> String {
+    // Per RFC 6901, `~1` decodes to `/` and `~0` decodes to `~`. Order
+    // matters: a literal `~01` must round-trip to `~1`, so substitute
+    // `~1` first then `~0`.
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+/// Resolve an internal `#/paths/...` operationRef against `Spec.paths`.
+/// Returns `Ok(())` if the ref points to a defined Operation, `Err(message)`
+/// otherwise. Caller is expected to have already classified the ref as
+/// internal (starts with `#/`).
+fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> Result<(), String> {
+    let after = match reference.strip_prefix("#/paths/") {
+        Some(rest) => rest,
+        None => return Err(format!("must start with `#/paths/`, found `{reference}`")),
+    };
+    // Split on `/` once: the path token, then the method token.
+    let (path_token, method) = match after.rsplit_once('/') {
+        Some((p, m)) => (p, m),
+        None => {
+            return Err(format!(
+                "must point to `#/paths/<encoded path>/<method>`, found `{reference}`"
+            ));
+        }
+    };
+    let path = unescape_pointer_token(path_token);
+    let Some(item) = spec.paths.paths.get(&path) else {
+        return Err(format!("path `{path}` not declared in `#/paths`"));
+    };
+    let method_lower = method.to_lowercase();
+    let exists = item
+        .operations
+        .as_ref()
+        .is_some_and(|m| m.contains_key(&method_lower));
+    if !exists {
+        return Err(format!(
+            "method `{method}` not declared on path `{path}`"
+        ));
+    }
+    Ok(())
+}
 
 /// The Link object represents a possible design-time link for a response.
 /// The presence of a link does not guarantee the caller’s ability to successfully invoke it,
@@ -90,6 +134,30 @@ impl ValidateWithContext<Spec> for Link {
                 format_args!(".operationId: missing operation with id `{operation_id}`"),
             );
         }
+
+        // Validate operationRef points to an Operation.
+        // Internal refs (start with `#/`) MUST resolve. External refs are
+        // gated on `IgnoreExternalReferences`, mirroring `RefOr` behavior.
+        if let Some(operation_ref) = &self.operation_ref {
+            if operation_ref.is_empty() {
+                ctx.error(path.clone(), ".operationRef: must not be empty");
+            } else if operation_ref.starts_with("#/") {
+                if let Err(msg) = resolve_internal_operation_ref(ctx.spec, operation_ref) {
+                    ctx.error(
+                        path.clone(),
+                        format_args!(".operationRef: {msg}"),
+                    );
+                }
+            } else if !ctx.is_option(Options::IgnoreExternalReferences) {
+                ctx.error(
+                    path.clone(),
+                    format_args!(
+                        ".operationRef: external reference `{operation_ref}` is not supported"
+                    ),
+                );
+            }
+        }
+
         if let Some(server) = &self.server {
             server.validate_with_context(ctx, format!("{path}.server"));
         }
@@ -164,12 +232,44 @@ mod tests {
         );
     }
 
+    fn spec_with_pets_get() -> Spec {
+        // Build a spec containing GET /pets so internal operationRef tests
+        // have a valid target.
+        use crate::v3_0::operation::Operation;
+        use crate::v3_0::path_item::{PathItem, Paths};
+        use crate::v3_0::reference::RefOr;
+        use crate::v3_0::response::{Response, Responses};
+
+        let op = Operation {
+            responses: Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op);
+        let item = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("/pets".to_owned(), item);
+        Spec {
+            paths,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn server_validates() {
-        let spec = Spec::default();
+        let spec = spec_with_pets_get();
         let mut ctx = Context::new(&spec, Options::new());
         Link {
-            operation_ref: Some("opref".into()),
+            operation_ref: Some("#/paths/~1pets/get".into()),
             server: Some(crate::v3_0::server::Server {
                 url: "".into(),
                 ..Default::default()
@@ -180,6 +280,168 @@ mod tests {
         assert!(
             ctx.errors.iter().any(|e| e.contains("server.url")),
             "expected server.url error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_internal_resolves() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "valid ref should not error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_unknown_path_errors() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1users/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".operationRef") && e.contains("`/users` not declared")),
+            "expected unknown path: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_unknown_method_errors() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/post".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".operationRef") && e.contains("method `post`")),
+            "expected unknown method: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_bad_prefix_errors() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/schemas/Foo".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".operationRef") && e.contains("must start with `#/paths/`")),
+            "expected bad-prefix error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_empty_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".operationRef") && e.contains("must not be empty")),
+            "expected empty-ref error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_external_unsupported() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("https://example.com/spec.yaml#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("external reference") && e.contains("not supported")),
+            "expected external-unsupported error: {:?}",
+            ctx.errors
+        );
+
+        // Gating with IgnoreExternalReferences silences the error.
+        let mut ctx = Context::new(&spec, Options::IgnoreExternalReferences.only());
+        Link {
+            operation_ref: Some("https://example.com/spec.yaml#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("external reference")),
+            "with option, no external error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_tilde0_decodes_to_tilde() {
+        // RFC 6901: `~01` round-trips to `~1`. Here we register a path that
+        // contains a literal `~` and verify the decoder finds it.
+        use crate::v3_0::operation::Operation;
+        use crate::v3_0::path_item::{PathItem, Paths};
+        use crate::v3_0::reference::RefOr;
+        use crate::v3_0::response::{Response, Responses};
+        let op = Operation {
+            responses: Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op);
+        let item = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("/~weird".to_owned(), item);
+        let spec = Spec {
+            paths,
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1~0weird/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "tilde-encoded ref should resolve: {:?}",
             ctx.errors
         );
     }

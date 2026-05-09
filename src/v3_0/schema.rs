@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
 use crate::v3_0::reference::RefOr;
 use crate::v3_0::discriminator::Discriminator;
 use crate::v3_0::external_documentation::ExternalDocumentation;
@@ -954,6 +954,24 @@ impl ValidateWithContext<Spec> for Schema {
 
 impl ValidateWithContext<Spec> for SingleSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // OAS 3.0 §4.7.21: `readOnly` and `writeOnly` MUST NOT both be true.
+        // Centralised here so every variant's dispatch goes through it.
+        let (read_only, write_only) = match self {
+            SingleSchema::String(s) => (s.read_only, s.write_only),
+            SingleSchema::Integer(s) => (s.read_only, s.write_only),
+            SingleSchema::Number(s) => (s.read_only, s.write_only),
+            SingleSchema::Boolean(s) => (s.read_only, s.write_only),
+            SingleSchema::Array(s) => (s.read_only, s.write_only),
+            SingleSchema::Object(s) => (s.read_only, s.write_only),
+            SingleSchema::Null(s) => (s.read_only, s.write_only),
+        };
+        if read_only == Some(true) && write_only == Some(true) {
+            ctx.error(
+                path.clone(),
+                ".readOnly and .writeOnly are mutually exclusive",
+            );
+        }
+
         match self {
             SingleSchema::String(s) => s.validate_with_context(ctx, path),
             SingleSchema::Integer(s) => s.validate_with_context(ctx, path),
@@ -1254,6 +1272,110 @@ mod tests {
             _ => panic!("expected Single schema"),
         }
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn read_only_write_only_mutex_each_variant() {
+        // Spec: a Schema MUST NOT have both readOnly and writeOnly set to
+        // true. Build one of each `SingleSchema` variant with both flags
+        // and run them through the dispatch path; each should produce the
+        // error.
+        fn case<T: Into<SingleSchema>>(s: T) -> Schema {
+            Schema::from(s.into())
+        }
+        let schemas: Vec<(String, Schema)> = vec![
+            (
+                "string".into(),
+                case(StringSchema {
+                    read_only: Some(true),
+                    write_only: Some(true),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "integer".into(),
+                case(IntegerSchema {
+                    read_only: Some(true),
+                    write_only: Some(true),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "number".into(),
+                case(NumberSchema {
+                    read_only: Some(true),
+                    write_only: Some(true),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "boolean".into(),
+                case(BooleanSchema {
+                    read_only: Some(true),
+                    write_only: Some(true),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "array".into(),
+                case(ArraySchema {
+                    read_only: Some(true),
+                    write_only: Some(true),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "object".into(),
+                case(ObjectSchema {
+                    read_only: Some(true),
+                    write_only: Some(true),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "null".into(),
+                case(NullSchema {
+                    read_only: Some(true),
+                    write_only: Some(true),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let spec = Spec::default();
+        for (name, schema) in &schemas {
+            let mut ctx = Context::new(&spec, crate::validation::Options::new());
+            schema.validate_with_context(&mut ctx, format!("s.{name}"));
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains(".readOnly and .writeOnly are mutually exclusive")),
+                "variant `{name}` should reject readOnly+writeOnly: errors {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_xor_write_only_individually_ok() {
+        // Only one of readOnly / writeOnly is fine.
+        let only_read = Schema::from(SingleSchema::from(StringSchema {
+            read_only: Some(true),
+            ..Default::default()
+        }));
+        let only_write = Schema::from(SingleSchema::from(StringSchema {
+            write_only: Some(true),
+            ..Default::default()
+        }));
+        let spec = Spec::default();
+        for s in [only_read, only_write] {
+            let mut ctx = Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+                "single flag should not error: {:?}",
+                ctx.errors
+            );
+        }
     }
 
     #[test]
