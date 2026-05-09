@@ -156,10 +156,13 @@ pub fn validate_optional_uri<T>(uri: &Option<String>, ctx: &mut Context<T>, path
         ctx.error(path, "must be a valid URI, found ``");
         return;
     }
-    // Reject only obviously broken forms (whitespace, control chars).
-    // The full RFC 3986 grammar is wide enough that anything else is best
-    // left to a dedicated parser.
-    if uri.bytes().any(|b| b.is_ascii_whitespace() || b == 0) {
+    // Reject obviously broken forms: any ASCII whitespace or control
+    // character (C0 0x00..0x1F or DEL 0x7F). The full RFC 3986 grammar
+    // is wide enough that everything else is best left to a parser.
+    if uri
+        .bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
         ctx.error(path, format_args!("must be a valid URI, found `{uri}`"));
     }
 }
@@ -314,6 +317,28 @@ mod tests {
             &Some(String::from("foo-bar")),
             &mut ctx,
             String::from("test_url"),
+        );
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn validate_optional_uri_rejects_control_chars_and_whitespace() {
+        // Tab, newline, DEL, and other C0 / DEL controls each fail.
+        for s in ["bad\turi", "with\nnewline", "with\x01ctl", "with\x7fdel"] {
+            let mut ctx = Context::new(&(), Options::new());
+            validate_optional_uri(&Some(s.to_owned()), &mut ctx, "u".to_owned());
+            assert!(
+                ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
+                "expected error for `{s:?}`: {:?}",
+                ctx.errors
+            );
+        }
+        // A clean URI passes.
+        let mut ctx = Context::new(&(), Options::new());
+        validate_optional_uri(
+            &Some("urn:example:dialect".to_owned()),
+            &mut ctx,
+            "u".to_owned(),
         );
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }

@@ -238,7 +238,12 @@ impl ValidateWithContext<Spec> for PathItem {
             if r.is_empty() {
                 ctx.error(path.clone(), ".$ref: must not be empty");
             } else if r.starts_with("#/") {
-                if !internal_path_item_ref_target_exists(ctx.spec, r) {
+                if internal_path_item_ref_target_exists(ctx.spec, r) {
+                    // Mark the target as visited so unused-component
+                    // detection (e.g. `components.pathItems[X]` reached
+                    // only via a `$ref`) doesn't falsely flag it.
+                    ctx.visit(r.clone());
+                } else {
                     ctx.error(
                         path.clone(),
                         format_args!(".$ref: target `{r}` is not declared in this document"),
@@ -532,6 +537,33 @@ mod tests {
             ctx.errors.iter().all(|e| !e.contains("external reference")),
             "errors: {:?}",
             ctx.errors
+        );
+    }
+
+    #[test]
+    fn ref_target_marked_visited_for_unused_detection() {
+        // A `paths` entry that is purely a `$ref` to
+        // `components.pathItems[Foo]` must mark the target as used so the
+        // unused-detection pass doesn't flag it.
+        let mut cp = BTreeMap::new();
+        cp.insert("Foo".to_owned(), PathItem::default());
+        let comp = crate::v3_1::components::Components {
+            path_items: Some(cp),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let pi = PathItem {
+            reference: Some("#/components/pathItems/Foo".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::empty());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.is_visited("#/components/pathItems/Foo"),
+            "$ref target must be marked visited"
         );
     }
 

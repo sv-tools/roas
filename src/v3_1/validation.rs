@@ -336,7 +336,9 @@ pub fn validate_tag_uniqueness(ctx: &mut Context<Spec>, tags: &[Tag]) {
 
 /// Validate that no two paths in a path map collapse to the same canonical
 /// (template-stripped) form. Extension keys (`x-...`) are skipped.
-/// Used for both `Spec.paths` and `Spec.webhooks`.
+/// Applied to `Spec.paths` only; webhook keys are arbitrary identifiers
+/// (not URL templates) per OAS 3.1.2 and `Spec.validate` skips this check
+/// for them.
 pub fn validate_path_template_uniqueness<V>(
     ctx: &mut Context<Spec>,
     section: &str,
@@ -370,8 +372,17 @@ pub fn validate_path_template_uniqueness<V>(
 /// `Operation::validate_with_context`, not here, so it also fires for
 /// operations nested inside Callback / Webhook path items.
 pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, item: &PathItem) {
-    let pi_params = item.parameters.as_deref();
-    if let Some(ops) = &item.operations {
+    // If the path entry is a `$ref` wrapper (no inline operations / params),
+    // follow the chain to the effective PathItem so the path-template ↔
+    // parameter correspondence check sees the operations actually mounted
+    // at this template. Inline content (when present) takes precedence.
+    let effective = if item.parameters.is_none() && item.operations.is_none() {
+        resolve_path_item_chain(ctx.spec, item)
+    } else {
+        item
+    };
+    let pi_params = effective.parameters.as_deref();
+    if let Some(ops) = &effective.operations {
         for (method, op) in ops {
             let op_path = format!("{path}.{method}");
             validate_operation_parameters(
@@ -382,6 +393,69 @@ pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, i
                 op.parameters.as_deref(),
             );
         }
+    }
+}
+
+/// Walk `PathItem.reference` hops with cycle detection. Stops at the first
+/// item without a `$ref`, on a dangling target, an empty/external ref, or
+/// a cycle (returning the current item in those cases — error reporting
+/// is `PathItem::validate_with_context`'s responsibility).
+fn resolve_path_item_chain<'a>(spec: &'a Spec, item: &'a PathItem) -> &'a PathItem {
+    let mut current = item;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(r) = current.reference.as_deref() {
+        if r.is_empty() || !seen.insert(r.to_owned()) {
+            return current;
+        }
+        let Some(next) = find_path_item_by_ref(spec, r) else {
+            return current;
+        };
+        current = next;
+    }
+    current
+}
+
+fn find_path_item_by_ref<'a>(spec: &'a Spec, reference: &str) -> Option<&'a PathItem> {
+    let unescape = |s: &str| s.replace("~1", "/").replace("~0", "~");
+    if let Some(after) = reference.strip_prefix("#/paths/") {
+        if after.contains('/') {
+            return None;
+        }
+        spec.paths.as_ref()?.paths.get(&unescape(after))
+    } else if let Some(after) = reference.strip_prefix("#/webhooks/") {
+        if after.contains('/') {
+            return None;
+        }
+        spec.webhooks.as_ref()?.paths.get(&unescape(after))
+    } else if let Some(after) = reference.strip_prefix("#/components/pathItems/") {
+        if after.contains('/') {
+            return None;
+        }
+        spec.components
+            .as_ref()?
+            .path_items
+            .as_ref()?
+            .get(&unescape(after))
+    } else if let Some(after) = reference.strip_prefix("#/components/callbacks/") {
+        let mut split = after.splitn(2, '/');
+        let (Some(cb_token), Some(expr_token)) = (split.next(), split.next()) else {
+            return None;
+        };
+        if expr_token.contains('/') {
+            return None;
+        }
+        let cb_name = unescape(cb_token);
+        let expr = unescape(expr_token);
+        let cb_ref = spec
+            .components
+            .as_ref()?
+            .callbacks
+            .as_ref()?
+            .get(&cb_name)?;
+        let cb = cb_ref.get_item(spec).ok()?;
+        cb.paths.get(&expr)
+    } else {
+        None
     }
 }
 
@@ -713,6 +787,77 @@ mod tests {
         assert!(
             ctx.errors.iter().all(|e| !e.contains("template variable")),
             "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_path_item_follows_internal_ref_chain() {
+        // A `paths` entry with only `$ref` set must still drive the
+        // path-template ↔ parameter check via the resolved target.
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::parameter::{InPath, Parameter};
+        use crate::v3_1::response::{Response, Responses};
+
+        let target = PathItem {
+            operations: Some(BTreeMap::from([(
+                "get".to_owned(),
+                Operation {
+                    parameters: Some(vec![RefOr::new_item(Parameter::Path(InPath {
+                        name: "wrong".into(),
+                        description: None,
+                        required: true,
+                        deprecated: None,
+                        style: None,
+                        explode: None,
+                        schema: None,
+                        example: None,
+                        examples: None,
+                        content: Some(BTreeMap::from([(
+                            "application/json".to_owned(),
+                            crate::v3_1::media_type::MediaType::default(),
+                        )])),
+                        extensions: None,
+                    }))]),
+                    responses: Some(Responses {
+                        responses: Some(BTreeMap::from([(
+                            "200".to_owned(),
+                            RefOr::new_item(Response {
+                                description: "ok".into(),
+                                ..Default::default()
+                            }),
+                        )])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+        let mut cp = BTreeMap::new();
+        cp.insert("Reusable".to_owned(), target);
+        let comp = Components {
+            path_items: Some(cp),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            components: Some(comp),
+            ..Default::default()
+        }));
+
+        // Caller mounts the reusable item under template `/users/{id}`,
+        // so the `wrong` parameter should be flagged.
+        let item = PathItem {
+            reference: Some("#/components/pathItems/Reusable".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/users/{id}", "#.paths[/users/{id}]", &item);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("template variable `{id}`") || e.contains("parameter `wrong`")),
+            "expected param-mismatch report after chain follow: {:?}",
             ctx.errors
         );
     }
