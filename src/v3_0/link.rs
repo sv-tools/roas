@@ -47,11 +47,21 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
             ));
         }
     };
-    let (path_token, method) = match after.rsplit_once('/') {
-        Some((p, m)) => (p, m),
-        None => {
+    // Per RFC 6901 the path is a single JSON Pointer reference token: `/`
+    // inside the path MUST be escaped as `~1`. So between `#/paths/` and the
+    // method there must be exactly one `/` separator. Refs like
+    // `#/paths//pets/get` (unescaped slash) are malformed and rejected here.
+    let slash_count = after.bytes().filter(|b| *b == b'/').count();
+    let (path_token, method) = match (slash_count, after.split_once('/')) {
+        (1, Some((p, m))) => (p, m),
+        (0, _) => {
             return OperationRefResolution::Err(format!(
                 "must point to `#/paths/<encoded path>/<method>`, found `{reference}`"
+            ));
+        }
+        _ => {
+            return OperationRefResolution::Err(format!(
+                "malformed JSON Pointer: the encoded path token must use `~1` for `/`, found `{reference}`"
             ));
         }
     };
@@ -597,6 +607,27 @@ mod tests {
         assert!(
             ctx.errors.iter().all(|e| !e.contains(".operationRef")),
             "with option, no .operationRef error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_unescaped_slash_in_path_token_is_malformed() {
+        // RFC 6901: a literal `/` inside a path token must be escaped as
+        // `~1`. The form `#/paths//pets/get` is malformed (two slashes
+        // between `#/paths/` and `get` make the path token ambiguous).
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths//pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("malformed JSON Pointer")),
+            "expected malformed-pointer error: {:?}",
             ctx.errors
         );
     }
