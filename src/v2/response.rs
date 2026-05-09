@@ -1,8 +1,8 @@
 //! Response Object
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
-use crate::common::reference::RefOr;
 use crate::v2::header::Header;
+use crate::v2::reference::RefOr;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
 use crate::validation::Options;
@@ -173,6 +173,16 @@ impl ValidateWithContext<Spec> for Response {
 
 impl ValidateWithContext<Spec> for Responses {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Per OAS v2: a Responses Object MUST contain at least one response code
+        // (`default` counts as a catch-all and is sufficient on its own).
+        let has_status = self.responses.as_ref().is_some_and(|r| !r.is_empty());
+        if self.default.is_none() && !has_status {
+            ctx.error(
+                path.clone(),
+                "must declare at least one response (a status code or `default`)",
+            );
+        }
+
         if let Some(response) = &self.default {
             response.validate_with_context(ctx, format!("{path}.default"));
         }
@@ -199,8 +209,8 @@ impl ValidateWithContext<Spec> for Responses {
 mod tests {
     use super::*;
     use crate::common::helpers::Context;
-    use crate::common::reference::RefOr;
     use crate::v2::header::{IntegerHeader, StringHeader};
+    use crate::v2::reference::RefOr;
     use crate::validation::Options;
     use std::collections::BTreeMap;
 

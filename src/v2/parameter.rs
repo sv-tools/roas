@@ -4,8 +4,8 @@ use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, Stri
 use crate::common::helpers::{
     Context, ValidateWithContext, validate_pattern, validate_required_string,
 };
-use crate::common::reference::RefOr;
 use crate::v2::items::Items;
+use crate::v2::reference::RefOr;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
 use serde::{Deserialize, Serialize};
@@ -238,7 +238,7 @@ pub struct IntegerParameter {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<i64>,
+    pub minimum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly greater than the value of `minimum`
     #[serde(rename = "exclusiveMinimum")]
@@ -247,7 +247,7 @@ pub struct IntegerParameter {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<i64>,
+    pub maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly less than the value of `maximum`
     #[serde(rename = "exclusiveMaximum")]
@@ -641,5 +641,345 @@ fn must_not_allow_empty_value(
     if p.is_some_and(|x| x) {
         ctx.errors
             .push(format!("{path}.{name}: must not allow empty value"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::v2::items::{Items, StringItem};
+    use crate::v2::schema::{Schema, StringSchema};
+    use crate::validation::Options;
+    use serde_json::json;
+
+    fn ctx() -> Context<'static, Spec> {
+        // Returns a context with a default Spec held by the static box leaked.
+        // Using a leak keeps the borrow checker simple in tests; the spec lives
+        // for the test process which is fine.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        Context::new(spec, Options::new())
+    }
+
+    #[test]
+    fn body_parameter_roundtrip_and_validate() {
+        let raw = json!({
+            "in": "body",
+            "name": "user",
+            "description": "the user",
+            "required": true,
+            "schema": {"type": "string"},
+            "x-foo": "bar",
+        });
+        let p: Parameter = serde_json::from_value(raw.clone()).unwrap();
+        match &p {
+            Parameter::Body(b) => {
+                assert_eq!(b.name, "user");
+                assert_eq!(b.required, Some(true));
+            }
+            _ => panic!("expected body"),
+        }
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v, raw);
+
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "x".into());
+        assert!(c.errors.is_empty(), "errors: {:?}", c.errors);
+
+        // Empty name produces an error.
+        let bad = Parameter::Body(Box::new(InBody {
+            name: String::new(),
+            description: None,
+            required: None,
+            schema: RefOr::new_item(Schema::from(StringSchema::default())),
+            extensions: None,
+        }));
+        let mut c = ctx();
+        bad.validate_with_context(&mut c, "p".into());
+        assert!(
+            c.errors.iter().any(|e| e.contains("must not be empty")),
+            "errors: {:?}",
+            c.errors
+        );
+    }
+
+    #[test]
+    fn header_parameter_all_variants_roundtrip_and_validate() {
+        // String
+        let raw = json!({"in": "header", "type": "string", "name": "h"});
+        let p: Parameter = serde_json::from_value(raw.clone()).unwrap();
+        assert!(matches!(&p, Parameter::Header(h) if matches!(**h, InHeader::String(_))));
+        assert_eq!(serde_json::to_value(&p).unwrap(), raw);
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(c.errors.is_empty(), "errors: {:?}", c.errors);
+
+        // Integer
+        let raw = json!({"in": "header", "type": "integer", "name": "h"});
+        let p: Parameter = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&p).unwrap(), raw);
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(c.errors.is_empty());
+
+        // Number
+        let raw = json!({"in": "header", "type": "number", "name": "h"});
+        let p: Parameter = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&p).unwrap(), raw);
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(c.errors.is_empty());
+
+        // Boolean
+        let raw = json!({"in": "header", "type": "boolean", "name": "h"});
+        let p: Parameter = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&p).unwrap(), raw);
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(c.errors.is_empty());
+
+        // Array
+        let raw =
+            json!({"in": "header", "type": "array", "name": "h", "items": {"type": "string"}});
+        let p: Parameter = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&p).unwrap(), raw);
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(c.errors.is_empty());
+
+        // Header with allowEmptyValue=true should produce a "must not allow empty value" error
+        let p = Parameter::Header(Box::new(InHeader::String(StringParameter {
+            name: "h".into(),
+            allow_empty_value: Some(true),
+            ..Default::default()
+        })));
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(
+            c.errors
+                .iter()
+                .any(|e| e.contains("must not allow empty value")),
+            "errors: {:?}",
+            c.errors
+        );
+
+        // Header with bad pattern triggers pattern error.
+        let p = Parameter::Header(Box::new(InHeader::String(StringParameter {
+            name: "h".into(),
+            pattern: Some("[".into()),
+            ..Default::default()
+        })));
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(
+            c.errors.iter().any(|e| e.contains("pattern")),
+            "errors: {:?}",
+            c.errors
+        );
+
+        // Each non-string variant — exercise allow-empty-value on each.
+        for variant in [
+            Parameter::Header(Box::new(InHeader::Integer(IntegerParameter {
+                name: "h".into(),
+                allow_empty_value: Some(true),
+                ..Default::default()
+            }))),
+            Parameter::Header(Box::new(InHeader::Number(NumberParameter {
+                name: "h".into(),
+                allow_empty_value: Some(true),
+                ..Default::default()
+            }))),
+            Parameter::Header(Box::new(InHeader::Boolean(BooleanParameter {
+                name: "h".into(),
+                allow_empty_value: Some(true),
+                ..Default::default()
+            }))),
+            Parameter::Header(Box::new(InHeader::Array(ArrayParameter {
+                name: "h".into(),
+                allow_empty_value: Some(true),
+                items: Items::String(Box::new(StringItem::default())),
+                ..Default::default()
+            }))),
+        ] {
+            let mut c = ctx();
+            variant.validate_with_context(&mut c, "p".into());
+            assert!(
+                c.errors
+                    .iter()
+                    .any(|e| e.contains("must not allow empty value")),
+                "errors: {:?}",
+                c.errors
+            );
+        }
+    }
+
+    #[test]
+    fn query_parameter_all_variants_roundtrip_and_validate() {
+        for raw in [
+            json!({"in": "query", "type": "string", "name": "q"}),
+            json!({"in": "query", "type": "integer", "name": "q"}),
+            json!({"in": "query", "type": "number", "name": "q"}),
+            json!({"in": "query", "type": "boolean", "name": "q"}),
+            json!({"in": "query", "type": "array", "name": "q", "items": {"type": "string"}}),
+        ] {
+            let p: Parameter = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&p).unwrap(), raw);
+            let mut c = ctx();
+            p.validate_with_context(&mut c, "p".into());
+            assert!(c.errors.is_empty(), "errors: {:?}", c.errors);
+        }
+
+        // Validate empty name reports an error for each kind.
+        for inner in [
+            InQuery::String(StringParameter::default()),
+            InQuery::Integer(IntegerParameter::default()),
+            InQuery::Number(NumberParameter::default()),
+            InQuery::Boolean(BooleanParameter::default()),
+            InQuery::Array(ArrayParameter {
+                items: Items::String(Box::default()),
+                ..Default::default()
+            }),
+        ] {
+            let p = Parameter::Query(Box::new(inner));
+            let mut c = ctx();
+            p.validate_with_context(&mut c, "p".into());
+            assert!(
+                c.errors.iter().any(|e| e.contains("must not be empty")),
+                "errors: {:?}",
+                c.errors
+            );
+        }
+    }
+
+    #[test]
+    fn path_parameter_all_variants_validate() {
+        // Each path parameter variant must have required=true; otherwise an error is reported.
+        let cases = [
+            Parameter::Path(Box::new(InPath::String(StringParameter {
+                name: "id".into(),
+                required: Some(true),
+                ..Default::default()
+            }))),
+            Parameter::Path(Box::new(InPath::Integer(IntegerParameter {
+                name: "id".into(),
+                required: Some(true),
+                ..Default::default()
+            }))),
+            Parameter::Path(Box::new(InPath::Number(NumberParameter {
+                name: "id".into(),
+                required: Some(true),
+                ..Default::default()
+            }))),
+            Parameter::Path(Box::new(InPath::Boolean(BooleanParameter {
+                name: "id".into(),
+                required: Some(true),
+                ..Default::default()
+            }))),
+            Parameter::Path(Box::new(InPath::Array(ArrayParameter {
+                name: "id".into(),
+                required: Some(true),
+                items: Items::String(Box::default()),
+                ..Default::default()
+            }))),
+        ];
+        for p in &cases {
+            let raw = serde_json::to_value(p).unwrap();
+            let p2: Parameter = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(p, &p2);
+            let mut c = ctx();
+            p.validate_with_context(&mut c, "p".into());
+            assert!(c.errors.is_empty(), "errors: {:?}", c.errors);
+        }
+
+        // Path without required produces an error
+        let p = Parameter::Path(Box::new(InPath::String(StringParameter {
+            name: "id".into(),
+            required: None,
+            ..Default::default()
+        })));
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(
+            c.errors.iter().any(|e| e.contains("must be required")),
+            "errors: {:?}",
+            c.errors
+        );
+
+        // Path with allow_empty_value triggers extra error.
+        let p = Parameter::Path(Box::new(InPath::String(StringParameter {
+            name: "id".into(),
+            required: Some(true),
+            allow_empty_value: Some(true),
+            ..Default::default()
+        })));
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(
+            c.errors
+                .iter()
+                .any(|e| e.contains("must not allow empty value")),
+            "errors: {:?}",
+            c.errors
+        );
+
+        // Hit each Path variant's must_be_required + allow-empty-value branches.
+        for inner in [
+            InPath::Integer(IntegerParameter::default()),
+            InPath::Number(NumberParameter::default()),
+            InPath::Boolean(BooleanParameter::default()),
+            InPath::Array(ArrayParameter {
+                items: Items::String(Box::default()),
+                ..Default::default()
+            }),
+        ] {
+            let p = Parameter::Path(Box::new(inner));
+            let mut c = ctx();
+            p.validate_with_context(&mut c, "p".into());
+            assert!(
+                c.errors.iter().any(|e| e.contains("must be required")),
+                "errors: {:?}",
+                c.errors
+            );
+        }
+    }
+
+    #[test]
+    fn formdata_parameter_all_variants_roundtrip_and_validate() {
+        for raw in [
+            json!({"in": "formData", "type": "string", "name": "f"}),
+            json!({"in": "formData", "type": "integer", "name": "f"}),
+            json!({"in": "formData", "type": "number", "name": "f"}),
+            json!({"in": "formData", "type": "boolean", "name": "f"}),
+            json!({"in": "formData", "type": "array", "name": "f", "items": {"type": "string"}}),
+            json!({"in": "formData", "type": "file", "name": "f"}),
+        ] {
+            let p: Parameter = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&p).unwrap(), raw);
+            let mut c = ctx();
+            p.validate_with_context(&mut c, "p".into());
+            assert!(c.errors.is_empty(), "errors: {:?}", c.errors);
+        }
+
+        // Empty-name validation for each variant.
+        for inner in [
+            InFormData::String(StringParameter::default()),
+            InFormData::Integer(IntegerParameter::default()),
+            InFormData::Number(NumberParameter::default()),
+            InFormData::Boolean(BooleanParameter::default()),
+            InFormData::Array(ArrayParameter {
+                items: Items::String(Box::default()),
+                ..Default::default()
+            }),
+            InFormData::File(FileParameter::default()),
+        ] {
+            let p = Parameter::FormData(Box::new(inner));
+            let mut c = ctx();
+            p.validate_with_context(&mut c, "p".into());
+            assert!(
+                c.errors.iter().any(|e| e.contains("must not be empty")),
+                "errors: {:?}",
+                c.errors
+            );
+        }
     }
 }

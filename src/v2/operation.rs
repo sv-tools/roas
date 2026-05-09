@@ -1,9 +1,9 @@
 //! Operation Object
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
-use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;
+use crate::v2::reference::RefOr;
 use crate::v2::response::Responses;
 use crate::v2::spec::{Scheme, Spec};
 use crate::v2::tag::Tag;
@@ -129,21 +129,12 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
+        // Per-parameter validation. Cross-cutting rules (body/formData
+        // exclusivity, (name, in) duplicates, path-template correspondence)
+        // run from `Spec::validate` via `crate::v2::validation`.
         if let Some(parameters) = &self.parameters {
-            let mut body_count = 0;
-            for (i, parameter) in parameters.clone().iter().enumerate() {
+            for (i, parameter) in parameters.iter().enumerate() {
                 parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
-                if let RefOr::Item(Parameter::Body(_)) = parameter {
-                    body_count += 1;
-                }
-            }
-            if body_count > 1 {
-                ctx.error(
-                    path.clone(),
-                    format_args!(
-                        ".parameters: only one body parameter allowed, found {body_count}",
-                    ),
-                );
             }
         }
 

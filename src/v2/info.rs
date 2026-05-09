@@ -28,7 +28,6 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Info {
     /// **Required** The title of the application.
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub title: String,
 
     /// A short description of the application.
@@ -50,7 +49,6 @@ pub struct Info {
     pub license: Option<License>,
 
     /// **Required** Provides the version of the application API (not to be confused with the specification version).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
 
     /// Allows extensions to the Swagger Schema.
@@ -321,10 +319,13 @@ mod tests {
             }),
             "serialize",
         );
+        // Required fields are now serialized even when empty — the spec says
+        // they're required, and silently dropping them produced malformed v2
+        // output that round-tripped only by accident.
         assert_eq!(
             serde_json::to_value(Info::default()).unwrap(),
-            json!({}),
-            "serialize",
+            json!({"title": "", "version": ""}),
+            "serialize default emits required fields",
         );
     }
 

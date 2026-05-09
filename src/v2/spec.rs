@@ -4,11 +4,12 @@ use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
     validate_not_visited, validate_optional_string_matches,
 };
-use crate::common::reference::{RefOr, ResolveReference};
+use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::info::Info;
 use crate::v2::parameter::Parameter;
-use crate::v2::path_item::PathItem;
+use crate::v2::path_item::Paths;
+use crate::v2::reference::RefOr;
 use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
@@ -124,8 +125,8 @@ pub struct Spec {
     /// The path is appended to the basePath in order to construct the full URL.
     /// [Path templating](https://swagger.io/specification/v2/#path-templating) is allowed.
     ///
-    /// The extensions support is dropped for simplicity.
-    pub paths: BTreeMap<String, PathItem>,
+    /// Supports `^x-` Specification Extensions on the Paths Object itself.
+    pub paths: Paths,
 
     /// An object to hold data types produced and consumed by operations.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -361,14 +362,25 @@ impl Validate for Spec {
             );
         }
 
-        // validate paths operations
+        // Validate paths operations and the new path-template / parameter rules.
         for (name, item) in self.paths.iter() {
             let path = format!("#.paths[{name}]");
             if !name.starts_with('/') {
                 ctx.error(path.clone(), "must start with `/`");
             }
-            item.validate_with_context(&mut ctx, path);
+            item.validate_with_context(&mut ctx, path.clone());
+            crate::v2::validation::validate_path_item(&mut ctx, name, &path, item);
         }
+
+        // Validate Spec-level security requirements against security_definitions.
+        if let Some(security) = &self.security {
+            crate::v2::validation::validate_security_requirements(&mut ctx, "#.security", security);
+        }
+
+        // Walk security_definitions: each scheme runs its own validator so
+        // missing required URLs etc. are reported even when no requirement
+        // references the scheme.
+        crate::v2::validation::validate_security_definitions(&mut ctx);
 
         if let Some(docs) = &self.external_docs {
             docs.validate_with_context(&mut ctx, "#.externalDocs".to_owned())
@@ -623,6 +635,546 @@ mod tests {
             .to_string(),
             r#"unknown variant `foo`, expected one of `http`, `https`, `ws`, `wss`"#,
             "foo string as scheme",
+        );
+    }
+
+    use crate::v2::operation::Operation;
+    use crate::v2::parameter::{InQuery, Parameter, StringParameter};
+    use crate::v2::path_item::PathItem;
+    use crate::v2::response::{Response, Responses};
+    use crate::v2::schema::{ObjectSchema, Schema, StringSchema};
+    use crate::v2::security_scheme::{
+        BasicSecurityScheme, OAuth2SecurityScheme, Scopes, SecurityScheme, SecuritySchemeOAuth2Flow,
+    };
+
+    fn happy_op() -> Operation {
+        Operation {
+            responses: Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn version_and_scheme_display() {
+        assert_eq!(format!("{}", Version::V2_0), "2.0");
+        for (s, expected) in [
+            (Scheme::HTTP, "http"),
+            (Scheme::HTTPS, "https"),
+            (Scheme::WS, "ws"),
+            (Scheme::WSS, "wss"),
+        ] {
+            assert_eq!(format!("{s}"), expected);
+        }
+    }
+
+    #[test]
+    fn happy_path_validate_no_errors() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".into(), happy_op());
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            "/users".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        spec.paths = crate::v2::path_item::Paths {
+            paths,
+            extensions: None,
+        };
+        let res = spec.validate(Options::new());
+        assert!(res.is_ok(), "errors: {:?}", res);
+    }
+
+    #[test]
+    fn validate_path_must_start_with_slash() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            "no-slash".to_owned(),
+            PathItem {
+                operations: Some({
+                    let mut m = BTreeMap::new();
+                    m.insert("get".to_owned(), happy_op());
+                    m
+                }),
+                ..Default::default()
+            },
+        );
+        spec.paths = crate::v2::path_item::Paths {
+            paths,
+            extensions: None,
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors.iter().any(|e| e.contains("must start with `/`")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn validate_base_path_must_start_with_slash() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        spec.base_path = Some("api".into());
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("basePath") && e.contains("must start with `/`")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn validate_security_with_definitions() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "basicAuth".to_owned(),
+            SecurityScheme::Basic(BasicSecurityScheme::default()),
+        );
+        spec.security_definitions = Some(defs);
+        let mut req = BTreeMap::new();
+        req.insert("basicAuth".to_owned(), vec![]);
+        spec.security = Some(vec![req]);
+        let res = spec.validate(Options::new());
+        assert!(res.is_ok(), "errors: {:?}", res);
+    }
+
+    #[test]
+    fn validate_undefined_security_scheme() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut req = BTreeMap::new();
+        req.insert("foo".to_owned(), vec![]);
+        spec.security = Some(vec![req]);
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("no securityDefinitions on the spec")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn validate_body_and_formdata_together_via_spec() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut op = happy_op();
+        op.parameters = Some(vec![
+            RefOr::new_item(Parameter::Body(Box::new(crate::v2::parameter::InBody {
+                name: "b".into(),
+                description: None,
+                required: None,
+                schema: RefOr::new_item(Schema::from(StringSchema::default())),
+                extensions: None,
+            }))),
+            RefOr::new_item(Parameter::FormData(Box::new(
+                crate::v2::parameter::InFormData::String(StringParameter {
+                    name: "f".into(),
+                    ..Default::default()
+                }),
+            ))),
+        ]);
+        let mut ops = BTreeMap::new();
+        ops.insert("post".into(), op);
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            "/p".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        spec.paths = crate::v2::path_item::Paths {
+            paths,
+            extensions: None,
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("`body` and `formData`")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn validate_duplicate_param_via_spec() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut op = happy_op();
+        op.parameters = Some(vec![
+            RefOr::new_item(Parameter::Query(Box::new(InQuery::String(
+                StringParameter {
+                    name: "q".into(),
+                    ..Default::default()
+                },
+            )))),
+            RefOr::new_item(Parameter::Query(Box::new(InQuery::String(
+                StringParameter {
+                    name: "q".into(),
+                    ..Default::default()
+                },
+            )))),
+        ]);
+        let mut ops = BTreeMap::new();
+        ops.insert("get".into(), op);
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            "/p".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        spec.paths = crate::v2::path_item::Paths {
+            paths,
+            extensions: None,
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors.iter().any(|e| e.contains("duplicate parameter")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn validate_missing_path_template_param_via_spec() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".into(), happy_op());
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            "/users/{id}".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        spec.paths = crate::v2::path_item::Paths {
+            paths,
+            extensions: None,
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("path template variable `{id}`")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn validate_empty_responses_via_spec() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert(
+            "get".into(),
+            Operation {
+                responses: Responses::default(),
+                ..Default::default()
+            },
+        );
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            "/p".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        spec.paths = crate::v2::path_item::Paths {
+            paths,
+            extensions: None,
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("must declare at least one response")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn define_schema_parameter_response_helpers() {
+        let mut spec = Spec::default();
+
+        let r = spec
+            .define_schema("Foo", Schema::from(StringSchema::default()))
+            .unwrap();
+        match r {
+            RefOr::Ref(rr) => assert_eq!(rr.reference, "#/definitions/Foo"),
+            _ => panic!(),
+        }
+        let p = Parameter::Query(Box::new(InQuery::String(StringParameter {
+            name: "p".into(),
+            ..Default::default()
+        })));
+        let r = spec.define_parameter("Bar", p).unwrap();
+        match r {
+            RefOr::Ref(rr) => assert_eq!(rr.reference, "#/parameters/Bar"),
+            _ => panic!(),
+        }
+        let r = spec
+            .define_response(
+                "Baz",
+                Response {
+                    description: "x".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        match r {
+            RefOr::Ref(rr) => assert_eq!(rr.reference, "#/responses/Baz"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn define_helpers_invalid_component_name() {
+        let mut spec = Spec::default();
+        let err = spec
+            .define_schema("bad name", Schema::from(StringSchema::default()))
+            .unwrap_err();
+        assert_eq!(err.name, "bad name");
+        let err = spec
+            .define_parameter(
+                "bad name",
+                Parameter::Query(Box::new(InQuery::String(StringParameter::default()))),
+            )
+            .unwrap_err();
+        assert_eq!(err.name, "bad name");
+        let err = spec
+            .define_response(
+                "bad name",
+                Response {
+                    description: "x".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.name, "bad name");
+    }
+
+    #[test]
+    fn paths_with_x_extensions_serde() {
+        let raw = serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/p": {},
+                "x-extra": "v",
+            },
+        });
+        let spec: Spec = serde_json::from_value(raw.clone()).unwrap();
+        assert!(spec.paths.extensions.is_some());
+        let v = serde_json::to_value(&spec).unwrap();
+        // The shape may differ in field ordering, but we round-trip through a
+        // re-parse to confirm equivalence.
+        let spec2: Spec = serde_json::from_value(v).unwrap();
+        assert_eq!(spec, spec2);
+    }
+
+    #[test]
+    fn resolve_reference_schema_objectschema_parameter() {
+        let mut spec = Spec::default();
+        let _ = spec
+            .define_schema(
+                "Object",
+                Schema::from(ObjectSchema {
+                    title: Some("t".into()),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        let _ = spec
+            .define_schema("StringSchema", Schema::from(StringSchema::default()))
+            .unwrap();
+        let _ = spec
+            .define_parameter(
+                "P",
+                Parameter::Query(Box::new(InQuery::String(StringParameter {
+                    name: "n".into(),
+                    ..Default::default()
+                }))),
+            )
+            .unwrap();
+
+        // ResolveReference<Schema>
+        let s: Option<&Schema> =
+            <Spec as ResolveReference<Schema>>::resolve_reference(&spec, "#/definitions/Object");
+        assert!(s.is_some());
+        let s: Option<&Schema> =
+            <Spec as ResolveReference<Schema>>::resolve_reference(&spec, "#/definitions/Missing");
+        assert!(s.is_none());
+
+        // ResolveReference<ObjectSchema>
+        let s: Option<&ObjectSchema> = <Spec as ResolveReference<ObjectSchema>>::resolve_reference(
+            &spec,
+            "#/definitions/Object",
+        );
+        assert!(s.is_some());
+        // Hits a non-object definition: returns None.
+        let s: Option<&ObjectSchema> = <Spec as ResolveReference<ObjectSchema>>::resolve_reference(
+            &spec,
+            "#/definitions/StringSchema",
+        );
+        assert!(s.is_none());
+        let s: Option<&ObjectSchema> = <Spec as ResolveReference<ObjectSchema>>::resolve_reference(
+            &spec,
+            "#/definitions/Missing",
+        );
+        assert!(s.is_none());
+
+        // ResolveReference<Parameter>
+        let p: Option<&Parameter> =
+            <Spec as ResolveReference<Parameter>>::resolve_reference(&spec, "#/parameters/P");
+        assert!(p.is_some());
+        let p: Option<&Parameter> =
+            <Spec as ResolveReference<Parameter>>::resolve_reference(&spec, "#/parameters/Missing");
+        assert!(p.is_none());
+
+        // ResolveReference<Response>
+        let _ = spec
+            .define_response(
+                "R",
+                Response {
+                    description: "x".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let r: Option<&Response> =
+            <Spec as ResolveReference<Response>>::resolve_reference(&spec, "#/responses/R");
+        assert!(r.is_some());
+        let r: Option<&Response> =
+            <Spec as ResolveReference<Response>>::resolve_reference(&spec, "#/responses/Missing");
+        assert!(r.is_none());
+
+        // ResolveReference<SecurityScheme>
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "S".to_owned(),
+            SecurityScheme::Basic(BasicSecurityScheme::default()),
+        );
+        spec.security_definitions = Some(defs);
+        let s: Option<&SecurityScheme> =
+            <Spec as ResolveReference<SecurityScheme>>::resolve_reference(
+                &spec,
+                "#/securityDefinitions/S",
+            );
+        assert!(s.is_some());
+        let s: Option<&SecurityScheme> =
+            <Spec as ResolveReference<SecurityScheme>>::resolve_reference(
+                &spec,
+                "#/securityDefinitions/Missing",
+            );
+        assert!(s.is_none());
+
+        // ResolveReference<Tag>
+        spec.tags = Some(vec![crate::v2::tag::Tag {
+            name: "t1".into(),
+            ..Default::default()
+        }]);
+        let t =
+            <Spec as ResolveReference<crate::v2::tag::Tag>>::resolve_reference(&spec, "#/tags/t1");
+        assert!(t.is_some());
+        let t = <Spec as ResolveReference<crate::v2::tag::Tag>>::resolve_reference(
+            &spec,
+            "#/tags/missing",
+        );
+        assert!(t.is_none());
+    }
+
+    #[test]
+    fn validate_oauth2_definitions_walked() {
+        let mut spec = Spec::default();
+        spec.info = crate::v2::info::Info {
+            title: "T".into(),
+            version: "1".into(),
+            ..Default::default()
+        };
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "o".to_owned(),
+            SecurityScheme::OAuth2(OAuth2SecurityScheme {
+                flow: SecuritySchemeOAuth2Flow::Implicit,
+                authorization_url: None,
+                token_url: None,
+                scopes: Scopes::default(),
+                description: None,
+                extensions: None,
+            }),
+        );
+        spec.security_definitions = Some(defs);
+        let err = spec.validate(Options::new()).unwrap_err();
+        // Per-scheme validate fires on missing URLs / empty scopes.
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("must not be empty") || e.contains("must be present")),
+            "errors: {:?}",
+            err.errors
         );
     }
 }

@@ -2,9 +2,9 @@
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
-use crate::common::reference::RefOr;
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
 use crate::v2::external_documentation::ExternalDocumentation;
+use crate::v2::reference::RefOr;
 use crate::v2::spec::Spec;
 use crate::v2::xml::XML;
 use monostate::MustBe;
@@ -30,11 +30,21 @@ pub enum Schema {
     #[serde(rename = "array")]
     Array(Box<ArraySchema>),
 
+    /// `null` type — extra (not in OAS 2.0 / draft-04). Intentionally retained
+    /// as a permissive deviation from the v2 spec.
     #[serde(rename = "null")]
     Null(Box<NullSchema>),
 
     #[serde(rename = "object")]
-    Object(Box<ObjectSchema>), // must be last
+    Object(Box<ObjectSchema>),
+
+    /// A schema composed of `allOf` other schemas (no parent `type` field).
+    /// Per JSON Schema draft-04, `allOf` may appear on any schema; this variant
+    /// is the top-level form (parallel to v3.0/v3.1's design). The inner
+    /// `ObjectSchema` also keeps its own `all_of` for backward compatibility,
+    /// so an `{"allOf": [...], "type": "object"}` input still deserializes as
+    /// `Object`. // must be last — typed variants take precedence.
+    AllOf(Box<AllOfSchema>),
 }
 
 impl Default for Schema {
@@ -85,6 +95,53 @@ impl From<ObjectSchema> for Schema {
     }
 }
 
+impl From<AllOfSchema> for Schema {
+    fn from(s: AllOfSchema) -> Self {
+        Schema::AllOf(Box::new(s))
+    }
+}
+
+/// A schema composed of `allOf` other schemas.
+/// Per JSON Schema draft-04, `allOf` may appear on any schema; this is the
+/// top-level form.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AllOfSchema {
+    /// **Required** The list of schemas that this schema is composed of.
+    #[serde(rename = "allOf")]
+    pub all_of: Vec<RefOr<Schema>>,
+
+    /// A title to explain the purpose of the schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// A short description of the attribute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Additional external documentation for this schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "externalDocs")]
+    pub external_docs: Option<ExternalDocumentation>,
+
+    /// Adds support for polymorphism. The discriminator is the schema property
+    /// name that is used to differentiate between other schemas which may
+    /// satisfy the payload description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discriminator: Option<String>,
+
+    /// A free-form property to include an example of an instance for this schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub example: Option<serde_json::Value>,
+
+    /// Allows extensions to the Swagger Schema.
+    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
+    /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
 impl Display for Schema {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -95,6 +152,7 @@ impl Display for Schema {
             Schema::Array(_) => write!(f, "array"),
             Schema::Object(_) => write!(f, "object"),
             Schema::Null(_) => write!(f, "null"),
+            Schema::AllOf(_) => write!(f, "allOf"),
         }
     }
 }
@@ -206,7 +264,7 @@ pub struct IntegerSchema {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<i64>,
+    pub minimum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly greater than the value of `minimum`
     #[serde(rename = "exclusiveMinimum")]
@@ -215,7 +273,7 @@ pub struct IntegerSchema {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<i64>,
+    pub maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly less than the value of `maximum`
     #[serde(rename = "exclusiveMaximum")]
@@ -490,9 +548,10 @@ pub struct ObjectSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<BTreeMap<String, RefOr<Schema>>>,
 
-    /// Declares the values of the header that the server will use if none is provided.
+    /// Declares the default value of the schema. For an object schema, this is
+    /// typically a JSON object that conforms to the property definitions.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<Vec<serde_json::Value>>,
+    pub default: Option<serde_json::Value>,
 
     /// Declares the maximum number of items that are allowed in the array.
     #[serde(rename = "maxProperties")]
@@ -623,6 +682,21 @@ impl ValidateWithContext<Spec> for Schema {
             Schema::Array(s) => s.validate_with_context(ctx, path),
             Schema::Object(s) => s.validate_with_context(ctx, path),
             Schema::Null(s) => s.validate_with_context(ctx, path),
+            Schema::AllOf(s) => s.validate_with_context(ctx, path),
+        }
+    }
+}
+
+impl ValidateWithContext<Spec> for AllOfSchema {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if self.all_of.is_empty() {
+            ctx.error(path.clone(), ".allOf: must not be empty");
+        }
+        for (i, schema) in self.all_of.iter().enumerate() {
+            schema.validate_with_context(ctx, format!("{path}.allOf[{i}]"));
+        }
+        if let Some(docs) = &self.external_docs {
+            docs.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
     }
 }
@@ -837,6 +911,228 @@ mod tests {
                 },
             }),
         );
+    }
+
+    #[test]
+    fn integer_number_boolean_array_null_serde_roundtrip() {
+        // Integer
+        let raw = serde_json::json!({"type": "integer", "format": "int32"});
+        let s: Schema = serde_json::from_value(raw.clone()).unwrap();
+        assert!(matches!(s, Schema::Integer(_)));
+        assert_eq!(serde_json::to_value(&s).unwrap(), raw);
+
+        // Number
+        let raw = serde_json::json!({"type": "number", "format": "double"});
+        let s: Schema = serde_json::from_value(raw.clone()).unwrap();
+        assert!(matches!(s, Schema::Number(_)));
+        assert_eq!(serde_json::to_value(&s).unwrap(), raw);
+
+        // Boolean
+        let raw = serde_json::json!({"type": "boolean"});
+        let s: Schema = serde_json::from_value(raw.clone()).unwrap();
+        assert!(matches!(s, Schema::Boolean(_)));
+        assert_eq!(serde_json::to_value(&s).unwrap(), raw);
+
+        // Array
+        let raw = serde_json::json!({
+            "type": "array",
+            "items": {"type": "string"}
+        });
+        let s: Schema = serde_json::from_value(raw.clone()).unwrap();
+        assert!(matches!(s, Schema::Array(_)));
+        assert_eq!(serde_json::to_value(&s).unwrap(), raw);
+
+        // Null
+        let raw = serde_json::json!({"type": "null"});
+        let s: Schema = serde_json::from_value(raw.clone()).unwrap();
+        assert!(matches!(s, Schema::Null(_)));
+        assert_eq!(serde_json::to_value(&s).unwrap(), raw);
+    }
+
+    #[test]
+    fn schema_validate_each_variant() {
+        let spec = Spec::default();
+
+        // String w/ bad pattern
+        let s = Schema::String(Box::new(StringSchema {
+            pattern: Some("[".into()),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("pattern")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // External docs validation paths
+        let ed = crate::v2::external_documentation::ExternalDocumentation {
+            url: "not-a-url".into(),
+            ..Default::default()
+        };
+        let s = Schema::Integer(Box::new(IntegerSchema {
+            external_docs: Some(ed.clone()),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // Number, Boolean, Array, Null with externalDocs.
+        for s in [
+            Schema::Number(Box::new(NumberSchema {
+                external_docs: Some(ed.clone()),
+                ..Default::default()
+            })),
+            Schema::Boolean(Box::new(BooleanSchema {
+                external_docs: Some(ed.clone()),
+                ..Default::default()
+            })),
+            Schema::Array(Box::new(ArraySchema {
+                external_docs: Some(ed.clone()),
+                items: Some(RefOr::new_item(Schema::from(StringSchema::default()))),
+                ..Default::default()
+            })),
+            Schema::Null(Box::new(NullSchema {
+                external_docs: Some(ed.clone()),
+                ..Default::default()
+            })),
+        ] {
+            let mut ctx = Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "p".into());
+            assert!(
+                ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+                "errors: {:?}",
+                ctx.errors
+            );
+        }
+
+        // Object with properties + additionalProperties + allOf
+        let s = Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "k".into(),
+                    RefOr::new_item(Schema::from(StringSchema {
+                        pattern: Some("[".into()),
+                        ..Default::default()
+                    })),
+                );
+                m
+            }),
+            additional_properties: Some(crate::common::bool_or::BoolOr::Item(RefOr::new_item(
+                Schema::from(StringSchema {
+                    pattern: Some("[".into()),
+                    ..Default::default()
+                }),
+            ))),
+            all_of: Some(vec![RefOr::new_item(ObjectSchema {
+                external_docs: Some(ed.clone()),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "p".into());
+        // Should accumulate errors from each branch
+        assert!(ctx.errors.len() >= 2, "errors: {:?}", ctx.errors);
+
+        // additionalProperties = bool, no schema validation needed
+        let s = Schema::Object(Box::new(ObjectSchema {
+            additional_properties: Some(crate::common::bool_or::BoolOr::Bool(true)),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn allof_schema_from_and_validate() {
+        let s = Schema::from(AllOfSchema {
+            all_of: vec![RefOr::new_item(Schema::from(StringSchema::default()))],
+            title: Some("t".into()),
+            ..Default::default()
+        });
+        assert!(matches!(s, Schema::AllOf(_)));
+        // Display
+        assert_eq!(format!("{s}"), "allOf");
+
+        // Empty allOf produces an error
+        let s = Schema::AllOf(Box::new(AllOfSchema::default()));
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".allOf: must not be empty")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // Non-empty allOf with externalDocs validation propagates
+        let ed = crate::v2::external_documentation::ExternalDocumentation {
+            url: "not-a-url".into(),
+            ..Default::default()
+        };
+        let s = Schema::AllOf(Box::new(AllOfSchema {
+            all_of: vec![RefOr::new_item(Schema::from(StringSchema::default()))],
+            external_docs: Some(ed),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn allof_schema_serde_roundtrip() {
+        let raw = serde_json::json!({
+            "allOf": [{"type": "string"}],
+            "title": "T",
+        });
+        let s: AllOfSchema = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(s.title, Some("T".into()));
+        assert_eq!(s.all_of.len(), 1);
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v, raw);
+    }
+
+    #[test]
+    fn schema_display_formats() {
+        assert_eq!(format!("{}", Schema::String(Box::default())), "string");
+        assert_eq!(format!("{}", Schema::Integer(Box::default())), "integer");
+        assert_eq!(format!("{}", Schema::Number(Box::default())), "number");
+        assert_eq!(format!("{}", Schema::Boolean(Box::default())), "boolean");
+        assert_eq!(
+            format!("{}", Schema::Array(Box::new(ArraySchema::default()))),
+            "array"
+        );
+        assert_eq!(format!("{}", Schema::Object(Box::default())), "object");
+        assert_eq!(format!("{}", Schema::Null(Box::default())), "null");
+    }
+
+    #[test]
+    fn schema_from_helpers() {
+        // Exercise each From impl.
+        let _: Schema = StringSchema::default().into();
+        let _: Schema = IntegerSchema::default().into();
+        let _: Schema = NumberSchema::default().into();
+        let _: Schema = BooleanSchema::default().into();
+        let _: Schema = ArraySchema::default().into();
+        let _: Schema = NullSchema::default().into();
+        let _: Schema = ObjectSchema::default().into();
+        let _: Schema = AllOfSchema::default().into();
     }
 
     #[test]
