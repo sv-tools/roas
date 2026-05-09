@@ -751,7 +751,12 @@ pub struct ArraySchema {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ObjectSchema {
-    #[serde(rename = "type")]
+    /// `type: "object"`. The field is also accepted as **absent** —
+    /// per common practice (Spectral, Stoplight, Redocly), a Schema
+    /// with no declared `type` is treated as an object schema. When
+    /// missing, serde fills in the default value via `MustBe::default()`,
+    /// so the parsed value round-trips with an explicit `type: "object"`.
+    #[serde(rename = "type", default)]
     pub schema_type: MustBe!("object"),
 
     /// A title to explain the purpose of the schema.
@@ -1110,6 +1115,55 @@ mod tests {
                 ..Default::default()
             }))),
         );
+    }
+
+    #[test]
+    fn schema_without_type_parses_as_object() {
+        // A schema with no `type` field is treated as an object schema
+        // (matches Spectral / Stoplight / Redocly tooling behavior). The
+        // deserialized value is `Schema::Single(Object(...))`; presence of
+        // `properties` / `required` round-trips through the object form.
+        let json = serde_json::json!({
+            "title": "Untyped",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "required": ["name"]
+        });
+        let parsed: Schema = serde_json::from_value(json).expect("must parse");
+        match &parsed {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Object(o) => {
+                    assert_eq!(o.title.as_deref(), Some("Untyped"));
+                    assert_eq!(o.required.as_deref(), Some(&["name".to_owned()][..]));
+                    assert!(o.properties.is_some());
+                }
+                other => panic!("expected Object, got {other:?}"),
+            },
+            _ => panic!("expected Schema::Single"),
+        }
+
+        // Bare `{}` also parses (as the default ObjectSchema).
+        let parsed: Schema = serde_json::from_value(serde_json::json!({})).expect("must parse");
+        assert!(matches!(
+            parsed,
+            Schema::Single(ref s) if matches!(s.as_ref(), SingleSchema::Object(_))
+        ));
+    }
+
+    #[test]
+    fn schema_typed_string_still_dispatches_correctly() {
+        // Sanity: making `type` optional on ObjectSchema must NOT route
+        // typed schemas to the object variant.
+        let parsed: Schema =
+            serde_json::from_value(serde_json::json!({"type": "string"})).expect("must parse");
+        match parsed {
+            Schema::Single(s) => match *s {
+                SingleSchema::String(_) => {}
+                other => panic!("expected String, got {other:?}"),
+            },
+            _ => panic!("expected Schema::Single"),
+        }
     }
 
     #[test]

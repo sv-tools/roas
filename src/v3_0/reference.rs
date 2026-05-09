@@ -43,11 +43,46 @@ impl Ref {
 }
 
 /// v3.0 RefOr<T> — either a `$ref` (v3.0 form) or an inline value of `T`.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+///
+/// Deserialization routes by **presence of `$ref` in the input** rather than
+/// by serde's untagged fallthrough. Inputs containing `$ref` MUST validate as
+/// a `Ref` (which rejects 3.1-only sibling fields via `deny_unknown_fields`);
+/// they will not be silently re-interpreted as an inline `T` if the `Ref`
+/// form fails. This protects the v3.0 strictness guarantee even when `T`'s
+/// own deserialization is permissive (for example, an ObjectSchema with a
+/// defaulted `type` field would otherwise eat a stray `$ref` as an unknown
+/// key).
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum RefOr<T> {
     Ref(Ref),
     Item(T),
+}
+
+impl<'de, T> Deserialize<'de> for RefOr<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Materialise the input as JSON Value so we can peek for `$ref` and
+        // then try the appropriate variant. The single allocation is
+        // acceptable for the deserialization path (and matches what other
+        // OAS parsers do internally).
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let has_ref = matches!(&value, serde_json::Value::Object(m) if m.contains_key("$ref"));
+        if has_ref {
+            Ref::deserialize(value)
+                .map(RefOr::Ref)
+                .map_err(serde::de::Error::custom)
+        } else {
+            T::deserialize(value)
+                .map(RefOr::Item)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 impl<D> RefOr<D> {
@@ -176,6 +211,34 @@ mod tests {
         let r: RefOr<Foo> =
             serde_json::from_value(json!({"$ref": "#/components/schemas/Foo"})).unwrap();
         assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/schemas/Foo"));
+    }
+
+    #[test]
+    fn schema_with_no_type_parses_as_inline_object() {
+        // Sanity: with the "missing type = object" relaxation in
+        // ObjectSchema, an inline schema with no `$ref` and no `type`
+        // still parses as `Item(ObjectSchema)`.
+        let r: RefOr<crate::v3_0::schema::Schema> =
+            serde_json::from_value(json!({"properties": {}})).expect("must parse");
+        assert!(matches!(r, RefOr::Item(_)), "expected inline Item form");
+    }
+
+    #[test]
+    fn schema_ref_with_extras_does_not_fall_back_to_inline() {
+        // Even though ObjectSchema's `type` is now optional (a schema with
+        // no `type` is treated as object), an input that *does* contain
+        // `$ref` MUST validate as a Ref. Routing-by-`$ref`-presence
+        // prevents `{"$ref": "...", "description": "..."}` from being
+        // silently parsed as an inline ObjectSchema with the `$ref`
+        // dropped.
+        let r = serde_json::from_value::<RefOr<crate::v3_0::schema::Schema>>(json!({
+            "$ref": "#/components/schemas/Foo",
+            "description": "this v3.1 sibling is rejected",
+        }));
+        assert!(
+            r.is_err(),
+            "ref form must fail strictly when 3.1 sibling fields are present, even with permissive ObjectSchema"
+        );
     }
 
     #[test]
