@@ -493,7 +493,7 @@ impl Spec {
         &mut self,
         name: impl Into<String>,
         path_item: PathItem,
-    ) -> Result<RefOr<PathItem>, InvalidComponentName> {
+    ) -> Result<PathItem, InvalidComponentName> {
         let name = name.into();
         check_component_name(&name)?;
         let reference = format!("#/components/pathItems/{name}");
@@ -502,7 +502,15 @@ impl Spec {
             .path_items
             .get_or_insert_with(Default::default)
             .insert(name, path_item);
-        Ok(RefOr::new_ref(reference))
+        // v3.1 containers (Paths / Webhooks / Callback / Components.pathItems)
+        // hold bare `PathItem` values; the Reference form is a `PathItem`
+        // whose `reference` field is set. Return that shape so callers can
+        // drop the result directly into any of those maps without an extra
+        // wrapping step.
+        Ok(PathItem {
+            reference: Some(reference),
+            ..Default::default()
+        })
     }
 }
 
@@ -617,8 +625,10 @@ impl Validate for Spec {
             .validate_with_context(&mut ctx, "#.info".to_owned());
 
         // jsonSchemaDialect MUST be a URI per OAS 3.1 (default-value spec for
-        // the `$schema` keyword in nested Schema Objects).
-        crate::common::helpers::validate_optional_url(
+        // the `$schema` keyword in nested Schema Objects). Use the generic
+        // URI validator (not the HTTP-only URL one) so non-HTTP dialect
+        // identifiers like `urn:example:dialect` are accepted.
+        crate::common::helpers::validate_optional_uri(
             &self.json_schema_dialect,
             &mut ctx,
             "#.jsonSchemaDialect".to_owned(),
@@ -658,6 +668,34 @@ impl Validate for Spec {
         }
         if let Some(webhooks) = &self.webhooks {
             collect_op_ids(webhooks, "webhooks", &mut ctx);
+        }
+        // Also collect op-ids from `components.pathItems` upfront — those
+        // operations are reachable (e.g. via `Link.operationId` or
+        // `Link.operationRef`) and Link validation runs *before* the
+        // components validate pass would otherwise visit them. Without
+        // this, a Link referencing an op-id defined only inside
+        // `components.pathItems` would be reported as missing.
+        if let Some(components) = &self.components
+            && let Some(map) = &components.path_items
+        {
+            for (name, item) in map.iter() {
+                if let Some(operations) = &item.operations {
+                    for (method, operation) in operations.iter() {
+                        if let Some(operation_id) = &operation.operation_id
+                            && !ctx
+                                .visited
+                                .insert(format!("#/paths/operations/{operation_id}"))
+                        {
+                            ctx.error(
+                                "#".to_owned(),
+                                format_args!(
+                                    ".components.pathItems[{name}].{method}.operationId: `{operation_id}` already in use"
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Top-level Spec.security: visit referenced schemes (so unused-detection

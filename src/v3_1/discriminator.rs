@@ -30,17 +30,17 @@ impl ValidateWithContext<Spec> for Discriminator {
 
         if let Some(mapping) = &self.mapping {
             for (k, v) in mapping {
-                // Per OAS 3.1, mapping values are EITHER schema names
-                // (resolved against `#/components/schemas/<name>`) OR
-                // already-formed URI references (e.g. JSON Pointer or
-                // absolute/relative URI). Detect the URI-reference case
-                // by the presence of a path separator or scheme; otherwise
-                // treat as a component schema name.
-                let reference = if v.starts_with("#/")
-                    || v.starts_with("http://")
-                    || v.starts_with("https://")
-                    || v.contains('/')
-                {
+                // Per OAS 3.1, mapping values are EITHER component schema
+                // *names* (resolved against `#/components/schemas/<name>`)
+                // OR URI references per RFC 3986. We distinguish by the
+                // shape of valid component names: per
+                // `Components.<map>` keys, names match
+                // `^[a-zA-Z0-9._-]+$` — no `/`, no `#`, no `:`. So any
+                // value containing `/`, `#`, or `:` is treated as a URI
+                // reference and used as-is. Anything else is taken as a
+                // component schema name.
+                let is_uri_ref = v.contains('/') || v.starts_with('#') || v.contains(':');
+                let reference = if is_uri_ref {
                     v.clone()
                 } else {
                     format!("#/components/schemas/{v}")

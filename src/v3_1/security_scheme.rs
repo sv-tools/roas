@@ -412,6 +412,10 @@ impl ValidateWithContext<Spec> for MutualTLSSecurityScheme {
 
 impl ValidateWithContext<Spec> for HttpSecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Spec: `scheme` is REQUIRED for `type: http`. The struct holds it
+        // as `String` (default = ""), so check non-empty here.
+        validate_required_string(&self.scheme, ctx, format!("{path}.scheme"));
+
         if let Some(bearer_format) = &self.bearer_format
             && !bearer_format.is_empty()
             && !self.scheme.eq_ignore_ascii_case("bearer")
