@@ -305,8 +305,8 @@ pub struct StringSchema {
     pub write_only: Option<bool>,
 
     /// Allows the value to be `null` in addition to its declared type.
-    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
-    /// Default value is `false`.
+    /// OpenAPI 3.0-only — 3.1 uses the `type` array form (e.g.
+    /// `type: ["<type>", "null"]`) instead. Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 
@@ -432,8 +432,8 @@ pub struct IntegerSchema {
     pub write_only: Option<bool>,
 
     /// Allows the value to be `null` in addition to its declared type.
-    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
-    /// Default value is `false`.
+    /// OpenAPI 3.0-only — 3.1 uses the `type` array form (e.g.
+    /// `type: ["<type>", "null"]`) instead. Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 
@@ -552,8 +552,8 @@ pub struct NumberSchema {
     pub write_only: Option<bool>,
 
     /// Allows the value to be `null` in addition to its declared type.
-    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
-    /// Default value is `false`.
+    /// OpenAPI 3.0-only — 3.1 uses the `type` array form (e.g.
+    /// `type: ["<type>", "null"]`) instead. Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 
@@ -625,8 +625,8 @@ pub struct BooleanSchema {
     pub write_only: Option<bool>,
 
     /// Allows the value to be `null` in addition to its declared type.
-    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
-    /// Default value is `false`.
+    /// OpenAPI 3.0-only — 3.1 uses the `type` array form (e.g.
+    /// `type: ["<type>", "null"]`) instead. Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 
@@ -715,8 +715,8 @@ pub struct ArraySchema {
     pub write_only: Option<bool>,
 
     /// Allows the value to be `null` in addition to its declared type.
-    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
-    /// Default value is `false`.
+    /// OpenAPI 3.0-only — 3.1 uses the `type` array form (e.g.
+    /// `type: ["<type>", "null"]`) instead. Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 
@@ -816,8 +816,8 @@ pub struct ObjectSchema {
     pub write_only: Option<bool>,
 
     /// Allows the value to be `null` in addition to its declared type.
-    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
-    /// Default value is `false`.
+    /// OpenAPI 3.0-only — 3.1 uses the `type` array form (e.g.
+    /// `type: ["<type>", "null"]`) instead. Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 
@@ -883,8 +883,8 @@ pub struct NullSchema {
     pub write_only: Option<bool>,
 
     /// Allows the value to be `null` in addition to its declared type.
-    /// OpenAPI 3.0-only — 3.1 uses `type: ["string", "null"]` instead.
-    /// Default value is `false`.
+    /// OpenAPI 3.0-only — 3.1 uses the `type` array form (e.g.
+    /// `type: ["<type>", "null"]`) instead. Default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 

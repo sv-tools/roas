@@ -24,16 +24,33 @@ use crate::v3_0::reference::RefOr;
 use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::spec::Spec;
 use crate::v3_0::tag::Tag;
+use crate::validation::Options;
 
-/// Resolve a `RefOr<Parameter>` against the spec's
-/// `#/components/parameters/...` pool. Returns `None` for unresolvable refs;
-/// the caller treats those as opaque (downstream `RefOr::validate_with_context`
-/// will already report the missing-ref error elsewhere).
-fn resolve_parameter<'a>(spec: &'a Spec, p: &'a RefOr<Parameter>) -> Option<&'a Parameter> {
+/// Result of attempting to resolve a `RefOr<Parameter>` for cross-cutting
+/// validation purposes. The distinction between an unresolved *internal* ref
+/// (already a hard error elsewhere via `RefOr::validate_with_context`) and an
+/// unresolved *external* ref matters: when the user has set
+/// `IgnoreExternalReferences`, we must not report a missing-`in: path`
+/// parameter error for a template variable that may well be defined in the
+/// external document we agreed to skip.
+enum ResolvedParam<'a> {
+    Item(&'a Parameter),
+    UnresolvedInternal,
+    UnresolvedExternal,
+}
+
+fn resolve_parameter<'a>(spec: &'a Spec, p: &'a RefOr<Parameter>) -> ResolvedParam<'a> {
     match p {
-        RefOr::Item(p) => Some(p),
+        RefOr::Item(p) => ResolvedParam::Item(p),
         RefOr::Ref(r) => {
-            <Spec as ResolveReference<Parameter>>::resolve_reference(spec, &r.reference)
+            if r.reference.starts_with("#/") {
+                match <Spec as ResolveReference<Parameter>>::resolve_reference(spec, &r.reference) {
+                    Some(p) => ResolvedParam::Item(p),
+                    None => ResolvedParam::UnresolvedInternal,
+                }
+            } else {
+                ResolvedParam::UnresolvedExternal
+            }
         }
     }
 }
@@ -92,30 +109,64 @@ pub fn validate_operation_parameters(
 ) {
     let template_vars = path_template_variables(template);
 
-    let mut emit_within_level_dups = |params: &[RefOr<Parameter>], origin: &str| {
+    // Whether we encountered any external `$ref` we couldn't follow under the
+    // current Options. If so, the path-template correspondence check is
+    // suppressed below — the missing path parameter may legitimately be
+    // declared in the external document we chose to skip.
+    let ignore_external = ctx.is_option(Options::IgnoreExternalReferences);
+    let mut has_unresolved_external = false;
+
+    fn dup_pass(
+        ctx: &mut Context<Spec>,
+        op_path: &str,
+        params: &[RefOr<Parameter>],
+        origin: &str,
+        ignore_external: bool,
+        has_unresolved_external: &mut bool,
+    ) {
         let mut seen: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
         for (i, raw) in params.iter().enumerate() {
-            let Some(p) = resolve_parameter(ctx.spec, raw) else {
-                continue;
-            };
-            let (name, loc) = parameter_identity(p);
-            let key = (name.to_owned(), loc);
-            *seen.entry(key.clone()).or_insert(0) += 1;
-            if seen[&key] == 2 {
-                ctx.error(
-                    op_path.to_owned(),
-                    format_args!(
-                        ".parameters: duplicate parameter `{name}` in `{loc}` ({origin}[{i}])"
-                    ),
-                );
+            let r = resolve_parameter(ctx.spec, raw);
+            match r {
+                ResolvedParam::Item(p) => {
+                    let (name, loc) = parameter_identity(p);
+                    let key = (name.to_owned(), loc);
+                    *seen.entry(key.clone()).or_insert(0) += 1;
+                    if seen[&key] == 2 {
+                        ctx.error(
+                            op_path.to_owned(),
+                            format_args!(
+                                ".parameters: duplicate parameter `{name}` in `{loc}` ({origin}[{i}])"
+                            ),
+                        );
+                    }
+                }
+                ResolvedParam::UnresolvedExternal if ignore_external => {
+                    *has_unresolved_external = true;
+                }
+                _ => {}
             }
         }
-    };
+    }
     if let Some(p) = path_item_params {
-        emit_within_level_dups(p, "path-item");
+        dup_pass(
+            ctx,
+            op_path,
+            p,
+            "path-item",
+            ignore_external,
+            &mut has_unresolved_external,
+        );
     }
     if let Some(p) = op_params {
-        emit_within_level_dups(p, "operation");
+        dup_pass(
+            ctx,
+            op_path,
+            p,
+            "operation",
+            ignore_external,
+            &mut has_unresolved_external,
+        );
     }
 
     // Merge: keyed by (name, in). Operation-level overrides path-item-level.
@@ -134,17 +185,9 @@ pub fn validate_operation_parameters(
         }
     }
     let mut merged: BTreeMap<(String, &'static str), Kind> = BTreeMap::new();
-    if let Some(params) = path_item_params {
+    for params in [path_item_params, op_params].into_iter().flatten() {
         for raw in params {
-            if let Some(p) = resolve_parameter(ctx.spec, raw) {
-                let (name, loc) = parameter_identity(p);
-                merged.insert((name.to_owned(), loc), kind_of(p));
-            }
-        }
-    }
-    if let Some(params) = op_params {
-        for raw in params {
-            if let Some(p) = resolve_parameter(ctx.spec, raw) {
+            if let ResolvedParam::Item(p) = resolve_parameter(ctx.spec, raw) {
                 let (name, loc) = parameter_identity(p);
                 merged.insert((name.to_owned(), loc), kind_of(p));
             }
@@ -158,14 +201,23 @@ pub fn validate_operation_parameters(
         }
     }
 
-    for var in &template_vars {
-        if !declared_path_params.contains(var) {
-            ctx.error(
-                op_path.to_owned(),
-                format_args!(
-                    ".parameters: path template variable `{{{var}}}` has no matching `in: path` parameter"
-                ),
-            );
+    // If we deliberately skipped any external `$ref`, the missing-`in: path`
+    // parameter we'd report could be defined in that external document.
+    // Suppress both directions of the correspondence check in that case;
+    // unresolvable internal refs still pass through and produce errors via
+    // `RefOr::validate_with_context` elsewhere.
+    let skip_template_correspondence = has_unresolved_external;
+
+    if !skip_template_correspondence {
+        for var in &template_vars {
+            if !declared_path_params.contains(var) {
+                ctx.error(
+                    op_path.to_owned(),
+                    format_args!(
+                        ".parameters: path template variable `{{{var}}}` has no matching `in: path` parameter"
+                    ),
+                );
+            }
         }
     }
     for declared in &declared_path_params {
@@ -184,7 +236,7 @@ pub fn validate_operation_parameters(
 /// operation level). Marks each named scheme as visited (for unused-scheme
 /// detection) and enforces:
 /// * the named scheme exists in `components.securitySchemes`,
-/// * apiKey / http / mutualTLS schemes carry only an empty scope array,
+/// * apiKey / http schemes carry only an empty scope array,
 /// * oauth2 / openIdConnect schemes' scopes (if any) are listed in some flow.
 pub fn validate_security_requirements(
     ctx: &mut Context<Spec>,
@@ -501,6 +553,39 @@ mod tests {
         assert!(
             ctx.errors.iter().any(|e| e
                 .contains("path parameter `id` does not match any `{name}` in the path template")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn external_ref_suppresses_template_correspondence_under_ignore_external() {
+        // A parameter whose `$ref` points to an external document we have
+        // chosen to skip should NOT trigger the "template variable has no
+        // matching `in: path` parameter" error — the external doc may well
+        // declare it.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let params: Vec<RefOr<Parameter>> = vec![RefOr::new_ref(
+            "https://other.example/spec.yaml#/components/parameters/PetId",
+        )];
+
+        // Without IgnoreExternalReferences: the error fires (we have no info).
+        let mut ctx = Context::new(spec, Options::new());
+        validate_operation_parameters(&mut ctx, "op", "/users/{id}", None, Some(&params));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("template variable `{id}`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // With IgnoreExternalReferences: suppressed (the external doc may
+        // define `id`).
+        let mut ctx = Context::new(spec, Options::IgnoreExternalReferences.only());
+        validate_operation_parameters(&mut ctx, "op", "/users/{id}", None, Some(&params));
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("template variable")),
             "errors: {:?}",
             ctx.errors
         );
