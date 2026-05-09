@@ -167,18 +167,19 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                 "malformed deep pointer: expected `/callbacks/<name>/<expr>/<method>` continuation, found `{reference}`"
             ));
         }
-        let method_lower = method.to_lowercase();
-        let Some(op) = item.operations.as_ref().and_then(|m| m.get(&method_lower)) else {
+        // JSON Pointer tokens are case-sensitive; OAS 3.1.2 fixes Operation
+        // field names to lowercase, so `GET` is not the same key as `get`.
+        let Some(op) = item.operations.as_ref().and_then(|m| m.get(method)) else {
             return OperationRefResolution::Err(format!(
                 "method `{method}` not declared on path `{display_path}`"
             ));
         };
-        let cb_name = parts[consumed + 1];
+        let cb_name = unescape_pointer_token(parts[consumed + 1]);
         let expr = unescape_pointer_token(parts[consumed + 2]);
         let next_method = parts[consumed + 3];
-        let Some(cb_ref) = op.callbacks.as_ref().and_then(|m| m.get(cb_name)) else {
+        let Some(cb_ref) = op.callbacks.as_ref().and_then(|m| m.get(&cb_name)) else {
             return OperationRefResolution::Err(format!(
-                "callback `{cb_name}` not declared on `{display_path}.{method_lower}`"
+                "callback `{cb_name}` not declared on `{display_path}.{method}`"
             ));
         };
         let cb = match cb_ref.get_item(spec) {
@@ -197,7 +198,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                 "expression `{expr}` not declared on callback `{cb_name}`"
             ));
         };
-        display_path = format!("{display_path}.{method_lower}.callbacks[{cb_name}][{expr}]");
+        display_path = format!("{display_path}.{method}.callbacks[{cb_name}][{expr}]");
         item = match resolve_path_item_ref_chain(spec, &display_path, next_item, &mut seen) {
             Ok((p, t)) => {
                 display_path = p;
@@ -209,11 +210,10 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         consumed += 4;
     }
 
-    let method_lower = method.to_lowercase();
     if !item
         .operations
         .as_ref()
-        .is_some_and(|m| m.contains_key(&method_lower))
+        .is_some_and(|m| m.contains_key(method))
     {
         return OperationRefResolution::Err(format!(
             "method `{method}` not declared on path `{display_path}`"
@@ -244,7 +244,9 @@ fn resolve_path_item_ref_chain<'a>(
         )));
     }
 
-    // PathItem refs may target either container (paths or components.pathItems).
+    // A PathItem `$ref` may target any of the four containers that hold
+    // PathItem objects: `#/paths`, `#/webhooks`, `#/components/pathItems`,
+    // or — under a Callback — `#/components/callbacks/<name>/<expr>`.
     let (target_path, target_item) = if let Some(after_paths) = ref_str.strip_prefix("#/paths/") {
         if after_paths.contains('/') {
             return Err(OperationRefResolution::Err(format!(
@@ -306,6 +308,53 @@ fn resolve_path_item_ref_chain<'a>(
         else {
             return Err(OperationRefResolution::Err(format!(
                 "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/components/pathItems`"
+            )));
+        };
+        (tp, t)
+    } else if let Some(after) = ref_str.strip_prefix("#/components/callbacks/") {
+        let mut split = after.splitn(2, '/');
+        let (Some(cb_token), Some(expr_token)) = (split.next(), split.next()) else {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to malformed JSON Pointer `{ref_str}`: callback target must be `<name>/<encoded expression>`"
+            )));
+        };
+        if expr_token.contains('/') {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to malformed JSON Pointer `{ref_str}`: the encoded expression token must use `~1` for `/`"
+            )));
+        }
+        let cb_name = unescape_pointer_token(cb_token);
+        let expr = unescape_pointer_token(expr_token);
+        let tp = format!("{cb_name}/{expr}");
+        if !seen.insert(tp.clone()) {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
+            )));
+        }
+        let Some(cb_ref) = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.callbacks.as_ref())
+            .and_then(|m| m.get(&cb_name))
+        else {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to `{ref_str}`, callback `{cb_name}` is not declared in `#/components/callbacks`"
+            )));
+        };
+        let cb = match cb_ref.get_item(spec) {
+            Ok(cb) => cb,
+            Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
+                return Err(OperationRefResolution::ExternalPathItemRef(target));
+            }
+            Err(crate::common::reference::ResolveError::NotFound(t)) => {
+                return Err(OperationRefResolution::Err(format!(
+                    "path `{path}` is a `$ref` to `{ref_str}`; callback resolves to `{t}`, which is not declared"
+                )));
+            }
+        };
+        let Some(t) = cb.paths.get(&expr) else {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to `{ref_str}`, expression `{expr}` is not declared on callback `{cb_name}`"
             )));
         };
         (tp, t)
@@ -1005,6 +1054,117 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("malformed deep pointer")),
             "expected malformed-deep-pointer error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_method_token_is_case_sensitive() {
+        // OAS 3.1.2 fixes Operation field names to lowercase, and JSON
+        // Pointer tokens are case-sensitive. `#/paths/~1pets/GET` must NOT
+        // resolve to the `get` operation.
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/GET".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("method `GET` not declared")),
+            "expected case-sensitive method error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_inline_callback_name_unescaped() {
+        // RFC 6901: a callback name containing `/` must round-trip through
+        // `~1`. Build a callback whose name literally is `weird/name`,
+        // referenced as `weird~1name`.
+        use crate::v3_1::callback::Callback;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("expr".to_owned(), pi_with_get());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert("weird/name".to_owned(), RefOr::new_item(cb));
+        let op = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/post/callbacks/weird~1name/expr/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "callback with `/` in name should resolve via `~1`: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn path_item_ref_chain_target_in_components_callbacks() {
+        // A PathItem in `paths` carries `$ref` pointing at a Path Item
+        // that lives under `#/components/callbacks/<n>/<expr>` — that
+        // PathItem is still a Path Item Object, so the chain follower must
+        // resolve it (Codex finding).
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("e".to_owned(), pi_with_get());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/callbacks/CB/e".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "chain through components.callbacks must resolve: {:?}",
             ctx.errors
         );
     }

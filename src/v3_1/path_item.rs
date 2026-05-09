@@ -279,9 +279,11 @@ fn unescape_pointer_token(token: &str) -> String {
 }
 
 /// True if `reference` (an internal `#/...` pointer) names a `PathItem`
-/// declared anywhere in the document. PathItem `$ref`s may target the
-/// three containers that store path items: `#/paths`, `#/webhooks`, and
-/// `#/components/pathItems`.
+/// declared anywhere in the document. PathItem `$ref`s may target any of
+/// the four containers that hold PathItem objects: `#/paths`,
+/// `#/webhooks`, `#/components/pathItems`, or
+/// `#/components/callbacks/<name>/<expression>` (each Callback's `paths`
+/// map values are PathItem objects too).
 fn internal_path_item_ref_target_exists(spec: &Spec, reference: &str) -> bool {
     let one_token = |after: &str| -> Option<String> {
         if after.contains('/') {
@@ -309,6 +311,22 @@ fn internal_path_item_ref_target_exists(spec: &Spec, reference: &str) -> bool {
                 .and_then(|c| c.path_items.as_ref())
                 .is_some_and(|m| m.contains_key(&k))
         })
+    } else if let Some(after) = reference.strip_prefix("#/components/callbacks/") {
+        let mut split = after.splitn(2, '/');
+        let (Some(cb_token), Some(expr_token)) = (split.next(), split.next()) else {
+            return false;
+        };
+        if expr_token.contains('/') {
+            return false;
+        }
+        let cb_name = unescape_pointer_token(cb_token);
+        let expr = unescape_pointer_token(expr_token);
+        spec.components
+            .as_ref()
+            .and_then(|c| c.callbacks.as_ref())
+            .and_then(|m| m.get(&cb_name))
+            .and_then(|cb_ref| cb_ref.get_item(spec).ok())
+            .is_some_and(|cb| cb.paths.contains_key(&expr))
     } else {
         false
     }
@@ -513,6 +531,53 @@ mod tests {
         assert!(
             ctx.errors.iter().all(|e| !e.contains("external reference")),
             "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_ref_resolved_against_components_callbacks() {
+        // Callback values are PathItem objects, so a `$ref` to
+        // `#/components/callbacks/<n>/<expr>` is a valid PathItem ref.
+        use crate::v3_1::callback::Callback;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("e".to_owned(), PathItem::default());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = crate::v3_1::components::Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let pi = PathItem {
+            reference: Some("#/components/callbacks/CB/e".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("not declared")),
+            "callback path-item target should resolve: {:?}",
+            ctx.errors
+        );
+
+        // Dangling target reports.
+        let pi = PathItem {
+            reference: Some("#/components/callbacks/CB/missing".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in this document")),
+            "dangling callback path-item should error: {:?}",
             ctx.errors
         );
     }
