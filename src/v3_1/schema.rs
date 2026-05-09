@@ -30,101 +30,81 @@ impl Default for Schema {
     }
 }
 
-impl Schema {
-    pub fn new_single_schema(schema: SingleSchema) -> Self {
-        Schema::Single(Box::new(schema))
+impl From<SingleSchema> for Schema {
+    fn from(s: SingleSchema) -> Self {
+        Schema::Single(Box::new(s))
     }
+}
 
-    pub fn new_boxed_single_schema(schema: SingleSchema) -> Box<Self> {
-        Box::new(Schema::Single(Box::new(schema)))
+impl From<MultiSchema> for Schema {
+    fn from(s: MultiSchema) -> Self {
+        Schema::Multi(Box::new(s))
     }
+}
 
-    pub fn new_single_schema_ref(schema: SingleSchema) -> RefOr<Self> {
-        RefOr::new_item(Schema::Single(Box::new(schema)))
+impl From<AllOfSchema> for Schema {
+    fn from(s: AllOfSchema) -> Self {
+        Schema::AllOf(Box::new(s))
     }
+}
 
-    pub fn new_boxed_single_schema_ref(schema: SingleSchema) -> RefOr<Box<Self>> {
-        RefOr::new_item(Box::new(Schema::Single(Box::new(schema))))
+impl From<AnyOfSchema> for Schema {
+    fn from(s: AnyOfSchema) -> Self {
+        Schema::AnyOf(Box::new(s))
     }
+}
 
-    pub fn new_multi_schema(schema: MultiSchema) -> Self {
-        Schema::Multi(Box::new(schema))
+impl From<OneOfSchema> for Schema {
+    fn from(s: OneOfSchema) -> Self {
+        Schema::OneOf(Box::new(s))
     }
+}
 
-    pub fn new_boxed_multi_schema(schema: MultiSchema) -> Box<Self> {
-        Box::new(Schema::Multi(Box::new(schema)))
+impl From<NotSchema> for Schema {
+    fn from(s: NotSchema) -> Self {
+        Schema::Not(Box::new(s))
     }
+}
 
-    pub fn new_multi_schema_ref(schema: MultiSchema) -> RefOr<Self> {
-        RefOr::new_item(Schema::Multi(Box::new(schema)))
+impl From<StringSchema> for SingleSchema {
+    fn from(s: StringSchema) -> Self {
+        SingleSchema::String(s)
     }
+}
 
-    pub fn new_boxed_multi_schema_ref(schema: MultiSchema) -> RefOr<Box<Self>> {
-        RefOr::new_item(Box::new(Schema::Multi(Box::new(schema))))
+impl From<IntegerSchema> for SingleSchema {
+    fn from(s: IntegerSchema) -> Self {
+        SingleSchema::Integer(s)
     }
+}
 
-    pub fn new_any_of_schema(schema: AnyOfSchema) -> Self {
-        Schema::AnyOf(Box::new(schema))
+impl From<NumberSchema> for SingleSchema {
+    fn from(s: NumberSchema) -> Self {
+        SingleSchema::Number(s)
     }
+}
 
-    pub fn new_boxed_any_of_schema(schema: AnyOfSchema) -> Box<Self> {
-        Box::new(Schema::AnyOf(Box::new(schema)))
+impl From<BooleanSchema> for SingleSchema {
+    fn from(s: BooleanSchema) -> Self {
+        SingleSchema::Boolean(s)
     }
+}
 
-    pub fn new_any_of_schema_ref(schema: AnyOfSchema) -> RefOr<Self> {
-        RefOr::new_item(Schema::AnyOf(Box::new(schema)))
+impl From<ArraySchema> for SingleSchema {
+    fn from(s: ArraySchema) -> Self {
+        SingleSchema::Array(s)
     }
+}
 
-    pub fn new_boxed_any_of_schema_ref(schema: AnyOfSchema) -> RefOr<Box<Self>> {
-        RefOr::new_item(Box::new(Schema::AnyOf(Box::new(schema))))
+impl From<NullSchema> for SingleSchema {
+    fn from(s: NullSchema) -> Self {
+        SingleSchema::Null(s)
     }
+}
 
-    pub fn new_all_of_schema(schema: AllOfSchema) -> Self {
-        Schema::AllOf(Box::new(schema))
-    }
-
-    pub fn new_boxed_all_of_schema(schema: AllOfSchema) -> Box<Self> {
-        Box::new(Schema::AllOf(Box::new(schema)))
-    }
-
-    pub fn new_all_of_schema_ref(schema: AllOfSchema) -> RefOr<Self> {
-        RefOr::new_item(Schema::AllOf(Box::new(schema)))
-    }
-
-    pub fn new_boxed_all_of_schema_ref(schema: AllOfSchema) -> RefOr<Box<Self>> {
-        RefOr::new_item(Box::new(Schema::AllOf(Box::new(schema))))
-    }
-
-    pub fn new_one_of_schema(schema: OneOfSchema) -> Self {
-        Schema::OneOf(Box::new(schema))
-    }
-
-    pub fn new_boxed_one_of_schema(schema: OneOfSchema) -> Box<Self> {
-        Box::new(Schema::OneOf(Box::new(schema)))
-    }
-
-    pub fn new_one_of_schema_ref(schema: OneOfSchema) -> RefOr<Self> {
-        RefOr::new_item(Schema::OneOf(Box::new(schema)))
-    }
-
-    pub fn new_boxed_one_of_schema_ref(schema: OneOfSchema) -> RefOr<Box<Self>> {
-        RefOr::new_item(Box::new(Schema::OneOf(Box::new(schema))))
-    }
-
-    pub fn new_not_schema(schema: NotSchema) -> Self {
-        Schema::Not(Box::new(schema))
-    }
-
-    pub fn new_boxed_not_schema(schema: NotSchema) -> Box<Self> {
-        Box::new(Schema::Not(Box::new(schema)))
-    }
-
-    pub fn new_not_schema_ref(schema: NotSchema) -> RefOr<Self> {
-        RefOr::new_item(Schema::Not(Box::new(schema)))
-    }
-
-    pub fn new_boxed_not_schema_ref(schema: NotSchema) -> RefOr<Box<Self>> {
-        RefOr::new_item(Box::new(Schema::Not(Box::new(schema))))
+impl From<ObjectSchema> for SingleSchema {
+    fn from(s: ObjectSchema) -> Self {
+        SingleSchema::Object(s)
     }
 }
 
@@ -132,7 +112,7 @@ impl Schema {
 pub struct AllOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "allOf")]
-    pub all_of: Vec<RefOr<Box<Schema>>>,
+    pub all_of: Vec<RefOr<Schema>>,
 
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,7 +126,7 @@ pub struct AllOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -170,7 +150,7 @@ pub struct AllOfSchema {
 pub struct AnyOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "anyOf")]
-    pub any_of: Vec<RefOr<Box<Schema>>>,
+    pub any_of: Vec<RefOr<Schema>>,
 
     /// Adds support for polymorphism.
     /// The discriminator is an object name that is used to differentiate between other schemas
@@ -191,7 +171,7 @@ pub struct AnyOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -208,7 +188,7 @@ pub struct AnyOfSchema {
 pub struct OneOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "oneOf")]
-    pub one_of: Vec<RefOr<Box<Schema>>>,
+    pub one_of: Vec<RefOr<Schema>>,
 
     /// Adds support for polymorphism.
     /// The discriminator is an object name that is used to differentiate between other schemas
@@ -229,7 +209,7 @@ pub struct OneOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -244,9 +224,8 @@ pub struct OneOfSchema {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NotSchema {
-    /// **Required** The list of schemas that this schema is composed of.
-    #[serde(rename = "allOf")]
-    pub not: RefOr<Box<Schema>>,
+    /// **Required** The schema that this schema must not match.
+    pub not: RefOr<Schema>,
 
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,7 +239,7 @@ pub struct NotSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -273,34 +252,37 @@ pub struct NotSchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+// SingleSchema is always heap-allocated via `Schema::Single(Box<SingleSchema>)`,
+// so the size variance between variants is intentional and harmless.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SingleSchema {
     #[serde(rename = "string")]
-    String(Box<StringSchema>),
+    String(StringSchema),
 
     #[serde(rename = "integer")]
-    Integer(Box<IntegerSchema>),
+    Integer(IntegerSchema),
 
     #[serde(rename = "number")]
-    Number(Box<NumberSchema>),
+    Number(NumberSchema),
 
     #[serde(rename = "boolean")]
-    Boolean(Box<BooleanSchema>),
+    Boolean(BooleanSchema),
 
     #[serde(rename = "array")]
-    Array(Box<ArraySchema>),
+    Array(ArraySchema),
 
     #[serde(rename = "null")]
-    Null(Box<NullSchema>),
+    Null(NullSchema),
 
     #[serde(rename = "object")]
-    Object(Box<ObjectSchema>), // must be last
+    Object(ObjectSchema), // must be last
 }
 
 impl Default for SingleSchema {
     fn default() -> Self {
-        SingleSchema::Object(Box::default())
+        SingleSchema::Object(ObjectSchema::default())
     }
 }
 
@@ -389,7 +371,7 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -482,7 +464,7 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -575,7 +557,7 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -636,7 +618,7 @@ pub struct BooleanSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -664,7 +646,7 @@ pub struct ArraySchema {
 
     /// **Required** Describes the type of items in the array.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<BoolOr<RefOr<Box<Schema>>>>,
+    pub items: Option<BoolOr<RefOr<Schema>>>,
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -714,7 +696,7 @@ pub struct ArraySchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -748,7 +730,7 @@ pub struct ObjectSchema {
     ///
     /// https://json-schema.org/understanding-json-schema/reference/object.html#properties
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<BTreeMap<String, RefOr<Box<Schema>>>>,
+    pub properties: Option<BTreeMap<String, RefOr<Schema>>>,
 
     /// Sometimes you want to say that, given a particular kind of property name, the value should match a particular schema.
     /// That’s where patternProperties comes in: it maps regular expressions to schemas.
@@ -756,7 +738,7 @@ pub struct ObjectSchema {
     ///
     /// https://json-schema.org/understanding-json-schema/reference/object.html#pattern-properties
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pattern_properties: Option<BTreeMap<String, RefOr<Box<Schema>>>>,
+    pub pattern_properties: Option<BTreeMap<String, RefOr<Schema>>>,
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -781,14 +763,14 @@ pub struct ObjectSchema {
     ///
     /// https://json-schema.org/understanding-json-schema/reference/object.html#additional-properties
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_properties: Option<BoolOr<RefOr<Box<Schema>>>>,
+    pub additional_properties: Option<BoolOr<RefOr<Schema>>>,
 
     /// The unevaluatedProperties keyword is similar to additionalProperties except that it can recognize properties declared in subschemas.
     /// So, the example from the previous section can be rewritten without the need to redeclare properties.
     ///
     /// https://json-schema.org/understanding-json-schema/reference/object.html#unevaluated-properties
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unevaluated_properties: Option<BoolOr<RefOr<Box<Schema>>>>,
+    pub unevaluated_properties: Option<BoolOr<RefOr<Schema>>>,
 
     /// The names of properties can be validated against a schema, irrespective of their values.
     /// This can be useful if you don’t want to enforce specific properties, but you want to make sure that
@@ -798,7 +780,7 @@ pub struct ObjectSchema {
     ///
     /// https://json-schema.org/understanding-json-schema/reference/object.html#property-names
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub property_names: Option<RefOr<Box<Schema>>>,
+    pub property_names: Option<RefOr<Schema>>,
 
     /// A list of required properties.
     /// If the object is defined at the root of the document,
@@ -835,7 +817,7 @@ pub struct ObjectSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -890,7 +872,7 @@ pub struct NullSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -960,7 +942,7 @@ pub struct MultiSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
-    /// A fre-form list to include the examples of instances for this schema.
+    /// A free-form list to include the examples of instances for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<serde_json::Value>>,
 
@@ -980,7 +962,7 @@ impl ValidateWithContext<Spec> for Schema {
             Schema::Multi(s) => s.validate_with_context(ctx, path),
             Schema::AllOf(s) => {
                 for (i, schema) in s.all_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.allOf[{i}]"));
+                    schema.validate_with_context(ctx, format!("{path}.allOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
@@ -988,7 +970,7 @@ impl ValidateWithContext<Spec> for Schema {
             }
             Schema::AnyOf(s) => {
                 for (i, schema) in s.any_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.anyOf[{i}]"));
+                    schema.validate_with_context(ctx, format!("{path}.anyOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
@@ -996,15 +978,14 @@ impl ValidateWithContext<Spec> for Schema {
             }
             Schema::OneOf(s) => {
                 for (i, schema) in s.one_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.oneOf[{i}]"));
+                    schema.validate_with_context(ctx, format!("{path}.oneOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
                 }
             }
             Schema::Not(s) => {
-                s.not
-                    .validate_with_context_boxed(ctx, format!("{path}.not"));
+                s.not.validate_with_context(ctx, format!("{path}.not"));
             }
         }
     }
@@ -1078,7 +1059,7 @@ impl ValidateWithContext<Spec> for ArraySchema {
         }
 
         if let Some(items) = &self.items {
-            items.validate_with_context_boxed(ctx, format!("{path}.items"));
+            items.validate_with_context(ctx, format!("{path}.items"));
         }
     }
 }
@@ -1094,14 +1075,14 @@ impl ValidateWithContext<Spec> for ObjectSchema {
 
         if let Some(properties) = &self.properties {
             for (name, schema) in properties {
-                schema.validate_with_context_boxed(ctx, format!("{path}.properties.{name}"));
+                schema.validate_with_context(ctx, format!("{path}.properties.{name}"));
             }
         }
 
         if let Some(properties) = &self.pattern_properties {
             for (pattern, schema) in properties {
                 let path = format!("{path}.pattern_properties[{pattern}]");
-                schema.validate_with_context_boxed(ctx, path.clone());
+                schema.validate_with_context(ctx, path.clone());
                 validate_pattern(pattern, ctx, path);
             }
         }
@@ -1110,7 +1091,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match additional_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
+                    schema.validate_with_context(ctx, format!("{path}.additionalProperties"));
                 }
             }
         }
@@ -1119,14 +1100,13 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match unevaluated_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema
-                        .validate_with_context_boxed(ctx, format!("{path}.unevaluatedProperties"));
+                    schema.validate_with_context(ctx, format!("{path}.unevaluatedProperties"));
                 }
             }
         }
 
         if let Some(property_names) = &self.property_names {
-            property_names.validate_with_context_boxed(ctx, format!("{path}.propertyNames"));
+            property_names.validate_with_context(ctx, format!("{path}.propertyNames"));
         }
     }
 }
@@ -1259,22 +1239,20 @@ mod tests {
         }
         assert_eq!(
             spec,
-            Schema::Single(Box::new(SingleSchema::String(Box::new(StringSchema {
+            Schema::Single(Box::new(SingleSchema::String(StringSchema {
                 title: Some("foo".to_owned()),
                 ..Default::default()
-            })))),
+            }))),
         );
     }
 
     #[test]
     fn test_single_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::Single(Box::new(SingleSchema::String(Box::new(
-                StringSchema {
-                    title: Some("foo".to_owned()),
-                    ..Default::default()
-                }
-            )))))
+            serde_json::to_value(Schema::from(SingleSchema::from(StringSchema {
+                title: Some("foo".to_owned()),
+                ..Default::default()
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "string",
@@ -1282,26 +1260,22 @@ mod tests {
             }),
         );
         assert_eq!(
-            serde_json::to_value(Schema::Single(Box::new(SingleSchema::Object(Box::new(
-                ObjectSchema {
-                    title: Some("foo".to_owned()),
-                    required: Some(vec!["bar".to_owned()]),
-                    properties: Some({
-                        let mut map = BTreeMap::new();
-                        map.insert(
-                            "bar".to_owned(),
-                            RefOr::new_item(Box::new(Schema::Single(Box::new(
-                                SingleSchema::String(Box::new(StringSchema {
-                                    title: Some("foo bar".to_owned()),
-                                    ..Default::default()
-                                })),
-                            )))),
-                        );
-                        map
-                    }),
-                    ..Default::default()
-                }
-            )))))
+            serde_json::to_value(Schema::from(SingleSchema::from(ObjectSchema {
+                title: Some("foo".to_owned()),
+                required: Some(vec!["bar".to_owned()]),
+                properties: Some({
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        "bar".to_owned(),
+                        RefOr::new_item(Schema::from(SingleSchema::from(StringSchema {
+                            title: Some("foo bar".to_owned()),
+                            ..Default::default()
+                        }))),
+                    );
+                    map
+                }),
+                ..Default::default()
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "object",
@@ -1341,7 +1315,7 @@ mod tests {
             }
             match schema.all_of[1].clone() {
                 RefOr::Item(o) => {
-                    if let Schema::Single(o) = *o {
+                    if let Schema::Single(o) = o {
                         if let SingleSchema::Object(o) = *o {
                             assert_eq!(o.title, Some("foo".to_owned()));
                         } else {
@@ -1361,18 +1335,16 @@ mod tests {
     #[test]
     fn test_all_of_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::AllOf(Box::new(AllOfSchema {
+            serde_json::to_value(Schema::from(AllOfSchema {
                 all_of: vec![
                     RefOr::new_ref("#/definitions/bar".to_owned()),
-                    RefOr::new_item(Box::new(Schema::Single(Box::new(SingleSchema::Object(
-                        Box::new(ObjectSchema {
-                            title: Some("foo".to_owned()),
-                            ..Default::default()
-                        })
-                    ))))),
+                    RefOr::new_item(Schema::from(SingleSchema::from(ObjectSchema {
+                        title: Some("foo".to_owned()),
+                        ..Default::default()
+                    }))),
                 ],
                 ..Default::default()
-            })))
+            }))
             .unwrap(),
             serde_json::json!({
                 "allOf": [
@@ -1390,7 +1362,7 @@ mod tests {
 
     #[test]
     fn test_string_serialize_deserialize() {
-        let spec = Schema::Single(Box::new(SingleSchema::String(Box::new(StringSchema {
+        let spec = Schema::Single(Box::new(SingleSchema::String(StringSchema {
             title: Some("foo".to_string()),
             format: Some(StringFormat::Custom("custom".to_string())),
             default: Some("d".to_string()),
@@ -1399,7 +1371,7 @@ mod tests {
             min_length: Some(1),
             examples: Some(vec![serde_json::json!("a"), serde_json::json!("b")]),
             ..Default::default()
-        }))));
+        })));
         let value = serde_json::json!({
             "type": "string",
             "title": "foo",
@@ -1416,7 +1388,7 @@ mod tests {
 
     #[test]
     fn test_integer_serialize_deserialize() {
-        let spec = Schema::Single(Box::new(SingleSchema::Integer(Box::new(IntegerSchema {
+        let spec = Schema::Single(Box::new(SingleSchema::Integer(IntegerSchema {
             title: Some("foo".to_string()),
             format: Some(IntegerFormat::Int32),
             default: Some(42),
@@ -1425,7 +1397,7 @@ mod tests {
             maximum: Some(105),
             examples: Some(vec![serde_json::json!(1), serde_json::json!(42)]),
             ..Default::default()
-        }))));
+        })));
         let value = serde_json::json!({
             "type": "integer",
             "title": "foo",
@@ -1442,7 +1414,7 @@ mod tests {
 
     #[test]
     fn test_number_serialize_deserialize() {
-        let spec = Schema::Single(Box::new(SingleSchema::Number(Box::new(NumberSchema {
+        let spec = Schema::Single(Box::new(SingleSchema::Number(NumberSchema {
             title: Some("foo".to_string()),
             format: Some(NumberFormat::Float),
             default: Some(42.0),
@@ -1451,7 +1423,7 @@ mod tests {
             maximum: Some(105.0),
             examples: Some(vec![serde_json::json!(1.0), serde_json::json!(42.0)]),
             ..Default::default()
-        }))));
+        })));
         let value = serde_json::json!({
             "type": "number",
             "title": "foo",
@@ -1468,12 +1440,12 @@ mod tests {
 
     #[test]
     fn test_boolean_serialize_deserialize() {
-        let spec = Schema::Single(Box::new(SingleSchema::Boolean(Box::new(BooleanSchema {
+        let spec = Schema::Single(Box::new(SingleSchema::Boolean(BooleanSchema {
             title: Some("foo".to_string()),
             default: Some(false),
             examples: Some(vec![serde_json::json!(true), serde_json::json!(false)]),
             ..Default::default()
-        }))));
+        })));
         let value = serde_json::json!({
             "type": "boolean",
             "title": "foo",
@@ -1486,14 +1458,14 @@ mod tests {
 
     #[test]
     fn test_array_serialize_deserialize() {
-        let spec = Schema::Single(Box::new(SingleSchema::Array(Box::new(ArraySchema {
+        let spec = Schema::from(SingleSchema::from(ArraySchema {
             title: Some("foo".to_string()),
-            items: Some(BoolOr::Item(Schema::new_boxed_single_schema_ref(
-                SingleSchema::Integer(Box::new(IntegerSchema {
+            items: Some(BoolOr::Item(RefOr::new_item(Schema::from(
+                SingleSchema::from(IntegerSchema {
                     title: Some("bar".into()),
                     ..Default::default()
-                })),
-            ))),
+                }),
+            )))),
             default: Some(vec![
                 serde_json::json!(1),
                 serde_json::json!(2),
@@ -1504,7 +1476,7 @@ mod tests {
                 serde_json::json!([0, 25, 43]),
             ]),
             ..Default::default()
-        }))));
+        }));
         let value = serde_json::json!({
             "type": "array",
             "title": "foo",
@@ -1521,11 +1493,13 @@ mod tests {
 
     #[test]
     fn test_object_serialize_deserialize() {
-        let spec = Schema::Single(Box::new(SingleSchema::Object(Box::new(ObjectSchema {
+        let spec = Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
             title: Some("foo".to_string()),
             properties: Some(BTreeMap::from_iter(vec![(
                 "bar".into(),
-                Schema::new_boxed_single_schema_ref(SingleSchema::Integer(Box::default())),
+                RefOr::new_item(Schema::from(
+                    SingleSchema::Integer(IntegerSchema::default()),
+                )),
             )])),
             default: Some(BTreeMap::from_iter(vec![(
                 "bar".into(),
@@ -1536,7 +1510,7 @@ mod tests {
                 serde_json::json!({"bar": 105}),
             ]),
             ..Default::default()
-        }))));
+        })));
         let value = serde_json::json!({
             "type": "object",
             "title": "foo",
@@ -1554,11 +1528,11 @@ mod tests {
 
     #[test]
     fn test_null_serialize_deserialize() {
-        let spec = Schema::Single(Box::new(SingleSchema::Null(Box::new(NullSchema {
+        let spec = Schema::Single(Box::new(SingleSchema::Null(NullSchema {
             title: Some("foo".to_string()),
             examples: Some(vec![serde_json::json!(null)]),
             ..Default::default()
-        }))));
+        })));
         let value = serde_json::json!({
             "type": "null",
             "title": "foo",

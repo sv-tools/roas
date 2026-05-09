@@ -147,23 +147,6 @@ impl<D> RefOr<D> {
     }
 }
 
-impl<D> RefOr<Box<D>> {
-    pub fn validate_with_context_boxed<T>(&self, ctx: &mut Context<T>, path: String)
-    where
-        T: ResolveReference<D>,
-        D: ValidateWithContext<T>,
-    {
-        match self {
-            RefOr::Ref(r) => {
-                RefOr::<D>::new_ref(r.reference.clone()).validate_with_context(ctx, path);
-            }
-            RefOr::Item(d) => {
-                d.as_ref().validate_with_context(ctx, path);
-            }
-        }
-    }
-}
-
 impl Ref {
     pub fn validate_with_context<T, D>(&self, ctx: &mut Context<T>, path: String)
     where

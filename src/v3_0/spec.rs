@@ -1,7 +1,10 @@
 //! The root document object of the OpenAPI v3.0.X specification.
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_not_visited};
-use crate::common::reference::{ResolveReference, resolve_in_map};
+use crate::common::helpers::{
+    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
+    validate_not_visited,
+};
+use crate::common::reference::{RefOr, ResolveReference, resolve_in_map};
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
 use crate::v3_0::example::Example;
@@ -279,6 +282,180 @@ impl Display for Version {
     }
 }
 
+impl Spec {
+    /// Insert a schema under `#/components/schemas/{name}` and return a `$ref` pointing to it.
+    /// Replaces any existing entry with the same name.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_schema(
+        &mut self,
+        name: impl Into<String>,
+        schema: impl Into<Schema>,
+    ) -> Result<RefOr<Schema>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/schemas/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .schemas
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(schema.into()));
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a response under `#/components/responses/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_response(
+        &mut self,
+        name: impl Into<String>,
+        response: Response,
+    ) -> Result<RefOr<Response>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/responses/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .responses
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(response));
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a parameter under `#/components/parameters/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_parameter(
+        &mut self,
+        name: impl Into<String>,
+        parameter: Parameter,
+    ) -> Result<RefOr<Parameter>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/parameters/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .parameters
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(parameter));
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert an example under `#/components/examples/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_example(
+        &mut self,
+        name: impl Into<String>,
+        example: Example,
+    ) -> Result<RefOr<Example>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/examples/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .examples
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(example));
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a request body under `#/components/requestBodies/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_request_body(
+        &mut self,
+        name: impl Into<String>,
+        request_body: RequestBody,
+    ) -> Result<RefOr<RequestBody>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/requestBodies/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .request_bodies
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(request_body));
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a header under `#/components/headers/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_header(
+        &mut self,
+        name: impl Into<String>,
+        header: Header,
+    ) -> Result<RefOr<Header>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/headers/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .headers
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(header));
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a security scheme under `#/components/securitySchemes/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_security_scheme(
+        &mut self,
+        name: impl Into<String>,
+        scheme: SecurityScheme,
+    ) -> Result<RefOr<SecurityScheme>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/securitySchemes/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .security_schemes
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(scheme));
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a link under `#/components/links/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_link(
+        &mut self,
+        name: impl Into<String>,
+        link: Link,
+    ) -> Result<RefOr<Link>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/links/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .links
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(link));
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a callback under `#/components/callbacks/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_callback(
+        &mut self,
+        name: impl Into<String>,
+        callback: Callback,
+    ) -> Result<RefOr<Callback>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/components/callbacks/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .callbacks
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(callback));
+        Ok(RefOr::new_ref(reference))
+    }
+}
+
 impl ResolveReference<Response> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Response> {
         self.components
@@ -521,126 +698,72 @@ mod tests {
             r#""3.0.4""#,
         );
     }
-}
 
-//     #[test]
-//     fn test_scheme_deserialize() {
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "2.0",
-//                 "info": {
-//                     "title": "foo",
-//                     "version": "1",
-//                 },
-//                 "paths": {},
-//             }))
-//             .unwrap(),
-//             Spec {
-//                 schemes: None,
-//                 info: Info {
-//                     title: String::from("foo"),
-//                     version: String::from("1"),
-//                     ..Default::default()
-//                 },
-//                 ..Default::default()
-//             },
-//             "no scheme",
-//         );
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "2.0",
-//                 "info": {
-//                     "title": "foo",
-//                     "version": "1",
-//                 },
-//                 "paths":{},
-//                 "schemes":null,
-//             }))
-//             .unwrap(),
-//             Spec {
-//                 schemes: None,
-//                 info: Info {
-//                     title: String::from("foo"),
-//                     version: String::from("1"),
-//                     ..Default::default()
-//                 },
-//                 ..Default::default()
-//             },
-//             "null scheme",
-//         );
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "2.0",
-//                 "info": {
-//                     "title": "foo",
-//                     "version": "1",
-//                 },
-//                 "paths": {},
-//                 "schemes": [],
-//             }))
-//             .unwrap(),
-//             Spec {
-//                 schemes: Some(vec![]),
-//                 info: Info {
-//                     title: String::from("foo"),
-//                     version: String::from("1"),
-//                     ..Default::default()
-//                 },
-//                 ..Default::default()
-//             },
-//             "empty schemes array",
-//         );
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "2.0",
-//                 "info": {
-//                     "title": "foo",
-//                     "version": "1",
-//                 },
-//                 "paths": {},
-//                 "schemes": ["http", "wss", "https", "ws"],
-//             }))
-//             .unwrap(),
-//             Spec {
-//                 schemes: Some(vec![Scheme::HTTP, Scheme::WSS, Scheme::HTTPS, Scheme::WS]),
-//                 info: Info {
-//                     title: String::from("foo"),
-//                     version: String::from("1"),
-//                     ..Default::default()
-//                 },
-//                 ..Default::default()
-//             },
-//             "correct schemes",
-//         );
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "2.0",
-//                 "info": {
-//                     "title": "foo",
-//                     "version": "1",
-//                 },
-//                 "paths": {},
-//                 "schemes": "foo",
-//             }))
-//             .unwrap_err()
-//             .to_string(),
-//             r#"invalid type: string "foo", expected a sequence"#,
-//             "foo string as schemes"
-//         );
-//         assert_eq!(
-//             serde_json::from_value::<Spec>(serde_json::json!({
-//                 "swagger": "2.0",
-//                 "info": {
-//                     "title": "foo",
-//                     "version": "1",
-//                 },
-//                 "paths": {},
-//                 "schemes": ["foo"],
-//             }))
-//             .unwrap_err()
-//             .to_string(),
-//             r#"unknown variant `foo`, expected one of `http`, `https`, `ws`, `wss`"#,
-//             "foo string as scheme",
-//         );
-//     }
-// }
+    #[test]
+    fn test_define_schema() {
+        use crate::v3_0::schema::{SingleSchema, StringSchema};
+        let mut spec = Spec::default();
+        let pet_ref = spec
+            .define_schema("Pet", SingleSchema::from(StringSchema::default()))
+            .expect("valid name");
+
+        match pet_ref {
+            RefOr::Ref(r) => assert_eq!(r.reference, "#/components/schemas/Pet"),
+            _ => panic!("expected Ref"),
+        }
+        assert!(spec.components.is_some());
+        assert!(
+            spec.components
+                .as_ref()
+                .unwrap()
+                .schemas
+                .as_ref()
+                .unwrap()
+                .contains_key("Pet")
+        );
+    }
+
+    #[test]
+    fn test_define_replaces_existing() {
+        use crate::v3_0::schema::{SingleSchema, StringSchema};
+        let mut spec = Spec::default();
+        spec.define_schema("Pet", SingleSchema::from(StringSchema::default()))
+            .unwrap();
+        spec.define_schema(
+            "Pet",
+            SingleSchema::from(StringSchema {
+                title: Some("Pet".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        let schemas = spec.components.unwrap().schemas.unwrap();
+        assert_eq!(schemas.len(), 1);
+        let pet = schemas.get("Pet").unwrap();
+        match pet {
+            RefOr::Item(Schema::Single(s)) => match s.as_ref() {
+                SingleSchema::String(s) => assert_eq!(s.title.as_deref(), Some("Pet")),
+                _ => panic!("expected String schema"),
+            },
+            _ => panic!("expected inline schema"),
+        }
+    }
+
+    #[test]
+    fn test_define_rejects_invalid_name() {
+        use crate::v3_0::schema::{SingleSchema, StringSchema};
+        let mut spec = Spec::default();
+        // Spaces, slashes, and other characters break `$ref` URI fragments;
+        // surface the failure at the `define_*` site, not in a later `validate()`.
+        let err = spec
+            .define_schema("My Pet", SingleSchema::from(StringSchema::default()))
+            .unwrap_err();
+        assert_eq!(err.name, "My Pet");
+        // No partial state must leak in on failure.
+        assert!(
+            spec.components.is_none(),
+            "name validation must run before mutation"
+        );
+    }
+}

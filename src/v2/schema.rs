@@ -16,30 +16,72 @@ use std::fmt::{Display, Formatter};
 #[serde(untagged)]
 pub enum Schema {
     #[serde(rename = "string")]
-    String(StringSchema),
+    String(Box<StringSchema>),
 
     #[serde(rename = "integer")]
-    Integer(IntegerSchema),
+    Integer(Box<IntegerSchema>),
 
     #[serde(rename = "number")]
-    Number(NumberSchema),
+    Number(Box<NumberSchema>),
 
     #[serde(rename = "boolean")]
-    Boolean(BooleanSchema),
+    Boolean(Box<BooleanSchema>),
 
     #[serde(rename = "array")]
-    Array(ArraySchema),
+    Array(Box<ArraySchema>),
 
     #[serde(rename = "null")]
-    Null(NullSchema),
+    Null(Box<NullSchema>),
 
     #[serde(rename = "object")]
-    Object(ObjectSchema), // must be last
+    Object(Box<ObjectSchema>), // must be last
 }
 
 impl Default for Schema {
     fn default() -> Self {
-        Schema::Object(ObjectSchema::default())
+        Schema::Object(Box::default())
+    }
+}
+
+impl From<StringSchema> for Schema {
+    fn from(s: StringSchema) -> Self {
+        Schema::String(Box::new(s))
+    }
+}
+
+impl From<IntegerSchema> for Schema {
+    fn from(s: IntegerSchema) -> Self {
+        Schema::Integer(Box::new(s))
+    }
+}
+
+impl From<NumberSchema> for Schema {
+    fn from(s: NumberSchema) -> Self {
+        Schema::Number(Box::new(s))
+    }
+}
+
+impl From<BooleanSchema> for Schema {
+    fn from(s: BooleanSchema) -> Self {
+        Schema::Boolean(Box::new(s))
+    }
+}
+
+impl From<ArraySchema> for Schema {
+    fn from(s: ArraySchema) -> Self {
+        Schema::Array(Box::new(s))
+    }
+}
+
+impl From<NullSchema> for Schema {
+    fn from(s: NullSchema) -> Self {
+        Schema::Null(Box::new(s))
+    }
+}
+
+impl From<ObjectSchema> for Schema {
+    fn from(s: ObjectSchema) -> Self {
+        Schema::Object(Box::new(s))
     }
 }
 
@@ -375,7 +417,7 @@ pub struct ArraySchema {
 
     /// **Required** Describes the type of items in the array.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<RefOr<Box<Schema>>>,
+    pub items: Option<RefOr<Schema>>,
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -446,7 +488,7 @@ pub struct ObjectSchema {
 
     /// Describes the properties in the object.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<BTreeMap<String, RefOr<Box<Schema>>>>,
+    pub properties: Option<BTreeMap<String, RefOr<Schema>>>,
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -465,7 +507,7 @@ pub struct ObjectSchema {
     /// Declares the properties whose names are not listed in the `properties`
     #[serde(rename = "additionalProperties")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_properties: Option<BoolOr<RefOr<Box<Schema>>>>,
+    pub additional_properties: Option<BoolOr<RefOr<Schema>>>,
 
     /// A list of required properties.
     /// If the object is defined at the root of the document,
@@ -642,7 +684,7 @@ impl ValidateWithContext<Spec> for ArraySchema {
         }
 
         if let Some(items) = &self.items {
-            items.validate_with_context_boxed(ctx, format!("{path}.items"));
+            items.validate_with_context(ctx, format!("{path}.items"));
         }
     }
 }
@@ -658,7 +700,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
 
         if let Some(properties) = &self.properties {
             for (name, schema) in properties {
-                schema.validate_with_context_boxed(ctx, format!("{path}.properties.{name}"));
+                schema.validate_with_context(ctx, format!("{path}.properties.{name}"));
             }
         }
 
@@ -666,7 +708,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match additional_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
+                    schema.validate_with_context(ctx, format!("{path}.additionalProperties"));
                 }
             }
         }
@@ -707,10 +749,10 @@ mod tests {
         }
         assert_eq!(
             spec,
-            Schema::String(StringSchema {
+            Schema::String(Box::new(StringSchema {
                 title: Some("foo".to_owned()),
                 ..Default::default()
-            }),
+            })),
         );
     }
 
@@ -755,10 +797,10 @@ mod tests {
     #[test]
     fn test_single_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::String(StringSchema {
+            serde_json::to_value(Schema::String(Box::new(StringSchema {
                 title: Some("foo".to_owned()),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "string",
@@ -766,22 +808,22 @@ mod tests {
             }),
         );
         assert_eq!(
-            serde_json::to_value(Schema::Object(ObjectSchema {
+            serde_json::to_value(Schema::Object(Box::new(ObjectSchema {
                 title: Some("foo".to_owned()),
                 required: Some(vec!["bar".to_owned()]),
                 properties: Some({
                     let mut map = BTreeMap::new();
                     map.insert(
                         "bar".to_owned(),
-                        RefOr::new_item(Box::new(Schema::String(StringSchema {
+                        RefOr::new_item(Schema::from(StringSchema {
                             title: Some("foo bar".to_owned()),
                             ..Default::default()
-                        }))),
+                        })),
                     );
                     map
                 }),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "object",
@@ -800,7 +842,7 @@ mod tests {
     #[test]
     fn test_all_of_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::Object(ObjectSchema {
+            serde_json::to_value(Schema::Object(Box::new(ObjectSchema {
                 all_of: Some(vec![
                     RefOr::new_ref("#/definitions/bar".to_owned()),
                     RefOr::new_item(ObjectSchema {
@@ -809,7 +851,7 @@ mod tests {
                     }),
                 ]),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "object",

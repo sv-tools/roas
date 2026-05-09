@@ -156,7 +156,7 @@ impl<'de> Deserialize<'de> for PathItem {
                         if res.servers.is_some() {
                             return Err(Error::duplicate_field("servers"));
                         }
-                        res.parameters = Some(map.next_value()?);
+                        res.servers = Some(map.next_value()?);
                     } else if key.starts_with("x-") {
                         if extensions.contains_key(key.clone().as_str()) {
                             return Err(Error::custom(format!("duplicate field '{key}'")));

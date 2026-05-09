@@ -3,7 +3,7 @@
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
-use regex::Regex;
+use lazy_regex::regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -105,8 +105,10 @@ impl ValidateWithContext<Spec> for Server {
                 visited.insert(name.clone());
             }
         };
-        let re = Regex::new(r"\{([a-zA-Z0-9.\-_]+)}").unwrap();
-        for (_, [name]) in re.captures_iter(&self.url).map(|c| c.extract()) {
+        for (_, [name]) in regex!(r"\{([a-zA-Z0-9.\-_]+)}")
+            .captures_iter(&self.url)
+            .map(|c| c.extract())
+        {
             if !visited.remove(name) {
                 ctx.error(
                     path.clone(),

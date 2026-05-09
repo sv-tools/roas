@@ -281,7 +281,6 @@ impl ValidateWithContext<Spec> for ArrayHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::items::StringItem;
 
     #[test]
     fn test_header_deserialize() {
@@ -416,7 +415,7 @@ mod tests {
             .unwrap(),
             Header::Array(ArrayHeader {
                 description: Some("A short description of the header.".to_owned()),
-                items: Items::String(StringItem::default()),
+                items: Items::String(Box::default()),
                 default: Some(vec![serde_json::json!("default")]),
                 collection_format: Some(CollectionFormat::TSV),
                 max_items: Some(10),
@@ -551,7 +550,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Header::Array(ArrayHeader {
                 description: Some("A short description of the header.".to_owned()),
-                items: Items::String(StringItem::default()),
+                items: Items::String(Box::default()),
                 default: Some(vec![serde_json::json!("default")]),
                 collection_format: Some(CollectionFormat::TSV),
                 max_items: Some(10),

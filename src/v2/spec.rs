@@ -1,9 +1,10 @@
 //! The root document object of the OpenAPI v2.0 specification.
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_not_visited, validate_optional_string_matches,
+    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
+    validate_not_visited, validate_optional_string_matches,
 };
-use crate::common::reference::ResolveReference;
+use crate::common::reference::{RefOr, ResolveReference};
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::info::Info;
 use crate::v2::parameter::Parameter;
@@ -14,7 +15,7 @@ use crate::v2::security_scheme::SecurityScheme;
 use crate::v2::tag::Tag;
 use crate::validation::{Error, Options, Validate};
 use enumset::EnumSet;
-use regex::Regex;
+use lazy_regex::regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -258,6 +259,60 @@ impl ResolveReference<Parameter> for Spec {
     }
 }
 
+impl Spec {
+    /// Insert a schema under `#/definitions/{name}` and return a `$ref` pointing to it.
+    /// Replaces any existing entry with the same name.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_schema(
+        &mut self,
+        name: impl Into<String>,
+        schema: impl Into<Schema>,
+    ) -> Result<RefOr<Schema>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/definitions/{name}");
+        self.definitions
+            .get_or_insert_with(Default::default)
+            .insert(name, schema.into());
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a parameter under `#/parameters/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_parameter(
+        &mut self,
+        name: impl Into<String>,
+        parameter: Parameter,
+    ) -> Result<RefOr<Parameter>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/parameters/{name}");
+        self.parameters
+            .get_or_insert_with(Default::default)
+            .insert(name, parameter);
+        Ok(RefOr::new_ref(reference))
+    }
+
+    /// Insert a response under `#/responses/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
+    pub fn define_response(
+        &mut self,
+        name: impl Into<String>,
+        response: Response,
+    ) -> Result<RefOr<Response>, InvalidComponentName> {
+        let name = name.into();
+        check_component_name(&name)?;
+        let reference = format!("#/responses/{name}");
+        self.responses
+            .get_or_insert_with(Default::default)
+            .insert(name, response);
+        Ok(RefOr::new_ref(reference))
+    }
+}
+
 impl ResolveReference<Response> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Response> {
         self.responses
@@ -290,8 +345,12 @@ impl Validate for Spec {
         self.info
             .validate_with_context(&mut ctx, "#.info".to_owned());
 
-        let re = Regex::new(r"^[^{}/ :\\]+(?::\d+)?$").unwrap();
-        validate_optional_string_matches(&self.host, &re, &mut ctx, "#.host".to_owned());
+        validate_optional_string_matches(
+            &self.host,
+            regex!(r"^[^{}/ :\\]+(?::\d+)?$"),
+            &mut ctx,
+            "#.host".to_owned(),
+        );
 
         if let Some(base_path) = &self.base_path
             && !base_path.starts_with('/')
