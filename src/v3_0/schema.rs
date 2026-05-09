@@ -333,18 +333,25 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<i64>>,
 
-    /// Declares the minimum value of the parameter.
+    /// Inclusive lower bound for the value.
+    /// Per JSON Schema draft-04 §5.1.3, this keyword is any number even when
+    /// the parent schema's `type` is `"integer"`. Stored as
+    /// [`serde_json::Number`] so integer-shaped values like `100` round-trip
+    /// without becoming `100.0`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<i64>,
+    pub minimum: Option<serde_json::Number>,
 
-    /// Declares that the value of the parameter is strictly greater than the value of `minimum`
+    /// If `true`, the value of the parameter is strictly greater than the
+    /// value of `minimum` (the draft-04 boolean modifier form, retained in
+    /// OpenAPI 3.0).
     #[serde(rename = "exclusiveMinimum")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusive_minimum: Option<bool>,
 
-    /// Declares the minimum value of the parameter.
+    /// Inclusive upper bound for the value.
+    /// See [`Self::minimum`] for the rationale on the type.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<i64>,
+    pub maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly less than the value of `maximum`
     #[serde(rename = "exclusiveMaximum")]
@@ -1020,5 +1027,49 @@ mod tests {
                 ],
             }),
         );
+    }
+
+    #[test]
+    fn test_integer_bounds_round_trip() {
+        // OpenAPI 3.0 / JSON Schema draft-04: minimum and maximum on
+        // `IntegerSchema` are numbers, not integers. Integer-shaped JSON
+        // input must round-trip as integers (real-world specs like
+        // `tests/v3_0_data/petstore.json` write `"maximum": 100`),
+        // and fractional values must parse.
+        let json = serde_json::json!({
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).expect("must parse");
+        match &parsed {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Integer(int) => {
+                    assert_eq!(int.minimum.as_ref().unwrap().as_i64(), Some(0));
+                    assert_eq!(int.maximum.as_ref().unwrap().as_i64(), Some(100));
+                }
+                _ => panic!("expected Integer schema"),
+            },
+            _ => panic!("expected Single schema"),
+        }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        let json = serde_json::json!({
+            "type": "integer",
+            "minimum": 0.5,
+            "maximum": 99.5,
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).expect("must parse");
+        match &parsed {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Integer(int) => {
+                    assert_eq!(int.minimum.as_ref().unwrap().as_f64(), Some(0.5));
+                    assert_eq!(int.maximum.as_ref().unwrap().as_f64(), Some(99.5));
+                }
+                _ => panic!("expected Integer schema"),
+            },
+            _ => panic!("expected Single schema"),
+        }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
 }
