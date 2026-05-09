@@ -439,6 +439,18 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
 
 impl ValidateWithContext<Spec> for OAuth2Flows {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Spec: at least one of implicit / password / clientCredentials /
+        // authorizationCode MUST be defined on an OAuthFlows Object.
+        if self.implicit.is_none()
+            && self.password.is_none()
+            && self.client_credentials.is_none()
+            && self.authorization_code.is_none()
+        {
+            ctx.error(
+                path.clone(),
+                "must define at least one of `implicit` / `password` / `clientCredentials` / `authorizationCode`",
+            );
+        }
         if let Some(flow) = &self.implicit {
             flow.validate_with_context(ctx, format!("{path}.implicit"));
         }
@@ -1265,8 +1277,16 @@ mod tests {
             ..Default::default()
         }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
-        assert!(ctx.errors.is_empty(), "OAuth2: no errors: {:?}", ctx.errors);
+        // OAS 3.1.2: OAuthFlows MUST define at least one flow.
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must define at least one")),
+            "expected at-least-one-flow error: {:?}",
+            ctx.errors
+        );
 
+        ctx = Context::new(&spec, Options::new());
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 implicit: Some(ImplicitOAuth2Flow {

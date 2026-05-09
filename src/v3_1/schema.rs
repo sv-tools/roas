@@ -1149,6 +1149,15 @@ impl ValidateWithContext<Spec> for StringSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        // Spec: minLength MUST be ≤ maxLength when both are present.
+        if let (Some(min), Some(max)) = (self.min_length, self.max_length)
+            && min > max
+        {
+            ctx.error(
+                path.clone(),
+                format_args!("`minLength` ({min}) must be ≤ `maxLength` ({max})"),
+            );
+        }
     }
 }
 
@@ -1160,6 +1169,12 @@ impl ValidateWithContext<Spec> for IntegerSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        // Spec: multipleOf MUST be > 0 (JSON Schema 2020-12 §6.2.1).
+        if let Some(m) = self.multiple_of
+            && m <= 0.0
+        {
+            ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
+        }
     }
 }
 
@@ -1170,6 +1185,11 @@ impl ValidateWithContext<Spec> for NumberSchema {
         }
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
+        }
+        if let Some(m) = self.multiple_of
+            && m <= 0.0
+        {
+            ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
         }
     }
 }
@@ -1197,6 +1217,16 @@ impl ValidateWithContext<Spec> for ArraySchema {
         if let Some(items) = &self.items {
             items.validate_with_context(ctx, format!("{path}.items"));
         }
+
+        // Spec: minItems MUST be ≤ maxItems when both are present.
+        if let (Some(min), Some(max)) = (self.min_items, self.max_items)
+            && min > max
+        {
+            ctx.error(
+                path.clone(),
+                format_args!("`minItems` ({min}) must be ≤ `maxItems` ({max})"),
+            );
+        }
     }
 }
 
@@ -1207,6 +1237,16 @@ impl ValidateWithContext<Spec> for ObjectSchema {
         }
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
+        }
+
+        // Spec: minProperties MUST be ≤ maxProperties when both are present.
+        if let (Some(min), Some(max)) = (self.min_properties, self.max_properties)
+            && min > max
+        {
+            ctx.error(
+                path.clone(),
+                format_args!("`minProperties` ({min}) must be ≤ `maxProperties` ({max})"),
+            );
         }
 
         if let Some(properties) = &self.properties {

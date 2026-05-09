@@ -62,7 +62,9 @@ pub struct Operation {
     #[serde(rename = "requestBody")]
     pub request_body: Option<RefOr<RequestBody>>,
 
-    /// The list of possible responses as they are returned from executing this operation.
+    /// **Required** by OAS 3.1.2 — but stored as `Option<Responses>` so
+    /// real-world specs that elide the field still deserialize, with the
+    /// missing-field surfaced at validate-time rather than parse-time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub responses: Option<Responses>,
 
@@ -147,8 +149,10 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
-        if let Some(responses) = &self.responses {
-            responses.validate_with_context(ctx, format!("{path}.responses"));
+        // Spec: Operation.responses is required.
+        match &self.responses {
+            Some(r) => r.validate_with_context(ctx, format!("{path}.responses")),
+            None => ctx.error(path.clone(), ".responses: required field is missing"),
         }
 
         if let Some(external_doc) = &self.external_docs {

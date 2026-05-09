@@ -30,7 +30,22 @@ impl ValidateWithContext<Spec> for Discriminator {
 
         if let Some(mapping) = &self.mapping {
             for (k, v) in mapping {
-                let schema_ref = RefOr::<Schema>::new_ref(format!("#/components/schemas/{v}"));
+                // Per OAS 3.1, mapping values are EITHER schema names
+                // (resolved against `#/components/schemas/<name>`) OR
+                // already-formed URI references (e.g. JSON Pointer or
+                // absolute/relative URI). Detect the URI-reference case
+                // by the presence of a path separator or scheme; otherwise
+                // treat as a component schema name.
+                let reference = if v.starts_with("#/")
+                    || v.starts_with("http://")
+                    || v.starts_with("https://")
+                    || v.contains('/')
+                {
+                    v.clone()
+                } else {
+                    format!("#/components/schemas/{v}")
+                };
+                let schema_ref = RefOr::<Schema>::new_ref(reference);
                 schema_ref.validate_with_context(ctx, format!("{path}.mapping[{k}]"));
             }
         }

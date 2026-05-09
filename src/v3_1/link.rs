@@ -38,15 +38,18 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
     // Determine which container the ref points at.
     enum Container {
         Paths,
+        Webhooks,
         ComponentPathItems,
     }
     let (container, after) = if let Some(rest) = reference.strip_prefix("#/paths/") {
         (Container::Paths, rest)
+    } else if let Some(rest) = reference.strip_prefix("#/webhooks/") {
+        (Container::Webhooks, rest)
     } else if let Some(rest) = reference.strip_prefix("#/components/pathItems/") {
         (Container::ComponentPathItems, rest)
     } else {
         return OperationRefResolution::Err(format!(
-            "must start with `#/paths/` or `#/components/pathItems/`, found `{reference}`"
+            "must start with `#/paths/`, `#/webhooks/`, or `#/components/pathItems/`, found `{reference}`"
         ));
     };
 
@@ -73,6 +76,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
     let lookup = |key: &str| -> Option<&crate::v3_1::path_item::PathItem> {
         match container {
             Container::Paths => spec.paths.as_ref().and_then(|p| p.paths.get(key)),
+            Container::Webhooks => spec.webhooks.as_ref().and_then(|w| w.paths.get(key)),
             Container::ComponentPathItems => spec
                 .components
                 .as_ref()
@@ -144,6 +148,24 @@ fn resolve_path_item_ref_chain<'a>(
         let Some(t) = paths.paths.get(&tp) else {
             return Err(OperationRefResolution::Err(format!(
                 "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/paths`"
+            )));
+        };
+        (tp, t)
+    } else if let Some(after) = ref_str.strip_prefix("#/webhooks/") {
+        if after.contains('/') {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to malformed JSON Pointer `{ref_str}`"
+            )));
+        }
+        let tp = unescape_pointer_token(after);
+        if !seen.insert(tp.clone()) {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
+            )));
+        }
+        let Some(t) = spec.webhooks.as_ref().and_then(|w| w.paths.get(&tp)) else {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/webhooks`"
             )));
         };
         (tp, t)

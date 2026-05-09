@@ -616,6 +616,14 @@ impl Validate for Spec {
         self.info
             .validate_with_context(&mut ctx, "#.info".to_owned());
 
+        // jsonSchemaDialect MUST be a URI per OAS 3.1 (default-value spec for
+        // the `$schema` keyword in nested Schema Objects).
+        crate::common::helpers::validate_optional_url(
+            &self.json_schema_dialect,
+            &mut ctx,
+            "#.jsonSchemaDialect".to_owned(),
+        );
+
         if let Some(servers) = &self.servers {
             for (i, server) in servers.iter().enumerate() {
                 server.validate_with_context(&mut ctx, format!("#.servers[{i}]"))
