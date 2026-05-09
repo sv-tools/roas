@@ -861,10 +861,13 @@ mod tests {
 
         let make_op = || Operation {
             responses: Some(Responses {
-                default: Some(RefOr::new_item(Response {
-                    description: "ok".into(),
-                    ..Default::default()
-                })),
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
                 ..Default::default()
             }),
             ..Default::default()
@@ -918,10 +921,13 @@ mod tests {
             "post".to_owned(),
             Operation {
                 responses: Some(Responses {
-                    default: Some(RefOr::new_item(Response {
-                        description: "ok".into(),
-                        ..Default::default()
-                    })),
+                    responses: Some(BTreeMap::from([(
+                        "200".to_owned(),
+                        RefOr::new_item(Response {
+                            description: "ok".into(),
+                            ..Default::default()
+                        }),
+                    )])),
                     ..Default::default()
                 }),
                 security: Some(vec![{
@@ -968,10 +974,13 @@ mod tests {
         let make_op = |id: &str| Operation {
             operation_id: Some(id.to_owned()),
             responses: Some(Responses {
-                default: Some(RefOr::new_item(Response {
-                    description: "ok".into(),
-                    ..Default::default()
-                })),
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1346,10 +1355,13 @@ mod tests {
         let make_op = |id: &str| Operation {
             operation_id: Some(id.to_owned()),
             responses: Some(Responses {
-                default: Some(RefOr::new_item(Response {
-                    description: "ok".into(),
-                    ..Default::default()
-                })),
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1417,10 +1429,13 @@ mod tests {
             Operation {
                 operation_id: Some("pickPet".to_owned()),
                 responses: Some(Responses {
-                    default: Some(RefOr::new_item(Response {
-                        description: "ok".into(),
-                        ..Default::default()
-                    })),
+                    responses: Some(BTreeMap::from([(
+                        "200".to_owned(),
+                        RefOr::new_item(Response {
+                            description: "ok".into(),
+                            ..Default::default()
+                        }),
+                    )])),
                     ..Default::default()
                 }),
                 ..Default::default()

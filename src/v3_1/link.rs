@@ -25,78 +25,141 @@ enum OperationRefResolution {
     ExternalPathItemRef(String),
 }
 
-/// Resolve an internal operationRef against `Spec.paths` or
-/// `Spec.components.pathItems`. Per OAS 3.1, an operationRef is a URI
-/// Reference that "MAY point to any Operation Object in the OpenAPI
-/// definition" — including Operations inside reusable Path Items in
-/// `#/components/pathItems/<name>/<method>`.
+/// Resolve an internal operationRef. Per OAS 3.1, an operationRef is a
+/// URI Reference that "MAY point to any Operation Object in the OpenAPI
+/// definition." Supported in-document containers:
+///
+/// - `#/paths/<encoded path>/<method>`
+/// - `#/webhooks/<name>/<method>`
+/// - `#/components/pathItems/<name>/<method>`
+/// - `#/components/callbacks/<name>/<encoded expression>/<method>` —
+///   reusable callback Operations are still Operation Objects.
 ///
 /// Follows internal PathItem `$ref` chains (with cycle detection) so a
 /// referencing PathItem with `{"$ref": "#/paths/~1canonical-pets"}` still
 /// resolves correctly.
 fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefResolution {
-    // Determine which container the ref points at.
+    // Determine which container the ref points at, and the count of JSON
+    // Pointer tokens in the tail (excluding the container prefix).
     enum Container {
         Paths,
         Webhooks,
         ComponentPathItems,
+        ComponentCallbacks,
     }
-    let (container, after) = if let Some(rest) = reference.strip_prefix("#/paths/") {
-        (Container::Paths, rest)
+    let (container, after, expected_tokens, schema_hint) = if let Some(rest) =
+        reference.strip_prefix("#/paths/")
+    {
+        (Container::Paths, rest, 2usize, "<encoded path>/<method>")
     } else if let Some(rest) = reference.strip_prefix("#/webhooks/") {
-        (Container::Webhooks, rest)
+        (Container::Webhooks, rest, 2usize, "<name>/<method>")
     } else if let Some(rest) = reference.strip_prefix("#/components/pathItems/") {
-        (Container::ComponentPathItems, rest)
+        (
+            Container::ComponentPathItems,
+            rest,
+            2usize,
+            "<name>/<method>",
+        )
+    } else if let Some(rest) = reference.strip_prefix("#/components/callbacks/") {
+        (
+            Container::ComponentCallbacks,
+            rest,
+            3usize,
+            "<name>/<encoded expression>/<method>",
+        )
     } else {
         return OperationRefResolution::Err(format!(
-            "must start with `#/paths/`, `#/webhooks/`, or `#/components/pathItems/`, found `{reference}`"
+            "must start with `#/paths/`, `#/webhooks/`, `#/components/pathItems/`, or `#/components/callbacks/`, found `{reference}`"
         ));
     };
 
-    // Per RFC 6901 the path is a single JSON Pointer reference token: `/`
-    // inside the path MUST be escaped as `~1`. So between the prefix and
-    // the method there must be exactly one `/` separator. Refs like
-    // `#/paths//pets/get` (unescaped slash) are malformed and rejected.
-    let slash_count = after.bytes().filter(|b| *b == b'/').count();
-    let (path_token, method) = match (slash_count, after.split_once('/')) {
-        (1, Some((p, m))) => (p, m),
-        (0, _) => {
-            return OperationRefResolution::Err(format!(
-                "must point to `<container>/<encoded path>/<method>`, found `{reference}`"
-            ));
-        }
-        _ => {
-            return OperationRefResolution::Err(format!(
-                "malformed JSON Pointer: the encoded path token must use `~1` for `/`, found `{reference}`"
-            ));
-        }
-    };
-    let path = unescape_pointer_token(path_token);
+    // Per RFC 6901 each JSON Pointer reference token uses `~1` to encode `/`
+    // and `~0` to encode `~`. So in the unescaped tail the number of `/`
+    // separators is exactly `expected_tokens - 1`; any other count is a
+    // malformed pointer.
+    let parts: Vec<&str> = after.split('/').collect();
+    if parts.len() != expected_tokens || parts.iter().any(|p| p.is_empty()) {
+        return OperationRefResolution::Err(format!(
+            "malformed JSON Pointer: must point to `#/<container>/{schema_hint}` where each token with embedded `/` is encoded as `~1`, found `{reference}`"
+        ));
+    }
 
-    let lookup = |key: &str| -> Option<&crate::v3_1::path_item::PathItem> {
-        match container {
-            Container::Paths => spec.paths.as_ref().and_then(|p| p.paths.get(key)),
-            Container::Webhooks => spec.webhooks.as_ref().and_then(|w| w.paths.get(key)),
-            Container::ComponentPathItems => spec
+    // Resolve to (`display path for errors`, `&PathItem`, `method`).
+    let (entry_path, item, method) = match container {
+        Container::Paths => {
+            let path = unescape_pointer_token(parts[0]);
+            let Some(item) = spec.paths.as_ref().and_then(|p| p.paths.get(&path)) else {
+                return OperationRefResolution::Err(format!(
+                    "path `{path}` not declared in `#/paths`"
+                ));
+            };
+            (path, item, parts[1])
+        }
+        Container::Webhooks => {
+            let name = unescape_pointer_token(parts[0]);
+            let Some(item) = spec.webhooks.as_ref().and_then(|w| w.paths.get(&name)) else {
+                return OperationRefResolution::Err(format!(
+                    "webhook `{name}` not declared in `#/webhooks`"
+                ));
+            };
+            (name, item, parts[1])
+        }
+        Container::ComponentPathItems => {
+            let name = unescape_pointer_token(parts[0]);
+            let Some(item) = spec
                 .components
                 .as_ref()
                 .and_then(|c| c.path_items.as_ref())
-                .and_then(|m| m.get(key)),
+                .and_then(|m| m.get(&name))
+            else {
+                return OperationRefResolution::Err(format!(
+                    "path item `{name}` not declared in `#/components/pathItems`"
+                ));
+            };
+            (name, item, parts[1])
+        }
+        Container::ComponentCallbacks => {
+            let cb_name = unescape_pointer_token(parts[0]);
+            let expr = unescape_pointer_token(parts[1]);
+            let Some(cb_ref) = spec
+                .components
+                .as_ref()
+                .and_then(|c| c.callbacks.as_ref())
+                .and_then(|m| m.get(&cb_name))
+            else {
+                return OperationRefResolution::Err(format!(
+                    "callback `{cb_name}` not declared in `#/components/callbacks`"
+                ));
+            };
+            // The callback slot may itself be a `$ref`; resolve it. External
+            // refs are reported via the same channel as PathItem external
+            // refs so callers can honor `IgnoreExternalReferences`.
+            let cb = match cb_ref.get_item(spec) {
+                Ok(cb) => cb,
+                Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
+                    return OperationRefResolution::ExternalPathItemRef(target);
+                }
+                Err(crate::common::reference::ResolveError::NotFound(t)) => {
+                    return OperationRefResolution::Err(format!(
+                        "callback `{cb_name}` is a `$ref` to `{t}`, which is not declared"
+                    ));
+                }
+            };
+            let Some(item) = cb.paths.get(&expr) else {
+                return OperationRefResolution::Err(format!(
+                    "expression `{expr}` not declared on callback `{cb_name}`"
+                ));
+            };
+            (format!("{cb_name}/{expr}"), item, parts[2])
         }
     };
 
-    let Some(item) = lookup(&path) else {
-        return OperationRefResolution::Err(format!(
-            "path `{path}` not declared in the resolved container"
-        ));
-    };
-
-    let mut seen = std::collections::BTreeSet::from([path.clone()]);
-    let (target_path, target_item) = match resolve_path_item_ref_chain(spec, &path, item, &mut seen)
-    {
-        Ok(t) => t,
-        Err(err) => return err,
-    };
+    let mut seen = std::collections::BTreeSet::from([entry_path.clone()]);
+    let (target_path, target_item) =
+        match resolve_path_item_ref_chain(spec, &entry_path, item, &mut seen) {
+            Ok(t) => t,
+            Err(err) => return err,
+        };
 
     let method_lower = method.to_lowercase();
     let exists = target_item
@@ -334,10 +397,13 @@ mod tests {
     fn spec_with_pets_get() -> Spec {
         let op = Operation {
             responses: Some(Responses {
-                default: Some(RefOr::new_item(Response {
-                    description: "ok".into(),
-                    ..Default::default()
-                })),
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
                 ..Default::default()
             }),
             ..Default::default()
@@ -555,10 +621,13 @@ mod tests {
 
     fn ok_responses() -> Responses {
         Responses {
-            default: Some(RefOr::new_item(Response {
-                description: "ok".into(),
-                ..Default::default()
-            })),
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                }),
+            )])),
             ..Default::default()
         }
     }
@@ -721,6 +790,90 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("not declared in `#/components/pathItems`")),
             "expected dangling-component-pathItem error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_into_components_callbacks() {
+        // Per OAS 3.1.2 operationRef can target any Operation Object,
+        // including Operations declared inside reusable Callbacks under
+        // `#/components/callbacks/<name>/<expression>/<method>`. The
+        // expression token is encoded per RFC 6901 (`/` → `~1`).
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("{$request.body#/cb}".to_owned(), pi_with_get());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("OnPing".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        // The expression key contains `#` (literal) and `/` (encoded as `~1`).
+        Link {
+            operation_ref: Some("#/components/callbacks/OnPing/{$request.body#~1cb}/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "callback target should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_into_callbacks_unknown_expression_errors() {
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "OnPing".to_owned(),
+                RefOr::new_item(Callback::default()),
+            )])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/callbacks/OnPing/missing/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("expression `missing`") && e.contains("OnPing")),
+            "expected unknown-expression error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_into_callbacks_unknown_callback_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/callbacks/Missing/x/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("callback `Missing` not declared")),
+            "expected dangling-callback error: {:?}",
             ctx.errors
         );
     }

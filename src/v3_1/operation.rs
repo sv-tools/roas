@@ -183,10 +183,13 @@ mod tests {
 
     fn ok_responses() -> Responses {
         Responses {
-            default: Some(RefOr::new_item(Response {
-                description: "ok".into(),
-                ..Default::default()
-            })),
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                }),
+            )])),
             ..Default::default()
         }
     }
