@@ -1149,10 +1149,7 @@ mod tests {
         assert_eq!(format!("{}", Schema::Integer(Box::default())), "integer");
         assert_eq!(format!("{}", Schema::Number(Box::default())), "number");
         assert_eq!(format!("{}", Schema::Boolean(Box::default())), "boolean");
-        assert_eq!(
-            format!("{}", Schema::Array(Box::default())),
-            "array"
-        );
+        assert_eq!(format!("{}", Schema::Array(Box::default())), "array");
         assert_eq!(format!("{}", Schema::Object(Box::default())), "object");
         assert_eq!(format!("{}", Schema::Null(Box::default())), "null");
     }

@@ -194,7 +194,15 @@ impl Serialize for Scopes {
     where
         S: Serializer,
     {
-        let total = self.scopes.len() + self.extensions.as_ref().map(|e| e.len()).unwrap_or(0);
+        // Only `x-` keys are emitted from `extensions`, so the size hint must
+        // count only those — a programmatically constructed map could carry
+        // non-`x-` entries that would otherwise overstate the count.
+        let ext_x_count = self
+            .extensions
+            .as_ref()
+            .map(|e| e.keys().filter(|k| k.starts_with("x-")).count())
+            .unwrap_or(0);
+        let total = self.scopes.len() + ext_x_count;
         let mut map = serializer.serialize_map(Some(total))?;
         for (k, v) in &self.scopes {
             map.serialize_entry(k, v)?;

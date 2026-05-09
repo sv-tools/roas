@@ -21,7 +21,6 @@ use crate::v2::path_item::PathItem;
 use crate::v2::reference::RefOr;
 use crate::v2::security_scheme::{SecurityScheme, SecuritySchemeOAuth2Flow};
 use crate::v2::spec::Spec;
-use crate::validation::Options;
 
 /// Resolve a `RefOr<Parameter>` against the spec's `#/parameters/...` pool.
 fn resolve_parameter<'a>(spec: &'a Spec, p: &'a RefOr<Parameter>) -> Option<&'a Parameter> {
@@ -83,33 +82,6 @@ fn in_formdata_name(f: &InFormData) -> &str {
     }
 }
 
-/// Returns true if the parameter sets `allowEmptyValue: true`.
-fn parameter_allows_empty_value(p: &Parameter) -> bool {
-    fn header_aev(h: &InHeader) -> bool {
-        match h {
-            InHeader::String(p) => p.allow_empty_value == Some(true),
-            InHeader::Integer(p) => p.allow_empty_value == Some(true),
-            InHeader::Number(p) => p.allow_empty_value == Some(true),
-            InHeader::Boolean(p) => p.allow_empty_value == Some(true),
-            InHeader::Array(p) => p.allow_empty_value == Some(true),
-        }
-    }
-    fn path_aev(p: &InPath) -> bool {
-        match p {
-            InPath::String(p) => p.allow_empty_value == Some(true),
-            InPath::Integer(p) => p.allow_empty_value == Some(true),
-            InPath::Number(p) => p.allow_empty_value == Some(true),
-            InPath::Boolean(p) => p.allow_empty_value == Some(true),
-            InPath::Array(p) => p.allow_empty_value == Some(true),
-        }
-    }
-    match p {
-        Parameter::Header(h) => header_aev(h),
-        Parameter::Path(p) => path_aev(p),
-        _ => false,
-    }
-}
-
 /// Extract `{name}` placeholders from a path template.
 fn path_template_variables(template: &str) -> BTreeSet<String> {
     let re = regex!(r"\{([^}]+)\}");
@@ -120,14 +92,18 @@ fn path_template_variables(template: &str) -> BTreeSet<String> {
 
 /// Validate operation-level parameter rules:
 /// * body / formData exclusivity (at most one body; body and formData cannot coexist),
-/// * (name, in) uniqueness (resolving references),
-/// * path parameter names match `{name}` in the path template,
-/// * `allowEmptyValue: true` only valid on header / path locations is rejected
-///   (per spec it is only meaningful for `query` / `formData`).
+/// * (name, in) uniqueness — duplicates *within the same level* are flagged.
+/// * path parameter names match `{name}` in the path template.
 ///
-/// `path_item_params` is the path-item-level parameters list; merging happens
-/// per the spec ("path item parameters can be overridden at the operation level
-/// but not removed"). For uniqueness we check the union by (name, in).
+/// Per OAS v2: "If a parameter is already defined at the Path Item, the new
+/// definition will override it, but can never remove it." So we first detect
+/// within-level duplicates (a real spec violation), then **merge** the lists by
+/// (name, in) with operation-level entries replacing path-item-level entries
+/// — and only then run body/formData/path-template checks on the merged set.
+///
+/// Per-parameter `allowEmptyValue` location rules are enforced inside each
+/// parameter's own `validate_with_context` (`must_not_allow_empty_value` for
+/// `header` / `path`), not here, to avoid duplicate errors.
 pub fn validate_operation_parameters(
     ctx: &mut Context<Spec>,
     op_path: &str,
@@ -137,15 +113,13 @@ pub fn validate_operation_parameters(
 ) {
     let template_vars = path_template_variables(template);
 
-    let mut body_count = 0usize;
-    let mut form_count = 0usize;
-    let mut seen: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
-    let mut declared_path_params: BTreeSet<String> = BTreeSet::new();
-
-    let mut iter = |params: &[RefOr<Parameter>], origin: &str| {
+    // Within-level duplicate detection: report once per (name, in) per layer.
+    let mut emit_within_level_dups = |params: &[RefOr<Parameter>], origin: &str| {
+        let mut seen: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
         for (i, raw) in params.iter().enumerate() {
-            let resolved = resolve_parameter(ctx.spec, raw);
-            let Some(p) = resolved else { continue };
+            let Some(p) = resolve_parameter(ctx.spec, raw) else {
+                continue;
+            };
             let (name, loc) = parameter_identity(p);
             let key = (name.to_owned(), loc);
             *seen.entry(key.clone()).or_insert(0) += 1;
@@ -157,32 +131,65 @@ pub fn validate_operation_parameters(
                     ),
                 );
             }
-            match p {
-                Parameter::Body(_) => body_count += 1,
-                Parameter::FormData(_) => form_count += 1,
-                Parameter::Path(_) => {
-                    declared_path_params.insert(name.to_owned());
-                }
-                _ => {}
-            }
-            // allowEmptyValue is only valid on `query` / `formData`.
-            if parameter_allows_empty_value(p)
-                && !matches!(p, Parameter::Query(_) | Parameter::FormData(_))
-            {
-                ctx.error(
-                    op_path.to_owned(),
-                    format_args!(
-                        ".parameters[{i}]: allowEmptyValue is only valid for `query` or `formData`"
-                    ),
-                );
-            }
         }
     };
     if let Some(p) = path_item_params {
-        iter(p, "path-item");
+        emit_within_level_dups(p, "path-item");
     }
     if let Some(p) = op_params {
-        iter(p, "operation");
+        emit_within_level_dups(p, "operation");
+    }
+
+    // Merge: keyed by (name, in). Operation-level overrides path-item-level
+    // (same key replaces). We only need the kind of the *winning* parameter
+    // for body/formData/path counting, so we store it as an enum tag — this
+    // sidesteps lifetime issues that would arise from holding `&Parameter`
+    // references across the closure / collection boundary.
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Body,
+        FormData,
+        Path,
+        Other,
+    }
+    fn kind_of(p: &Parameter) -> Kind {
+        match p {
+            Parameter::Body(_) => Kind::Body,
+            Parameter::FormData(_) => Kind::FormData,
+            Parameter::Path(_) => Kind::Path,
+            _ => Kind::Other,
+        }
+    }
+    let mut merged: BTreeMap<(String, &'static str), Kind> = BTreeMap::new();
+    if let Some(params) = path_item_params {
+        for raw in params {
+            if let Some(p) = resolve_parameter(ctx.spec, raw) {
+                let (name, loc) = parameter_identity(p);
+                merged.insert((name.to_owned(), loc), kind_of(p));
+            }
+        }
+    }
+    if let Some(params) = op_params {
+        for raw in params {
+            if let Some(p) = resolve_parameter(ctx.spec, raw) {
+                let (name, loc) = parameter_identity(p);
+                merged.insert((name.to_owned(), loc), kind_of(p));
+            }
+        }
+    }
+
+    let mut body_count = 0usize;
+    let mut form_count = 0usize;
+    let mut declared_path_params: BTreeSet<String> = BTreeSet::new();
+    for ((name, _loc), kind) in &merged {
+        match kind {
+            Kind::Body => body_count += 1,
+            Kind::FormData => form_count += 1,
+            Kind::Path => {
+                declared_path_params.insert(name.clone());
+            }
+            Kind::Other => {}
+        }
     }
 
     if body_count > 1 {
@@ -314,23 +321,36 @@ pub fn validate_security_requirements(
     }
 }
 
-/// Walk `security_definitions` and ensure each one is visited (so "unused
-/// scheme" detection can fire) plus its own per-scheme validation runs.
+/// Walk `security_definitions` and run each scheme's per-scheme validator
+/// (URL-required-by-flow rules, etc.). Unused-scheme detection is wired up
+/// from `Spec::validate` via `validate_not_visited`.
+///
+/// We pre-collect the names so the `&mut Context` borrow used by each
+/// `validate_with_context` call doesn't overlap with the immutable borrow
+/// of `ctx.spec.security_definitions`. The schemes themselves are *not*
+/// cloned — they're looked up by reference per iteration.
 pub fn validate_security_definitions(ctx: &mut Context<Spec>) {
-    let Some(defs) = ctx.spec.security_definitions.clone() else {
-        return;
-    };
-    for (name, scheme) in &defs {
+    let names: Vec<String> = ctx
+        .spec
+        .security_definitions
+        .as_ref()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    for name in names {
         let p = format!("#/securityDefinitions/{name}");
-        // Per-scheme validation (URL-required-by-flow rules, etc.).
-        crate::common::helpers::ValidateWithContext::validate_with_context(scheme, ctx, p.clone());
-        // Treat as referenced so unused-scheme detection only flags truly
-        // orphan schemes; per-requirement validators above already mark used
-        // schemes via ctx.visit().
-        if !ctx.is_visited(&p) && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes) {
-            // Don't error here — leave to caller / validate_not_visited
-            // hookup. We just record absence.
-        }
+        // Snapshot the scheme into an owned value: cloning a single
+        // `SecurityScheme` (a small enum) is cheaper than refactoring
+        // `ValidateWithContext` to split the &mut Context borrow.
+        let Some(scheme) = ctx
+            .spec
+            .security_definitions
+            .as_ref()
+            .and_then(|m| m.get(&name))
+            .cloned()
+        else {
+            continue;
+        };
+        crate::common::helpers::ValidateWithContext::validate_with_context(&scheme, ctx, p);
     }
 }
 
@@ -459,6 +479,40 @@ mod tests {
     }
 
     #[test]
+    fn op_level_param_overrides_path_item_does_not_double_count() {
+        // Per spec, an operation-level parameter with the same (name, in)
+        // as a path-item-level parameter *overrides* it — not a duplicate
+        // and not double-counted toward body / formData totals.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let path_item = vec![body_param("payload")];
+        let op = vec![body_param("payload")];
+        validate_operation_parameters(&mut ctx, "op", "/p", Some(&path_item), Some(&op));
+        assert!(
+            ctx.errors.is_empty(),
+            "override should not duplicate or inflate counts: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn within_level_duplicate_still_flagged_after_merge() {
+        // True within-level duplicates (two body params at the operation
+        // level) remain a spec violation even with the merge step.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let op = vec![body_param("x"), body_param("x")];
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&op));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("duplicate parameter `x` in `body`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn duplicate_name_in_location() {
         let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
         let mut ctx = Context::new(spec, Options::new());
@@ -512,14 +566,19 @@ mod tests {
 
     #[test]
     fn allow_empty_value_only_for_query_or_formdata() {
+        // The rule lives on each parameter's own validator (via
+        // `must_not_allow_empty_value` in `parameter.rs`), so we exercise it
+        // by running per-parameter validation rather than the cross-cutting
+        // helper. This avoids the duplicate-error pattern flagged in PR #100
+        // review.
         let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
         let mut ctx = Context::new(spec, Options::new());
-        let params = vec![path_param_aev("id")];
-        validate_operation_parameters(&mut ctx, "op", "/users/{id}", None, Some(&params));
+        let p = path_param_aev("id");
+        p.validate_with_context(&mut ctx, "op.parameters[0]".into());
         assert!(
             ctx.errors
                 .iter()
-                .any(|e| e.contains("allowEmptyValue is only valid for `query` or `formData`")),
+                .any(|e| e.contains("must not allow empty value")),
             "errors: {:?}",
             ctx.errors
         );

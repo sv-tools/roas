@@ -207,6 +207,16 @@ impl<'de> Deserialize<'de> for PathItem {
 
 impl ValidateWithContext<Spec> for PathItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // `$ref` (when present) MUST be a non-empty URI per the spec; the same
+        // shape `v2::reference::Ref::validate_with_context` enforces.
+        if let Some(reference) = &self.reference {
+            crate::common::helpers::validate_required_string(
+                reference,
+                ctx,
+                format!("{path}.$ref"),
+            );
+        }
+
         if let Some(other) = &self.operations {
             for (method, operation) in other.iter() {
                 operation.validate_with_context(ctx, format!("{path}.{method}"));
@@ -266,7 +276,15 @@ impl Serialize for Paths {
     where
         S: Serializer,
     {
-        let total = self.paths.len() + self.extensions.as_ref().map(|e| e.len()).unwrap_or(0);
+        // Only `x-` keys are emitted from `extensions`, so the size hint must
+        // count only those — a programmatically constructed map could carry
+        // non-`x-` entries that would otherwise overstate the count.
+        let ext_x_count = self
+            .extensions
+            .as_ref()
+            .map(|e| e.keys().filter(|k| k.starts_with("x-")).count())
+            .unwrap_or(0);
+        let total = self.paths.len() + ext_x_count;
         let mut map = serializer.serialize_map(Some(total))?;
         for (k, v) in &self.paths {
             map.serialize_entry(k, v)?;
@@ -777,6 +795,23 @@ mod tests {
         assert!(item.operations.is_none());
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v, raw);
+    }
+
+    #[test]
+    fn path_item_empty_ref_is_flagged() {
+        // Empty `$ref` is invalid — it must be a non-empty URI.
+        let item = PathItem {
+            reference: Some(String::new()),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]
