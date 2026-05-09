@@ -71,6 +71,11 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
     }
 
     let mut visits: Vec<String> = Vec::new();
+    // Track visited PathItems by their full container-prefixed reference so
+    // cycle detection isn't fooled by identical keys in different
+    // containers (e.g. a webhook named `Foo` $ref'ing
+    // `#/components/pathItems/Foo`).
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let (entry_path, mut item, mut consumed): (String, &crate::v3_1::path_item::PathItem, usize) =
         match container {
             Container::Paths => {
@@ -83,6 +88,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                         "path `{path}` not declared in `#/paths`"
                     ));
                 };
+                seen.insert(format!("#/paths/{}", parts[0]));
                 (path, item, 1)
             }
             Container::Webhooks => {
@@ -95,6 +101,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                         "webhook `{name}` not declared in `#/webhooks`"
                     ));
                 };
+                seen.insert(format!("#/webhooks/{}", parts[0]));
                 (name, item, 1)
             }
             Container::ComponentPathItems => {
@@ -113,6 +120,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                     ));
                 };
                 visits.push(format!("#/components/pathItems/{name}"));
+                seen.insert(format!("#/components/pathItems/{}", parts[0]));
                 (name, item, 1)
             }
             Container::ComponentCallbacks => {
@@ -148,11 +156,11 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                     ));
                 };
                 visits.push(format!("#/components/callbacks/{cb_name}"));
+                seen.insert(format!("#/components/callbacks/{}/{}", parts[0], parts[1]));
                 (format!("{cb_name}/{expr}"), item, 2)
             }
         };
 
-    let mut seen = std::collections::BTreeSet::from([entry_path.clone()]);
     let mut display_path = entry_path;
     item = match resolve_path_item_ref_chain(spec, &display_path, item, &mut seen, &mut visits) {
         Ok((p, t)) => {
@@ -270,6 +278,13 @@ fn resolve_path_item_ref_chain<'a>(
     // A PathItem `$ref` may target any of the four containers that hold
     // PathItem objects: `#/paths`, `#/webhooks`, `#/components/pathItems`,
     // or — under a Callback — `#/components/callbacks/<name>/<expr>`.
+    // Cycle key is the full container-prefixed reference: identical
+    // sub-paths (e.g. `Foo`) in different containers must NOT collide.
+    if !seen.insert(ref_str.clone()) {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
+        )));
+    }
     let (target_path, target_item) = if let Some(after_paths) = ref_str.strip_prefix("#/paths/") {
         if after_paths.contains('/') {
             return Err(OperationRefResolution::Err(format!(
@@ -277,11 +292,6 @@ fn resolve_path_item_ref_chain<'a>(
             )));
         }
         let tp = unescape_pointer_token(after_paths);
-        if !seen.insert(tp.clone()) {
-            return Err(OperationRefResolution::Err(format!(
-                "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
-            )));
-        }
         let Some(paths) = spec.paths.as_ref() else {
             return Err(OperationRefResolution::Err(format!(
                 "path `{path}` has a `$ref` to `{ref_str}` but spec has no `paths`"
@@ -300,11 +310,6 @@ fn resolve_path_item_ref_chain<'a>(
             )));
         }
         let tp = unescape_pointer_token(after);
-        if !seen.insert(tp.clone()) {
-            return Err(OperationRefResolution::Err(format!(
-                "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
-            )));
-        }
         let Some(t) = spec.webhooks.as_ref().and_then(|w| w.paths.get(&tp)) else {
             return Err(OperationRefResolution::Err(format!(
                 "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/webhooks`"
@@ -318,11 +323,6 @@ fn resolve_path_item_ref_chain<'a>(
             )));
         }
         let tp = unescape_pointer_token(after);
-        if !seen.insert(tp.clone()) {
-            return Err(OperationRefResolution::Err(format!(
-                "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
-            )));
-        }
         let Some(t) = spec
             .components
             .as_ref()
@@ -350,11 +350,6 @@ fn resolve_path_item_ref_chain<'a>(
         let cb_name = unescape_pointer_token(cb_token);
         let expr = unescape_pointer_token(expr_token);
         let tp = format!("{cb_name}/{expr}");
-        if !seen.insert(tp.clone()) {
-            return Err(OperationRefResolution::Err(format!(
-                "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
-            )));
-        }
         let Some(cb_ref) = spec
             .components
             .as_ref()
@@ -1260,6 +1255,50 @@ mod tests {
         assert!(
             ctx.is_visited("#/components/callbacks/CB"),
             "components.callbacks target should be marked visited"
+        );
+    }
+
+    #[test]
+    fn ref_chain_cross_container_same_key_not_cycle() {
+        // Webhook `Foo` $refs `#/components/pathItems/Foo`. Identical key
+        // strings in different containers must NOT collide in the cycle
+        // detector — the chain resolves cleanly to the components.pathItems
+        // operation.
+        use crate::v3_1::components::Components;
+        let mut cp = BTreeMap::new();
+        cp.insert("Foo".to_owned(), pi_with_get());
+        let comp = Components {
+            path_items: Some(cp),
+            ..Default::default()
+        };
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert(
+            "Foo".to_owned(),
+            PathItem {
+                reference: Some("#/components/pathItems/Foo".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            webhooks: Some(webhooks),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/webhooks/Foo/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("cyclic")),
+            "cross-container same-key must not be flagged as cycle: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "operationRef should resolve: {:?}",
+            ctx.errors
         );
     }
 
