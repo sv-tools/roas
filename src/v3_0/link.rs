@@ -73,9 +73,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                 }
             }
         } else if ref_str.is_empty() {
-            return OperationRefResolution::Err(format!(
-                "path `{path}` carries an empty `$ref`"
-            ));
+            return OperationRefResolution::Err(format!("path `{path}` carries an empty `$ref`"));
         } else {
             return OperationRefResolution::ExternalPathItemRef(ref_str.clone());
         }
@@ -495,7 +493,9 @@ mod tests {
             ..Default::default()
         };
         let mut paths = Paths::default();
-        paths.paths.insert("/canonical-pets".to_owned(), canonical_item);
+        paths
+            .paths
+            .insert("/canonical-pets".to_owned(), canonical_item);
         paths.paths.insert("/pets".to_owned(), alias_item);
         let spec = Spec {
             paths,
@@ -524,9 +524,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("method `post`")),
+            ctx.errors.iter().any(|e| e.contains("method `post`")),
             "expected unknown method on resolved target: {:?}",
             ctx.errors
         );
@@ -585,9 +583,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("external document")),
+            ctx.errors.iter().any(|e| e.contains("external document")),
             "expected external-PathItem-ref error: {:?}",
             ctx.errors
         );
