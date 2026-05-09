@@ -4,7 +4,7 @@
 
 use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
-    validate_not_visited,
+    validate_not_visited, validate_required_string,
 };
 use crate::common::reference::{RefOr, ResolveReference, resolve_in_map};
 use crate::v3_1::callback::Callback;
@@ -278,9 +278,30 @@ pub struct Spec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_docs: Option<ExternalDocumentation>,
 
+    /// ReDoc/Redocly extension that groups tags in the side menu.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-tagGroups")]
+    pub x_tag_groups: Option<Vec<TagGroup>>,
+
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc/Redocly `x-tagGroups` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct TagGroup {
+    /// **Required** The display name for the tag group.
+    pub name: String,
+
+    /// **Required** The tags included in the group.
+    pub tags: Vec<String>,
+
+    /// Allows extensions on the tag group extension object.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -796,6 +817,12 @@ impl Validate for Spec {
             docs.validate_with_context(&mut ctx, "#.externalDocs".to_owned())
         }
 
+        if let Some(tag_groups) = &self.x_tag_groups {
+            for (i, tag_group) in tag_groups.iter().enumerate() {
+                tag_group.validate_with_context(&mut ctx, format!("#.x-tagGroups[{i}]"));
+            }
+        }
+
         if let Some(tags) = &self.tags {
             validate_tag_uniqueness(&mut ctx, tags);
             for tag in tags.iter() {
@@ -805,6 +832,18 @@ impl Validate for Spec {
         }
 
         ctx.into()
+    }
+}
+
+impl ValidateWithContext<Spec> for TagGroup {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
+        if self.tags.is_empty() {
+            ctx.error(format!("{path}.tags"), "must contain at least one tag");
+        }
+        for (i, tag) in self.tags.iter().enumerate() {
+            validate_required_string(tag, ctx, format!("{path}.tags[{i}]"));
+        }
     }
 }
 
@@ -1849,6 +1888,41 @@ mod tests {
                 e.errors
             );
         }
+    }
+
+    #[test]
+    fn x_tag_groups_round_trip_and_validate() {
+        let value = serde_json::json!({
+            "openapi": "3.1.2",
+            "info": {
+                "title": "Pets",
+                "version": "1"
+            },
+            "paths": {},
+            "tags": [
+                {
+                    "name": "pets"
+                }
+            ],
+            "x-tagGroups": [
+                {
+                    "name": "Public API",
+                    "tags": ["pets"]
+                }
+            ]
+        });
+
+        let spec: Spec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&spec).unwrap(), value);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        spec.x_tag_groups.as_ref().unwrap()[0]
+            .validate_with_context(&mut ctx, "#.x-tagGroups[0]".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        TagGroup::default().validate_with_context(&mut ctx, "#.x-tagGroups[0]".to_owned());
+        assert_eq!(ctx.errors.len(), 2, "tag group errors: {:?}", ctx.errors);
     }
 }
 

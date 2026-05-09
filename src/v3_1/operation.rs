@@ -96,9 +96,39 @@ pub struct Operation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub servers: Option<Vec<Server>>,
 
+    /// ReDoc/Redocly extension with code samples associated with this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-codeSamples", alias = "x-code-samples")]
+    pub x_code_samples: Option<Vec<CodeSample>>,
+
+    /// Codegen/documentation extension with extra operation tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-tags")]
+    pub x_tags: Option<Vec<String>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc/Redocly `x-codeSamples` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct CodeSample {
+    /// **Required** Code sample language.
+    pub lang: String,
+
+    /// Optional display label for the language tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// **Required** Code sample source code.
+    pub source: String,
+
+    /// Allows extensions on the code sample extension object.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,6 +173,18 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
+        if let Some(samples) = &self.x_code_samples {
+            for (i, sample) in samples.iter().enumerate() {
+                sample.validate_with_context(ctx, format!("{path}.x-codeSamples[{i}]"));
+            }
+        }
+
+        if let Some(tags) = &self.x_tags {
+            for (i, tag) in tags.iter().enumerate() {
+                validate_required_string(tag, ctx, format!("{path}.x-tags[{i}]"));
+            }
+        }
+
         if let Some(callbacks) = &self.callbacks {
             for (k, v) in callbacks {
                 v.validate_with_context(ctx, format!("{path}.callbacks[{k}]"));
@@ -171,6 +213,13 @@ impl ValidateWithContext<Spec> for Operation {
                 sec,
             );
         }
+    }
+}
+
+impl ValidateWithContext<Spec> for CodeSample {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_string(&self.lang, ctx, format!("{path}.lang"));
+        validate_required_string(&self.source, ctx, format!("{path}.source"));
     }
 }
 
@@ -291,5 +340,51 @@ mod tests {
             "expected op-level security error: {:?}",
             ctx.errors
         );
+    }
+
+    #[test]
+    fn documentation_extensions_round_trip_and_validate() {
+        let value = serde_json::json!({
+            "responses": {
+                "200": {
+                    "description": "OK"
+                }
+            },
+            "x-codeSamples": [
+                {
+                    "lang": "curl",
+                    "label": "cURL",
+                    "source": "curl https://example.com/pets"
+                }
+            ],
+            "x-tags": ["sdk", "docs"]
+        });
+        let operation: Operation = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&operation).unwrap(), value);
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        operation.validate_with_context(&mut ctx, "operation".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let alias_value = serde_json::json!({
+            "responses": {
+                "200": {
+                    "description": "OK"
+                }
+            },
+            "x-code-samples": [
+                {
+                    "lang": "rust",
+                    "source": "println!(\"ok\");"
+                }
+            ]
+        });
+        let operation: Operation = serde_json::from_value(alias_value).unwrap();
+        assert_eq!(operation.x_code_samples.as_ref().unwrap()[0].lang, "rust");
+
+        let mut ctx = Context::new(&spec, Options::new());
+        CodeSample::default().validate_with_context(&mut ctx, "sample".to_owned());
+        assert_eq!(ctx.errors.len(), 2, "expected lang/source errors");
     }
 }

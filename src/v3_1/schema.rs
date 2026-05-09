@@ -2,7 +2,9 @@
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
+use crate::common::helpers::{
+    Context, PushError, ValidateWithContext, validate_pattern, validate_required_string,
+};
 use crate::common::reference::RefOr;
 use crate::v3_1::discriminator::Discriminator;
 use crate::v3_1::external_documentation::ExternalDocumentation;
@@ -339,6 +341,11 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
 
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
+
     /// Declares the maximum length of the parameter value.
     #[serde(rename = "maxLength")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -433,6 +440,11 @@ pub struct IntegerSchema {
     #[serde(rename = "enum")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<i64>>,
+
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
 
     /// Inclusive lower bound for the value.
     /// Per JSON Schema 2020-12 §6.2.4, this keyword is any number even when
@@ -547,6 +559,11 @@ pub struct NumberSchema {
     #[serde(rename = "enum")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<f64>>,
+
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -865,6 +882,16 @@ pub struct ObjectSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub property_names: Option<RefOr<Schema>>,
 
+    /// Codegen/documentation extension with tags associated with this schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-tags")]
+    pub x_tags: Option<Vec<String>>,
+
+    /// Codegen extension overriding the discriminator value for this schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-discriminator-value")]
+    pub x_discriminator_value: Option<String>,
+
     /// A list of required properties.
     /// If the object is defined at the root of the document,
     /// the `required` property MUST be omitted.
@@ -1153,6 +1180,33 @@ impl ValidateWithContext<Spec> for SingleSchema {
     }
 }
 
+fn validate_enum_descriptions_len(
+    enum_len: Option<usize>,
+    descriptions: Option<&Vec<String>>,
+    ctx: &mut Context<Spec>,
+    path: &str,
+) {
+    if let (Some(enum_len), Some(descriptions)) = (enum_len, descriptions)
+        && descriptions.len() != enum_len
+    {
+        ctx.error(
+            format!("{path}.x-enumDescriptions"),
+            format_args!(
+                "must contain exactly one description per enum value ({enum_len} expected, {} found)",
+                descriptions.len()
+            ),
+        );
+    }
+}
+
+fn validate_extension_tags(tags: &Option<Vec<String>>, ctx: &mut Context<Spec>, path: &str) {
+    if let Some(tags) = tags {
+        for (i, tag) in tags.iter().enumerate() {
+            validate_required_string(tag, ctx, format!("{path}.x-tags[{i}]"));
+        }
+    }
+}
+
 impl ValidateWithContext<Spec> for StringSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if let Some(docs) = &self.external_docs {
@@ -1170,6 +1224,12 @@ impl ValidateWithContext<Spec> for StringSchema {
                 format_args!("`minLength` ({min}) must be ≤ `maxLength` ({max})"),
             );
         }
+        validate_enum_descriptions_len(
+            self.enum_values.as_ref().map(Vec::len),
+            self.x_enum_descriptions.as_ref(),
+            ctx,
+            &path,
+        );
     }
 }
 
@@ -1187,6 +1247,12 @@ impl ValidateWithContext<Spec> for IntegerSchema {
         {
             ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
         }
+        validate_enum_descriptions_len(
+            self.enum_values.as_ref().map(Vec::len),
+            self.x_enum_descriptions.as_ref(),
+            ctx,
+            &path,
+        );
     }
 }
 
@@ -1203,6 +1269,12 @@ impl ValidateWithContext<Spec> for NumberSchema {
         {
             ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
         }
+        validate_enum_descriptions_len(
+            self.enum_values.as_ref().map(Vec::len),
+            self.x_enum_descriptions.as_ref(),
+            ctx,
+            &path,
+        );
     }
 }
 
@@ -1295,6 +1367,10 @@ impl ValidateWithContext<Spec> for ObjectSchema {
 
         if let Some(property_names) = &self.property_names {
             property_names.validate_with_context(ctx, format!("{path}.propertyNames"));
+        }
+        validate_extension_tags(&self.x_tags, ctx, &path);
+        if let Some(value) = &self.x_discriminator_value {
+            validate_required_string(value, ctx, format!("{path}.x-discriminator-value"));
         }
     }
 }
@@ -2275,6 +2351,52 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("s.type") && e.contains("must contain at least one element")),
             "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn common_codegen_extensions_round_trip_and_validate() {
+        let enum_json = serde_json::json!({
+            "type": "string",
+            "enum": ["open", "closed"],
+            "x-enumDescriptions": ["Open state", "Closed state"]
+        });
+        let schema: Schema = serde_json::from_value(enum_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&schema).unwrap(), enum_json);
+
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let object_json = serde_json::json!({
+            "type": "object",
+            "x-tags": ["models"],
+            "x-discriminator-value": "pet"
+        });
+        let schema: Schema = serde_json::from_value(object_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&schema).unwrap(), object_json);
+
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let schema = Schema::Single(Box::new(SingleSchema::String(StringSchema {
+            enum_values: Some(vec!["open".to_owned(), "closed".to_owned()]),
+            x_enum_descriptions: Some(vec!["Open state".to_owned()]),
+            ..Default::default()
+        })));
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("s.x-enumDescriptions")),
+            "enum descriptions length: {:?}",
             ctx.errors
         );
     }
