@@ -1,6 +1,6 @@
 [package]
 name = "roas"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 description = "Rust OpenAPI Specification"
@@ -19,7 +19,7 @@ include = [
 ]
 
 [features]
-default = ["v3_0"]
+default = ["v3_1"]
 # Support for OpenAPI v2
 v2 = []
 
