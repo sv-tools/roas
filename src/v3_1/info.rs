@@ -206,6 +206,11 @@ impl ValidateWithContext<Spec> for License {
                 "`identifier` and `url` are mutually exclusive (OAS 3.1)",
             );
         }
+        // `identifier` is an SPDX expression; when present it must be
+        // non-empty, otherwise the field carries no information.
+        if let Some(id) = &self.identifier {
+            validate_required_string(id, ctx, format!("{path}.identifier"));
+        }
         validate_optional_url(&self.url, ctx, format!("{path}.url"));
     }
 }
@@ -540,6 +545,22 @@ mod tests {
         }
         .validate_with_context(&mut ctx, String::from("license"));
         assert_eq!(ctx.errors.len(), 1, "incorrect url: {:?}", ctx.errors);
+
+        // Present-but-empty `identifier` is invalid (OAS 3.1 SPDX field).
+        ctx = Context::new(&spec, Default::default());
+        License {
+            name: String::from("Apache 2.0"),
+            identifier: Some(String::new()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("license"));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("license.identifier") && e.contains("must not be empty")),
+            "empty identifier: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]
