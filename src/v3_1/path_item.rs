@@ -241,8 +241,15 @@ impl ValidateWithContext<Spec> for PathItem {
                 if internal_path_item_ref_target_exists(ctx.spec, r) {
                     // Mark the target as visited so unused-component
                     // detection (e.g. `components.pathItems[X]` reached
-                    // only via a `$ref`) doesn't falsely flag it.
+                    // only via a `$ref`) doesn't falsely flag it. Also
+                    // mark the component container itself when the ref
+                    // is into `components.pathItems` or
+                    // `components.callbacks`, which the unused-check
+                    // keys off of.
                     ctx.visit(r.clone());
+                    if let Some(component) = component_container_visit(r) {
+                        ctx.visit(component);
+                    }
                 } else {
                     ctx.error(
                         path.clone(),
@@ -281,6 +288,22 @@ impl ValidateWithContext<Spec> for PathItem {
 /// `~0` → `~`. Order matters so `~01` round-trips to `~1`.
 fn unescape_pointer_token(token: &str) -> String {
     token.replace("~1", "/").replace("~0", "~")
+}
+
+/// If `reference` resolves to a `PathItem` housed under a Components
+/// container (`#/components/pathItems/<name>` or
+/// `#/components/callbacks/<name>/<expr>`), return the component-level
+/// reference (`#/components/pathItems/<name>` or
+/// `#/components/callbacks/<name>`) that the unused-check keys off.
+fn component_container_visit(reference: &str) -> Option<String> {
+    if reference.starts_with("#/components/pathItems/") {
+        Some(reference.to_owned())
+    } else if let Some(after) = reference.strip_prefix("#/components/callbacks/") {
+        let cb_token = after.split_once('/').map(|(c, _)| c).unwrap_or(after);
+        Some(format!("#/components/callbacks/{cb_token}"))
+    } else {
+        None
+    }
 }
 
 /// True if `reference` (an internal `#/...` pointer) names a `PathItem`
@@ -537,6 +560,39 @@ mod tests {
             ctx.errors.iter().all(|e| !e.contains("external reference")),
             "errors: {:?}",
             ctx.errors
+        );
+    }
+
+    #[test]
+    fn ref_to_components_callbacks_marks_callback_container_visited() {
+        // Codex: a `$ref` to `#/components/callbacks/CB/e` reaches a
+        // PathItem inside the callback. The unused-callbacks check keys
+        // off `#/components/callbacks/CB`, so that container — not just
+        // the deep path — must be marked visited.
+        use crate::v3_1::callback::Callback;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("e".to_owned(), PathItem::default());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = crate::v3_1::components::Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let pi = PathItem {
+            reference: Some("#/components/callbacks/CB/e".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::empty());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.is_visited("#/components/callbacks/CB"),
+            "callback container must be marked visited"
         );
     }
 

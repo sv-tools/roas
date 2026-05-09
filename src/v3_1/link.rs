@@ -17,7 +17,11 @@ fn unescape_pointer_token(token: &str) -> String {
 
 /// Outcome of attempting to resolve an internal `#/paths/...` operationRef.
 enum OperationRefResolution {
-    Ok,
+    /// Successfully resolved. The carried list contains internal component
+    /// references the resolver touched along the way (path-items and
+    /// callbacks); the caller marks each as visited so unused-component
+    /// detection doesn't false-flag them.
+    Ok(Vec<String>),
     Err(String),
     /// The PathItem reached has a `$ref` that points outside this document;
     /// caller decides whether that's an error based on
@@ -66,6 +70,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         ));
     }
 
+    let mut visits: Vec<String> = Vec::new();
     let (entry_path, mut item, mut consumed): (String, &crate::v3_1::path_item::PathItem, usize) =
         match container {
             Container::Paths => {
@@ -107,6 +112,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                         "path item `{name}` not declared in `#/components/pathItems`"
                     ));
                 };
+                visits.push(format!("#/components/pathItems/{name}"));
                 (name, item, 1)
             }
             Container::ComponentCallbacks => {
@@ -141,13 +147,14 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                         "expression `{expr}` not declared on callback `{cb_name}`"
                     ));
                 };
+                visits.push(format!("#/components/callbacks/{cb_name}"));
                 (format!("{cb_name}/{expr}"), item, 2)
             }
         };
 
     let mut seen = std::collections::BTreeSet::from([entry_path.clone()]);
     let mut display_path = entry_path;
-    item = match resolve_path_item_ref_chain(spec, &display_path, item, &mut seen) {
+    item = match resolve_path_item_ref_chain(spec, &display_path, item, &mut seen, &mut visits) {
         Ok((p, t)) => {
             display_path = p;
             t
@@ -182,6 +189,15 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                 "callback `{cb_name}` not declared on `{display_path}.{method}`"
             ));
         };
+        // If the inline callback slot is itself a `$ref` into
+        // `#/components/callbacks/...`, that callback component is now
+        // used; mark it so unused-detection doesn't false-flag it.
+        if let crate::common::reference::RefOr::Ref(r) = cb_ref
+            && let Some(after) = r.reference.strip_prefix("#/components/callbacks/")
+        {
+            let cb_token = after.split_once('/').map(|(c, _)| c).unwrap_or(after);
+            visits.push(format!("#/components/callbacks/{cb_token}"));
+        }
         let cb = match cb_ref.get_item(spec) {
             Ok(cb) => cb,
             Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
@@ -199,7 +215,13 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
             ));
         };
         display_path = format!("{display_path}.{method}.callbacks[{cb_name}][{expr}]");
-        item = match resolve_path_item_ref_chain(spec, &display_path, next_item, &mut seen) {
+        item = match resolve_path_item_ref_chain(
+            spec,
+            &display_path,
+            next_item,
+            &mut seen,
+            &mut visits,
+        ) {
             Ok((p, t)) => {
                 display_path = p;
                 t
@@ -219,7 +241,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
             "method `{method}` not declared on path `{display_path}`"
         ));
     }
-    OperationRefResolution::Ok
+    OperationRefResolution::Ok(visits)
 }
 
 fn malformed_pointer(reference: &str) -> OperationRefResolution {
@@ -233,6 +255,7 @@ fn resolve_path_item_ref_chain<'a>(
     path: &str,
     item: &'a crate::v3_1::path_item::PathItem,
     seen: &mut std::collections::BTreeSet<String>,
+    visits: &mut Vec<String>,
 ) -> Result<(String, &'a crate::v3_1::path_item::PathItem), OperationRefResolution> {
     let Some(ref_str) = &item.reference else {
         return Ok((path.to_owned(), item));
@@ -310,6 +333,7 @@ fn resolve_path_item_ref_chain<'a>(
                 "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/components/pathItems`"
             )));
         };
+        visits.push(format!("#/components/pathItems/{tp}"));
         (tp, t)
     } else if let Some(after) = ref_str.strip_prefix("#/components/callbacks/") {
         let mut split = after.splitn(2, '/');
@@ -357,12 +381,13 @@ fn resolve_path_item_ref_chain<'a>(
                 "path `{path}` is a `$ref` to `{ref_str}`, expression `{expr}` is not declared on callback `{cb_name}`"
             )));
         };
+        visits.push(format!("#/components/callbacks/{cb_name}"));
         (tp, t)
     } else {
         return Err(OperationRefResolution::ExternalPathItemRef(ref_str.clone()));
     };
 
-    resolve_path_item_ref_chain(spec, &target_path, target_item, seen)
+    resolve_path_item_ref_chain(spec, &target_path, target_item, seen, visits)
 }
 
 /// The Link object represents a possible design-time link for a response.
@@ -455,7 +480,14 @@ impl ValidateWithContext<Spec> for Link {
                 ctx.error(path.clone(), ".operationRef: must not be empty");
             } else if operation_ref.starts_with("#/") {
                 match resolve_internal_operation_ref(ctx.spec, operation_ref) {
-                    OperationRefResolution::Ok => {}
+                    OperationRefResolution::Ok(visits) => {
+                        // Mark each touched component reference so unused-
+                        // detection doesn't flag a path-item or callback that
+                        // is reached only via this operationRef.
+                        for r in visits {
+                            ctx.visit(r);
+                        }
+                    }
                     OperationRefResolution::Err(msg) => {
                         ctx.error(path.clone(), format_args!(".operationRef: {msg}"));
                     }
@@ -1166,6 +1198,68 @@ mod tests {
             ctx.errors.iter().all(|e| !e.contains(".operationRef")),
             "chain through components.callbacks must resolve: {:?}",
             ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_into_components_path_items_marks_visited() {
+        // Codex: a Link.operationRef that resolves into
+        // `#/components/pathItems/<name>/<method>` must mark the
+        // component as visited so the unused-pathItems check doesn't
+        // falsely flag it.
+        use crate::v3_1::components::Components;
+        let mut cp = BTreeMap::new();
+        cp.insert("Reusable".to_owned(), pi_with_get());
+        let comp = Components {
+            path_items: Some(cp),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::empty());
+        Link {
+            operation_ref: Some("#/components/pathItems/Reusable/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.is_visited("#/components/pathItems/Reusable"),
+            "components.pathItems target should be marked visited"
+        );
+    }
+
+    #[test]
+    fn operation_ref_into_components_callbacks_marks_visited() {
+        // Same idea for `#/components/callbacks/<n>/<expr>/<method>`:
+        // the unused-callbacks check keys off the callback container
+        // (`#/components/callbacks/<n>`), so that's what we mark.
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("e".to_owned(), pi_with_get());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::empty());
+        Link {
+            operation_ref: Some("#/components/callbacks/CB/e/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.is_visited("#/components/callbacks/CB"),
+            "components.callbacks target should be marked visited"
         );
     }
 
