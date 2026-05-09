@@ -16,11 +16,7 @@ include = [
     "README.md",
     "LICENSE-APACHE",
     "LICENSE-MIT",
-    "dependencies-license.json",
 ]
-
-[package.metadata]
-dependencies-license-file = "dependencies-license.json"
 
 [features]
 default = ["v3_0"]

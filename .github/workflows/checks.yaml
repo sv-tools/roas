@@ -22,107 +22,137 @@ permissions: read-all
 
 jobs:
   RustMeta:
+    name: Collect crate metadata
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.rustmeta.outputs.matrix }}
       publish: ${{ steps.rustmeta.outputs.publish }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v5.5.0
-      - uses: sv-tools/rust-metadata-action@8618602bef8488998677a4ed006f9a9a35cf6756 # v0.1.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: sv-tools/rust-metadata-action@f3e4c81b5d58bb5920965e9441181788608c6c5c # v1.0.0
         id: rustmeta
-  Format:
+  BuildJob:
+    name: Build per OS
+    needs: RustMeta
+    strategy:
+        matrix:
+            os: [ "ubuntu-latest", "windows-latest", "macos-latest" ]
+            args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+      - run: cargo build ${{ matrix.args }} --all-targets --verbose
+  Build:
+    name: Wait for build jobs to finish
+    needs: BuildJob
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v5.5.0
+      - run: echo "Build jobs succeeded"
+  Format:
+    name: Check Rust code formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
       - run: cargo fmt --all --check --verbose
   Clippy:
+    name: Check Rust code with Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v5.5.0
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        with:
-          cache-targets: false
-          cache-all-crates: true
-      - run: cargo tools
-      - run: cargo clippy --all-features --verbose -- --deny warnings
-      - run: cargo clippy --all-features --quiet --message-format=json | cargo-action-fmt
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+      - run: cargo install-tools
+      - run: cargo clippy --all-features --all-targets --verbose -- --deny warnings
+      - run: cargo clippy --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
         if: failure()
-  TestsJob:
+  TestJob:
+    name: Test per OS
     needs: RustMeta
     strategy:
       matrix:
+        os: [ "ubuntu-latest", "windows-latest", "macos-latest" ]
         args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v5.5.0
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        with:
-          cache-targets: false
-          cache-all-crates: true
-      - run: cargo tools
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+      - run: cargo install-tools
       - name: Run tests
-        run: cargo llvm-cov nextest ${{ matrix.args }} --no-default-features --no-fail-fast --verbose
+        run: cargo llvm-cov nextest ${{ matrix.args }} --all-targets --no-fail-fast --no-tests=pass --verbose
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
       - name: Upload coverage reports to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1.2.1
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          report_type: test_results
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
   Tests:
-    needs: TestsJob
-    if: ${{ always() }}
+    name: Wait for testing jobs to finish
+    needs: TestJob
     runs-on: ubuntu-latest
     steps:
-      - name: Check status
-        if: ${{ needs.TestsJob.result != 'success' }}
-        run: exit 1
+      - run: echo "Testing jobs succeeded"
   Deps:
+    name: Check dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v5.5.0
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        with:
-          cache-targets: false
-          cache-all-crates: true
-      - run: cargo tools
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+      - run: cargo install-tools
       - name: Machete
         run: cargo machete
       - name: Deny
         run: cargo deny check all
-  PublishJob:
+  PublishCrateJob:
+    name: Test publishing per crate
     needs: RustMeta
     strategy:
       matrix:
         package: ${{ fromJSON(needs.RustMeta.outputs.publish) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v5.5.0
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        with:
-          cache-targets: false
-          cache-all-crates: true
-      - run: cargo tools
-      - run: cargo license --all-features --avoid-dev-deps --json > dependencies-license.json
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
       - name: Dry run publish
-        run: cargo publish --package ${{ matrix.package }} --all-features --allow-dirty --dry-run --verbose
-      - name: Packaging
-        run: cargo package --package ${{ matrix.package }} --all-features --list --allow-dirty
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        run: cargo publish --all-features --package ${{ matrix.package }} --dry-run --verbose
+      - name: Create package
+        run: cargo package --all-features --package ${{ matrix.package }} --verbose
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.package }}-crate
           path: target/package/${{ matrix.package }}-*.crate
   Publish:
-    needs: PublishJob
+    name: Wait for publishing jobs to finish
+    needs:
+      - RustMeta
+      - PublishCrateJob
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Check status
-        if: ${{ needs.PublishJob.result != 'success' }}
+        if: ${{ needs.RustMeta.outputs.publish != '[]' && (needs.PublishCrateJob.result == 'failure' || needs.PublishCrateJob.result == 'cancelled') }}
+        run: exit 1
+  AllChecks:
+    name: All checks
+    needs:
+      - Build
+      - Format
+      - Clippy
+      - Tests
+      - Deps
+      - Publish
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all checks succeeded
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
         run: exit 1

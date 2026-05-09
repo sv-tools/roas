@@ -20,6 +20,5 @@ Cargo.lock
 /Cargo.lock
 
 *.profraw
-dependencies-license.json
 
 .claude/
