@@ -153,7 +153,6 @@ impl<'de> Deserialize<'de> for PathItem {
             "delete",
             "options",
             "trace",
-            "<custom method>",
             "x-<ext name>",
         ];
 
@@ -205,11 +204,23 @@ impl<'de> Deserialize<'de> for PathItem {
                         }
                         extensions.insert(key, map.next_value()?);
                     } else {
-                        let key = key.to_lowercase();
-                        if operations.contains_key(key.as_str()) {
-                            return Err(Error::custom(format!("duplicate field '{key}'")));
+                        // OAS 3.1.2 fixes the operation field set to the eight
+                        // HTTP method names (case-sensitive lowercase per the
+                        // spec, but we accept any casing and normalise).
+                        // Reject anything else so typos like `gett` or
+                        // unsupported methods do not silently become an
+                        // Operation slot.
+                        let lowered = key.to_lowercase();
+                        const HTTP_METHODS: &[&str] = &[
+                            "get", "put", "post", "delete", "options", "head", "patch", "trace",
+                        ];
+                        if !HTTP_METHODS.contains(&lowered.as_str()) {
+                            return Err(Error::unknown_field(key.as_str(), FIELDS));
                         }
-                        operations.insert(key, map.next_value()?);
+                        if operations.contains_key(lowered.as_str()) {
+                            return Err(Error::custom(format!("duplicate field '{lowered}'")));
+                        }
+                        operations.insert(lowered, map.next_value()?);
                     }
                 }
                 if !operations.is_empty() {
@@ -442,5 +453,32 @@ mod tests {
         let p: Paths = [("/a", PathItem::default())].into();
         assert_eq!(p.len(), 1);
         assert_eq!(p.iter().count(), 1);
+    }
+
+    #[test]
+    fn unknown_method_key_rejected() {
+        // OAS 3.1.2 fixes the operation field set to the eight standard
+        // HTTP method names. A typoed key like `gett` is not a valid
+        // Operation slot and must not silently become one.
+        let raw = r#"{"gett": {"responses": {"200": {"description": "ok"}}}}"#;
+        let err = serde_json::from_str::<PathItem>(raw)
+            .expect_err("expected unknown-field error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("gett") && msg.contains("unknown field"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn known_methods_case_insensitive_accepted() {
+        // Lowercase canonical form is accepted; uppercase is normalised.
+        let raw = r#"{"GET": {"responses": {"200": {"description": "ok"}}}}"#;
+        let pi: PathItem = serde_json::from_str(raw).unwrap();
+        assert!(
+            pi.operations
+                .as_ref()
+                .is_some_and(|m| m.contains_key("get"))
+        );
     }
 }

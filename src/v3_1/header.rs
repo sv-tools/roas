@@ -91,6 +91,9 @@ impl ValidateWithContext<Spec> for Header {
             (false, false) => ctx.error(path.clone(), "must define either `schema` or `content`"),
             _ => {}
         }
+        if let Some(schema) = &self.schema {
+            schema.validate_with_context(ctx, format!("{path}.schema"));
+        }
         if let Some(examples) = &self.examples {
             for (k, v) in examples {
                 v.validate_with_context(ctx, format!("{path}.examples[{k}]"));
@@ -185,6 +188,25 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("must define either `schema` or `content`")),
             "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn header_walks_schema() {
+        // The header validator must walk into `schema` so structural errors
+        // inside it (like an empty $ref) surface instead of being silently
+        // dropped on the floor.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Header {
+            schema: Some(RefOr::new_ref("".into())),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("h.schema")),
+            "expected h.schema error: {:?}",
             ctx.errors
         );
     }

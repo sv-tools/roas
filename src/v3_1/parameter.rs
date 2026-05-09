@@ -427,6 +427,7 @@ impl ValidateWithContext<Spec> for InPath {
         must_be_required(&Some(self.required), ctx, path.clone(), self.name.clone());
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -435,6 +436,7 @@ impl ValidateWithContext<Spec> for InQuery {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -443,6 +445,7 @@ impl ValidateWithContext<Spec> for InHeader {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
     }
 }
 
@@ -451,6 +454,32 @@ impl ValidateWithContext<Spec> for InCookie {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
+        walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
+    }
+}
+
+/// Walk into the nested `schema`, `examples` map, and `content` media-type
+/// entries so that invalid `$ref`s, malformed sub-schemas, and broken
+/// example/media-type bodies are reported instead of silently skipped.
+fn walk_schema_examples_content(
+    ctx: &mut Context<Spec>,
+    schema: &Option<RefOr<Schema>>,
+    examples: &Option<BTreeMap<String, RefOr<Example>>>,
+    content: &Option<BTreeMap<String, MediaType>>,
+    path: &str,
+) {
+    if let Some(schema) = schema {
+        schema.validate_with_context(ctx, format!("{path}.schema"));
+    }
+    if let Some(examples) = examples {
+        for (k, v) in examples {
+            v.validate_with_context(ctx, format!("{path}.examples[{k}]"));
+        }
+    }
+    if let Some(content) = content {
+        for (k, v) in content {
+            v.validate_with_context(ctx, format!("{path}.content[{k}]"));
+        }
     }
 }
 
@@ -590,6 +619,44 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("must contain exactly one media type entry")),
             "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn parameter_walks_schema_examples_content() {
+        // Validators must traverse nested `schema`, `examples`, and
+        // `content`. Use empty $refs so each surfaces a distinct
+        // "$ref: must not be empty" error scoped under the parameter path.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Query(InQuery {
+            name: "q".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: Some(RefOr::new_ref("".into())),
+            example: None,
+            examples: Some(BTreeMap::from([(
+                "ex".to_owned(),
+                RefOr::new_ref("".into()),
+            )])),
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("p.schema")),
+            "expected p.schema error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("p.examples[ex]")),
+            "expected p.examples[ex] error: {:?}",
             ctx.errors
         );
     }

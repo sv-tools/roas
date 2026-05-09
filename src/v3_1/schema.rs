@@ -1079,6 +1079,12 @@ impl ValidateWithContext<Spec> for Schema {
             Schema::Single(s) => s.validate_with_context(ctx, path),
             Schema::Multi(s) => s.validate_with_context(ctx, path),
             Schema::AllOf(s) => {
+                // JSON Schema 2020-12 §10.2.1.1: `allOf` MUST be a non-empty
+                // array. The same MUST applies to `anyOf` (§10.2.1.2) and
+                // `oneOf` (§10.2.1.3).
+                if s.all_of.is_empty() {
+                    ctx.error(path.clone(), "`allOf` must be a non-empty array");
+                }
                 for (i, schema) in s.all_of.iter().enumerate() {
                     schema.validate_with_context(ctx, format!("{path}.allOf[{i}]"));
                 }
@@ -1087,6 +1093,9 @@ impl ValidateWithContext<Spec> for Schema {
                 }
             }
             Schema::AnyOf(s) => {
+                if s.any_of.is_empty() {
+                    ctx.error(path.clone(), "`anyOf` must be a non-empty array");
+                }
                 for (i, schema) in s.any_of.iter().enumerate() {
                     schema.validate_with_context(ctx, format!("{path}.anyOf[{i}]"));
                 }
@@ -1095,6 +1104,9 @@ impl ValidateWithContext<Spec> for Schema {
                 }
             }
             Schema::OneOf(s) => {
+                if s.one_of.is_empty() {
+                    ctx.error(path.clone(), "`oneOf` must be a non-empty array");
+                }
                 for (i, schema) in s.one_of.iter().enumerate() {
                     schema.validate_with_context(ctx, format!("{path}.oneOf[{i}]"));
                 }
@@ -1300,6 +1312,11 @@ impl ValidateWithContext<Spec> for NullSchema {
 
 impl ValidateWithContext<Spec> for MultiSchema {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // JSON Schema 2020-12 §6.1.1: when `type` is an array it MUST contain
+        // at least one element. An empty `type: []` is not a valid schema.
+        if self.schema_types.is_empty() {
+            ctx.error(format!("{path}.type"), "must contain at least one element");
+        }
         let allowed_types: HashSet<String> = HashSet::from_iter(vec![
             "string".into(),
             "number".into(),
@@ -2213,6 +2230,54 @@ mod tests {
             ctx.errors
                 .iter()
                 .any(|e| e.contains("readOnly and .writeOnly are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn composition_arrays_must_be_non_empty() {
+        // JSON Schema 2020-12: `allOf`, `anyOf`, `oneOf` MUST be non-empty.
+        let spec = crate::v3_1::spec::Spec::default();
+        for (json, kw) in [
+            (serde_json::json!({"allOf": []}), "allOf"),
+            (serde_json::json!({"anyOf": []}), "anyOf"),
+            (serde_json::json!({"oneOf": []}), "oneOf"),
+        ] {
+            let s: Schema = serde_json::from_value(json).unwrap();
+            let mut ctx =
+                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains(&format!("`{kw}` must be a non-empty array"))),
+                "{kw} errors: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn multi_schema_type_array_must_be_non_empty() {
+        // JSON Schema 2020-12 §6.1.1: `type` array MUST contain at least
+        // one element. The wrapper `Schema` doesn't expose a Multi variant
+        // for an empty array directly via JSON (since deserialisation
+        // would route empty `type: []` to MultiSchema), so build the
+        // MultiSchema struct directly.
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let m = MultiSchema {
+            schema_types: vec![],
+            ..Default::default()
+        };
+        let s = Schema::Multi(Box::new(m));
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("s.type") && e.contains("must contain at least one element")),
             "errors: {:?}",
             ctx.errors
         );

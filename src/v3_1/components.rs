@@ -179,24 +179,14 @@ impl ValidateWithContext<Spec> for Components {
         }
 
         if let Some(objs) = &self.path_items {
+            // Note: operationId uniqueness across paths/webhooks/components.
+            // pathItems is collected upfront in `Spec::validate_with_context`
+            // so links can resolve `operationId` references that point at
+            // ops defined only inside reusable path items. Re-doing the
+            // insert here would always trip the "already in use" branch and
+            // produce a false-positive duplicate for any valid reusable
+            // path item that has an operationId.
             for (name, item) in objs {
-                if let Some(operations) = &item.operations {
-                    for (method, operation) in operations.iter() {
-                        if let Some(operation_id) = &operation.operation_id
-                            && !ctx
-                                .visited
-                                .insert(format!("#/paths/operations/{operation_id}"))
-                        {
-                            ctx.error(
-                                "#".to_owned(),
-                                format_args!(
-                                    ".paths[{name}].{method}.operationId: `{operation_id}` already in use"
-                                ),
-                            );
-                        }
-                    }
-                }
-
                 let reference = format!("#/components/pathItems/{name}");
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedPathItems) {
                     ctx.error(reference, "unused");

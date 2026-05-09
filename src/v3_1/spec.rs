@@ -722,12 +722,13 @@ impl Validate for Spec {
         }
 
         if let Some(webhooks) = &self.webhooks {
-            // Webhook keys are arbitrary names (not URL paths), so the
-            // path-template / starts-with-`/` checks don't apply. We still
-            // run equivalent-template detection in case the user used
-            // templates inside webhook keys.
-            validate_path_template_uniqueness(&mut ctx, "#.webhooks", &webhooks.paths);
-
+            // Webhook keys are arbitrary identifiers, NOT URL paths. The
+            // OAS 3.1.2 Webhooks Object pattern field is `{name}`, so
+            // path-template equivalence (e.g. `/pets/{id}` ≡ `/pets/{name}`)
+            // does not apply: legitimate names can contain `{` / `}` /
+            // template-looking substrings without violating spec. Running
+            // `validate_path_template_uniqueness` here would falsely reject
+            // them, so we don't.
             for (name, item) in webhooks.iter() {
                 let path = format!("#.webhooks[{name}]");
                 item.validate_with_context(&mut ctx, path);
@@ -1539,6 +1540,110 @@ mod tests {
             "expected license mutex error: {:?}",
             err.errors
         );
+    }
+
+    #[test]
+    fn components_path_items_op_id_not_double_counted() {
+        // Regression: a single operationId defined in `components.pathItems`
+        // used to be reported as `already in use` because the spec-level
+        // pre-pass and the components validator both inserted it into
+        // ctx.visited. The pre-pass is now the single source of truth.
+        use crate::v3_1::components::Components;
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::PathItem;
+        use crate::v3_1::response::{Response, Responses};
+
+        let op = Operation {
+            operation_id: Some("reuse".into()),
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op);
+        let pi = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let comp = Components {
+            path_items: Some(BTreeMap::from([("Reusable".to_owned(), pi)])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        // Options::new() defaults include `IgnoreUnusedPathItems`, which
+        // is what production users get; the regression we're locking in
+        // is the false-positive duplicate-id error, so we just check that
+        // *no* `already in use` error appears for `reuse`.
+        let res = spec.validate(Options::new());
+        match res {
+            Ok(_) => {}
+            Err(e) => {
+                assert!(
+                    e.errors.iter().all(|s| !s.contains("already in use")),
+                    "spurious duplicate-id error: {:?}",
+                    e.errors
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn webhook_keys_no_path_template_uniqueness() {
+        // Webhook keys are arbitrary identifiers, not URL templates. Two
+        // distinct webhook names that share a `{name}`-templated shape
+        // (e.g. `pet-{kind}` and `user-{kind}`) collapse to the same
+        // canonical form under the path-template rule, but per OAS 3.1.2
+        // they are independent webhooks. The validator must not reject.
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::{PathItem, Paths};
+        use crate::v3_1::response::{Response, Responses};
+
+        let op = Operation {
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let pi = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert("pet-{kind}".to_owned(), pi.clone());
+        webhooks.paths.insert("user-{kind}".to_owned(), pi);
+        let spec = Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let res = spec.validate(Options::new());
+        if let Err(e) = res {
+            assert!(
+                e.errors.iter().all(|s| !s.contains("collapse to the same")),
+                "webhook templates wrongly flagged: {:?}",
+                e.errors
+            );
+        }
     }
 }
 
