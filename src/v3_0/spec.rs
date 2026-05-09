@@ -589,7 +589,7 @@ impl Validate for Spec {
         }
 
         if let Some(components) = &self.components {
-            components.validate_with_context(&mut ctx, "{}.components".to_owned());
+            components.validate_with_context(&mut ctx, "#.components".to_owned());
         }
 
         if let Some(docs) = &self.external_docs {

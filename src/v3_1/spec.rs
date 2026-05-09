@@ -659,7 +659,7 @@ impl Validate for Spec {
         }
 
         if let Some(components) = &self.components {
-            components.validate_with_context(&mut ctx, "{}.components".to_owned());
+            components.validate_with_context(&mut ctx, "#.components".to_owned());
         }
 
         if self.components.is_none() && self.paths.is_none() && self.webhooks.is_none() {

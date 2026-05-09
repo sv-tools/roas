@@ -416,19 +416,21 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum: Option<i64>,
 
-    /// Declares that the value of the parameter is strictly greater than the value of `minimum`
+    /// Declares that the value of the parameter is strictly greater than this value.
+    /// In OpenAPI 3.1 / JSON Schema 2020-12 this is a numeric bound, not a boolean modifier.
     #[serde(rename = "exclusiveMinimum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_minimum: Option<bool>,
+    pub exclusive_minimum: Option<i64>,
 
-    /// Declares the minimum value of the parameter.
+    /// Declares the maximum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maximum: Option<i64>,
 
-    /// Declares that the value of the parameter is strictly less than the value of `maximum`
+    /// Declares that the value of the parameter is strictly less than this value.
+    /// In OpenAPI 3.1 / JSON Schema 2020-12 this is a numeric bound, not a boolean modifier.
     #[serde(rename = "exclusiveMaximum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_maximum: Option<bool>,
+    pub exclusive_maximum: Option<i64>,
 
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
@@ -509,19 +511,21 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum: Option<f64>,
 
-    /// Declares that the value of the parameter is strictly greater than the value of `minimum`
+    /// Declares that the value of the parameter is strictly greater than this value.
+    /// In OpenAPI 3.1 / JSON Schema 2020-12 this is a numeric bound, not a boolean modifier.
     #[serde(rename = "exclusiveMinimum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_minimum: Option<bool>,
+    pub exclusive_minimum: Option<f64>,
 
-    /// Declares the minimum value of the parameter.
+    /// Declares the maximum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maximum: Option<f64>,
 
-    /// Declares that the value of the parameter is strictly less than the value of `maximum`
+    /// Declares that the value of the parameter is strictly less than this value.
+    /// In OpenAPI 3.1 / JSON Schema 2020-12 this is a numeric bound, not a boolean modifier.
     #[serde(rename = "exclusiveMaximum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_maximum: Option<bool>,
+    pub exclusive_maximum: Option<f64>,
 
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
@@ -1127,6 +1131,7 @@ impl ValidateWithContext<Spec> for MultiSchema {
         let allowed_types: HashSet<String> = HashSet::from_iter(vec![
             "string".into(),
             "number".into(),
+            "integer".into(),
             "object".into(),
             "array".into(),
             "boolean".into(),
@@ -1413,6 +1418,49 @@ mod tests {
     }
 
     #[test]
+    fn test_exclusive_bounds_are_numeric() {
+        // OpenAPI 3.1 / JSON Schema 2020-12: exclusiveMinimum/Maximum are numeric,
+        // not booleans (that was the OAS 3.0 / JSON Schema draft-04 form).
+        let json = serde_json::json!({
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "exclusiveMaximum": 100,
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).expect("must parse");
+        match &parsed {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Integer(int) => {
+                    assert_eq!(int.exclusive_minimum, Some(0));
+                    assert_eq!(int.exclusive_maximum, Some(100));
+                }
+                _ => panic!("expected Integer schema"),
+            },
+            _ => panic!("expected Single schema"),
+        }
+        // Round-trip back to JSON must produce the numeric form, not a boolean.
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        // Same for number
+        let json = serde_json::json!({
+            "type": "number",
+            "exclusiveMinimum": 0.5,
+            "exclusiveMaximum": 1.5,
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).expect("must parse");
+        match &parsed {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Number(n) => {
+                    assert_eq!(n.exclusive_minimum, Some(0.5));
+                    assert_eq!(n.exclusive_maximum, Some(1.5));
+                }
+                _ => panic!("expected Number schema"),
+            },
+            _ => panic!("expected Single schema"),
+        }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
     fn test_number_serialize_deserialize() {
         let spec = Schema::Single(Box::new(SingleSchema::Number(NumberSchema {
             title: Some("foo".to_string()),
@@ -1557,6 +1605,29 @@ mod tests {
         });
         assert_eq!(serde_json::to_value(&spec).unwrap(), value);
         assert_eq!(serde_json::from_value::<Schema>(value).unwrap(), spec);
+
+        // Round-trip alone is not enough: validate that all primitive type
+        // names accepted by the deserializer are also accepted by the validator.
+        let spec_owner = Spec::default();
+        let mut ctx = Context::new(&spec_owner, crate::validation::Options::empty());
+        let multi = MultiSchema {
+            schema_types: vec![
+                "string".into(),
+                "integer".into(),
+                "number".into(),
+                "boolean".into(),
+                "object".into(),
+                "array".into(),
+                "null".into(),
+            ],
+            ..Default::default()
+        };
+        multi.validate_with_context(&mut ctx, "schema".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "all primitive types should be valid: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]
