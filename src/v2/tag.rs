@@ -31,6 +31,11 @@ pub struct Tag {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_docs: Option<ExternalDocumentation>,
 
+    /// ReDoc extension that overrides tag display text in documentation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-displayName")]
+    pub x_display_name: Option<String>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -85,6 +90,18 @@ mod tests {
             }),
             "serialize",
         );
+    }
+
+    #[test]
+    fn x_display_name_round_trip() {
+        let value = serde_json::json!({
+            "name": "pet",
+            "description": "Pets operations",
+            "x-displayName": "Pets",
+        });
+        let tag = serde_json::from_value::<Tag>(value.clone()).unwrap();
+        assert_eq!(tag.x_display_name, Some("Pets".to_owned()));
+        assert_eq!(serde_json::to_value(tag).unwrap(), value);
     }
 
     #[test]

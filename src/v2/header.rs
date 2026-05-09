@@ -94,7 +94,7 @@ pub struct IntegerHeader {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<i64>,
+    pub minimum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly greater than the value of `minimum`
     #[serde(rename = "exclusiveMinimum")]
@@ -103,7 +103,7 @@ pub struct IntegerHeader {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<i64>,
+    pub maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly less than the value of `maximum`
     #[serde(rename = "exclusiveMaximum")]
@@ -213,6 +213,7 @@ pub struct ArrayHeader {
 
     /// Determines the format of the array if type array is used.
     #[serde(rename = "collectionFormat")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub collection_format: Option<CollectionFormat>,
 
     // Declares the maximum number of items that are allowed in the array.
@@ -333,9 +334,9 @@ mod tests {
                 format: Some(IntegerFormat::Int32),
                 default: Some(5.to_owned()),
                 enum_values: Some(vec![5.to_owned()]),
-                maximum: Some(10),
+                maximum: Some(10.into()),
                 exclusive_maximum: Some(true),
-                minimum: Some(1),
+                minimum: Some(1.into()),
                 exclusive_minimum: Some(true),
                 multiple_of: Some(1.0),
                 extensions: Some({
@@ -468,9 +469,9 @@ mod tests {
                 format: Some(IntegerFormat::Int32),
                 default: Some(5.to_owned()),
                 enum_values: Some(vec![5.to_owned()]),
-                maximum: Some(10),
+                maximum: Some(10.into()),
                 exclusive_maximum: Some(true),
-                minimum: Some(1),
+                minimum: Some(1.into()),
                 exclusive_minimum: Some(true),
                 multiple_of: Some(1.0),
                 extensions: Some({

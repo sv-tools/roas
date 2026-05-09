@@ -120,7 +120,7 @@ pub struct IntegerItem {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<i64>,
+    pub minimum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly greater than the value of `minimum`
     #[serde(rename = "exclusiveMinimum")]
@@ -129,7 +129,7 @@ pub struct IntegerItem {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<i64>,
+    pub maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly less than the value of `maximum`
     #[serde(rename = "exclusiveMaximum")]
@@ -379,9 +379,9 @@ mod tests {
                 format: Some(IntegerFormat::Int64),
                 default: Some(42),
                 enum_values: Some(vec![42, 105]),
-                minimum: Some(1),
+                minimum: Some(1.into()),
                 exclusive_minimum: Some(true),
-                maximum: Some(10),
+                maximum: Some(10.into()),
                 exclusive_maximum: Some(true),
                 multiple_of: Some(2.0),
                 extensions: Some({
@@ -401,9 +401,9 @@ mod tests {
                 format: Some(IntegerFormat::Int64),
                 default: Some(42),
                 enum_values: Some(vec![42, 105]),
-                minimum: Some(1),
+                minimum: Some(1.into()),
                 exclusive_minimum: Some(true),
-                maximum: Some(10),
+                maximum: Some(10.into()),
                 exclusive_maximum: Some(true),
                 multiple_of: Some(2.0),
                 extensions: Some({

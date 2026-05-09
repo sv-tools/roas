@@ -28,7 +28,6 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Info {
     /// **Required** The title of the application.
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub title: String,
 
     /// A short description of the application.
@@ -50,8 +49,12 @@ pub struct Info {
     pub license: Option<License>,
 
     /// **Required** Provides the version of the application API (not to be confused with the specification version).
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
+
+    /// ReDoc extension that configures the API logo in generated documentation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-logo")]
+    pub x_logo: Option<Logo>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -125,6 +128,32 @@ pub struct License {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+/// ReDoc `x-logo` extension object.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Logo {
+    /// **Required** URL pointing to the logo image.
+    pub url: String,
+
+    /// Optional background color, commonly a hex RGB value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<String>,
+
+    /// Optional alt text for the logo image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_text: Option<String>,
+
+    /// Optional link target for the logo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+
+    /// Allows extensions on the logo extension object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
 impl ValidateWithContext<Spec> for Info {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if !ctx.is_option(Options::IgnoreEmptyInfoTitle) {
@@ -141,6 +170,10 @@ impl ValidateWithContext<Spec> for Info {
         if let Some(license) = &self.license {
             license.validate_with_context(ctx, format!("{path}.license"));
         }
+
+        if let Some(logo) = &self.x_logo {
+            logo.validate_with_context(ctx, format!("{path}.x-logo"));
+        }
     }
 }
 
@@ -155,6 +188,13 @@ impl ValidateWithContext<Spec> for License {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         validate_optional_url(&self.url, ctx, format!("{path}.url"));
+    }
+}
+
+impl ValidateWithContext<Spec> for Logo {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        crate::common::helpers::validate_required_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_url(&self.href, ctx, format!("{path}.href"));
     }
 }
 
@@ -249,6 +289,41 @@ mod tests {
     }
 
     #[test]
+    fn test_info_x_logo_round_trip_and_validate() {
+        let value = json!({
+            "title": "Swagger Sample App",
+            "version": "1.0.1",
+            "x-logo": {
+                "url": "https://example.com/logo.png",
+                "backgroundColor": "#FFFFFF",
+                "altText": "Example logo",
+                "href": "https://example.com",
+                "x-extra": "kept"
+            }
+        });
+        let info = serde_json::from_value::<Info>(value.clone()).unwrap();
+        assert_eq!(
+            info.x_logo,
+            Some(Logo {
+                url: "https://example.com/logo.png".to_owned(),
+                background_color: Some("#FFFFFF".to_owned()),
+                alt_text: Some("Example logo".to_owned()),
+                href: Some("https://example.com".to_owned()),
+                extensions: Some(BTreeMap::from_iter([(
+                    "x-extra".to_owned(),
+                    serde_json::json!("kept")
+                )])),
+            })
+        );
+        assert_eq!(serde_json::to_value(&info).unwrap(), value);
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Default::default());
+        info.validate_with_context(&mut ctx, "info".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
     fn test_info_serialize() {
         assert_eq!(
             serde_json::to_value(Info {
@@ -321,10 +396,13 @@ mod tests {
             }),
             "serialize",
         );
+        // Required fields are now serialized even when empty — the spec says
+        // they're required, and silently dropping them produced malformed v2
+        // output that round-tripped only by accident.
         assert_eq!(
             serde_json::to_value(Info::default()).unwrap(),
-            json!({}),
-            "serialize",
+            json!({"title": "", "version": ""}),
+            "serialize default emits required fields",
         );
     }
 
