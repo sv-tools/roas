@@ -200,14 +200,16 @@ pub fn validate_operation_parameters(
         }
     }
 
-    // If we deliberately skipped any external `$ref`, the missing-`in: path`
-    // parameter we'd report could be defined in that external document.
-    // Suppress both directions of the correspondence check in that case;
-    // unresolvable internal refs still pass through and produce errors via
-    // `RefOr::validate_with_context` elsewhere.
-    let skip_template_correspondence = has_unresolved_external;
+    // If we deliberately skipped any external `$ref`, a template variable
+    // that looks unmatched here may legitimately be defined in the external
+    // document we agreed not to follow. Suppress only the
+    // `template-var-missing-parameter` direction in that case. The opposite
+    // direction (a *declared* path parameter whose name is not in the
+    // template) still fires unconditionally — those parameters are visible
+    // locally, so the inconsistency is real regardless of external refs.
+    let skip_template_var_missing = has_unresolved_external;
 
-    if !skip_template_correspondence {
+    if !skip_template_var_missing {
         for var in &template_vars {
             if !declared_path_params.contains(var) {
                 ctx.error(

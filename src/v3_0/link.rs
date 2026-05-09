@@ -15,37 +15,85 @@ fn unescape_pointer_token(token: &str) -> String {
     token.replace("~1", "/").replace("~0", "~")
 }
 
+/// Outcome of attempting to resolve an internal `#/paths/...` operationRef.
+enum OperationRefResolution {
+    /// The ref resolves to a defined Operation.
+    Ok,
+    /// The ref is structurally invalid or its target path/method is missing.
+    Err(String),
+    /// The PathItem reached has a `$ref` that points outside this document;
+    /// we cannot inspect operations there. Caller decides whether that's an
+    /// error based on `IgnoreExternalReferences`.
+    ExternalPathItemRef(String),
+}
+
 /// Resolve an internal `#/paths/...` operationRef against `Spec.paths`.
-/// Returns `Ok(())` if the ref points to a defined Operation, `Err(message)`
-/// otherwise. Caller is expected to have already classified the ref as
-/// internal (starts with `#/`).
-fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> Result<(), String> {
+///
+/// Per OAS 3.0.4 a PathItem may itself be a `$ref` to another PathItem; in
+/// that case `operations` on the referencing entry is empty and the methods
+/// live on the target. We follow one hop of `PathItem.reference` for
+/// internal refs so an operationRef like `#/paths/~1pets/get` still
+/// validates when `/pets` is `{ "$ref": "#/paths/~1other" }`.
+///
+/// Multi-hop chains are not followed: spec paths cycles are unusual, and
+/// the next hop's target would itself need to be a non-ref PathItem to
+/// declare any operations.
+fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefResolution {
     let after = match reference.strip_prefix("#/paths/") {
         Some(rest) => rest,
-        None => return Err(format!("must start with `#/paths/`, found `{reference}`")),
+        None => {
+            return OperationRefResolution::Err(format!(
+                "must start with `#/paths/`, found `{reference}`"
+            ));
+        }
     };
-    // Split on `/` once: the path token, then the method token.
     let (path_token, method) = match after.rsplit_once('/') {
         Some((p, m)) => (p, m),
         None => {
-            return Err(format!(
+            return OperationRefResolution::Err(format!(
                 "must point to `#/paths/<encoded path>/<method>`, found `{reference}`"
             ));
         }
     };
     let path = unescape_pointer_token(path_token);
     let Some(item) = spec.paths.paths.get(&path) else {
-        return Err(format!("path `{path}` not declared in `#/paths`"));
+        return OperationRefResolution::Err(format!("path `{path}` not declared in `#/paths`"));
     };
+
+    // If the resolved PathItem is itself a `$ref`, follow it once.
+    let target_item = if let Some(ref_str) = &item.reference {
+        if let Some(after_paths) = ref_str.strip_prefix("#/paths/") {
+            let target_path = unescape_pointer_token(after_paths);
+            match spec.paths.paths.get(&target_path) {
+                Some(t) => t,
+                None => {
+                    return OperationRefResolution::Err(format!(
+                        "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/paths`"
+                    ));
+                }
+            }
+        } else if ref_str.is_empty() {
+            return OperationRefResolution::Err(format!(
+                "path `{path}` carries an empty `$ref`"
+            ));
+        } else {
+            return OperationRefResolution::ExternalPathItemRef(ref_str.clone());
+        }
+    } else {
+        item
+    };
+
     let method_lower = method.to_lowercase();
-    let exists = item
+    let exists = target_item
         .operations
         .as_ref()
         .is_some_and(|m| m.contains_key(&method_lower));
     if !exists {
-        return Err(format!("method `{method}` not declared on path `{path}`"));
+        return OperationRefResolution::Err(format!(
+            "method `{method}` not declared on path `{path}`"
+        ));
     }
-    Ok(())
+    OperationRefResolution::Ok
 }
 
 /// The Link object represents a possible design-time link for a response.
@@ -136,12 +184,28 @@ impl ValidateWithContext<Spec> for Link {
         // Validate operationRef points to an Operation.
         // Internal refs (start with `#/`) MUST resolve. External refs are
         // gated on `IgnoreExternalReferences`, mirroring `RefOr` behavior.
+        // If the target PathItem itself is `$ref`-d to an external document,
+        // we likewise gate on `IgnoreExternalReferences`.
         if let Some(operation_ref) = &self.operation_ref {
             if operation_ref.is_empty() {
                 ctx.error(path.clone(), ".operationRef: must not be empty");
             } else if operation_ref.starts_with("#/") {
-                if let Err(msg) = resolve_internal_operation_ref(ctx.spec, operation_ref) {
-                    ctx.error(path.clone(), format_args!(".operationRef: {msg}"));
+                match resolve_internal_operation_ref(ctx.spec, operation_ref) {
+                    OperationRefResolution::Ok => {}
+                    OperationRefResolution::Err(msg) => {
+                        ctx.error(path.clone(), format_args!(".operationRef: {msg}"));
+                    }
+                    OperationRefResolution::ExternalPathItemRef(target)
+                        if !ctx.is_option(Options::IgnoreExternalReferences) =>
+                    {
+                        ctx.error(
+                            path.clone(),
+                            format_args!(
+                                ".operationRef: target PathItem is a `$ref` to external document `{target}`, which is not supported"
+                            ),
+                        );
+                    }
+                    OperationRefResolution::ExternalPathItemRef(_) => {}
                 }
             } else if !ctx.is_option(Options::IgnoreExternalReferences) {
                 ctx.error(
@@ -396,6 +460,147 @@ mod tests {
         assert!(
             ctx.errors.iter().all(|e| !e.contains("external reference")),
             "with option, no external error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_follows_internal_path_item_ref() {
+        // `/pets` is a PathItem `$ref` pointing at `/canonical-pets`, which
+        // declares `get`. The Link's operationRef `#/paths/~1pets/get` must
+        // resolve via the indirection.
+        use crate::v3_0::operation::Operation;
+        use crate::v3_0::path_item::{PathItem, Paths};
+        use crate::v3_0::reference::RefOr;
+        use crate::v3_0::response::{Response, Responses};
+
+        let op = Operation {
+            responses: Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op);
+        let canonical_item = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let alias_item = PathItem {
+            reference: Some("#/paths/~1canonical-pets".into()),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("/canonical-pets".to_owned(), canonical_item);
+        paths.paths.insert("/pets".to_owned(), alias_item);
+        let spec = Spec {
+            paths,
+            ..Default::default()
+        };
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "ref-of-ref should resolve: {:?}",
+            ctx.errors
+        );
+
+        // Method that doesn't exist on the canonical target still fails,
+        // proving we resolved through the indirection (rather than just
+        // skipping the check).
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/post".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("method `post`")),
+            "expected unknown method on resolved target: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_target_missing() {
+        // `/pets` is a `$ref` to `/missing`, which doesn't exist.
+        use crate::v3_0::path_item::{PathItem, Paths};
+        let alias_item = PathItem {
+            reference: Some("#/paths/~1missing".into()),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("/pets".to_owned(), alias_item);
+        let spec = Spec {
+            paths,
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("$ref") && e.contains("not declared")),
+            "expected dangling-target error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_external_path_item_ref() {
+        // `/pets` is a `$ref` to a path in another document. Without
+        // IgnoreExternalReferences, we error; with the option set, we let
+        // it pass.
+        use crate::v3_0::path_item::{PathItem, Paths};
+        let alias_item = PathItem {
+            reference: Some("https://other.example/spec.yaml#/paths/~1pets".into()),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("/pets".to_owned(), alias_item);
+        let spec = Spec {
+            paths,
+            ..Default::default()
+        };
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("external document")),
+            "expected external-PathItem-ref error: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&spec, Options::IgnoreExternalReferences.only());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "with option, no .operationRef error: {:?}",
             ctx.errors
         );
     }
