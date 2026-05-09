@@ -756,8 +756,7 @@ impl ValidateWithContext<Spec> for Schema {
                 }
             }
             Schema::Not(s) => {
-                s.not
-                    .validate_with_context(ctx, format!("{path}.not"));
+                s.not.validate_with_context(ctx, format!("{path}.not"));
             }
         }
     }

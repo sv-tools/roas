@@ -985,8 +985,7 @@ impl ValidateWithContext<Spec> for Schema {
                 }
             }
             Schema::Not(s) => {
-                s.not
-                    .validate_with_context(ctx, format!("{path}.not"));
+                s.not.validate_with_context(ctx, format!("{path}.not"));
             }
         }
     }
@@ -1101,8 +1100,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match unevaluated_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema
-                        .validate_with_context(ctx, format!("{path}.unevaluatedProperties"));
+                    schema.validate_with_context(ctx, format!("{path}.unevaluatedProperties"));
                 }
             }
         }
@@ -1499,7 +1497,9 @@ mod tests {
             title: Some("foo".to_string()),
             properties: Some(BTreeMap::from_iter(vec![(
                 "bar".into(),
-                RefOr::new_item(Schema::from(SingleSchema::Integer(IntegerSchema::default()))),
+                RefOr::new_item(Schema::from(
+                    SingleSchema::Integer(IntegerSchema::default()),
+                )),
             )])),
             default: Some(BTreeMap::from_iter(vec![(
                 "bar".into(),

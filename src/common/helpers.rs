@@ -1,9 +1,37 @@
 use enumset::EnumSet;
+use lazy_regex::regex;
 use regex::Regex;
 use std::collections::HashSet;
 use std::fmt;
+use thiserror::Error;
 
 use crate::validation::{Error, Options};
+
+/// Allowed character set for OpenAPI component / definition map keys.
+/// Mirrors the pattern enforced by `v3_0::Components` / `v3_1::Components`
+/// validators. Used by `Spec::define_*` helpers to surface invalid keys
+/// at insertion time rather than during a later `validate()` pass.
+pub const COMPONENT_NAME_PATTERN: &str = r"^[a-zA-Z0-9.\-_]+$";
+
+/// Returned by `Spec::define_*` helpers when a component name does not
+/// match [`COMPONENT_NAME_PATTERN`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
+#[error("component name {name:?} must match pattern `{COMPONENT_NAME_PATTERN}`")]
+pub struct InvalidComponentName {
+    pub name: String,
+}
+
+/// Returns `Ok(())` if `name` matches [`COMPONENT_NAME_PATTERN`],
+/// otherwise an [`InvalidComponentName`] error.
+pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
+    if regex!(r"^[a-zA-Z0-9.\-_]+$").is_match(name) {
+        Ok(())
+    } else {
+        Err(InvalidComponentName {
+            name: name.to_owned(),
+        })
+    }
+}
 
 /// ValidateWithContext is a trait for validating an object with a context.
 /// It allows the object to be validated with additional context information,

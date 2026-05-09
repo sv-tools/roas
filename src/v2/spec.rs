@@ -1,7 +1,8 @@
 //! The root document object of the OpenAPI v2.0 specification.
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_not_visited, validate_optional_string_matches,
+    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
+    validate_not_visited, validate_optional_string_matches,
 };
 use crate::common::reference::{RefOr, ResolveReference};
 use crate::v2::external_documentation::ExternalDocumentation;
@@ -261,45 +262,54 @@ impl ResolveReference<Parameter> for Spec {
 impl Spec {
     /// Insert a schema under `#/definitions/{name}` and return a `$ref` pointing to it.
     /// Replaces any existing entry with the same name.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
     pub fn define_schema(
         &mut self,
         name: impl Into<String>,
         schema: impl Into<Schema>,
-    ) -> RefOr<Schema> {
+    ) -> Result<RefOr<Schema>, InvalidComponentName> {
         let name = name.into();
+        check_component_name(&name)?;
         let reference = format!("#/definitions/{name}");
         self.definitions
             .get_or_insert_with(Default::default)
             .insert(name, schema.into());
-        RefOr::new_ref(reference)
+        Ok(RefOr::new_ref(reference))
     }
 
     /// Insert a parameter under `#/parameters/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
     pub fn define_parameter(
         &mut self,
         name: impl Into<String>,
         parameter: Parameter,
-    ) -> RefOr<Parameter> {
+    ) -> Result<RefOr<Parameter>, InvalidComponentName> {
         let name = name.into();
+        check_component_name(&name)?;
         let reference = format!("#/parameters/{name}");
         self.parameters
             .get_or_insert_with(Default::default)
             .insert(name, parameter);
-        RefOr::new_ref(reference)
+        Ok(RefOr::new_ref(reference))
     }
 
     /// Insert a response under `#/responses/{name}` and return a `$ref` pointing to it.
+    ///
+    /// Returns an error if `name` does not match `^[a-zA-Z0-9.\-_]+$`.
     pub fn define_response(
         &mut self,
         name: impl Into<String>,
         response: Response,
-    ) -> RefOr<Response> {
+    ) -> Result<RefOr<Response>, InvalidComponentName> {
         let name = name.into();
+        check_component_name(&name)?;
         let reference = format!("#/responses/{name}");
         self.responses
             .get_or_insert_with(Default::default)
             .insert(name, response);
-        RefOr::new_ref(reference)
+        Ok(RefOr::new_ref(reference))
     }
 }
 
