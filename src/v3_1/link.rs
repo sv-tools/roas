@@ -25,29 +25,41 @@ enum OperationRefResolution {
     ExternalPathItemRef(String),
 }
 
-/// Resolve an internal `#/paths/...` operationRef against `Spec.paths`.
+/// Resolve an internal operationRef against `Spec.paths` or
+/// `Spec.components.pathItems`. Per OAS 3.1, an operationRef is a URI
+/// Reference that "MAY point to any Operation Object in the OpenAPI
+/// definition" — including Operations inside reusable Path Items in
+/// `#/components/pathItems/<name>/<method>`.
+///
 /// Follows internal PathItem `$ref` chains (with cycle detection) so a
-/// `Link.operationRef` like `#/paths/~1pets/get` still validates when
-/// `/pets` is `{ "$ref": "#/paths/~1canonical-pets" }`.
+/// referencing PathItem with `{"$ref": "#/paths/~1canonical-pets"}` still
+/// resolves correctly.
 fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefResolution {
-    let after = match reference.strip_prefix("#/paths/") {
-        Some(rest) => rest,
-        None => {
-            return OperationRefResolution::Err(format!(
-                "must start with `#/paths/`, found `{reference}`"
-            ));
-        }
+    // Determine which container the ref points at.
+    enum Container {
+        Paths,
+        ComponentPathItems,
+    }
+    let (container, after) = if let Some(rest) = reference.strip_prefix("#/paths/") {
+        (Container::Paths, rest)
+    } else if let Some(rest) = reference.strip_prefix("#/components/pathItems/") {
+        (Container::ComponentPathItems, rest)
+    } else {
+        return OperationRefResolution::Err(format!(
+            "must start with `#/paths/` or `#/components/pathItems/`, found `{reference}`"
+        ));
     };
+
     // Per RFC 6901 the path is a single JSON Pointer reference token: `/`
-    // inside the path MUST be escaped as `~1`. So between `#/paths/` and the
-    // method there must be exactly one `/` separator. Refs like
+    // inside the path MUST be escaped as `~1`. So between the prefix and
+    // the method there must be exactly one `/` separator. Refs like
     // `#/paths//pets/get` (unescaped slash) are malformed and rejected.
     let slash_count = after.bytes().filter(|b| *b == b'/').count();
     let (path_token, method) = match (slash_count, after.split_once('/')) {
         (1, Some((p, m))) => (p, m),
         (0, _) => {
             return OperationRefResolution::Err(format!(
-                "must point to `#/paths/<encoded path>/<method>`, found `{reference}`"
+                "must point to `<container>/<encoded path>/<method>`, found `{reference}`"
             ));
         }
         _ => {
@@ -57,48 +69,25 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         }
     };
     let path = unescape_pointer_token(path_token);
-    let Some(paths) = spec.paths.as_ref() else {
-        return OperationRefResolution::Err(format!(
-            "spec has no `paths` to resolve `{reference}` against"
-        ));
-    };
-    let Some(item_or) = paths.paths.get(&path) else {
-        return OperationRefResolution::Err(format!("path `{path}` not declared in `#/paths`"));
-    };
-    // The map value is `RefOr<PathItem>`. If it's a Ref we treat it as
-    // PathItem-level redirection; if it's an inline Item we may follow
-    // `PathItem.reference` chains as in v3.0.
-    use crate::common::reference::RefOr;
-    let mut seen = std::collections::BTreeSet::from([path.clone()]);
-    let item = match item_or {
-        RefOr::Item(item) => item,
-        RefOr::Ref(r) => {
-            if let Some(after_paths) = r.reference.strip_prefix("#/paths/") {
-                let target = unescape_pointer_token(after_paths);
-                if !seen.insert(target.clone()) {
-                    return OperationRefResolution::Err(format!(
-                        "path `{path}` has a cyclic `$ref` chain through `{}`",
-                        r.reference
-                    ));
-                }
-                match paths.paths.get(&target).and_then(|x| match x {
-                    RefOr::Item(it) => Some(it),
-                    RefOr::Ref(_) => None,
-                }) {
-                    Some(it) => it,
-                    None => {
-                        return OperationRefResolution::Err(format!(
-                            "path `{path}` is a `$ref` to `{}`, which is not declared in `#/paths` (or chains further)",
-                            r.reference
-                        ));
-                    }
-                }
-            } else {
-                return OperationRefResolution::ExternalPathItemRef(r.reference.clone());
-            }
+
+    let lookup = |key: &str| -> Option<&crate::v3_1::path_item::PathItem> {
+        match container {
+            Container::Paths => spec.paths.as_ref().and_then(|p| p.paths.get(key)),
+            Container::ComponentPathItems => spec
+                .components
+                .as_ref()
+                .and_then(|c| c.path_items.as_ref())
+                .and_then(|m| m.get(key)),
         }
     };
 
+    let Some(item) = lookup(&path) else {
+        return OperationRefResolution::Err(format!(
+            "path `{path}` not declared in the resolved container"
+        ));
+    };
+
+    let mut seen = std::collections::BTreeSet::from([path.clone()]);
     let (target_path, target_item) = match resolve_path_item_ref_chain(spec, &path, item, &mut seen)
     {
         Ok(t) => t,
@@ -134,43 +123,55 @@ fn resolve_path_item_ref_chain<'a>(
         )));
     }
 
-    let Some(after_paths) = ref_str.strip_prefix("#/paths/") else {
-        return Err(OperationRefResolution::ExternalPathItemRef(ref_str.clone()));
-    };
-
-    if after_paths.contains('/') {
-        return Err(OperationRefResolution::Err(format!(
-            "path `{path}` is a `$ref` to malformed JSON Pointer `{ref_str}`: the encoded path token must use `~1` for `/`"
-        )));
-    }
-
-    let target_path = unescape_pointer_token(after_paths);
-    if !seen.insert(target_path.clone()) {
-        return Err(OperationRefResolution::Err(format!(
-            "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
-        )));
-    }
-
-    use crate::common::reference::RefOr;
-    let Some(paths) = spec.paths.as_ref() else {
-        return Err(OperationRefResolution::Err(format!(
-            "path `{path}` has a `$ref` to `{ref_str}` but spec has no `paths`"
-        )));
-    };
-    let target_item = match paths.paths.get(&target_path) {
-        Some(RefOr::Item(it)) => it,
-        Some(RefOr::Ref(r)) => {
-            // Recursively follow Spec.paths-level RefOr<PathItem>.
+    // PathItem refs may target either container (paths or components.pathItems).
+    let (target_path, target_item) = if let Some(after_paths) = ref_str.strip_prefix("#/paths/") {
+        if after_paths.contains('/') {
             return Err(OperationRefResolution::Err(format!(
-                "path `{path}` chains to `{}`, which is itself a Reference at the Spec.paths slot — multi-level Reference not supported",
-                r.reference
+                "path `{path}` is a `$ref` to malformed JSON Pointer `{ref_str}`: the encoded path token must use `~1` for `/`"
             )));
         }
-        None => {
+        let tp = unescape_pointer_token(after_paths);
+        if !seen.insert(tp.clone()) {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
+            )));
+        }
+        let Some(paths) = spec.paths.as_ref() else {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` has a `$ref` to `{ref_str}` but spec has no `paths`"
+            )));
+        };
+        let Some(t) = paths.paths.get(&tp) else {
             return Err(OperationRefResolution::Err(format!(
                 "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/paths`"
             )));
+        };
+        (tp, t)
+    } else if let Some(after) = ref_str.strip_prefix("#/components/pathItems/") {
+        if after.contains('/') {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to malformed JSON Pointer `{ref_str}`"
+            )));
         }
+        let tp = unescape_pointer_token(after);
+        if !seen.insert(tp.clone()) {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
+            )));
+        }
+        let Some(t) = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.path_items.as_ref())
+            .and_then(|m| m.get(&tp))
+        else {
+            return Err(OperationRefResolution::Err(format!(
+                "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/components/pathItems`"
+            )));
+        };
+        (tp, t)
+    } else {
+        return Err(OperationRefResolution::ExternalPathItemRef(ref_str.clone()));
     };
 
     resolve_path_item_ref_chain(spec, &target_path, target_item, seen)
@@ -326,9 +327,7 @@ mod tests {
             ..Default::default()
         };
         let mut paths = Paths::default();
-        paths
-            .paths
-            .insert("/pets".to_owned(), RefOr::new_item(item));
+        paths.paths.insert("/pets".to_owned(), item);
         Spec {
             paths: Some(paths),
             ..Default::default()

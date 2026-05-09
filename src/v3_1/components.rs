@@ -59,7 +59,7 @@ pub struct Components {
 
     /// An object to hold reusable Path Item Objects.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub path_items: Option<BTreeMap<String, RefOr<PathItem>>>,
+    pub path_items: Option<BTreeMap<String, PathItem>>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -179,14 +179,7 @@ impl ValidateWithContext<Spec> for Components {
         }
 
         if let Some(objs) = &self.path_items {
-            for (name, r) in objs {
-                let item = match r.get_item(ctx.spec) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        ctx.error("#".to_owned(), format_args!(".paths[{name}]: `{e}`"));
-                        continue;
-                    }
-                };
+            for (name, item) in objs {
                 if let Some(operations) = &item.operations {
                     for (method, operation) in operations.iter() {
                         if let Some(operation_id) = &operation.operation_id
@@ -209,7 +202,7 @@ impl ValidateWithContext<Spec> for Components {
                     ctx.error(reference, "unused");
                 }
                 validate_string_matches(name, re, ctx, format!("{path}.pathItems[<name>]"));
-                r.validate_with_context(ctx, format!("{path}.pathItems[{name}]"));
+                item.validate_with_context(ctx, format!("{path}.pathItems[{name}]"));
             }
         }
 

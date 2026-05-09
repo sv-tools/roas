@@ -501,7 +501,7 @@ impl Spec {
             .get_or_insert_with(Default::default)
             .path_items
             .get_or_insert_with(Default::default)
-            .insert(name, RefOr::new_item(path_item));
+            .insert(name, path_item);
         Ok(RefOr::new_ref(reference))
     }
 }
@@ -569,9 +569,13 @@ impl ResolveReference<Callback> for Spec {
 
 impl ResolveReference<PathItem> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&PathItem> {
+        // `path_items` holds bare `PathItem` (not `RefOr<PathItem>`), so we
+        // can't use `resolve_in_map` here; do a direct prefix-stripped lookup.
+        let key = reference.strip_prefix("#/components/pathItems/")?;
         self.components
             .as_ref()
-            .and_then(|x| resolve_in_map(self, reference, "#/components/pathItems/", &x.path_items))
+            .and_then(|c| c.path_items.as_ref())
+            .and_then(|m| m.get(key))
     }
 }
 
@@ -622,14 +626,7 @@ impl Validate for Spec {
         // (3.1 added webhooks; both are reachable Operation containers).
         // Spec: operationId MUST be unique across the whole document.
         let collect_op_ids = |container: &Paths, section: &str, ctx: &mut Context<Spec>| {
-            for (name, r) in container.iter() {
-                let item = match r.get_item(ctx.spec) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        ctx.error("#".to_owned(), format_args!(".{section}[{name}]: `{e}`"));
-                        continue;
-                    }
-                };
+            for (name, item) in container.iter() {
                 if let Some(operations) = &item.operations {
                     for (method, operation) in operations.iter() {
                         if let Some(operation_id) = &operation.operation_id
@@ -657,8 +654,8 @@ impl Validate for Spec {
 
         // Top-level Spec.security: visit referenced schemes (so unused-detection
         // doesn't flag legitimately-required schemes) and run scope-by-scheme-type
-        // checks (oauth2 + openIdConnect may carry scopes; apiKey / http /
-        // mutualTLS must have empty arrays).
+        // checks. Per OAS 3.1, only `oauth2` scopes are resolved against the
+        // scheme's flows; the other types accept free-form role-name arrays.
         if let Some(sec) = &self.security {
             validate_security_requirements(&mut ctx, "#.security", sec);
         }
@@ -668,15 +665,13 @@ impl Validate for Spec {
             // `/pets/{name}` collapse to the same canonical shape.
             validate_path_template_uniqueness(&mut ctx, "#.paths", &paths.paths);
 
-            for (name, r) in paths.iter() {
+            for (name, item) in paths.iter() {
                 let path = format!("#.paths[{name}]");
                 if !name.starts_with('/') {
                     ctx.error(path.clone(), "must start with `/`");
                 }
-                r.validate_with_context(&mut ctx, path.clone());
-                if let Ok(item) = r.get_item(ctx.spec) {
-                    validate_path_item(&mut ctx, name, &path, item);
-                }
+                item.validate_with_context(&mut ctx, path.clone());
+                validate_path_item(&mut ctx, name, &path, item);
             }
         }
 
@@ -835,17 +830,17 @@ mod tests {
         let mut paths = Paths::default();
         paths.paths.insert(
             "/pets/{id}".into(),
-            RefOr::new_item(PathItem {
+            PathItem {
                 operations: Some(ops_a),
                 ..Default::default()
-            }),
+            },
         );
         paths.paths.insert(
             "/pets/{name}".into(),
-            RefOr::new_item(PathItem {
+            PathItem {
                 operations: Some(ops_b),
                 ..Default::default()
-            }),
+            },
         );
         let spec = Spec {
             info: Info {
@@ -894,10 +889,10 @@ mod tests {
         let mut webhooks = Paths::default();
         webhooks.paths.insert(
             "newPet".to_owned(),
-            RefOr::new_item(PathItem {
+            PathItem {
                 operations: Some(ops),
                 ..Default::default()
-            }),
+            },
         );
         let spec = Spec {
             info: Info {
@@ -943,18 +938,18 @@ mod tests {
         let mut paths = Paths::default();
         paths.paths.insert(
             "/pets".to_owned(),
-            RefOr::new_item(PathItem {
+            PathItem {
                 operations: Some(path_ops),
                 ..Default::default()
-            }),
+            },
         );
         let mut webhooks = Paths::default();
         webhooks.paths.insert(
             "petCreated".to_owned(),
-            RefOr::new_item(PathItem {
+            PathItem {
                 operations: Some(webhook_ops),
                 ..Default::default()
-            }),
+            },
         );
 
         let spec = Spec {

@@ -157,10 +157,9 @@ impl ValidateWithContext<Spec> for Operation {
 
         // Operation-level `security`: validated here so it runs everywhere
         // an Operation is reached (including operations nested inside
-        // `Callback` and `Webhooks` path items). The shared helper enforces
-        // the scope-by-scheme-type rule (apiKey / http / mutualTLS must
-        // carry empty scopes; oauth2 across all four flows; openIdConnect
-        // accepts any).
+        // `Callback` and `Webhooks` path items). The shared helper resolves
+        // `oauth2` scopes against the scheme's flows and accepts free-form
+        // role-name arrays for the other scheme types per OAS 3.1.
         if let Some(sec) = &self.security {
             crate::v3_1::validation::validate_security_requirements(
                 ctx,

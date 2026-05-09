@@ -8,9 +8,12 @@
 //! * Path template `{var}` ↔ `in: path` parameter correspondence
 //! * Equivalent templated paths (e.g. `/pets/{id}` vs `/pets/{name}`) collisions
 //! * Tag-name uniqueness in `Spec.tags`
-//! * Security requirement validation (top-level + operation-level), including
-//!   the OAS 3.1 rule that scope arrays must be empty for non-oauth2 /
-//!   non-openIdConnect schemes (apiKey / http / mutualTLS).
+//! * Security requirement validation (top-level + operation-level). Per
+//!   OAS 3.1, only `oauth2` requirements need their scopes resolved
+//!   against the scheme's flow scopes; for `apiKey` / `http` /
+//!   `mutualTLS` / `openIdConnect` the array MAY contain free-form role
+//!   names that aren't otherwise defined in the document (relaxed from
+//!   3.0's "must be empty for non-oauth" rule).
 //! * Operation ID uniqueness across `Spec.paths` *and* `Spec.webhooks`
 //!   (3.1 added webhooks; previous code only walked paths).
 
@@ -221,9 +224,11 @@ pub fn validate_operation_parameters(
 /// Validate a list of security requirements. Marks each named scheme as
 /// visited (for unused-scheme detection) and enforces:
 /// * the named scheme exists in `components.securitySchemes`,
-/// * apiKey / http / mutualTLS schemes carry only an empty scope array,
-/// * oauth2 scopes (if any) are listed in some flow,
-/// * openIdConnect accepts any scope list.
+/// * `oauth2` scopes (if any) are listed in some flow,
+/// * `apiKey` / `http` / `mutualTLS` / `openIdConnect` accept any scope
+///   list — per OAS 3.1, the array MAY contain free-form role names that
+///   are not otherwise defined in the document. (3.0 required these
+///   arrays to be empty; 3.1 relaxed that.)
 pub fn validate_security_requirements(
     ctx: &mut Context<Spec>,
     path: &str,
@@ -523,9 +528,9 @@ mod tests {
 
     #[test]
     fn equivalent_templates_flagged() {
-        let mut paths: BTreeMap<String, RefOr<PathItem>> = BTreeMap::new();
-        paths.insert("/pets/{id}".into(), RefOr::new_item(PathItem::default()));
-        paths.insert("/pets/{name}".into(), RefOr::new_item(PathItem::default()));
+        let mut paths: BTreeMap<String, PathItem> = BTreeMap::new();
+        paths.insert("/pets/{id}".into(), PathItem::default());
+        paths.insert("/pets/{name}".into(), PathItem::default());
         let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
         let mut ctx = Context::new(spec, Options::new());
         validate_path_template_uniqueness(&mut ctx, "#.paths", &paths);

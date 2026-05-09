@@ -1,5 +1,4 @@
 use crate::common::helpers::{Context, ValidateWithContext};
-use crate::common::reference::RefOr;
 use crate::v3_1::path_item::PathItem;
 use crate::v3_1::spec::Spec;
 use serde::de::{Error, MapAccess, Visitor};
@@ -46,10 +45,12 @@ use std::fmt;
 /// ```
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Callback {
-    /// A `Path Item` (or a Reference to one) describing the callback request
-    /// and its expected responses. Per OAS 3.1, a callback's path-item slot
-    /// can be a Reference, so the value type is `RefOr<PathItem>`.
-    pub paths: BTreeMap<String, RefOr<PathItem>>,
+    /// A `Path Item` describing the callback request and its expected
+    /// responses. The reference form is modelled as a `PathItem` whose
+    /// `reference` field is set — bare `PathItem` is used here so adjacent
+    /// fields (`summary`, `description`) are preserved instead of dropped
+    /// by Reference Object semantics.
+    pub paths: BTreeMap<String, PathItem>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -166,13 +167,18 @@ mod tests {
 
     #[test]
     fn callback_path_value_can_be_ref() {
-        // OAS 3.1 allows the callback path-item slot to be a Reference.
+        // OAS 3.1 allows the callback path-item slot to be a Reference,
+        // but the Reference form is captured as `PathItem.reference` set
+        // (with sibling fields preserved) — there is no separate Ref form.
         let v = json!({
             "{$request.body#/callbackUrl}": {"$ref": "#/components/pathItems/Hook"}
         });
         let cb: Callback = serde_json::from_value(v).unwrap();
         let entry = cb.paths.get("{$request.body#/callbackUrl}").expect("entry");
-        assert!(matches!(entry, RefOr::Ref(_)));
+        assert_eq!(
+            entry.reference.as_deref(),
+            Some("#/components/pathItems/Hook"),
+        );
     }
 
     #[test]

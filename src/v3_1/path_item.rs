@@ -257,13 +257,16 @@ impl ValidateWithContext<Spec> for PathItem {
 /// holds the relative paths to the individual endpoints (or webhook
 /// expressions) and supports `^x-` Specification Extensions per OAS 3.1.2.
 ///
-/// In 3.1 the value is `RefOr<PathItem>` because both Paths and Webhooks
-/// allow a Reference Object pointing at a reusable Path Item (likely living
-/// in `components.pathItems`).
+/// Per OAS 3.1, the patterned values are `Path Item Object`s — and a Path
+/// Item Object's `$ref` is one of its own fixed fields. We therefore use
+/// **bare `PathItem`** (not `RefOr<PathItem>`) here; the reference case is
+/// modelled as a `PathItem` whose `reference` field is set, which preserves
+/// the spec-allowed adjacent fields (`summary`, `description`) instead of
+/// dropping them via Reference Object semantics.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Paths {
-    /// Map from path / webhook key to its `RefOr<PathItem>`.
-    pub paths: BTreeMap<String, RefOr<PathItem>>,
+    /// Map from path / webhook key to its `PathItem`.
+    pub paths: BTreeMap<String, PathItem>,
 
     /// `^x-` Specification Extensions on the Paths / Webhooks Object itself.
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
@@ -278,14 +281,14 @@ impl Paths {
         self.paths.len()
     }
 
-    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, RefOr<PathItem>> {
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, PathItem> {
         self.paths.iter()
     }
 }
 
 impl<S, K> From<S> for Paths
 where
-    S: IntoIterator<Item = (K, RefOr<PathItem>)>,
+    S: IntoIterator<Item = (K, PathItem)>,
     K: Into<String>,
 {
     fn from(iter: S) -> Self {
@@ -339,7 +342,7 @@ impl<'de> Deserialize<'de> for Paths {
             where
                 M: MapAccess<'de>,
             {
-                let mut paths: BTreeMap<String, RefOr<PathItem>> = BTreeMap::new();
+                let mut paths: BTreeMap<String, PathItem> = BTreeMap::new();
                 let mut ext: BTreeMap<String, serde_json::Value> = BTreeMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     if key.starts_with("x-") {
@@ -435,7 +438,7 @@ mod tests {
 
     #[test]
     fn paths_iter_and_from() {
-        let p: Paths = [("/a", RefOr::new_item(PathItem::default()))].into();
+        let p: Paths = [("/a", PathItem::default())].into();
         assert_eq!(p.len(), 1);
         assert_eq!(p.iter().count(), 1);
     }
