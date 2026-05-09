@@ -77,9 +77,9 @@ where
 {
     if let Some(ext) = ext {
         let mut map = serializer.serialize_map(Some(ext.len()))?;
-        for (k, v) in ext.clone() {
+        for (k, v) in ext {
             if k.starts_with("x-") {
-                map.serialize_entry(&k, &v)?;
+                map.serialize_entry(k, v)?;
             }
         }
         map.end()

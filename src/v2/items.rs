@@ -10,24 +10,54 @@ use std::collections::BTreeMap;
 #[serde(tag = "type")]
 pub enum Items {
     #[serde(rename = "string")]
-    String(StringItem),
+    String(Box<StringItem>),
 
     #[serde(rename = "integer")]
-    Integer(IntegerItem),
+    Integer(Box<IntegerItem>),
 
     #[serde(rename = "number")]
-    Number(NumberItem),
+    Number(Box<NumberItem>),
 
     #[serde(rename = "boolean")]
-    Boolean(BooleanItem),
+    Boolean(Box<BooleanItem>),
 
     #[serde(rename = "array")]
-    Array(ArrayItem),
+    Array(Box<ArrayItem>),
 }
 
 impl Default for Items {
     fn default() -> Self {
-        Items::String(StringItem::default())
+        Items::String(Box::default())
+    }
+}
+
+impl From<StringItem> for Items {
+    fn from(i: StringItem) -> Self {
+        Items::String(Box::new(i))
+    }
+}
+
+impl From<IntegerItem> for Items {
+    fn from(i: IntegerItem) -> Self {
+        Items::Integer(Box::new(i))
+    }
+}
+
+impl From<NumberItem> for Items {
+    fn from(i: NumberItem) -> Self {
+        Items::Number(Box::new(i))
+    }
+}
+
+impl From<BooleanItem> for Items {
+    fn from(i: BooleanItem) -> Self {
+        Items::Boolean(Box::new(i))
+    }
+}
+
+impl From<ArrayItem> for Items {
+    fn from(i: ArrayItem) -> Self {
+        Items::Array(Box::new(i))
     }
 }
 
@@ -189,7 +219,7 @@ pub struct BooleanItem {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ArrayItem {
     /// **Required** Describes the type of items in the array.
-    pub items: Box<Items>,
+    pub items: Items,
 
     /// Declares the values of the item that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,7 +311,7 @@ mod tests {
                 "x-internal-id": 123,
             }))
             .unwrap(),
-            Items::String(StringItem {
+            Items::String(Box::new(StringItem {
                 format: Some(StringFormat::Byte),
                 default: Some(String::from("default")),
                 enum_values: Some(vec![String::from("enum1"), String::from("enum2")]),
@@ -293,7 +323,7 @@ mod tests {
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }),
+            })),
             "deserialize",
         );
     }
@@ -301,7 +331,7 @@ mod tests {
     #[test]
     fn test_string_items_serialize() {
         assert_eq!(
-            serde_json::to_value(Items::String(StringItem {
+            serde_json::to_value(Items::String(Box::new(StringItem {
                 format: Some(StringFormat::Byte),
                 default: Some(String::from("default")),
                 enum_values: Some(vec![String::from("enum1"), String::from("enum2")]),
@@ -313,7 +343,7 @@ mod tests {
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "string",
@@ -345,7 +375,7 @@ mod tests {
                 "x-internal-id": 123,
             }))
             .unwrap(),
-            Items::Integer(IntegerItem {
+            Items::Integer(Box::new(IntegerItem {
                 format: Some(IntegerFormat::Int64),
                 default: Some(42),
                 enum_values: Some(vec![42, 105]),
@@ -359,7 +389,7 @@ mod tests {
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }),
+            })),
             "deserialize",
         );
     }
@@ -367,7 +397,7 @@ mod tests {
     #[test]
     fn test_integer_items_serialize() {
         assert_eq!(
-            serde_json::to_value(Items::Integer(IntegerItem {
+            serde_json::to_value(Items::Integer(Box::new(IntegerItem {
                 format: Some(IntegerFormat::Int64),
                 default: Some(42),
                 enum_values: Some(vec![42, 105]),
@@ -381,7 +411,7 @@ mod tests {
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "integer",
@@ -415,7 +445,7 @@ mod tests {
                 "x-internal-id": 123,
             }))
             .unwrap(),
-            Items::Number(NumberItem {
+            Items::Number(Box::new(NumberItem {
                 format: Some(NumberFormat::Double),
                 default: Some(42.0),
                 enum_values: Some(vec![42.0, 105.0]),
@@ -429,7 +459,7 @@ mod tests {
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }),
+            })),
             "deserialize",
         );
     }
@@ -437,7 +467,7 @@ mod tests {
     #[test]
     fn test_number_items_serialize() {
         assert_eq!(
-            serde_json::to_value(Items::Number(NumberItem {
+            serde_json::to_value(Items::Number(Box::new(NumberItem {
                 format: Some(NumberFormat::Double),
                 default: Some(42.0),
                 enum_values: Some(vec![42.0, 105.0]),
@@ -451,7 +481,7 @@ mod tests {
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "number",
@@ -478,14 +508,14 @@ mod tests {
                 "x-internal-id": 123,
             }))
             .unwrap(),
-            Items::Boolean(BooleanItem {
+            Items::Boolean(Box::new(BooleanItem {
                 default: Some(false),
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }),
+            })),
             "deserialize",
         );
     }
@@ -493,14 +523,14 @@ mod tests {
     #[test]
     fn test_boolean_items_serialize() {
         assert_eq!(
-            serde_json::to_value(Items::Boolean(BooleanItem {
+            serde_json::to_value(Items::Boolean(Box::new(BooleanItem {
                 default: Some(true),
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "boolean",
@@ -528,8 +558,8 @@ mod tests {
                 "x-internal-id": 123,
             }))
             .unwrap(),
-            Items::Array(ArrayItem {
-                items: Box::new(Items::Number(NumberItem {
+            Items::Array(Box::new(ArrayItem {
+                items: Items::Number(Box::new(NumberItem {
                     format: Some(NumberFormat::Double),
                     ..Default::default()
                 })),
@@ -543,7 +573,7 @@ mod tests {
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }),
+            })),
             "deserialize",
         );
     }
@@ -551,8 +581,8 @@ mod tests {
     #[test]
     fn test_array_items_serialize() {
         assert_eq!(
-            serde_json::to_value(Items::Array(ArrayItem {
-                items: Box::new(Items::Number(NumberItem {
+            serde_json::to_value(Items::Array(Box::new(ArrayItem {
+                items: Items::Number(Box::new(NumberItem {
                     format: Some(NumberFormat::Double),
                     ..Default::default()
                 })),
@@ -566,7 +596,7 @@ mod tests {
                     map.insert(String::from("x-internal-id"), 123.into());
                     map
                 }),
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "type": "array",

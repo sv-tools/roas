@@ -13,7 +13,7 @@ use crate::v3_0::schema::Schema;
 use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
-use regex::Regex;
+use lazy_regex::regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -68,7 +68,7 @@ pub struct Components {
 
 impl ValidateWithContext<Spec> for Components {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        let re = Regex::new(r"^[a-zA-Z0-9.\-_]+$").unwrap();
+        let re = regex!(r"^[a-zA-Z0-9.\-_]+$");
 
         if let Some(objs) = &self.schemas {
             for (name, obj) in objs {
@@ -76,7 +76,7 @@ impl ValidateWithContext<Spec> for Components {
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedSchemas) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.schemas[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.schemas[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.schemas[{name}]"));
             }
         }
@@ -87,7 +87,7 @@ impl ValidateWithContext<Spec> for Components {
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedResponses) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.responses[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.responses[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.responses[{name}]"));
             }
         }
@@ -98,7 +98,7 @@ impl ValidateWithContext<Spec> for Components {
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedParameters) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.parameters[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.parameters[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.parameters[{name}]"));
             }
         }
@@ -109,7 +109,7 @@ impl ValidateWithContext<Spec> for Components {
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedExamples) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.examples[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.examples[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.examples[{name}]"));
             }
         }
@@ -121,7 +121,7 @@ impl ValidateWithContext<Spec> for Components {
                 {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.requestBodies[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.requestBodies[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.requestBodies[{name}]"));
             }
         }
@@ -132,7 +132,7 @@ impl ValidateWithContext<Spec> for Components {
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedHeaders) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.headers[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.headers[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.headers[{name}]"));
             }
         }
@@ -145,7 +145,7 @@ impl ValidateWithContext<Spec> for Components {
                 {
                     ctx.error(reference.clone(), "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.securitySchemes[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.securitySchemes[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.securitySchemes[{name}]"));
                 if let Ok(SecurityScheme::OAuth2(oauth2)) = obj.get_item(ctx.spec)
                     && let Some(flow) = &oauth2.flows.implicit
@@ -168,7 +168,7 @@ impl ValidateWithContext<Spec> for Components {
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedLinks) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.links[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.links[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.links[{name}]"));
             }
         }
@@ -179,7 +179,7 @@ impl ValidateWithContext<Spec> for Components {
                 if !ctx.is_visited(&reference) && !ctx.is_option(Options::IgnoreUnusedCallbacks) {
                     ctx.error(reference, "unused");
                 }
-                validate_string_matches(name, &re, ctx, format!("{path}.callbacks[<name>]"));
+                validate_string_matches(name, re, ctx, format!("{path}.callbacks[<name>]"));
                 obj.validate_with_context(ctx, format!("{path}.callbacks[{name}]"));
             }
         }

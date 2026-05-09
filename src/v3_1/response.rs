@@ -298,10 +298,10 @@ mod tests {
                         "application/json".to_owned(),
                         MediaType {
                             schema: Some(RefOr::new_item(Schema::Single(Box::new(
-                                SingleSchema::Object(Box::new(ObjectSchema {
+                                SingleSchema::Object(ObjectSchema {
                                     title: Some("foo".to_owned()),
                                     ..Default::default()
-                                })),
+                                }),
                             )))),
                             ..Default::default()
                         },
@@ -354,10 +354,10 @@ mod tests {
                         "application/json".to_owned(),
                         MediaType {
                             schema: Some(RefOr::new_item(Schema::Single(Box::new(
-                                SingleSchema::Object(Box::new(ObjectSchema {
+                                SingleSchema::Object(ObjectSchema {
                                     title: Some("foo".to_owned()),
                                     ..Default::default()
-                                })),
+                                }),
                             )))),
                             ..Default::default()
                         },
@@ -469,10 +469,10 @@ mod tests {
                             "application/json".to_owned(),
                             MediaType {
                                 schema: Some(RefOr::new_item(Schema::Single(Box::new(
-                                    SingleSchema::Object(Box::new(ObjectSchema {
+                                    SingleSchema::Object(ObjectSchema {
                                         title: Some("foo".to_owned()),
                                         ..Default::default()
-                                    })),
+                                    }),
                                 )))),
                                 ..Default::default()
                             },
@@ -543,10 +543,10 @@ mod tests {
                             "application/json".to_owned(),
                             MediaType {
                                 schema: Some(RefOr::new_item(Schema::Single(Box::new(
-                                    SingleSchema::Object(Box::new(ObjectSchema {
+                                    SingleSchema::Object(ObjectSchema {
                                         title: Some("foo".to_owned()),
                                         ..Default::default()
-                                    })),
+                                    }),
                                 )))),
                                 ..Default::default()
                             },
@@ -650,10 +650,10 @@ mod tests {
                     "application/json".to_owned(),
                     MediaType {
                         schema: Some(RefOr::new_item(Schema::Single(Box::new(
-                            SingleSchema::Object(Box::new(ObjectSchema {
+                            SingleSchema::Object(ObjectSchema {
                                 title: Some("foo".to_owned()),
                                 ..Default::default()
-                            })),
+                            }),
                         )))),
                         ..Default::default()
                     },

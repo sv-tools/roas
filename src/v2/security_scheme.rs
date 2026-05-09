@@ -55,7 +55,7 @@ impl Display for SecurityScheme {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             SecurityScheme::Basic(_) => write!(f, "basic"),
-            SecurityScheme::ApiKey(_) => write!(f, "aoiKey"),
+            SecurityScheme::ApiKey(_) => write!(f, "apiKey"),
             SecurityScheme::OAuth2(_) => write!(f, "oauth2"),
         }
     }

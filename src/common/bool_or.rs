@@ -9,8 +9,8 @@ pub enum BoolOr<T> {
     Item(T),
 }
 
-impl<D> BoolOr<RefOr<Box<D>>> {
-    pub fn validate_with_context_boxed<T>(&self, ctx: &mut Context<T>, path: String)
+impl<D> BoolOr<RefOr<D>> {
+    pub fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
         D: ValidateWithContext<T>,
@@ -18,7 +18,7 @@ impl<D> BoolOr<RefOr<Box<D>>> {
         match self {
             BoolOr::Bool(_) => {}
             BoolOr::Item(d) => {
-                d.validate_with_context_boxed(ctx, path);
+                d.validate_with_context(ctx, path);
             }
         }
     }

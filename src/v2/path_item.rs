@@ -626,9 +626,9 @@ mod tests {
                         name: String::from("id"),
                         description: Some(String::from("ID of pet to use")),
                         required: Some(true),
-                        items: Items::String(StringItem {
+                        items: Items::String(Box::new(StringItem {
                             ..Default::default()
-                        }),
+                        })),
                         collection_format: Some(CollectionFormat::CSV),
                         ..Default::default()
                     })

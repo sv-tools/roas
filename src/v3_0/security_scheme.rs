@@ -72,7 +72,7 @@ impl Display for SecurityScheme {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             SecurityScheme::HTTP(_) => write!(f, "http"),
-            SecurityScheme::ApiKey(_) => write!(f, "aoiKey"),
+            SecurityScheme::ApiKey(_) => write!(f, "apiKey"),
             SecurityScheme::OAuth2(_) => write!(f, "oauth2"),
             SecurityScheme::OpenIdConnect(_) => write!(f, "openIdConnect"),
         }

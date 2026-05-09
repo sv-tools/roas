@@ -307,6 +307,161 @@ impl Display for Version {
     }
 }
 
+impl Spec {
+    /// Insert a schema under `#/components/schemas/{name}` and return a `$ref` pointing to it.
+    /// Replaces any existing entry with the same name.
+    pub fn define_schema(
+        &mut self,
+        name: impl Into<String>,
+        schema: impl Into<Schema>,
+    ) -> RefOr<Schema> {
+        let name = name.into();
+        let reference = format!("#/components/schemas/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .schemas
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(schema.into()));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert a response under `#/components/responses/{name}` and return a `$ref` pointing to it.
+    pub fn define_response(
+        &mut self,
+        name: impl Into<String>,
+        response: Response,
+    ) -> RefOr<Response> {
+        let name = name.into();
+        let reference = format!("#/components/responses/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .responses
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(response));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert a parameter under `#/components/parameters/{name}` and return a `$ref` pointing to it.
+    pub fn define_parameter(
+        &mut self,
+        name: impl Into<String>,
+        parameter: Parameter,
+    ) -> RefOr<Parameter> {
+        let name = name.into();
+        let reference = format!("#/components/parameters/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .parameters
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(parameter));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert an example under `#/components/examples/{name}` and return a `$ref` pointing to it.
+    pub fn define_example(
+        &mut self,
+        name: impl Into<String>,
+        example: Example,
+    ) -> RefOr<Example> {
+        let name = name.into();
+        let reference = format!("#/components/examples/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .examples
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(example));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert a request body under `#/components/requestBodies/{name}` and return a `$ref` pointing to it.
+    pub fn define_request_body(
+        &mut self,
+        name: impl Into<String>,
+        request_body: RequestBody,
+    ) -> RefOr<RequestBody> {
+        let name = name.into();
+        let reference = format!("#/components/requestBodies/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .request_bodies
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(request_body));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert a header under `#/components/headers/{name}` and return a `$ref` pointing to it.
+    pub fn define_header(&mut self, name: impl Into<String>, header: Header) -> RefOr<Header> {
+        let name = name.into();
+        let reference = format!("#/components/headers/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .headers
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(header));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert a security scheme under `#/components/securitySchemes/{name}` and return a `$ref` pointing to it.
+    pub fn define_security_scheme(
+        &mut self,
+        name: impl Into<String>,
+        scheme: SecurityScheme,
+    ) -> RefOr<SecurityScheme> {
+        let name = name.into();
+        let reference = format!("#/components/securitySchemes/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .security_schemes
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(scheme));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert a link under `#/components/links/{name}` and return a `$ref` pointing to it.
+    pub fn define_link(&mut self, name: impl Into<String>, link: Link) -> RefOr<Link> {
+        let name = name.into();
+        let reference = format!("#/components/links/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .links
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(link));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert a callback under `#/components/callbacks/{name}` and return a `$ref` pointing to it.
+    pub fn define_callback(
+        &mut self,
+        name: impl Into<String>,
+        callback: Callback,
+    ) -> RefOr<Callback> {
+        let name = name.into();
+        let reference = format!("#/components/callbacks/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .callbacks
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(callback));
+        RefOr::new_ref(reference)
+    }
+
+    /// Insert a path item under `#/components/pathItems/{name}` and return a `$ref` pointing to it.
+    pub fn define_path_item(
+        &mut self,
+        name: impl Into<String>,
+        path_item: PathItem,
+    ) -> RefOr<PathItem> {
+        let name = name.into();
+        let reference = format!("#/components/pathItems/{name}");
+        self.components
+            .get_or_insert_with(Default::default)
+            .path_items
+            .get_or_insert_with(Default::default)
+            .insert(name, RefOr::new_item(path_item));
+        RefOr::new_ref(reference)
+    }
+}
+
 impl ResolveReference<Response> for Spec {
     fn resolve_reference(&self, reference: &str) -> Option<&Response> {
         self.components

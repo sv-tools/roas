@@ -31,11 +31,83 @@ impl Default for Schema {
     }
 }
 
+impl From<SingleSchema> for Schema {
+    fn from(s: SingleSchema) -> Self {
+        Schema::Single(Box::new(s))
+    }
+}
+
+impl From<AllOfSchema> for Schema {
+    fn from(s: AllOfSchema) -> Self {
+        Schema::AllOf(Box::new(s))
+    }
+}
+
+impl From<AnyOfSchema> for Schema {
+    fn from(s: AnyOfSchema) -> Self {
+        Schema::AnyOf(Box::new(s))
+    }
+}
+
+impl From<OneOfSchema> for Schema {
+    fn from(s: OneOfSchema) -> Self {
+        Schema::OneOf(Box::new(s))
+    }
+}
+
+impl From<NotSchema> for Schema {
+    fn from(s: NotSchema) -> Self {
+        Schema::Not(Box::new(s))
+    }
+}
+
+impl From<StringSchema> for SingleSchema {
+    fn from(s: StringSchema) -> Self {
+        SingleSchema::String(s)
+    }
+}
+
+impl From<IntegerSchema> for SingleSchema {
+    fn from(s: IntegerSchema) -> Self {
+        SingleSchema::Integer(s)
+    }
+}
+
+impl From<NumberSchema> for SingleSchema {
+    fn from(s: NumberSchema) -> Self {
+        SingleSchema::Number(s)
+    }
+}
+
+impl From<BooleanSchema> for SingleSchema {
+    fn from(s: BooleanSchema) -> Self {
+        SingleSchema::Boolean(s)
+    }
+}
+
+impl From<ArraySchema> for SingleSchema {
+    fn from(s: ArraySchema) -> Self {
+        SingleSchema::Array(s)
+    }
+}
+
+impl From<NullSchema> for SingleSchema {
+    fn from(s: NullSchema) -> Self {
+        SingleSchema::Null(s)
+    }
+}
+
+impl From<ObjectSchema> for SingleSchema {
+    fn from(s: ObjectSchema) -> Self {
+        SingleSchema::Object(s)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct AllOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "allOf")]
-    pub all_of: Vec<RefOr<Box<Schema>>>,
+    pub all_of: Vec<RefOr<Schema>>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -57,7 +129,7 @@ pub struct AllOfSchema {
 pub struct AnyOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "anyOf")]
-    pub any_of: Vec<RefOr<Box<Schema>>>,
+    pub any_of: Vec<RefOr<Schema>>,
 
     /// Adds support for polymorphism.
     /// The discriminator is an object name that is used to differentiate between other schemas
@@ -79,7 +151,7 @@ pub struct AnyOfSchema {
 pub struct OneOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "oneOf")]
-    pub one_of: Vec<RefOr<Box<Schema>>>,
+    pub one_of: Vec<RefOr<Schema>>,
 
     /// Adds support for polymorphism.
     /// The discriminator is an object name that is used to differentiate between other schemas
@@ -99,9 +171,8 @@ pub struct OneOfSchema {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NotSchema {
-    /// **Required** The list of schemas that this schema is composed of.
-    #[serde(rename = "allOf")]
-    pub not: RefOr<Box<Schema>>,
+    /// **Required** The schema that this schema must not match.
+    pub not: RefOr<Schema>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -475,7 +546,7 @@ pub struct ArraySchema {
 
     /// **Required** Describes the type of items in the array.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<RefOr<Box<Schema>>>,
+    pub items: Option<RefOr<Schema>>,
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -546,7 +617,7 @@ pub struct ObjectSchema {
 
     /// Describes the properties in the object.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<BTreeMap<String, RefOr<Box<Schema>>>>,
+    pub properties: Option<BTreeMap<String, RefOr<Schema>>>,
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -565,7 +636,7 @@ pub struct ObjectSchema {
     /// Declares the properties whose names are not listed in the `properties`
     #[serde(rename = "additionalProperties")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_properties: Option<BoolOr<RefOr<Box<Schema>>>>,
+    pub additional_properties: Option<BoolOr<RefOr<Schema>>>,
 
     /// A list of required properties.
     /// If the object is defined at the root of the document,
@@ -662,7 +733,7 @@ impl ValidateWithContext<Spec> for Schema {
             Schema::Single(s) => s.validate_with_context(ctx, path),
             Schema::AllOf(s) => {
                 for (i, schema) in s.all_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.allOf[{i}]"));
+                    schema.validate_with_context(ctx, format!("{path}.allOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
@@ -670,7 +741,7 @@ impl ValidateWithContext<Spec> for Schema {
             }
             Schema::AnyOf(s) => {
                 for (i, schema) in s.any_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.anyOf[{i}]"));
+                    schema.validate_with_context(ctx, format!("{path}.anyOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
@@ -678,7 +749,7 @@ impl ValidateWithContext<Spec> for Schema {
             }
             Schema::OneOf(s) => {
                 for (i, schema) in s.one_of.iter().enumerate() {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.oneOf[{i}]"));
+                    schema.validate_with_context(ctx, format!("{path}.oneOf[{i}]"));
                 }
                 if let Some(discriminator) = &s.discriminator {
                     discriminator.validate_with_context(ctx, format!("{path}.discriminator"));
@@ -686,7 +757,7 @@ impl ValidateWithContext<Spec> for Schema {
             }
             Schema::Not(s) => {
                 s.not
-                    .validate_with_context_boxed(ctx, format!("{path}.not"));
+                    .validate_with_context(ctx, format!("{path}.not"));
             }
         }
     }
@@ -763,7 +834,7 @@ impl ValidateWithContext<Spec> for ArraySchema {
         }
 
         if let Some(items) = &self.items {
-            items.validate_with_context_boxed(ctx, format!("{path}.items"));
+            items.validate_with_context(ctx, format!("{path}.items"));
         }
     }
 }
@@ -779,7 +850,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
 
         if let Some(properties) = &self.properties {
             for (name, schema) in properties {
-                schema.validate_with_context_boxed(ctx, format!("{path}.properties.{name}"));
+                schema.validate_with_context(ctx, format!("{path}.properties.{name}"));
             }
         }
 
@@ -787,7 +858,7 @@ impl ValidateWithContext<Spec> for ObjectSchema {
             match additional_properties {
                 BoolOr::Bool(_) => {}
                 BoolOr::Item(schema) => {
-                    schema.validate_with_context_boxed(ctx, format!("{path}.additionalProperties"));
+                    schema.validate_with_context(ctx, format!("{path}.additionalProperties"));
                 }
             }
         }
@@ -858,12 +929,10 @@ mod tests {
                         let mut map = BTreeMap::new();
                         map.insert(
                             "bar".to_owned(),
-                            RefOr::new_item(Box::new(Schema::Single(Box::new(
-                                SingleSchema::String(StringSchema {
-                                    title: Some("foo bar".to_owned()),
-                                    ..Default::default()
-                                }),
-                            )))),
+                            RefOr::new_item(Schema::from(SingleSchema::from(StringSchema {
+                                title: Some("foo bar".to_owned()),
+                                ..Default::default()
+                            }))),
                         );
                         map
                     }),
@@ -909,7 +978,7 @@ mod tests {
             }
             match schema.all_of[1].clone() {
                 RefOr::Item(o) => {
-                    if let Schema::Single(o) = *o {
+                    if let Schema::Single(o) = o {
                         if let SingleSchema::Object(o) = *o {
                             assert_eq!(o.title, Some("foo".to_owned()));
                         } else {
@@ -929,18 +998,16 @@ mod tests {
     #[test]
     fn test_all_of_serialize() {
         assert_eq!(
-            serde_json::to_value(Schema::AllOf(Box::new(AllOfSchema {
+            serde_json::to_value(Schema::from(AllOfSchema {
                 all_of: vec![
                     RefOr::new_ref("#/definitions/bar".to_owned()),
-                    RefOr::new_item(Box::new(Schema::Single(Box::new(SingleSchema::Object(
-                        ObjectSchema {
-                            title: Some("foo".to_owned()),
-                            ..Default::default()
-                        }
-                    ))))),
+                    RefOr::new_item(Schema::from(SingleSchema::from(ObjectSchema {
+                        title: Some("foo".to_owned()),
+                        ..Default::default()
+                    }))),
                 ],
                 ..Default::default()
-            })))
+            }))
             .unwrap(),
             serde_json::json!({
                 "allOf": [
