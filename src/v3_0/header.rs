@@ -1,10 +1,10 @@
 //! Header Object
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
-use crate::common::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::media_type::MediaType;
 use crate::v3_0::parameter::InHeaderStyle;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::spec::Spec;
 use serde::{Deserialize, Serialize};
@@ -84,8 +84,12 @@ impl ValidateWithContext<Spec> for Header {
         if self.example.is_some() && self.examples.is_some() {
             ctx.error(path.clone(), "example and examples are mutually exclusive");
         }
-        if self.schema.is_some() && self.content.is_some() {
-            ctx.error(path.clone(), "schema and content are mutually exclusive");
+        // Spec: a Header MUST contain either `schema` or `content` (the same
+        // exactly-one rule as a Parameter).
+        match (self.schema.is_some(), self.content.is_some()) {
+            (true, true) => ctx.error(path.clone(), "schema and content are mutually exclusive"),
+            (false, false) => ctx.error(path.clone(), "must define either `schema` or `content`"),
+            _ => {}
         }
         if let Some(examples) = &self.examples {
             for (k, v) in examples {
@@ -93,6 +97,15 @@ impl ValidateWithContext<Spec> for Header {
             }
         }
         if let Some(content) = &self.content {
+            if content.len() != 1 {
+                ctx.error(
+                    path.clone(),
+                    format_args!(
+                        ".content: must contain exactly one media type entry, found {}",
+                        content.len()
+                    ),
+                );
+            }
             for (k, v) in content {
                 v.validate_with_context(ctx, format!("{path}.content[{k}]"));
             }
@@ -130,6 +143,84 @@ mod tests {
                 ..Default::default()
             },
             "deserialize",
+        );
+    }
+
+    #[test]
+    fn validate_example_examples_xor_and_content_size() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Header {
+            example: Some(serde_json::json!(1)),
+            examples: Some(BTreeMap::from([(
+                "a".into(),
+                RefOr::new_item(crate::v3_0::example::Example::default()),
+            )])),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let mut content = BTreeMap::new();
+        content.insert("application/json".to_owned(), MediaType::default());
+        content.insert("text/plain".to_owned(), MediaType::default());
+        Header {
+            content: Some(content),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must contain exactly one media type entry")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn header_must_define_schema_or_content() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Header::default().validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must define either `schema` or `content`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_schema_and_content_mutex() {
+        use crate::v3_0::schema::{ObjectSchema, Schema, SingleSchema};
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Header {
+            schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::Object(ObjectSchema::default()),
+            )))),
+            content: Some(BTreeMap::from([(
+                "application/json".to_owned(),
+                MediaType::default(),
+            )])),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("schema and content are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
         );
     }
 

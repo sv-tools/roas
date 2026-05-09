@@ -137,3 +137,106 @@ impl ValidateWithContext<Spec> for Callback {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::validation::Options;
+    use serde_json::json;
+
+    #[test]
+    fn round_trip_paths_and_extensions() {
+        let v = json!({
+            "{$request.body#/callbackUrl}": {
+                "post": {"responses": {"200": {"description": "ok"}}}
+            },
+            "x-internal": "yes"
+        });
+        let cb: Callback = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(cb.paths.len(), 1);
+        assert!(cb.extensions.is_some());
+        assert_eq!(serde_json::to_value(&cb).unwrap(), v);
+    }
+
+    #[test]
+    fn duplicate_path_key_errors() {
+        // Multiple identical keys in JSON are last-wins on parsing, so
+        // construct via repeated keys explicitly through a string parse.
+        let raw = r#"{"a": {}, "a": {}}"#;
+        let res: Result<Callback, _> = serde_json::from_str(raw);
+        assert!(
+            res.is_err(),
+            "expected duplicate-field error, got: {:?}",
+            res.ok()
+        );
+    }
+
+    #[test]
+    fn duplicate_extension_key_errors() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let res: Result<Callback, _> = serde_json::from_str(raw);
+        assert!(res.is_err(), "expected duplicate extension error");
+    }
+
+    #[test]
+    fn validate_walks_path_items() {
+        // PathItem with operation that has empty responses → triggers the
+        // "must declare at least one response" error in the new validator.
+        let cb: Callback = serde_json::from_value(json!({
+            "{$request.body#/cb}": {
+                "post": {"responses": {}}
+            }
+        }))
+        .unwrap();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        cb.validate_with_context(&mut ctx, "cb".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must declare at least one response")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn callback_nested_operation_security_is_validated() {
+        // An operation inside a Callback path item must still have its
+        // `security` requirements checked. `validate_path_item` is only
+        // called for `Spec.paths`, so callback-nested operations rely on
+        // `Operation::validate_with_context` to invoke
+        // `validate_security_requirements` directly.
+        let cb: Callback = serde_json::from_value(json!({
+            "{$request.body#/url}": {
+                "post": {
+                    "responses": {"200": {"description": "ok"}},
+                    "security": [{"missing-scheme": []}]
+                }
+            }
+        }))
+        .unwrap();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        cb.validate_with_context(&mut ctx, "cb".into());
+        // With no Components on the Spec, the validator surfaces a
+        // "no `components.securitySchemes`" error — proof the operation
+        // inside the callback ran security validation.
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("post.security") && e.contains("missing-scheme")),
+            "expected security validation inside callback: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn empty_callback_round_trips() {
+        let cb: Callback = serde_json::from_value(json!({})).unwrap();
+        assert!(cb.paths.is_empty());
+        assert!(cb.extensions.is_none());
+        assert_eq!(serde_json::to_value(&cb).unwrap(), json!({}));
+    }
+}

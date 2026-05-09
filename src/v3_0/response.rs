@@ -1,17 +1,28 @@
 //! Response Object
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
-use crate::common::reference::RefOr;
 use crate::v3_0::header::Header;
 use crate::v3_0::link::Link;
 use crate::v3_0::media_type::MediaType;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
+use lazy_regex::regex;
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
+
+/// True if `key` is a 3-digit HTTP status code (100-599) or a wildcard
+/// range token `1XX/2XX/3XX/4XX/5XX` (uppercase X). Per OAS 3.0.4 the
+/// `Responses` object's patterned keys are exactly this union.
+fn is_response_code_key(key: &str) -> bool {
+    if let Ok(n) = key.parse::<u16>() {
+        return (100..=599).contains(&n);
+    }
+    regex!(r"^[1-5]XX$").is_match(key)
+}
 
 /// A container for the expected responses of an operation.
 /// The container maps a HTTP response code to the expected response.
@@ -49,18 +60,10 @@ pub struct Responses {
     /// section defines.
     pub default: Option<RefOr<Response>>,
 
-    /// Any HTTP status code can be used as the property name,
-    /// but only one property per code,
-    /// to describe the expected response for that HTTP status code.
-    /// A Reference Object can link to a response that is defined in the OpenAPI Object’s
-    /// components/responses section.
-    /// This field MUST be enclosed in quotation marks (for example, “200”) for compatibility
-    /// between JSON and YAML.
-    /// To define a range of response codes, this field MAY contain the uppercase wildcard character `X`.
-    /// For example, `2XX` represents all response codes between `[200-299]`.
-    /// Only the following range definitions are allowed: `1XX`, `2XX`, `3XX`, `4XX`, and `5XX`.
-    /// If a response is defined using an explicit code,
-    /// the explicit code definition takes precedence over the range definition for that code.
+    /// Either a 3-digit HTTP status code (`"200"`) or one of the wildcard
+    /// range tokens `1XX/2XX/3XX/4XX/5XX` (uppercase X). The string form is
+    /// required because YAML would otherwise convert `200` to an integer.
+    /// Explicit codes take precedence over the range that contains them.
     pub responses: Option<BTreeMap<String, RefOr<Response>>>,
 
     /// Allows extensions to the Swagger Schema.
@@ -73,7 +76,6 @@ pub struct Responses {
 pub struct Response {
     /// **Required** A short description of the response.
     /// [CommonMark](https://spec.commonmark.org) syntax MAY be used for rich text representation.
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
 
     /// Maps a header name to its definition.
@@ -89,15 +91,21 @@ pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<BTreeMap<String, MediaType>>,
 
-    /// Maps a header name to its definition.
-    /// [RFC7230](https://www.rfc-editor.org/rfc/rfc7230) states header names are case insensitive.
-    /// If a response header is defined with the name `"Content-Type"`, it SHALL be ignored.
+    /// A map of operations links that can be followed from the response.
+    /// The key is a short name for the link (constrained to the same naming
+    /// pattern as Component map keys: `^[a-zA-Z0-9.\-_]+$`); the value is a
+    /// `Link` Object or a `Reference` to one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<BTreeMap<String, RefOr<Link>>>,
 
-    /// A map of operations links that can be followed from the response.
-    /// The key of the map is a short name for the link,
-    /// following the naming constraints of the names for Component Objects.
+    /// ReDoc/Redocly extension with a short response summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-summary")]
+    pub x_summary: Option<String>,
+
+    /// This object MAY be extended with Specification Extensions.
+    /// The field name MUST begin with `x-`, for example, `x-internal-id`.
+    /// The value can be null, a primitive, an array or an object.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,7 +146,16 @@ impl<'de> Deserialize<'de> for Responses {
     where
         D: Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["default", "x-...", "1xx", "2xx", "3xx", "4xx", "5xx"];
+        const FIELDS: &[&str] = &[
+            "default",
+            "x-...",
+            "<3-digit status code>",
+            "1XX",
+            "2XX",
+            "3XX",
+            "4XX",
+            "5XX",
+        ];
 
         struct ResponsesVisitor;
 
@@ -167,18 +184,13 @@ impl<'de> Deserialize<'de> for Responses {
                             return Err(Error::custom(format_args!("duplicate field `{key}`")));
                         }
                         extensions.insert(key, map.next_value()?);
-                    } else {
-                        match key.parse::<u16>() {
-                            Ok(100..=599) => {
-                                if responses.contains_key(key.as_str()) {
-                                    return Err(Error::custom(format_args!(
-                                        "duplicate field `{key}`"
-                                    )));
-                                }
-                                responses.insert(key, map.next_value()?);
-                            }
-                            _ => return Err(Error::unknown_field(key.as_str(), FIELDS)),
+                    } else if is_response_code_key(key.as_str()) {
+                        if responses.contains_key(key.as_str()) {
+                            return Err(Error::custom(format_args!("duplicate field `{key}`")));
                         }
+                        responses.insert(key, map.next_value()?);
+                    } else {
+                        return Err(Error::unknown_field(key.as_str(), FIELDS));
                     }
                 }
                 if !responses.is_empty() {
@@ -220,21 +232,33 @@ impl ValidateWithContext<Spec> for Response {
 
 impl ValidateWithContext<Spec> for Responses {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Spec: the Responses Object MUST contain at least one entry. The
+        // 3.0.4 prose says "at least one response code", but tooling and the
+        // spec's own examples treat a `default`-only Responses object as
+        // valid (the OAS Linter accepts it; ReDoc renders it). We follow
+        // that convention: any of `default` / one keyed code / one wildcard
+        // satisfies the requirement.
+        let has_any =
+            self.default.is_some() || self.responses.as_ref().is_some_and(|m| !m.is_empty());
+        if !has_any {
+            ctx.error(
+                path.clone(),
+                "must declare at least one response (a status code, a wildcard like `2XX`, or `default`)",
+            );
+        }
+
         if let Some(response) = &self.default {
             response.validate_with_context(ctx, format!("{path}.default"));
         }
         if let Some(responses) = &self.responses {
             for (name, response) in responses {
-                match name.parse::<u16>() {
-                    Ok(100..=599) => {}
-                    _ => {
-                        ctx.error(
-                            path.clone(),
-                            format_args!(
-                                "name must be an integer within [100..599] range, found `{name}`"
-                            ),
-                        );
-                    }
+                if !is_response_code_key(name) {
+                    ctx.error(
+                        path.clone(),
+                        format_args!(
+                            "key must be a 3-digit status code (100-599) or one of `1XX/2XX/3XX/4XX/5XX`, found `{name}`"
+                        ),
+                    );
                 }
                 response.validate_with_context(ctx, format!("{path}.{name}"));
             }
@@ -325,6 +349,7 @@ mod tests {
                     map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                     map
                 }),
+                x_summary: None,
             },
             "response deserialization",
         );
@@ -381,6 +406,7 @@ mod tests {
                     map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                     map
                 }),
+                x_summary: None,
             })
             .unwrap(),
             serde_json::json!({
@@ -496,6 +522,7 @@ mod tests {
                         map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                         map
                     }),
+                    x_summary: None,
                 })),
                 responses: Some({
                     let mut map = BTreeMap::new();
@@ -570,6 +597,7 @@ mod tests {
                         map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                         map
                     }),
+                    x_summary: None,
                 })),
                 responses: Some({
                     let mut map = BTreeMap::new();
@@ -639,6 +667,9 @@ mod tests {
                         description: Some("A short description of the header.".to_owned()),
                         required: Some(true),
                         style: Some(InHeaderStyle::Simple),
+                        schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                            SingleSchema::Object(ObjectSchema::default()),
+                        )))),
                         ..Default::default()
                     }),
                 );
@@ -665,7 +696,7 @@ mod tests {
                 map.insert(
                     "next".to_owned(),
                     RefOr::new_item(Link {
-                        operation_ref: Some("getNextPage".to_owned()),
+                        operation_id: Some("getNextPage".to_owned()),
                         description: Some("Get the next page of results".to_owned()),
                         ..Default::default()
                     }),
@@ -677,9 +708,18 @@ mod tests {
                 map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                 map
             }),
+            x_summary: None,
         }
         .validate_with_context(&mut ctx, "response".to_owned());
-        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+        // The unknown operationId surfaces a single Link error; for this
+        // test we just confirm Response itself does not emit anything else.
+        assert!(
+            ctx.errors
+                .iter()
+                .all(|e| e.contains("missing operation with id")),
+            "unexpected errors: {:?}",
+            ctx.errors
+        );
 
         let mut ctx = Context::new(&spec, Options::new());
         Response {
@@ -704,5 +744,22 @@ mod tests {
         );
         Response::default().validate_with_context(&mut ctx, "response".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn x_summary_round_trip() {
+        let response: Response = serde_json::from_value(serde_json::json!({
+            "description": "Created",
+            "x-summary": "Created"
+        }))
+        .unwrap();
+        assert_eq!(response.x_summary, Some("Created".to_owned()));
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "description": "Created",
+                "x-summary": "Created"
+            })
+        );
     }
 }

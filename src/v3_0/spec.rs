@@ -2,9 +2,9 @@
 
 use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
-    validate_not_visited,
+    validate_not_visited, validate_required_string,
 };
-use crate::common::reference::{RefOr, ResolveReference, resolve_in_map};
+use crate::common::reference::ResolveReference;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
 use crate::v3_0::example::Example;
@@ -13,13 +13,18 @@ use crate::v3_0::header::Header;
 use crate::v3_0::info::Info;
 use crate::v3_0::link::Link;
 use crate::v3_0::parameter::Parameter;
-use crate::v3_0::path_item::PathItem;
+use crate::v3_0::path_item::Paths;
+use crate::v3_0::reference::{RefOr, resolve_in_map};
 use crate::v3_0::request_body::RequestBody;
 use crate::v3_0::response::Response;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::server::Server;
 use crate::v3_0::tag::Tag;
+use crate::v3_0::validation::{
+    validate_path_item, validate_path_template_uniqueness, validate_security_requirements,
+    validate_tag_uniqueness,
+};
 use crate::validation::{Error, Options, Validate};
 use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
@@ -181,8 +186,6 @@ pub struct Spec {
     /// as they are identical.
     /// In case of ambiguous matching, it’s up to the tooling to decide which one to use.
     ///
-    /// Support of extensions is dropped for simplicity.
-    ///
     /// Specification example:
     ///
     /// ```yaml
@@ -199,7 +202,7 @@ pub struct Spec {
     ///               items:
     ///                 $ref: '#/components/schemas/pet'
     /// ```
-    pub paths: BTreeMap<String, PathItem>,
+    pub paths: Paths,
 
     /// An element to hold various schemas for the specification.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -236,9 +239,30 @@ pub struct Spec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_docs: Option<ExternalDocumentation>,
 
+    /// ReDoc/Redocly extension that groups tags in the side menu.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-tagGroups")]
+    pub x_tag_groups: Option<Vec<TagGroup>>,
+
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc/Redocly `x-tagGroups` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct TagGroup {
+    /// **Required** The display name for the tag group.
+    pub name: String,
+
+    /// **Required** The tags included in the group.
+    pub tags: Vec<String>,
+
+    /// Allows extensions on the tag group extension object.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -580,12 +604,24 @@ impl Validate for Spec {
             }
         }
 
+        // Top-level security: visit referenced schemes (so unused-detection
+        // doesn't fault on schemes the API actually requires) and run the
+        // scope-by-scheme-type checks.
+        if let Some(sec) = &self.security {
+            validate_security_requirements(&mut ctx, "#.security", sec);
+        }
+
+        // Equivalent-template detection: `/pets/{id}` and `/pets/{name}`
+        // collapse to the same canonical shape.
+        validate_path_template_uniqueness(&mut ctx, &self.paths.paths);
+
         for (name, item) in self.paths.iter() {
             let path = format!("#.paths[{name}]");
             if !name.starts_with('/') {
                 ctx.error(path.clone(), "must start with `/`");
             }
-            item.validate_with_context(&mut ctx, path);
+            item.validate_with_context(&mut ctx, path.clone());
+            validate_path_item(&mut ctx, name, &path, item);
         }
 
         if let Some(components) = &self.components {
@@ -596,7 +632,14 @@ impl Validate for Spec {
             docs.validate_with_context(&mut ctx, "#.externalDocs".to_owned())
         }
 
+        if let Some(tag_groups) = &self.x_tag_groups {
+            for (i, tag_group) in tag_groups.iter().enumerate() {
+                tag_group.validate_with_context(&mut ctx, format!("#.x-tagGroups[{i}]"));
+            }
+        }
+
         if let Some(tags) = &self.tags {
+            validate_tag_uniqueness(&mut ctx, tags);
             for tag in tags.iter() {
                 let path = format!("#/tags/{}", tag.name);
                 validate_not_visited(tag, &mut ctx, Options::IgnoreUnusedTags, path);
@@ -604,6 +647,15 @@ impl Validate for Spec {
         }
 
         ctx.into()
+    }
+}
+
+impl ValidateWithContext<Spec> for TagGroup {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
+        for (i, tag) in self.tags.iter().enumerate() {
+            validate_required_string(tag, ctx, format!("{path}.tags[{i}]"));
+        }
     }
 }
 
@@ -764,6 +816,422 @@ mod tests {
         assert!(
             spec.components.is_none(),
             "name validation must run before mutation"
+        );
+    }
+
+    #[test]
+    fn all_define_helpers_insert_and_return_ref() {
+        use crate::v3_0::callback::Callback;
+        use crate::v3_0::example::Example;
+        use crate::v3_0::header::Header;
+        use crate::v3_0::link::Link;
+        use crate::v3_0::parameter::{InQuery, Parameter};
+        use crate::v3_0::request_body::RequestBody;
+        use crate::v3_0::response::Response;
+        use crate::v3_0::security_scheme::{HttpScheme, HttpSecurityScheme, SecurityScheme};
+
+        let mut spec = Spec::default();
+
+        let r = spec.define_response("Ok", Response::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/responses/Ok"));
+
+        let r = spec
+            .define_parameter(
+                "Q",
+                Parameter::Query(InQuery {
+                    name: "q".into(),
+                    description: None,
+                    required: None,
+                    deprecated: None,
+                    allow_empty_value: None,
+                    style: None,
+                    explode: None,
+                    allow_reserved: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                }),
+            )
+            .unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/parameters/Q"));
+
+        let r = spec.define_example("Ex", Example::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/examples/Ex"));
+
+        let r = spec
+            .define_request_body("RB", RequestBody::default())
+            .unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/requestBodies/RB"));
+
+        let r = spec.define_header("H", Header::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/headers/H"));
+
+        let r = spec
+            .define_security_scheme(
+                "S",
+                SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                    scheme: HttpScheme::Basic,
+                    bearer_format: None,
+                    description: None,
+                    extensions: None,
+                })),
+            )
+            .unwrap();
+        assert!(
+            matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/securitySchemes/S")
+        );
+
+        let r = spec.define_link("L", Link::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/links/L"));
+
+        let r = spec.define_callback("CB", Callback::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/callbacks/CB"));
+
+        // All inserts ended up under the same Components object.
+        let comp = spec.components.as_ref().unwrap();
+        assert!(comp.responses.as_ref().unwrap().contains_key("Ok"));
+        assert!(comp.parameters.as_ref().unwrap().contains_key("Q"));
+        assert!(comp.examples.as_ref().unwrap().contains_key("Ex"));
+        assert!(comp.request_bodies.as_ref().unwrap().contains_key("RB"));
+        assert!(comp.headers.as_ref().unwrap().contains_key("H"));
+        assert!(comp.security_schemes.as_ref().unwrap().contains_key("S"));
+        assert!(comp.links.as_ref().unwrap().contains_key("L"));
+        assert!(comp.callbacks.as_ref().unwrap().contains_key("CB"));
+    }
+
+    #[test]
+    fn define_helpers_reject_invalid_names() {
+        use crate::v3_0::callback::Callback;
+        use crate::v3_0::example::Example;
+        use crate::v3_0::header::Header;
+        use crate::v3_0::link::Link;
+        use crate::v3_0::request_body::RequestBody;
+        use crate::v3_0::response::Response;
+        use crate::v3_0::security_scheme::{HttpScheme, HttpSecurityScheme, SecurityScheme};
+
+        let mut spec = Spec::default();
+        // Use a name with an invalid character that the validator rejects.
+        let bad = "x y";
+        assert!(spec.define_response(bad, Response::default()).is_err());
+        assert!(spec.define_example(bad, Example::default()).is_err());
+        assert!(
+            spec.define_request_body(bad, RequestBody::default())
+                .is_err()
+        );
+        assert!(spec.define_header(bad, Header::default()).is_err());
+        assert!(
+            spec.define_security_scheme(
+                bad,
+                SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                    scheme: HttpScheme::Basic,
+                    bearer_format: None,
+                    description: None,
+                    extensions: None,
+                })),
+            )
+            .is_err()
+        );
+        assert!(spec.define_link(bad, Link::default()).is_err());
+        assert!(spec.define_callback(bad, Callback::default()).is_err());
+        // None of the failures left state behind.
+        assert!(spec.components.is_none());
+    }
+
+    #[test]
+    fn resolve_reference_paths_for_each_component_kind() {
+        use crate::v3_0::callback::Callback;
+        use crate::v3_0::example::Example;
+        use crate::v3_0::header::Header;
+        use crate::v3_0::link::Link;
+        use crate::v3_0::parameter::{InQuery, Parameter};
+        use crate::v3_0::request_body::RequestBody;
+        use crate::v3_0::response::Response;
+        use crate::v3_0::schema::{SingleSchema, StringSchema};
+        use crate::v3_0::security_scheme::{HttpScheme, HttpSecurityScheme, SecurityScheme};
+
+        let mut spec = Spec::default();
+        spec.define_schema("S", SingleSchema::from(StringSchema::default()))
+            .unwrap();
+        spec.define_response("R", Response::default()).unwrap();
+        spec.define_parameter(
+            "P",
+            Parameter::Query(InQuery {
+                name: "q".into(),
+                description: None,
+                required: None,
+                deprecated: None,
+                allow_empty_value: None,
+                style: None,
+                explode: None,
+                allow_reserved: None,
+                schema: None,
+                example: None,
+                examples: None,
+                content: None,
+                extensions: None,
+            }),
+        )
+        .unwrap();
+        spec.define_request_body("RB", RequestBody::default())
+            .unwrap();
+        spec.define_header("H", Header::default()).unwrap();
+        spec.define_example("E", Example::default()).unwrap();
+        spec.define_callback("CB", Callback::default()).unwrap();
+        spec.define_link("L", Link::default()).unwrap();
+        spec.define_security_scheme(
+            "SS",
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                scheme: HttpScheme::Basic,
+                bearer_format: None,
+                description: None,
+                extensions: None,
+            })),
+        )
+        .unwrap();
+
+        assert!(
+            <Spec as ResolveReference<Schema>>::resolve_reference(&spec, "#/components/schemas/S")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Response>>::resolve_reference(
+                &spec,
+                "#/components/responses/R"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Parameter>>::resolve_reference(
+                &spec,
+                "#/components/parameters/P"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<RequestBody>>::resolve_reference(
+                &spec,
+                "#/components/requestBodies/RB"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Header>>::resolve_reference(&spec, "#/components/headers/H")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Example>>::resolve_reference(
+                &spec,
+                "#/components/examples/E"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Callback>>::resolve_reference(
+                &spec,
+                "#/components/callbacks/CB"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Link>>::resolve_reference(&spec, "#/components/links/L")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<SecurityScheme>>::resolve_reference(
+                &spec,
+                "#/components/securitySchemes/SS"
+            )
+            .is_some()
+        );
+
+        // tags resolver finds tags by name.
+        let spec = Spec {
+            tags: Some(vec![Tag {
+                name: "pets".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert!(<Spec as ResolveReference<Tag>>::resolve_reference(&spec, "#/tags/pets").is_some());
+        assert!(
+            <Spec as ResolveReference<Tag>>::resolve_reference(&spec, "#/tags/missing").is_none()
+        );
+    }
+
+    #[test]
+    fn component_reference_alias_chain_resolves() {
+        use crate::v3_0::components::Components;
+        use crate::v3_0::schema::{SingleSchema, StringSchema};
+
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            "AliasA".to_owned(),
+            RefOr::new_ref("#/components/schemas/AliasB"),
+        );
+        schemas.insert(
+            "AliasB".to_owned(),
+            RefOr::new_ref("#/components/schemas/Target"),
+        );
+        schemas.insert(
+            "Target".to_owned(),
+            RefOr::new_item(SingleSchema::from(StringSchema::default()).into()),
+        );
+        let spec = Spec {
+            components: Some(Components {
+                schemas: Some(schemas),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(
+            <Spec as ResolveReference<Schema>>::resolve_reference(
+                &spec,
+                "#/components/schemas/AliasA"
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn component_reference_alias_cycle_does_not_recurse_forever() {
+        use crate::common::helpers::Context;
+        use crate::v3_0::components::Components;
+
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            "AliasA".to_owned(),
+            RefOr::new_ref("#/components/schemas/AliasB"),
+        );
+        schemas.insert(
+            "AliasB".to_owned(),
+            RefOr::new_ref("#/components/schemas/AliasA"),
+        );
+        let spec = Spec {
+            components: Some(Components {
+                schemas: Some(schemas),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(
+            <Spec as ResolveReference<Schema>>::resolve_reference(
+                &spec,
+                "#/components/schemas/AliasA"
+            )
+            .is_none()
+        );
+
+        let mut ctx = Context::new(&spec, Options::new());
+        RefOr::<Schema>::new_ref("#/components/schemas/AliasA")
+            .validate_with_context(&mut ctx, "#.schema".to_owned());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not found")),
+            "cycle should be reported as an unresolved ref, not recurse: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn version_display_all_variants() {
+        assert_eq!(Version::V3_0_0.to_string(), "3.0.0");
+        assert_eq!(Version::V3_0_1.to_string(), "3.0.1");
+        assert_eq!(Version::V3_0_2.to_string(), "3.0.2");
+        assert_eq!(Version::V3_0_3.to_string(), "3.0.3");
+        assert_eq!(Version::V3_0_4.to_string(), "3.0.4");
+    }
+
+    #[test]
+    fn full_spec_validate_drives_path_template_uniqueness() {
+        use crate::v3_0::path_item::Paths;
+        use crate::v3_0::response::{Response, Responses};
+
+        let mut paths = Paths::default();
+        let make_op = || crate::v3_0::operation::Operation {
+            responses: Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut ops_a: BTreeMap<String, crate::v3_0::operation::Operation> = BTreeMap::new();
+        ops_a.insert("get".to_owned(), make_op());
+        let mut ops_b: BTreeMap<String, crate::v3_0::operation::Operation> = BTreeMap::new();
+        ops_b.insert("get".to_owned(), make_op());
+        paths.paths.insert(
+            "/pets/{id}".into(),
+            crate::v3_0::path_item::PathItem {
+                operations: Some(ops_a),
+                ..Default::default()
+            },
+        );
+        paths.paths.insert(
+            "/pets/{name}".into(),
+            crate::v3_0::path_item::PathItem {
+                operations: Some(ops_b),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths,
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("collapse to the same shape")),
+            "expected equivalent-template error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn x_tag_groups_round_trip_and_validate() {
+        let value = serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {
+                "title": "Pets",
+                "version": "1.0.0"
+            },
+            "paths": {},
+            "x-tagGroups": [
+                {
+                    "name": "Animals",
+                    "tags": ["pets"]
+                }
+            ]
+        });
+        let spec: Spec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&spec).unwrap(), value);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        spec.x_tag_groups
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap()
+            .validate_with_context(&mut ctx, "#.x-tagGroups[0]".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        TagGroup::default().validate_with_context(&mut ctx, "#.x-tagGroups[0]".to_owned());
+        assert!(
+            ctx.errors
+                .contains(&"#.x-tagGroups[0].name: must not be empty".to_owned()),
+            "expected name error: {:?}",
+            ctx.errors
         );
     }
 }
