@@ -40,8 +40,12 @@ roas = { version = "0.6", default-features = false, features = ["v3_1"] }
 
 ## Examples
 
-The default feature is `v3_0`, so the example below works with `cargo add roas`
-out of the box:
+The default feature is `v3_0`. The example below also uses `serde_json`
+directly, so add both crates:
+
+```shell
+cargo add roas serde_json
+```
 
 ```rust
 use roas::v3_0::spec::Spec;
