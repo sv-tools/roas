@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::{ResolveError, ResolveReference};
 use crate::validation::Options;
+use std::collections::BTreeSet;
 
 /// v3.0 Reference Object — exactly `{ "$ref": "..." }`.
 ///
@@ -116,9 +117,27 @@ pub fn resolve_in_map<'a, T, D>(
 where
     T: ResolveReference<D>,
 {
-    map.as_ref()
-        .and_then(|x| x.get(reference.trim_start_matches(prefix)))
-        .and_then(move |x| x.get_item(spec).ok())
+    let map = map.as_ref()?;
+    let mut current = reference;
+    let mut visited = BTreeSet::new();
+
+    loop {
+        let key = current.strip_prefix(prefix)?;
+        let item = map.get(key)?;
+
+        match item {
+            RefOr::Item(d) => return Some(d),
+            RefOr::Ref(r) => {
+                if !r.reference.starts_with(prefix) {
+                    return item.get_item(spec).ok();
+                }
+                if !visited.insert(r.reference.as_str()) {
+                    return None;
+                }
+                current = &r.reference;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -157,5 +176,17 @@ mod tests {
         let r: RefOr<Foo> =
             serde_json::from_value(json!({"$ref": "#/components/schemas/Foo"})).unwrap();
         assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/schemas/Foo"));
+    }
+
+    #[test]
+    fn schema_ref_rejects_v3_1_sibling_fields() {
+        let r = serde_json::from_value::<RefOr<crate::v3_0::schema::Schema>>(json!({
+            "$ref": "#/components/schemas/Foo",
+            "description": "should be rejected",
+        }));
+        assert!(
+            r.is_err(),
+            "schema refs must not fall back to inline schemas when v3.1 sibling fields are present"
+        );
     }
 }

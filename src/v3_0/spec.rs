@@ -1061,6 +1061,81 @@ mod tests {
     }
 
     #[test]
+    fn component_reference_alias_chain_resolves() {
+        use crate::v3_0::components::Components;
+        use crate::v3_0::schema::{SingleSchema, StringSchema};
+
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            "AliasA".to_owned(),
+            RefOr::new_ref("#/components/schemas/AliasB"),
+        );
+        schemas.insert(
+            "AliasB".to_owned(),
+            RefOr::new_ref("#/components/schemas/Target"),
+        );
+        schemas.insert(
+            "Target".to_owned(),
+            RefOr::new_item(SingleSchema::from(StringSchema::default()).into()),
+        );
+        let spec = Spec {
+            components: Some(Components {
+                schemas: Some(schemas),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(
+            <Spec as ResolveReference<Schema>>::resolve_reference(
+                &spec,
+                "#/components/schemas/AliasA"
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn component_reference_alias_cycle_does_not_recurse_forever() {
+        use crate::common::helpers::Context;
+        use crate::v3_0::components::Components;
+
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            "AliasA".to_owned(),
+            RefOr::new_ref("#/components/schemas/AliasB"),
+        );
+        schemas.insert(
+            "AliasB".to_owned(),
+            RefOr::new_ref("#/components/schemas/AliasA"),
+        );
+        let spec = Spec {
+            components: Some(Components {
+                schemas: Some(schemas),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(
+            <Spec as ResolveReference<Schema>>::resolve_reference(
+                &spec,
+                "#/components/schemas/AliasA"
+            )
+            .is_none()
+        );
+
+        let mut ctx = Context::new(&spec, Options::new());
+        RefOr::<Schema>::new_ref("#/components/schemas/AliasA")
+            .validate_with_context(&mut ctx, "#.schema".to_owned());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not found")),
+            "cycle should be reported as an unresolved ref, not recurse: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn version_display_all_variants() {
         assert_eq!(Version::V3_0_0.to_string(), "3.0.0");
         assert_eq!(Version::V3_0_1.to_string(), "3.0.1");

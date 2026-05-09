@@ -5,7 +5,7 @@ use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Decode one JSON Pointer reference token (`~1` → `/`, `~0` → `~`).
 fn unescape_pointer_token(token: &str) -> String {
@@ -29,15 +29,6 @@ enum OperationRefResolution {
 
 /// Resolve an internal `#/paths/...` operationRef against `Spec.paths`.
 ///
-/// Per OAS 3.0.4 a PathItem may itself be a `$ref` to another PathItem; in
-/// that case `operations` on the referencing entry is empty and the methods
-/// live on the target. We follow one hop of `PathItem.reference` for
-/// internal refs so an operationRef like `#/paths/~1pets/get` still
-/// validates when `/pets` is `{ "$ref": "#/paths/~1other" }`.
-///
-/// Multi-hop chains are not followed: spec paths cycles are unusual, and
-/// the next hop's target would itself need to be a non-ref PathItem to
-/// declare any operations.
 fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefResolution {
     let after = match reference.strip_prefix("#/paths/") {
         Some(rest) => rest,
@@ -70,25 +61,11 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         return OperationRefResolution::Err(format!("path `{path}` not declared in `#/paths`"));
     };
 
-    // If the resolved PathItem is itself a `$ref`, follow it once.
-    let target_item = if let Some(ref_str) = &item.reference {
-        if let Some(after_paths) = ref_str.strip_prefix("#/paths/") {
-            let target_path = unescape_pointer_token(after_paths);
-            match spec.paths.paths.get(&target_path) {
-                Some(t) => t,
-                None => {
-                    return OperationRefResolution::Err(format!(
-                        "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/paths`"
-                    ));
-                }
-            }
-        } else if ref_str.is_empty() {
-            return OperationRefResolution::Err(format!("path `{path}` carries an empty `$ref`"));
-        } else {
-            return OperationRefResolution::ExternalPathItemRef(ref_str.clone());
-        }
-    } else {
-        item
+    let mut seen = BTreeSet::from([path.clone()]);
+    let (target_path, target_item) = match resolve_path_item_ref_chain(spec, &path, item, &mut seen)
+    {
+        Ok(target) => target,
+        Err(err) => return err,
     };
 
     let method_lower = method.to_lowercase();
@@ -98,10 +75,54 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         .is_some_and(|m| m.contains_key(&method_lower));
     if !exists {
         return OperationRefResolution::Err(format!(
-            "method `{method}` not declared on path `{path}`"
+            "method `{method}` not declared on path `{target_path}`"
         ));
     }
     OperationRefResolution::Ok
+}
+
+/// Follow internal PathItem `$ref` chains so operationRef validation checks
+/// the operation-bearing target, while reporting external refs and cycles.
+fn resolve_path_item_ref_chain<'a>(
+    spec: &'a Spec,
+    path: &str,
+    item: &'a crate::v3_0::path_item::PathItem,
+    seen: &mut BTreeSet<String>,
+) -> Result<(String, &'a crate::v3_0::path_item::PathItem), OperationRefResolution> {
+    let Some(ref_str) = &item.reference else {
+        return Ok((path.to_owned(), item));
+    };
+
+    if ref_str.is_empty() {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` carries an empty `$ref`"
+        )));
+    }
+
+    let Some(after_paths) = ref_str.strip_prefix("#/paths/") else {
+        return Err(OperationRefResolution::ExternalPathItemRef(ref_str.clone()));
+    };
+
+    if after_paths.contains('/') {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` is a `$ref` to malformed JSON Pointer `{ref_str}`: the encoded path token must use `~1` for `/`"
+        )));
+    }
+
+    let target_path = unescape_pointer_token(after_paths);
+    if !seen.insert(target_path.clone()) {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` has a cyclic `$ref` chain through `{ref_str}`"
+        )));
+    }
+
+    let Some(target_item) = spec.paths.paths.get(&target_path) else {
+        return Err(OperationRefResolution::Err(format!(
+            "path `{path}` is a `$ref` to `{ref_str}`, which is not declared in `#/paths`"
+        )));
+    };
+
+    resolve_path_item_ref_chain(spec, &target_path, target_item, seen)
 }
 
 /// The Link object represents a possible design-time link for a response.
@@ -536,6 +557,102 @@ mod tests {
         assert!(
             ctx.errors.iter().any(|e| e.contains("method `post`")),
             "expected unknown method on resolved target: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_follows_multi_hop_internal_path_item_ref() {
+        use crate::v3_0::operation::Operation;
+        use crate::v3_0::path_item::{PathItem, Paths};
+        use crate::v3_0::reference::RefOr;
+        use crate::v3_0::response::{Response, Responses};
+
+        let op = Operation {
+            responses: Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op);
+        let canonical_item = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("/canonical".to_owned(), canonical_item);
+        paths.paths.insert(
+            "/middle".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1canonical".into()),
+                ..Default::default()
+            },
+        );
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1middle".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths,
+            ..Default::default()
+        };
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "multi-hop PathItem ref should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_cycle_errors() {
+        use crate::v3_0::path_item::{PathItem, Paths};
+
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1b".into()),
+                ..Default::default()
+            },
+        );
+        paths.paths.insert(
+            "/b".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1a".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths,
+            ..Default::default()
+        };
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1a/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".operationRef") && e.contains("cyclic `$ref` chain")),
+            "expected PathItem ref cycle error: {:?}",
             ctx.errors
         );
     }
