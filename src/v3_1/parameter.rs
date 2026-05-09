@@ -458,9 +458,6 @@ impl ValidateWithContext<Spec> for InCookie {
     }
 }
 
-/// Walk into the nested `schema`, `examples` map, and `content` media-type
-/// entries so that invalid `$ref`s, malformed sub-schemas, and broken
-/// example/media-type bodies are reported instead of silently skipped.
 fn walk_schema_examples_content(
     ctx: &mut Context<Spec>,
     schema: &Option<RefOr<Schema>>,
@@ -625,9 +622,6 @@ mod tests {
 
     #[test]
     fn parameter_walks_schema_examples_content() {
-        // Validators must traverse nested `schema`, `examples`, and
-        // `content`. Use empty $refs so each surfaces a distinct
-        // "$ref: must not be empty" error scoped under the parameter path.
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
         let p = Parameter::Query(InQuery {

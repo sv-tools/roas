@@ -66,11 +66,9 @@ pub struct PathItem {
     /// operations in this path.
     pub description: Option<String>,
 
-    /// A definition of the operations on this path.
-    ///
-    /// Any map items that can be converted to an `Operation` object will be stored here.
-    /// This includes `get`, `put`, `post`, `delete`, `options`, `head`, `patch`, `trace`,
-    /// and any other custom operations, like SEARCH and etc...
+    /// Operations on this path, keyed by lowercase HTTP method name.
+    /// OAS 3.1.2 defines exactly these eight: `get`, `put`, `post`,
+    /// `delete`, `options`, `head`, `patch`, `trace`.
     pub operations: Option<BTreeMap<String, Operation>>,
 
     /// An alternative server array to service all operations in this path.
@@ -204,12 +202,9 @@ impl<'de> Deserialize<'de> for PathItem {
                         }
                         extensions.insert(key, map.next_value()?);
                     } else {
-                        // OAS 3.1.2 fixes the operation field set to the eight
-                        // HTTP method names (case-sensitive lowercase per the
-                        // spec, but we accept any casing and normalise).
-                        // Reject anything else so typos like `gett` or
-                        // unsupported methods do not silently become an
-                        // Operation slot.
+                        // OAS 3.1.2 fixes the Operation field set to these
+                        // eight method names; anything else is a typo or
+                        // unsupported method, not a custom operation.
                         let lowered = key.to_lowercase();
                         const HTTP_METHODS: &[&str] = &[
                             "get", "put", "post", "delete", "options", "head", "patch", "trace",
@@ -457,12 +452,8 @@ mod tests {
 
     #[test]
     fn unknown_method_key_rejected() {
-        // OAS 3.1.2 fixes the operation field set to the eight standard
-        // HTTP method names. A typoed key like `gett` is not a valid
-        // Operation slot and must not silently become one.
         let raw = r#"{"gett": {"responses": {"200": {"description": "ok"}}}}"#;
-        let err = serde_json::from_str::<PathItem>(raw)
-            .expect_err("expected unknown-field error");
+        let err = serde_json::from_str::<PathItem>(raw).expect_err("expected unknown-field error");
         let msg = err.to_string();
         assert!(
             msg.contains("gett") && msg.contains("unknown field"),
@@ -472,7 +463,6 @@ mod tests {
 
     #[test]
     fn known_methods_case_insensitive_accepted() {
-        // Lowercase canonical form is accepted; uppercase is normalised.
         let raw = r#"{"GET": {"responses": {"200": {"description": "ok"}}}}"#;
         let pi: PathItem = serde_json::from_str(raw).unwrap();
         assert!(

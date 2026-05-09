@@ -2237,7 +2237,6 @@ mod tests {
 
     #[test]
     fn composition_arrays_must_be_non_empty() {
-        // JSON Schema 2020-12: `allOf`, `anyOf`, `oneOf` MUST be non-empty.
         let spec = crate::v3_1::spec::Spec::default();
         for (json, kw) in [
             (serde_json::json!({"allOf": []}), "allOf"),
@@ -2260,11 +2259,8 @@ mod tests {
 
     #[test]
     fn multi_schema_type_array_must_be_non_empty() {
-        // JSON Schema 2020-12 §6.1.1: `type` array MUST contain at least
-        // one element. The wrapper `Schema` doesn't expose a Multi variant
-        // for an empty array directly via JSON (since deserialisation
-        // would route empty `type: []` to MultiSchema), so build the
-        // MultiSchema struct directly.
+        // Build via the struct: `serde_json::from_value` on `{"type": []}`
+        // would not route to `MultiSchema`.
         let spec = crate::v3_1::spec::Spec::default();
         let mut ctx =
             crate::common::helpers::Context::new(&spec, crate::validation::Options::new());

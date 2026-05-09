@@ -194,9 +194,6 @@ mod tests {
 
     #[test]
     fn header_walks_schema() {
-        // The header validator must walk into `schema` so structural errors
-        // inside it (like an empty $ref) surface instead of being silently
-        // dropped on the floor.
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         Header {

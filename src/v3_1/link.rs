@@ -39,8 +39,6 @@ enum OperationRefResolution {
 /// referencing PathItem with `{"$ref": "#/paths/~1canonical-pets"}` still
 /// resolves correctly.
 fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefResolution {
-    // Determine which container the ref points at, and the count of JSON
-    // Pointer tokens in the tail (excluding the container prefix).
     enum Container {
         Paths,
         Webhooks,
@@ -73,10 +71,8 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         ));
     };
 
-    // Per RFC 6901 each JSON Pointer reference token uses `~1` to encode `/`
-    // and `~0` to encode `~`. So in the unescaped tail the number of `/`
-    // separators is exactly `expected_tokens - 1`; any other count is a
-    // malformed pointer.
+    // Per RFC 6901, each token's `/` is encoded as `~1`, so the number of
+    // unescaped `/` separators must equal `expected_tokens - 1`.
     let parts: Vec<&str> = after.split('/').collect();
     if parts.len() != expected_tokens || parts.iter().any(|p| p.is_empty()) {
         return OperationRefResolution::Err(format!(
@@ -84,7 +80,6 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         ));
     }
 
-    // Resolve to (`display path for errors`, `&PathItem`, `method`).
     let (entry_path, item, method) = match container {
         Container::Paths => {
             let path = unescape_pointer_token(parts[0]);
@@ -131,9 +126,8 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                     "callback `{cb_name}` not declared in `#/components/callbacks`"
                 ));
             };
-            // The callback slot may itself be a `$ref`; resolve it. External
-            // refs are reported via the same channel as PathItem external
-            // refs so callers can honor `IgnoreExternalReferences`.
+            // External callback refs route through ExternalPathItemRef so
+            // callers can honor `IgnoreExternalReferences`.
             let cb = match cb_ref.get_item(spec) {
                 Ok(cb) => cb,
                 Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
@@ -796,10 +790,6 @@ mod tests {
 
     #[test]
     fn operation_ref_into_components_callbacks() {
-        // Per OAS 3.1.2 operationRef can target any Operation Object,
-        // including Operations declared inside reusable Callbacks under
-        // `#/components/callbacks/<name>/<expression>/<method>`. The
-        // expression token is encoded per RFC 6901 (`/` → `~1`).
         use crate::v3_1::callback::Callback;
         use crate::v3_1::components::Components;
         let mut cb_paths = BTreeMap::new();
@@ -817,7 +807,7 @@ mod tests {
             ..Default::default()
         };
         let mut ctx = Context::new(&spec, Options::new());
-        // The expression key contains `#` (literal) and `/` (encoded as `~1`).
+        // Expression key contains `/` and so is encoded as `~1`.
         Link {
             operation_ref: Some("#/components/callbacks/OnPing/{$request.body#~1cb}/get".into()),
             ..Default::default()
