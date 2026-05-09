@@ -95,3 +95,92 @@ impl ValidateWithContext<Spec> for Link {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::validation::Options;
+    use serde_json::json;
+
+    #[test]
+    fn round_trip_full() {
+        let v = json!({
+            "operationId": "getPet",
+            "parameters": {"id": "$response.body#/id"},
+            "requestBody": {"name": "fluffy"},
+            "description": "Linked",
+            "server": {"url": "https://example.com"},
+            "x-internal": true
+        });
+        let l: Link = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&l).unwrap(), v);
+    }
+
+    #[test]
+    fn xor_both_present_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("ref".into()),
+            operation_id: Some("id".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn xor_neither_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link::default().validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must specify exactly one")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn missing_operation_id_reported() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_id: Some("nonexistent".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("missing operation with id `nonexistent`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn server_validates() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("opref".into()),
+            server: Some(crate::v3_0::server::Server {
+                url: "".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("server.url")),
+            "expected server.url error: {:?}",
+            ctx.errors
+        );
+    }
+}

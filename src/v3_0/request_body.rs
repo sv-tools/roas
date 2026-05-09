@@ -72,3 +72,61 @@ impl ValidateWithContext<Spec> for RequestBody {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::validation::Options;
+    use serde_json::json;
+
+    #[test]
+    fn round_trip_with_extensions() {
+        let v = json!({
+            "description": "A user",
+            "required": true,
+            "content": {
+                "application/json": {"schema": {"type": "object"}}
+            },
+            "x-internal": "yes"
+        });
+        let rb: RequestBody = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(rb.required, Some(true));
+        assert!(rb.extensions.is_some());
+        assert_eq!(serde_json::to_value(&rb).unwrap(), v);
+    }
+
+    #[test]
+    fn validate_walks_content() {
+        let mut content = BTreeMap::new();
+        content.insert(
+            "application/json".to_owned(),
+            crate::v3_0::media_type::MediaType {
+                example: Some(json!(1)),
+                examples: Some(BTreeMap::from([(
+                    "a".into(),
+                    crate::v3_0::reference::RefOr::new_item(
+                        crate::v3_0::example::Example::default(),
+                    ),
+                )])),
+                ..Default::default()
+            },
+        );
+        let rb = RequestBody {
+            description: None,
+            content,
+            required: None,
+            extensions: None,
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        rb.validate_with_context(&mut ctx, "rb".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("rb.content[application/json]")),
+            "expected nested content error: {:?}",
+            ctx.errors
+        );
+    }
+}

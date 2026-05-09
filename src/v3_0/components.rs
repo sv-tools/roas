@@ -197,3 +197,223 @@ impl ValidateWithContext<Spec> for Components {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::v3_0::callback::Callback;
+    use crate::v3_0::example::Example;
+    use crate::v3_0::header::Header;
+    use crate::v3_0::link::Link;
+    use crate::v3_0::parameter::{InQuery, Parameter};
+    use crate::v3_0::request_body::RequestBody;
+    use crate::v3_0::response::Response;
+    use crate::v3_0::schema::{Schema, SingleSchema, StringSchema};
+    use crate::v3_0::security_scheme::{
+        AuthorizationCodeOAuth2Flow, ClientCredentialsOAuth2Flow, ImplicitOAuth2Flow,
+        OAuth2Flows, OAuth2SecurityScheme, PasswordOAuth2Flow, SecurityScheme,
+    };
+    use serde_json::json;
+
+    fn map_with<T>(name: &str, t: T) -> BTreeMap<String, RefOr<T>> {
+        BTreeMap::from([(name.to_owned(), RefOr::new_item(t))])
+    }
+
+    #[test]
+    fn round_trip_all_kinds() {
+        let v = json!({
+            "schemas": {"S": {"type": "string"}},
+            "responses": {"R": {"description": "ok"}},
+            "parameters": {"P": {"name": "q", "in": "query", "schema": {"type": "string"}}},
+            "examples": {"E": {"value": 1}},
+            "requestBodies": {"RB": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+            "headers": {"H": {"description": "h"}},
+            "securitySchemes": {"SS": {"type": "http", "scheme": "Basic"}},
+            "links": {"L": {"operationId": "op"}},
+            "callbacks": {"CB": {"{$request.body#/cb}": {"post": {"responses": {"200": {"description": "ok"}}}}}},
+            "x-tra": "yes"
+        });
+        let comp: Components = serde_json::from_value(v.clone()).unwrap();
+        // Round-trip preserves all maps.
+        let re: Components = serde_json::from_value(serde_json::to_value(&comp).unwrap()).unwrap();
+        assert_eq!(re, comp);
+    }
+
+    #[test]
+    fn unused_components_each_kind_reports() {
+        let comp = Components {
+            schemas: Some(map_with("S", Schema::Single(Box::new(SingleSchema::String(StringSchema::default()))))),
+            responses: Some(map_with("R", Response::default())),
+            parameters: Some(map_with("P", Parameter::Query(InQuery {
+                name: "q".into(),
+                description: None,
+                required: None,
+                deprecated: None,
+                allow_empty_value: None,
+                style: None,
+                explode: None,
+                allow_reserved: None,
+                schema: None,
+                example: None,
+                examples: None,
+                content: None,
+                extensions: None,
+            }))),
+            examples: Some(map_with("E", Example::default())),
+            request_bodies: Some(map_with("RB", RequestBody::default())),
+            headers: Some(map_with("H", Header::default())),
+            security_schemes: Some(map_with(
+                "SS",
+                SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+                    flows: OAuth2Flows {
+                        implicit: Some(ImplicitOAuth2Flow {
+                            authorization_url: "https://x.example/auth".into(),
+                            refresh_url: None,
+                            scopes: BTreeMap::from([("read".to_owned(), "Read".to_owned())]),
+                            extensions: None,
+                        }),
+                        password: Some(PasswordOAuth2Flow {
+                            token_url: "https://x.example/t".into(),
+                            refresh_url: None,
+                            scopes: BTreeMap::from([("write".to_owned(), "Write".to_owned())]),
+                            extensions: None,
+                        }),
+                        client_credentials: Some(ClientCredentialsOAuth2Flow {
+                            token_url: "https://x.example/t".into(),
+                            refresh_url: None,
+                            scopes: BTreeMap::from([("admin".to_owned(), "Admin".to_owned())]),
+                            extensions: None,
+                        }),
+                        authorization_code: Some(AuthorizationCodeOAuth2Flow {
+                            authorization_url: "https://x.example/auth".into(),
+                            token_url: "https://x.example/t".into(),
+                            refresh_url: None,
+                            scopes: BTreeMap::from([("delete".to_owned(), "Delete".to_owned())]),
+                            extensions: None,
+                        }),
+                        extensions: None,
+                    },
+                    description: None,
+                    extensions: None,
+                })),
+            )),
+            links: Some(map_with("L", Link::default())),
+            callbacks: Some(map_with("CB", Callback::default())),
+            extensions: None,
+        };
+        let spec = Spec {
+            components: Some(comp.clone()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        comp.validate_with_context(&mut ctx, "#.components".into());
+        // Each kind should produce an "unused" error.
+        for path in [
+            "#/components/schemas/S",
+            "#/components/responses/R",
+            "#/components/parameters/P",
+            "#/components/examples/E",
+            "#/components/requestBodies/RB",
+            "#/components/headers/H",
+            "#/components/securitySchemes/SS",
+            "#/components/links/L",
+            "#/components/callbacks/CB",
+        ] {
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains(path) && e.contains("unused")),
+                "expected `{path}: unused`: {:?}",
+                ctx.errors
+            );
+        }
+        // OAuth2 unused-scope detection now visits ALL four flows.
+        for scope in ["read", "write", "admin", "delete"] {
+            let p = format!("#/components/securitySchemes/SS/{scope}");
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains(&p) && e.contains("unused")),
+                "expected unused scope `{scope}`: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn ignored_unused_options_silence_each_kind() {
+        let comp = Components {
+            schemas: Some(map_with("S", Schema::Single(Box::new(SingleSchema::String(StringSchema::default()))))),
+            responses: Some(map_with("R", Response::default())),
+            parameters: Some(map_with(
+                "P",
+                Parameter::Query(InQuery {
+                    name: "q".into(),
+                    description: None,
+                    required: None,
+                    deprecated: None,
+                    allow_empty_value: None,
+                    style: None,
+                    explode: None,
+                    allow_reserved: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                }),
+            )),
+            examples: Some(map_with("E", Example::default())),
+            request_bodies: Some(map_with("RB", RequestBody::default())),
+            headers: Some(map_with("H", Header::default())),
+            security_schemes: None,
+            links: Some(map_with("L", Link::default())),
+            callbacks: Some(map_with("CB", Callback::default())),
+            extensions: None,
+        };
+        let spec = Spec {
+            components: Some(comp.clone()),
+            ..Default::default()
+        };
+        let opts = Options::IgnoreUnusedSchemas
+            | Options::IgnoreUnusedResponses
+            | Options::IgnoreUnusedParameters
+            | Options::IgnoreUnusedExamples
+            | Options::IgnoreUnusedRequestBodies
+            | Options::IgnoreUnusedHeaders
+            | Options::IgnoreUnusedLinks
+            | Options::IgnoreUnusedCallbacks;
+        let mut ctx = Context::new(&spec, opts);
+        comp.validate_with_context(&mut ctx, "#.components".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("unused")),
+            "no unused errors when ignored: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn invalid_component_name_reported() {
+        let mut schemas: BTreeMap<String, RefOr<Schema>> = BTreeMap::new();
+        schemas.insert(
+            "bad name".to_owned(),
+            RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(StringSchema::default())))),
+        );
+        let comp = Components {
+            schemas: Some(schemas),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp.clone()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::IgnoreUnusedSchemas.only());
+        comp.validate_with_context(&mut ctx, "#.components".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must match pattern")),
+            "expected pattern error: {:?}",
+            ctx.errors
+        );
+    }
+}

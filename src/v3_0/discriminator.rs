@@ -36,3 +36,74 @@ impl ValidateWithContext<Spec> for Discriminator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::v3_0::schema::{ObjectSchema, SingleSchema};
+    use crate::validation::Options;
+
+    #[test]
+    fn round_trip_with_mapping() {
+        let json = serde_json::json!({
+            "propertyName": "type",
+            "mapping": {
+                "cat": "Cat",
+                "dog": "Dog",
+            },
+        });
+        let d: Discriminator = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(d.property_name, "type");
+        assert_eq!(d.mapping.as_ref().unwrap().len(), 2);
+        assert_eq!(serde_json::to_value(&d).unwrap(), json);
+    }
+
+    #[test]
+    fn round_trip_property_only() {
+        let json = serde_json::json!({"propertyName": "kind"});
+        let d: Discriminator = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(d.mapping, None);
+        assert_eq!(serde_json::to_value(&d).unwrap(), json);
+    }
+
+    #[test]
+    fn validate_empty_property_name() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Discriminator::default().validate_with_context(&mut ctx, "d".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("propertyName") && e.contains("must not be empty")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_mapping_resolves() {
+        let mut spec = Spec::default();
+        spec.define_schema("Cat", SingleSchema::from(ObjectSchema::default()))
+            .unwrap();
+        let d = Discriminator {
+            property_name: "type".into(),
+            mapping: Some(BTreeMap::from([
+                ("cat".to_owned(), "Cat".to_owned()),
+                ("missing".to_owned(), "Missing".to_owned()),
+            ])),
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        d.validate_with_context(&mut ctx, "d".to_owned());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("Missing") && e.contains("not found")),
+            "expected missing schema reported: {:?}",
+            ctx.errors
+        );
+        assert!(
+            !ctx.errors.iter().any(|e| e.contains("schemas/Cat") && e.contains("not found")),
+            "Cat must resolve: {:?}",
+            ctx.errors
+        );
+    }
+}

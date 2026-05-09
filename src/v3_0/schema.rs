@@ -256,6 +256,21 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
 
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
+
+    /// Codegen extension with Rust/Java-style enum variant names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enum-varnames")]
+    pub x_enum_varnames: Option<Vec<String>>,
+
+    /// Codegen extension with enum member names used by several generators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumNames")]
+    pub x_enum_names: Option<Vec<String>>,
+
     /// Declares the maximum length of the parameter value.
     #[serde(rename = "maxLength")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -351,6 +366,21 @@ pub struct IntegerSchema {
     #[serde(rename = "enum")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<i64>>,
+
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
+
+    /// Codegen extension with Rust/Java-style enum variant names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enum-varnames")]
+    pub x_enum_varnames: Option<Vec<String>>,
+
+    /// Codegen extension with enum member names used by several generators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumNames")]
+    pub x_enum_names: Option<Vec<String>>,
 
     /// Inclusive lower bound for the value.
     /// Per JSON Schema draft-04 §5.1.3, this keyword is any number even when
@@ -463,6 +493,21 @@ pub struct NumberSchema {
     #[serde(rename = "enum")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<f64>>,
+
+    /// Documentation/codegen extension with descriptions for enum values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumDescriptions")]
+    pub x_enum_descriptions: Option<Vec<String>>,
+
+    /// Codegen extension with Rust/Java-style enum variant names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enum-varnames")]
+    pub x_enum_varnames: Option<Vec<String>>,
+
+    /// Codegen extension with enum member names used by several generators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-enumNames")]
+    pub x_enum_names: Option<Vec<String>>,
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -739,6 +784,11 @@ pub struct ObjectSchema {
     #[serde(rename = "additionalProperties")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub additional_properties: Option<BoolOr<RefOr<Schema>>>,
+
+    /// ReDoc/Redocly extension with a display name for additional properties.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-additionalPropertiesName")]
+    pub x_additional_properties_name: Option<String>,
 
     /// A list of required properties.
     /// If the object is defined at the root of the document,
@@ -1203,6 +1253,308 @@ mod tests {
             },
             _ => panic!("expected Single schema"),
         }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn from_conversions_each_variant() {
+        let _: Schema = SingleSchema::from(StringSchema::default()).into();
+        let _: Schema = SingleSchema::from(IntegerSchema::default()).into();
+        let _: Schema = SingleSchema::from(NumberSchema::default()).into();
+        let _: Schema = SingleSchema::from(BooleanSchema::default()).into();
+        let _: Schema = SingleSchema::from(ArraySchema::default()).into();
+        let _: Schema = SingleSchema::from(ObjectSchema::default()).into();
+        let _: Schema = SingleSchema::from(NullSchema::default()).into();
+
+        let _: Schema = AllOfSchema::default().into();
+        let _: Schema = AnyOfSchema::default().into();
+        let _: Schema = OneOfSchema::default().into();
+        let _: Schema = NotSchema {
+            not: RefOr::new_item(Schema::default()),
+            extensions: None,
+        }
+        .into();
+
+        let s = Schema::default();
+        // Default is the empty Object schema.
+        if let Schema::Single(inner) = s {
+            assert!(matches!(*inner, SingleSchema::Object(_)));
+        } else {
+            panic!("default should be Single");
+        }
+    }
+
+    #[test]
+    fn validate_dispatches_to_each_single_variant() {
+        // Each variant validator runs at least one optional walk (xml /
+        // externalDocs); seed each with a malformed XML namespace to surface
+        // the dispatch path.
+        let bad_xml = || crate::v3_0::xml::XML {
+            namespace: Some("not-a-url".into()),
+            ..Default::default()
+        };
+        let cases: Vec<Schema> = vec![
+            Schema::from(SingleSchema::from(StringSchema {
+                xml: Some(bad_xml()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(IntegerSchema {
+                xml: Some(bad_xml()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(NumberSchema {
+                xml: Some(bad_xml()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(BooleanSchema {
+                xml: Some(bad_xml()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(ArraySchema {
+                xml: Some(bad_xml()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(ObjectSchema {
+                xml: Some(bad_xml()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(NullSchema {
+                xml: Some(bad_xml()),
+                ..Default::default()
+            })),
+        ];
+        let spec = Spec::default();
+        for (i, schema) in cases.iter().enumerate() {
+            let mut ctx = Context::new(&spec, crate::validation::Options::new());
+            schema.validate_with_context(&mut ctx, format!("c[{i}]"));
+            assert!(
+                ctx.errors.iter().any(|e| e.contains("namespace")),
+                "case {i}: errors: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn validate_walks_external_docs_per_variant() {
+        // ExternalDocumentation requires a non-empty URL — picks up empty.
+        let bad_docs = || crate::v3_0::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let cases: Vec<Schema> = vec![
+            Schema::from(SingleSchema::from(StringSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(IntegerSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(NumberSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(BooleanSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(ArraySchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(ObjectSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            })),
+            Schema::from(SingleSchema::from(NullSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            })),
+        ];
+        let spec = Spec::default();
+        for (i, schema) in cases.iter().enumerate() {
+            let mut ctx = Context::new(&spec, crate::validation::Options::new());
+            schema.validate_with_context(&mut ctx, format!("c[{i}]"));
+            assert!(
+                ctx.errors.iter().any(|e| e.contains("externalDocs")),
+                "case {i}: errors: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn object_validate_walks_properties() {
+        let json = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "bad": {"type": "string", "pattern": "["}
+            }
+        });
+        let s: Schema = serde_json::from_value(json).unwrap();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "obj".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("obj.properties.bad")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn null_boolean_number_schemas_round_trip() {
+        let json = serde_json::json!({"type": "null", "title": "n"});
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        let json = serde_json::json!({"type": "boolean", "default": true});
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        let json = serde_json::json!({
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 99.5,
+            "exclusiveMinimum": true,
+            "exclusiveMaximum": false,
+            "multipleOf": 0.5,
+            "enum": [1.0, 2.5]
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn one_of_any_of_not_round_trip_and_validate() {
+        let json = serde_json::json!({
+            "oneOf": [{"type": "string"}, {"$ref": "#/components/schemas/X"}],
+            "discriminator": {"propertyName": "kind"}
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(parsed, Schema::OneOf(_)));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        let json = serde_json::json!({
+            "anyOf": [{"type": "string"}, {"type": "integer"}]
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(parsed, Schema::AnyOf(_)));
+
+        let json = serde_json::json!({"not": {"type": "string"}});
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(parsed, Schema::Not(_)));
+
+        // Validate dispatches into composition arms.
+        let spec = Spec::default();
+        let composition: Schema = serde_json::from_value(serde_json::json!({
+            "allOf": [{"type": "string", "pattern": "["}],
+            "discriminator": {"propertyName": ""}
+        }))
+        .unwrap();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        composition.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("pattern")),
+            "expected nested string pattern error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("propertyName")),
+            "expected discriminator empty propertyName: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn additional_properties_bool_and_schema_round_trip() {
+        let json = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        let json = serde_json::json!({
+            "type": "object",
+            "additionalProperties": {"type": "string", "pattern": "["}
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        // Validate walks into additionalProperties Item form to surface nested
+        // pattern errors.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        parsed.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("additionalProperties")),
+            "expected additionalProperties walk error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn nullable_writeonly_deprecated_round_trip() {
+        let json = serde_json::json!({
+            "type": "string",
+            "nullable": true,
+            "writeOnly": true,
+            "deprecated": true,
+            "readOnly": false
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn array_items_validate_walks() {
+        let json = serde_json::json!({
+            "type": "array",
+            "items": {"type": "string", "pattern": "["}
+        });
+        let parsed: Schema = serde_json::from_value(json).unwrap();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        parsed.validate_with_context(&mut ctx, "arr".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("arr.items.pattern")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn schema_display_impl() {
+        assert_eq!(SingleSchema::String(StringSchema::default()).to_string(), "string");
+        assert_eq!(SingleSchema::Integer(IntegerSchema::default()).to_string(), "integer");
+        assert_eq!(SingleSchema::Number(NumberSchema::default()).to_string(), "number");
+        assert_eq!(SingleSchema::Boolean(BooleanSchema::default()).to_string(), "boolean");
+        assert_eq!(SingleSchema::Array(ArraySchema::default()).to_string(), "array");
+        assert_eq!(SingleSchema::Object(ObjectSchema::default()).to_string(), "object");
+        assert_eq!(SingleSchema::Null(NullSchema::default()).to_string(), "null");
+    }
+
+    #[test]
+    fn common_extension_fields_round_trip() {
+        let json = serde_json::json!({
+            "type": "string",
+            "enum": ["open", "closed"],
+            "x-enumDescriptions": ["Open state", "Closed state"],
+            "x-enum-varnames": ["Open", "Closed"],
+            "x-enumNames": ["OPEN", "CLOSED"],
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        let json = serde_json::json!({
+            "type": "object",
+            "additionalProperties": {
+                "type": "string"
+            },
+            "x-additionalPropertiesName": "metadata",
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
 }

@@ -97,6 +97,11 @@ pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<BTreeMap<String, RefOr<Link>>>,
 
+    /// ReDoc/Redocly extension with a short response summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-summary")]
+    pub x_summary: Option<String>,
+
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -335,6 +340,7 @@ mod tests {
                     map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                     map
                 }),
+                x_summary: None,
             },
             "response deserialization",
         );
@@ -391,6 +397,7 @@ mod tests {
                     map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                     map
                 }),
+                x_summary: None,
             })
             .unwrap(),
             serde_json::json!({
@@ -506,6 +513,7 @@ mod tests {
                         map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                         map
                     }),
+                    x_summary: None,
                 })),
                 responses: Some({
                     let mut map = BTreeMap::new();
@@ -580,6 +588,7 @@ mod tests {
                         map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                         map
                     }),
+                    x_summary: None,
                 })),
                 responses: Some({
                     let mut map = BTreeMap::new();
@@ -687,6 +696,7 @@ mod tests {
                 map.insert("x-extra".to_owned(), serde_json::json!("extension"));
                 map
             }),
+            x_summary: None,
         }
         .validate_with_context(&mut ctx, "response".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
@@ -714,5 +724,22 @@ mod tests {
         );
         Response::default().validate_with_context(&mut ctx, "response".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn x_summary_round_trip() {
+        let response: Response = serde_json::from_value(serde_json::json!({
+            "description": "Created",
+            "x-summary": "Created"
+        }))
+        .unwrap();
+        assert_eq!(response.x_summary, Some("Created".to_owned()));
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "description": "Created",
+                "x-summary": "Created"
+            })
+        );
     }
 }

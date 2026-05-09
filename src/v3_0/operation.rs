@@ -7,7 +7,6 @@ use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::parameter::Parameter;
 use crate::v3_0::request_body::RequestBody;
 use crate::v3_0::response::Responses;
-use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
 use crate::v3_0::tag::Tag;
@@ -94,9 +93,65 @@ pub struct Operation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub servers: Option<Vec<Server>>,
 
+    /// ReDoc/Redocly extension with code samples associated with this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-codeSamples")]
+    pub x_code_samples: Option<Vec<CodeSample>>,
+
+    /// ReDoc/Redocly extension with operation badges.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-badges")]
+    pub x_badges: Option<Vec<Badge>>,
+
+    /// Documentation extension with extra operation examples.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-examples")]
+    pub x_examples: Option<BTreeMap<String, serde_json::Value>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc/Redocly `x-codeSamples` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct CodeSample {
+    /// **Required** Code sample language.
+    pub lang: String,
+
+    /// Optional display label for the language tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// **Required** Code sample source code.
+    pub source: String,
+
+    /// Allows extensions on the code sample extension object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc/Redocly `x-badges` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct Badge {
+    /// **Required** Badge text.
+    pub name: String,
+
+    /// Optional badge position supported by documentation renderers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+
+    /// Optional badge color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+
+    /// Allows extensions on the badge extension object.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,6 +196,18 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
+        if let Some(samples) = &self.x_code_samples {
+            for (i, sample) in samples.iter().enumerate() {
+                sample.validate_with_context(ctx, format!("{path}.x-codeSamples[{i}]"));
+            }
+        }
+
+        if let Some(badges) = &self.x_badges {
+            for (i, badge) in badges.iter().enumerate() {
+                badge.validate_with_context(ctx, format!("{path}.x-badges[{i}]"));
+            }
+        }
+
         if let Some(callbacks) = &self.callbacks {
             for (k, v) in callbacks {
                 v.validate_with_context(ctx, format!("{path}.callbacks[{k}]"));
@@ -154,43 +221,153 @@ impl ValidateWithContext<Spec> for Operation {
             external_doc.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
 
-        if let Some(security) = &self.security {
-            for (i, security) in security.iter().enumerate() {
-                for (name, scopes) in security {
-                    let path = format!("{path}.security[{i}][{name}]");
-                    let reference = format!("#/components/securitySchemes/{name}");
-                    let spec_ref = RefOr::<SecurityScheme>::new_ref(reference.clone());
-                    spec_ref.validate_with_context(ctx, path.clone());
-                    if !scopes.is_empty()
-                        && let Ok(SecurityScheme::OAuth2(oauth2)) = spec_ref.get_item(ctx.spec)
-                    {
-                        for scope in scopes {
-                            ctx.visit(format!("{reference}/{scope}"));
-                            let mut found = false;
-                            if let Some(flow) = &oauth2.flows.implicit {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.password {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.client_credentials {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found && let Some(flow) = &oauth2.flows.authorization_code {
-                                found = found || flow.scopes.contains_key(scope)
-                            }
-                            if !found {
-                                ctx.error(
-                                    path.clone(),
-                                    format_args!(
-                                        "scope `{scope}` not found in spec by reference `{reference}`"
-                                    ),
-                                );
-                            }
-                        }
-                    }
+        // Operation-level `security` is validated cross-cuttingly by
+        // `crate::v3_0::validation::validate_path_item` (called from
+        // `Spec::validate`) — that helper enforces the scope-by-scheme-type
+        // rule, walks all four OAuth2 flows, and reports missing schemes.
+    }
+}
+
+impl ValidateWithContext<Spec> for CodeSample {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_string(&self.lang, ctx, format!("{path}.lang"));
+        validate_required_string(&self.source, ctx, format!("{path}.source"));
+    }
+}
+
+impl ValidateWithContext<Spec> for Badge {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_string(&self.name, ctx, format!("{path}.name"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::validation::Options;
+
+    #[test]
+    fn validate_walks_tags_servers_external_docs() {
+        // Build a Spec with one declared tag so the operation's
+        // `tags[0]` resolves; the second tag references a missing tag,
+        // covering the IgnoreMissingTags branch.
+        let spec = Spec {
+            tags: Some(vec![crate::v3_0::tag::Tag {
+                name: "pets".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        let op = Operation {
+            tags: Some(vec!["pets".into(), "".into(), "missing".into()]),
+            servers: Some(vec![crate::v3_0::server::Server {
+                url: "".into(),
+                ..Default::default()
+            }]),
+            external_docs: Some(crate::v3_0::external_documentation::ExternalDocumentation {
+                url: "".into(),
+                description: None,
+                extensions: None,
+            }),
+            responses: crate::v3_0::response::Responses {
+                default: Some(crate::v3_0::reference::RefOr::new_item(
+                    crate::v3_0::response::Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut ctx = Context::new(&spec, Options::new());
+        op.validate_with_context(&mut ctx, "op".into());
+        // Empty tag string surfaces the required-string error.
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("op.tags[1]") && e.contains("must not be empty")),
+            "errors: {:?}",
+            ctx.errors
+        );
+        // Missing tag surfaces the not-found-in-spec error.
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`missing` not found in spec")),
+            "errors: {:?}",
+            ctx.errors
+        );
+        // Server URL empty surfaces the per-server validator.
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("op.servers[0].url")),
+            "errors: {:?}",
+            ctx.errors
+        );
+        // ExternalDocs URL empty surfaces.
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("op.externalDocs.url")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // With IgnoreMissingTags, the missing-tag error is silenced.
+        let mut ctx = Context::new(&spec, Options::IgnoreMissingTags.only());
+        op.validate_with_context(&mut ctx, "op".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("not found in spec")),
+            "missing-tags should be silenced: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn documentation_extensions_round_trip_and_validate() {
+        let value = serde_json::json!({
+            "responses": {
+                "200": {
+                    "description": "OK"
+                }
+            },
+            "x-codeSamples": [
+                {
+                    "lang": "curl",
+                    "label": "cURL",
+                    "source": "curl https://example.com/pets"
+                }
+            ],
+            "x-badges": [
+                {
+                    "name": "Beta",
+                    "position": "before",
+                    "color": "purple"
+                }
+            ],
+            "x-examples": {
+                "request": {
+                    "id": 1
                 }
             }
-        }
+        });
+        let operation: Operation = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&operation).unwrap(), value);
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        operation.validate_with_context(&mut ctx, "operation".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        CodeSample::default().validate_with_context(&mut ctx, "sample".to_owned());
+        assert_eq!(ctx.errors.len(), 2, "expected lang/source errors");
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Badge::default().validate_with_context(&mut ctx, "badge".to_owned());
+        assert_eq!(ctx.errors, vec!["badge.name: must not be empty"]);
     }
 }

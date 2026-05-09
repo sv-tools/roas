@@ -2,6 +2,7 @@
 
 use crate::common::helpers::{
     Context, ValidateWithContext, validate_email, validate_optional_url, validate_required_string,
+    validate_required_url,
 };
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
@@ -52,6 +53,11 @@ pub struct Info {
     /// **Required** The version of the OpenAPI document
     /// (which is distinct from the OpenAPI Specification version or the API implementation version).
     pub version: String,
+
+    /// ReDoc/Redocly extension that configures the API logo in generated documentation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-logo")]
+    pub x_logo: Option<Logo>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -125,6 +131,32 @@ pub struct License {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+/// ReDoc/Redocly `x-logo` extension object.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Logo {
+    /// **Required** URL pointing to the logo image.
+    pub url: String,
+
+    /// Optional background color, commonly a hex RGB value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<String>,
+
+    /// Optional alt text for the logo image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_text: Option<String>,
+
+    /// Optional link target for the logo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+
+    /// Allows extensions on the logo extension object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
 impl ValidateWithContext<Spec> for Info {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if !ctx.is_option(Options::IgnoreEmptyInfoTitle) {
@@ -141,6 +173,10 @@ impl ValidateWithContext<Spec> for Info {
         if let Some(license) = &self.license {
             license.validate_with_context(ctx, format!("{path}.license"));
         }
+
+        if let Some(logo) = &self.x_logo {
+            logo.validate_with_context(ctx, format!("{path}.x-logo"));
+        }
     }
 }
 
@@ -155,6 +191,14 @@ impl ValidateWithContext<Spec> for License {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
         validate_optional_url(&self.url, ctx, format!("{path}.url"));
+    }
+}
+
+impl ValidateWithContext<Spec> for Logo {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Single helper: empties → "must not be empty", non-URLs → "must be a valid URL".
+        validate_required_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_url(&self.href, ctx, format!("{path}.href"));
     }
 }
 
@@ -562,5 +606,43 @@ mod tests {
         }
         .validate_with_context(&mut ctx, String::from("info"));
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn x_logo_round_trip_and_validate() {
+        let info: Info = serde_json::from_value(json!({
+            "title": "Swagger Sample App",
+            "version": "1.0.1",
+            "x-logo": {
+                "url": "https://example.com/logo.svg",
+                "altText": "Example",
+                "backgroundColor": "#ffffff",
+                "href": "https://example.com"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            info.x_logo,
+            Some(Logo {
+                url: "https://example.com/logo.svg".to_owned(),
+                alt_text: Some("Example".to_owned()),
+                background_color: Some("#ffffff".to_owned()),
+                href: Some("https://example.com".to_owned()),
+                extensions: None,
+            })
+        );
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        info.validate_with_context(&mut ctx, "info".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        Logo::default().validate_with_context(&mut ctx, "logo".to_owned());
+        assert!(
+            ctx.errors.contains(&"logo.url: must not be empty".to_owned()),
+            "expected empty URL error: {:?}",
+            ctx.errors
+        );
     }
 }

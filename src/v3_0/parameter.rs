@@ -493,3 +493,203 @@ fn either_schema_or_content(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::helpers::Context;
+    use crate::v3_0::schema::{ObjectSchema, Schema, SingleSchema};
+    use crate::validation::Options;
+    use serde_json::json;
+
+    fn ok_schema() -> RefOr<Schema> {
+        RefOr::new_item(Schema::Single(Box::new(SingleSchema::Object(
+            ObjectSchema::default(),
+        ))))
+    }
+
+    #[test]
+    fn path_param_dispatch_round_trip() {
+        let v = json!({
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"}
+        });
+        let p: Parameter = serde_json::from_value(v.clone()).unwrap();
+        assert!(matches!(p, Parameter::Path(_)));
+        assert_eq!(serde_json::to_value(&p).unwrap(), v);
+    }
+
+    #[test]
+    fn query_header_cookie_round_trip() {
+        for (loc, _style) in [
+            ("query", "form"),
+            ("header", "simple"),
+            ("cookie", "form"),
+        ] {
+            let v = json!({"name": "n", "in": loc, "schema": {"type": "string"}});
+            let p: Parameter = serde_json::from_value(v.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&p).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn validate_path_param_must_be_required() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Path(InPath {
+            name: "id".into(),
+            description: None,
+            required: false,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(ok_schema()),
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must be required")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_example_examples_xor_each_location() {
+        let spec = Spec::default();
+
+        let p = Parameter::Query(InQuery {
+            name: "q".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: Some(ok_schema()),
+            example: Some(json!(1)),
+            examples: Some(BTreeMap::from([(
+                "a".into(),
+                RefOr::new_item(crate::v3_0::example::Example::default()),
+            )])),
+            content: None,
+            extensions: None,
+        });
+        let mut ctx = Context::new(&spec, Options::new());
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        let p = Parameter::Header(InHeader {
+            name: "X".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(ok_schema()),
+            example: Some(json!(1)),
+            examples: Some(BTreeMap::from([(
+                "a".into(),
+                RefOr::new_item(crate::v3_0::example::Example::default()),
+            )])),
+            content: None,
+            extensions: None,
+        });
+        let mut ctx = Context::new(&spec, Options::new());
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.iter().any(|e| e.contains("example and examples")));
+
+        let p = Parameter::Cookie(InCookie {
+            name: "c".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(ok_schema()),
+            example: Some(json!(1)),
+            examples: Some(BTreeMap::from([(
+                "a".into(),
+                RefOr::new_item(crate::v3_0::example::Example::default()),
+            )])),
+            content: None,
+            extensions: None,
+        });
+        let mut ctx = Context::new(&spec, Options::new());
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.iter().any(|e| e.contains("example and examples")));
+    }
+
+    #[test]
+    fn content_size_must_be_one() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let mut content = BTreeMap::new();
+        content.insert("application/json".to_owned(), MediaType::default());
+        content.insert("text/plain".to_owned(), MediaType::default());
+        let p = Parameter::Query(InQuery {
+            name: "q".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: Some(content),
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must contain exactly one media type entry")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn empty_name_is_required() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Query(InQuery {
+            name: "".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("name") && e.contains("must not be empty")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+}

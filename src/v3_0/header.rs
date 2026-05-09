@@ -143,6 +143,68 @@ mod tests {
     }
 
     #[test]
+    fn validate_example_examples_xor_and_content_size() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Header {
+            example: Some(serde_json::json!(1)),
+            examples: Some(BTreeMap::from([(
+                "a".into(),
+                RefOr::new_item(crate::v3_0::example::Example::default()),
+            )])),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("example and examples")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let mut content = BTreeMap::new();
+        content.insert("application/json".to_owned(), MediaType::default());
+        content.insert("text/plain".to_owned(), MediaType::default());
+        Header {
+            content: Some(content),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must contain exactly one media type entry")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_schema_and_content_mutex() {
+        use crate::v3_0::schema::{ObjectSchema, Schema, SingleSchema};
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Header {
+            schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::Object(ObjectSchema::default()),
+            )))),
+            content: Some(BTreeMap::from([(
+                "application/json".to_owned(),
+                MediaType::default(),
+            )])),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("schema and content are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn test_header_serialize() {
         assert_eq!(
             serde_json::to_value(Header {
