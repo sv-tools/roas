@@ -147,16 +147,18 @@ pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path
 /// `urn:example:dialect`) and not necessarily HTTP(S).
 pub fn validate_optional_uri<T>(uri: &Option<String>, ctx: &mut Context<T>, path: String) {
     let Some(uri) = uri else { return };
-    if uri.is_empty() || ctx.is_option(Options::IgnoreInvalidUrls) {
+    if ctx.is_option(Options::IgnoreInvalidUrls) {
         return;
     }
-    // RFC 3986 §3: a URI reference is "absolute-URI / relative-ref". An
-    // absolute URI starts with `scheme:`; a relative reference can start
-    // with `//`, `/`, a fragment `#`, or just a path segment. The strict
-    // way is to parse it; the cheap heuristic is "either contains a
-    // scheme-like prefix (alpha then `:`) or starts with `/`, `#`, `?`, or
-    // looks like a path segment". Reject only obviously broken forms
-    // (whitespace, control chars).
+    // Present-but-empty is invalid: the field was set, so it must hold
+    // a real URI. (Absent is fine — the caller used `Option`.)
+    if uri.is_empty() {
+        ctx.error(path, "must be a valid URI, found ``");
+        return;
+    }
+    // Reject only obviously broken forms (whitespace, control chars).
+    // The full RFC 3986 grammar is wide enough that anything else is best
+    // left to a dedicated parser.
     if uri.bytes().any(|b| b.is_ascii_whitespace() || b == 0) {
         ctx.error(path, format_args!("must be a valid URI, found `{uri}`"));
     }

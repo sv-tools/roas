@@ -1383,6 +1383,27 @@ mod tests {
             "errors: {:?}",
             err.errors
         );
+
+        // Present-but-empty (`Some("")`) is also invalid: the field was
+        // set, so it must hold a URI.
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            json_schema_dialect: Some("".into()),
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("jsonSchemaDialect") && e.contains("must be a valid URI")),
+            "errors: {:?}",
+            err.errors
+        );
     }
 
     #[test]
