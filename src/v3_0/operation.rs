@@ -221,10 +221,18 @@ impl ValidateWithContext<Spec> for Operation {
             external_doc.validate_with_context(ctx, format!("{path}.externalDocs"));
         }
 
-        // Operation-level `security` is validated cross-cuttingly by
-        // `crate::v3_0::validation::validate_path_item` (called from
-        // `Spec::validate`) — that helper enforces the scope-by-scheme-type
-        // rule, walks all four OAuth2 flows, and reports missing schemes.
+        // Operation-level `security`: validated here so it runs everywhere
+        // an Operation is reached (including operations nested inside
+        // `Callback` path items, which `validate_path_item` does not visit).
+        // The shared helper enforces the scope-by-scheme-type rule, walks
+        // all four OAuth2 flows, and reports missing schemes.
+        if let Some(sec) = &self.security {
+            crate::v3_0::validation::validate_security_requirements(
+                ctx,
+                &format!("{path}.security"),
+                sec,
+            );
+        }
     }
 }
 

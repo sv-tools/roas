@@ -202,6 +202,37 @@ mod tests {
     }
 
     #[test]
+    fn callback_nested_operation_security_is_validated() {
+        // An operation inside a Callback path item must still have its
+        // `security` requirements checked. `validate_path_item` is only
+        // called for `Spec.paths`, so callback-nested operations rely on
+        // `Operation::validate_with_context` to invoke
+        // `validate_security_requirements` directly.
+        let cb: Callback = serde_json::from_value(json!({
+            "{$request.body#/url}": {
+                "post": {
+                    "responses": {"200": {"description": "ok"}},
+                    "security": [{"missing-scheme": []}]
+                }
+            }
+        }))
+        .unwrap();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        cb.validate_with_context(&mut ctx, "cb".into());
+        // With no Components on the Spec, the validator surfaces a
+        // "no `components.securitySchemes`" error — proof the operation
+        // inside the callback ran security validation.
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("post.security") && e.contains("missing-scheme")),
+            "expected security validation inside callback: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn empty_callback_round_trips() {
         let cb: Callback = serde_json::from_value(json!({})).unwrap();
         assert!(cb.paths.is_empty());

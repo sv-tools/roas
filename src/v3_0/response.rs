@@ -231,11 +231,19 @@ impl ValidateWithContext<Spec> for Response {
 
 impl ValidateWithContext<Spec> for Responses {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        // Spec: "The Responses Object MUST contain at least one response code".
+        // Spec: the Responses Object MUST contain at least one entry. The
+        // 3.0.4 prose says "at least one response code", but tooling and the
+        // spec's own examples treat a `default`-only Responses object as
+        // valid (the OAS Linter accepts it; ReDoc renders it). We follow
+        // that convention: any of `default` / one keyed code / one wildcard
+        // satisfies the requirement.
         let has_any =
             self.default.is_some() || self.responses.as_ref().is_some_and(|m| !m.is_empty());
         if !has_any {
-            ctx.error(path.clone(), "must declare at least one response");
+            ctx.error(
+                path.clone(),
+                "must declare at least one response (a status code, a wildcard like `2XX`, or `default`)",
+            );
         }
 
         if let Some(response) = &self.default {

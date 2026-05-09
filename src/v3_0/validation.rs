@@ -17,7 +17,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::common::helpers::{Context, PushError};
 use crate::common::reference::ResolveReference;
-use crate::v3_0::operation::Operation;
 use crate::v3_0::parameter::{InCookie, InHeader, InPath, InQuery, Parameter};
 use crate::v3_0::path_item::PathItem;
 use crate::v3_0::reference::RefOr;
@@ -376,7 +375,12 @@ pub fn validate_path_template_uniqueness(
     }
 }
 
-/// Per-path entry point: walk operations and emit cross-cutting checks.
+/// Per-path entry point: emit cross-cutting checks that only make sense for
+/// the operations actually mounted on `Spec.paths` — currently parameter
+/// dedup and path-template ↔ `in: path` correspondence. Operation-level
+/// `security` is intentionally NOT validated here: it runs from
+/// `Operation::validate_with_context` so it also fires for operations
+/// nested inside Callback path items (which this function never sees).
 pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, item: &PathItem) {
     let pi_params = item.parameters.as_deref();
     if let Some(ops) = &item.operations {
@@ -389,14 +393,7 @@ pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, i
                 pi_params,
                 op.parameters.as_deref(),
             );
-            validate_operation_security(ctx, &op_path, op);
         }
-    }
-}
-
-fn validate_operation_security(ctx: &mut Context<Spec>, op_path: &str, op: &Operation) {
-    if let Some(sec) = &op.security {
-        validate_security_requirements(ctx, &format!("{op_path}.security"), sec);
     }
 }
 
