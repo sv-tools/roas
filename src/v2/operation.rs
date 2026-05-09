@@ -87,9 +87,34 @@ pub struct Operation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security: Option<Vec<BTreeMap<String, Vec<String>>>>,
 
+    /// ReDoc extension with code samples associated with this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-codeSamples")]
+    pub x_code_samples: Option<Vec<CodeSample>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc `x-codeSamples` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct CodeSample {
+    /// **Required** Code sample language.
+    pub lang: String,
+
+    /// Optional display label for the language tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// **Required** Code sample source code.
+    pub source: String,
+
+    /// Allows extensions on the code sample extension object.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,8 +163,21 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
+        if let Some(samples) = &self.x_code_samples {
+            for (i, sample) in samples.iter().enumerate() {
+                sample.validate_with_context(ctx, format!("{path}.x-codeSamples[{i}]"));
+            }
+        }
+
         self.responses
             .validate_with_context(ctx, format!("{path}.responses"));
+    }
+}
+
+impl ValidateWithContext<Spec> for CodeSample {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_string(&self.lang, ctx, format!("{path}.lang"));
+        validate_required_string(&self.source, ctx, format!("{path}.source"));
     }
 }
 
@@ -263,6 +301,7 @@ mod tests {
                 }]),
                 deprecated: Some(true),
                 schemes: Some(vec![Scheme::HTTPS]),
+                x_code_samples: None,
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert("x-extra".to_owned(), serde_json::json!("extra"));
@@ -333,6 +372,7 @@ mod tests {
                 }]),
                 deprecated: Some(true),
                 schemes: Some(vec![Scheme::HTTPS]),
+                x_code_samples: None,
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert("x-extra".to_owned(), serde_json::json!("extra"));
@@ -395,5 +435,43 @@ mod tests {
             }),
             "serialization"
         );
+    }
+
+    #[test]
+    fn x_code_samples_round_trip_and_validate() {
+        let value = serde_json::json!({
+            "responses": {
+                "default": {
+                    "description": "ok"
+                }
+            },
+            "x-codeSamples": [
+                {
+                    "lang": "JavaScript",
+                    "label": "Node",
+                    "source": "console.log('ok');",
+                    "x-extra": "kept"
+                }
+            ]
+        });
+        let operation = serde_json::from_value::<Operation>(value.clone()).unwrap();
+        assert_eq!(
+            operation.x_code_samples,
+            Some(vec![CodeSample {
+                lang: "JavaScript".to_owned(),
+                label: Some("Node".to_owned()),
+                source: "console.log('ok');".to_owned(),
+                extensions: Some(BTreeMap::from_iter([(
+                    "x-extra".to_owned(),
+                    serde_json::json!("kept")
+                )])),
+            }])
+        );
+        assert_eq!(serde_json::to_value(&operation).unwrap(), value);
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Default::default());
+        operation.validate_with_context(&mut ctx, "operation".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }

@@ -49,6 +49,11 @@ pub struct InBody {
     /// ***Required*** The schema defining the type used for the body parameter.
     pub schema: RefOr<Schema>,
 
+    /// ReDoc extension containing named examples for the request body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-examples")]
+    pub x_examples: Option<BTreeMap<String, serde_json::Value>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -189,6 +194,11 @@ pub struct StringParameter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
 
+    /// ReDoc extension containing named examples for this parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-examples")]
+    pub x_examples: Option<BTreeMap<String, serde_json::Value>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -258,6 +268,11 @@ pub struct IntegerParameter {
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
+
+    /// ReDoc extension containing named examples for this parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-examples")]
+    pub x_examples: Option<BTreeMap<String, serde_json::Value>>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -329,6 +344,11 @@ pub struct NumberParameter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
 
+    /// ReDoc extension containing named examples for this parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-examples")]
+    pub x_examples: Option<BTreeMap<String, serde_json::Value>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -366,6 +386,11 @@ pub struct BooleanParameter {
     /// **Note**: "default" has no meaning for required parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<bool>,
+
+    /// ReDoc extension containing named examples for this parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-examples")]
+    pub x_examples: Option<BTreeMap<String, serde_json::Value>>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -426,6 +451,11 @@ pub struct ArrayParameter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique_items: Option<bool>,
 
+    /// ReDoc extension containing named examples for this parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-examples")]
+    pub x_examples: Option<BTreeMap<String, serde_json::Value>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -456,6 +486,11 @@ pub struct FileParameter {
     /// **Note**: "default" has no meaning for required parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
+
+    /// ReDoc extension containing named examples for this parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-examples")]
+    pub x_examples: Option<BTreeMap<String, serde_json::Value>>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -648,7 +683,7 @@ fn must_not_allow_empty_value(
 mod tests {
     use super::*;
     use crate::common::helpers::Context;
-    use crate::v2::items::{Items, StringItem};
+    use crate::v2::items::Items;
     use crate::v2::schema::{Schema, StringSchema};
     use crate::validation::Options;
     use serde_json::json;
@@ -692,6 +727,7 @@ mod tests {
             description: None,
             required: None,
             schema: RefOr::new_item(Schema::from(StringSchema::default())),
+            x_examples: None,
             extensions: None,
         }));
         let mut c = ctx();
@@ -797,7 +833,7 @@ mod tests {
             Parameter::Header(Box::new(InHeader::Array(ArrayParameter {
                 name: "h".into(),
                 allow_empty_value: Some(true),
-                items: Items::String(Box::new(StringItem::default())),
+                items: Items::String(Box::default()),
                 ..Default::default()
             }))),
         ] {
@@ -981,5 +1017,53 @@ mod tests {
                 c.errors
             );
         }
+    }
+
+    #[test]
+    fn x_examples_round_trip() {
+        let body = json!({
+            "in": "body",
+            "name": "payload",
+            "schema": { "type": "string" },
+            "x-examples": {
+                "application/json": { "value": "demo" }
+            }
+        });
+        let p: Parameter = serde_json::from_value(body.clone()).unwrap();
+        match &p {
+            Parameter::Body(body) => assert_eq!(
+                body.x_examples,
+                Some(BTreeMap::from_iter([(
+                    "application/json".to_owned(),
+                    serde_json::json!({ "value": "demo" })
+                )]))
+            ),
+            _ => panic!("expected body parameter"),
+        }
+        assert_eq!(serde_json::to_value(&p).unwrap(), body);
+
+        let query = json!({
+            "in": "query",
+            "type": "string",
+            "name": "q",
+            "x-examples": {
+                "default": "demo"
+            }
+        });
+        let p: Parameter = serde_json::from_value(query.clone()).unwrap();
+        match &p {
+            Parameter::Query(query) => match query.as_ref() {
+                InQuery::String(query) => assert_eq!(
+                    query.x_examples,
+                    Some(BTreeMap::from_iter([(
+                        "default".to_owned(),
+                        serde_json::json!("demo")
+                    )]))
+                ),
+                _ => panic!("expected string query parameter"),
+            },
+            _ => panic!("expected query parameter"),
+        }
+        assert_eq!(serde_json::to_value(&p).unwrap(), query);
     }
 }

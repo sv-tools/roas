@@ -381,6 +381,7 @@ mod tests {
             description: None,
             required: None,
             schema: RefOr::new_item(Schema::from(StringSchema::default())),
+            x_examples: None,
             extensions: None,
         })))
     }
@@ -418,6 +419,13 @@ mod tests {
             allow_empty_value: Some(true),
             ..Default::default()
         }))))
+    }
+
+    fn spec_with_security_definitions(defs: BTreeMap<String, SecurityScheme>) -> Spec {
+        Spec {
+            security_definitions: Some(defs),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -570,13 +578,12 @@ mod tests {
 
     #[test]
     fn security_requires_existing_scheme() {
-        let mut spec = Spec::default();
         let mut defs = BTreeMap::new();
         defs.insert(
             "basic".to_owned(),
             SecurityScheme::Basic(BasicSecurityScheme::default()),
         );
-        spec.security_definitions = Some(defs);
+        let spec = spec_with_security_definitions(defs);
         let spec: &'static Spec = Box::leak(Box::new(spec));
 
         let mut ctx = Context::new(spec, Options::new());
@@ -594,13 +601,12 @@ mod tests {
 
     #[test]
     fn security_basic_with_scopes_is_invalid() {
-        let mut spec = Spec::default();
         let mut defs = BTreeMap::new();
         defs.insert(
             "b".to_owned(),
             SecurityScheme::Basic(BasicSecurityScheme::default()),
         );
-        spec.security_definitions = Some(defs);
+        let spec = spec_with_security_definitions(defs);
         let spec: &'static Spec = Box::leak(Box::new(spec));
 
         let mut ctx = Context::new(spec, Options::new());
@@ -618,7 +624,6 @@ mod tests {
 
     #[test]
     fn security_apikey_with_scopes_is_invalid() {
-        let mut spec = Spec::default();
         let mut defs = BTreeMap::new();
         defs.insert(
             "ak".to_owned(),
@@ -628,7 +633,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        spec.security_definitions = Some(defs);
+        let spec = spec_with_security_definitions(defs);
         let spec: &'static Spec = Box::leak(Box::new(spec));
 
         let mut ctx = Context::new(spec, Options::new());
@@ -646,7 +651,6 @@ mod tests {
 
     #[test]
     fn security_oauth2_undefined_scope() {
-        let mut spec = Spec::default();
         let mut defs = BTreeMap::new();
         defs.insert(
             "o".to_owned(),
@@ -659,7 +663,7 @@ mod tests {
                 extensions: None,
             }),
         );
-        spec.security_definitions = Some(defs);
+        let spec = spec_with_security_definitions(defs);
         let spec: &'static Spec = Box::leak(Box::new(spec));
 
         let mut ctx = Context::new(spec, Options::new());
@@ -678,7 +682,6 @@ mod tests {
     #[test]
     fn security_oauth2_missing_token_or_auth() {
         // Implicit without authorizationUrl
-        let mut spec = Spec::default();
         let mut defs = BTreeMap::new();
         defs.insert(
             "o".to_owned(),
@@ -691,7 +694,7 @@ mod tests {
                 extensions: None,
             }),
         );
-        spec.security_definitions = Some(defs);
+        let spec = spec_with_security_definitions(defs);
         let spec: &'static Spec = Box::leak(Box::new(spec));
         let mut ctx = Context::new(spec, Options::new());
         let mut req = BTreeMap::new();
@@ -706,7 +709,6 @@ mod tests {
         );
 
         // Password without tokenUrl
-        let mut spec = Spec::default();
         let mut defs = BTreeMap::new();
         defs.insert(
             "o".to_owned(),
@@ -719,7 +721,7 @@ mod tests {
                 extensions: None,
             }),
         );
-        spec.security_definitions = Some(defs);
+        let spec = spec_with_security_definitions(defs);
         let spec: &'static Spec = Box::leak(Box::new(spec));
         let mut ctx = Context::new(spec, Options::new());
         let mut req = BTreeMap::new();
@@ -736,7 +738,6 @@ mod tests {
 
     #[test]
     fn validate_security_definitions_walks_each() {
-        let mut spec = Spec::default();
         let mut defs = BTreeMap::new();
         defs.insert(
             "o".to_owned(),
@@ -749,7 +750,7 @@ mod tests {
                 extensions: None,
             }),
         );
-        spec.security_definitions = Some(defs);
+        let spec = spec_with_security_definitions(defs);
         let spec: &'static Spec = Box::leak(Box::new(spec));
         let mut ctx = Context::new(spec, Options::new());
         validate_security_definitions(&mut ctx);
@@ -773,12 +774,14 @@ mod tests {
     fn validate_path_item_invokes_op_validators() {
         // Build a spec, path with templated path /users/{id}, an operation
         // missing the corresponding `in: path` parameter — should produce an error.
-        let mut op = crate::v2::operation::Operation::default();
-        op.responses = Responses {
-            default: Some(RefOr::new_item(Response {
-                description: "ok".into(),
+        let op = crate::v2::operation::Operation {
+            responses: Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
                 ..Default::default()
-            })),
+            },
             ..Default::default()
         };
         let mut ops = BTreeMap::new();

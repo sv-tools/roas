@@ -174,6 +174,16 @@ pub struct Spec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_docs: Option<ExternalDocumentation>,
 
+    /// ReDoc extension that backports OpenAPI 3 servers to Swagger 2.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-servers")]
+    pub x_servers: Option<Vec<Server>>,
+
+    /// ReDoc extension that groups tags in the side menu.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-tagGroups")]
+    pub x_tag_groups: Option<Vec<TagGroup>>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -217,6 +227,39 @@ pub enum Scheme {
     /// `wss` protocol (WebSocket Secure)
     #[serde(rename = "wss")]
     WSS,
+}
+
+/// ReDoc `x-servers` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct Server {
+    /// **Required** The server URL.
+    pub url: String,
+
+    /// A short description of the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Allows extensions on the server extension object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// ReDoc `x-tagGroups` extension entry.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct TagGroup {
+    /// **Required** The display name for the tag group.
+    pub name: String,
+
+    /// **Required** The tags included in the group.
+    pub tags: Vec<String>,
+
+    /// Allows extensions on the tag group extension object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 impl Display for Scheme {
@@ -386,6 +429,18 @@ impl Validate for Spec {
             docs.validate_with_context(&mut ctx, "#.externalDocs".to_owned())
         }
 
+        if let Some(servers) = &self.x_servers {
+            for (i, server) in servers.iter().enumerate() {
+                server.validate_with_context(&mut ctx, format!("#.x-servers[{i}]"));
+            }
+        }
+
+        if let Some(tag_groups) = &self.x_tag_groups {
+            for (i, tag_group) in tag_groups.iter().enumerate() {
+                tag_group.validate_with_context(&mut ctx, format!("#.x-tagGroups[{i}]"));
+            }
+        }
+
         if let Some(tags) = &self.tags {
             for tag in tags.iter() {
                 let path = format!("#/tags/{}", tag.name);
@@ -415,6 +470,21 @@ impl Validate for Spec {
         }
 
         ctx.into()
+    }
+}
+
+impl ValidateWithContext<Spec> for Server {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        crate::common::helpers::validate_required_string(&self.url, ctx, format!("{path}.url"));
+    }
+}
+
+impl ValidateWithContext<Spec> for TagGroup {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        crate::common::helpers::validate_required_string(&self.name, ctx, format!("{path}.name"));
+        for (i, tag) in self.tags.iter().enumerate() {
+            crate::common::helpers::validate_required_string(tag, ctx, format!("{path}.tags[{i}]"));
+        }
     }
 }
 
@@ -472,6 +542,57 @@ mod tests {
             "unknown variant `foo`, expected `2.0`",
             "foo as swagger version",
         );
+    }
+
+    #[test]
+    fn test_common_doc_extensions_round_trip_and_validate() {
+        let value = serde_json::json!({
+            "swagger": "2.0",
+            "info": {
+                "title": "foo",
+                "version": "1",
+            },
+            "paths": {},
+            "x-servers": [
+                {
+                    "url": "https://api.example.com",
+                    "description": "Production",
+                    "x-extra": true,
+                }
+            ],
+            "x-tagGroups": [
+                {
+                    "name": "Core",
+                    "tags": ["pets"],
+                    "x-extra": "group",
+                }
+            ],
+        });
+        let spec = serde_json::from_value::<Spec>(value.clone()).unwrap();
+        assert_eq!(
+            spec.x_servers,
+            Some(vec![Server {
+                url: "https://api.example.com".to_owned(),
+                description: Some("Production".to_owned()),
+                extensions: Some(BTreeMap::from_iter([(
+                    "x-extra".to_owned(),
+                    serde_json::json!(true)
+                )])),
+            }])
+        );
+        assert_eq!(
+            spec.x_tag_groups,
+            Some(vec![TagGroup {
+                name: "Core".to_owned(),
+                tags: vec!["pets".to_owned()],
+                extensions: Some(BTreeMap::from_iter([(
+                    "x-extra".to_owned(),
+                    serde_json::json!("group")
+                )])),
+            }])
+        );
+        assert_eq!(serde_json::to_value(&spec).unwrap(), value);
+        assert!(spec.validate(Default::default()).is_ok());
     }
 
     #[test]
@@ -660,6 +781,17 @@ mod tests {
         }
     }
 
+    fn spec_with_info() -> Spec {
+        Spec {
+            info: crate::v2::info::Info {
+                title: "T".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn version_and_scheme_display() {
         assert_eq!(format!("{}", Version::V2_0), "2.0");
@@ -675,12 +807,7 @@ mod tests {
 
     #[test]
     fn happy_path_validate_no_errors() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
+        let mut spec = spec_with_info();
         let mut ops = BTreeMap::new();
         ops.insert("get".into(), happy_op());
         let mut paths = BTreeMap::new();
@@ -701,12 +828,7 @@ mod tests {
 
     #[test]
     fn validate_path_must_start_with_slash() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
+        let mut spec = spec_with_info();
         let mut paths = BTreeMap::new();
         paths.insert(
             "no-slash".to_owned(),
@@ -733,12 +855,7 @@ mod tests {
 
     #[test]
     fn validate_base_path_must_start_with_slash() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
+        let mut spec = spec_with_info();
         spec.base_path = Some("api".into());
         let err = spec.validate(Options::new()).unwrap_err();
         assert!(
@@ -752,36 +869,30 @@ mod tests {
 
     #[test]
     fn validate_security_with_definitions() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
         let mut defs = BTreeMap::new();
         defs.insert(
             "basicAuth".to_owned(),
             SecurityScheme::Basic(BasicSecurityScheme::default()),
         );
-        spec.security_definitions = Some(defs);
         let mut req = BTreeMap::new();
         req.insert("basicAuth".to_owned(), vec![]);
-        spec.security = Some(vec![req]);
+        let spec = Spec {
+            security_definitions: Some(defs),
+            security: Some(vec![req]),
+            ..spec_with_info()
+        };
         let res = spec.validate(Options::new());
         assert!(res.is_ok(), "errors: {:?}", res);
     }
 
     #[test]
     fn validate_undefined_security_scheme() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
         let mut req = BTreeMap::new();
         req.insert("foo".to_owned(), vec![]);
-        spec.security = Some(vec![req]);
+        let spec = Spec {
+            security: Some(vec![req]),
+            ..spec_with_info()
+        };
         let err = spec.validate(Options::new()).unwrap_err();
         assert!(
             err.errors
@@ -794,12 +905,7 @@ mod tests {
 
     #[test]
     fn validate_body_and_formdata_together_via_spec() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
+        let mut spec = spec_with_info();
         let mut op = happy_op();
         op.parameters = Some(vec![
             RefOr::new_item(Parameter::Body(Box::new(crate::v2::parameter::InBody {
@@ -807,6 +913,7 @@ mod tests {
                 description: None,
                 required: None,
                 schema: RefOr::new_item(Schema::from(StringSchema::default())),
+                x_examples: None,
                 extensions: None,
             }))),
             RefOr::new_item(Parameter::FormData(Box::new(
@@ -842,12 +949,7 @@ mod tests {
 
     #[test]
     fn validate_duplicate_param_via_spec() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
+        let mut spec = spec_with_info();
         let mut op = happy_op();
         op.parameters = Some(vec![
             RefOr::new_item(Parameter::Query(Box::new(InQuery::String(
@@ -887,12 +989,7 @@ mod tests {
 
     #[test]
     fn validate_missing_path_template_param_via_spec() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
+        let mut spec = spec_with_info();
         let mut ops = BTreeMap::new();
         ops.insert("get".into(), happy_op());
         let mut paths = BTreeMap::new();
@@ -919,12 +1016,7 @@ mod tests {
 
     #[test]
     fn validate_empty_responses_via_spec() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
+        let mut spec = spec_with_info();
         let mut ops = BTreeMap::new();
         ops.insert(
             "get".into(),
@@ -1148,12 +1240,6 @@ mod tests {
 
     #[test]
     fn validate_oauth2_definitions_walked() {
-        let mut spec = Spec::default();
-        spec.info = crate::v2::info::Info {
-            title: "T".into(),
-            version: "1".into(),
-            ..Default::default()
-        };
         let mut defs = BTreeMap::new();
         defs.insert(
             "o".to_owned(),
@@ -1166,7 +1252,10 @@ mod tests {
                 extensions: None,
             }),
         );
-        spec.security_definitions = Some(defs);
+        let spec = Spec {
+            security_definitions: Some(defs),
+            ..spec_with_info()
+        };
         let err = spec.validate(Options::new()).unwrap_err();
         // Per-scheme validate fires on missing URLs / empty scopes.
         assert!(

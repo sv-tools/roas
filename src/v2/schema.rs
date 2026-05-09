@@ -133,6 +133,11 @@ pub struct AllOfSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
+    /// ReDoc extension that marks this schema as nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-nullable")]
+    pub x_nullable: Option<bool>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -225,6 +230,11 @@ pub struct StringSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
+    /// ReDoc extension that marks this schema as nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-nullable")]
+    pub x_nullable: Option<bool>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -310,6 +320,11 @@ pub struct IntegerSchema {
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
+
+    /// ReDoc extension that marks this schema as nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-nullable")]
+    pub x_nullable: Option<bool>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -397,6 +412,11 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
 
+    /// ReDoc extension that marks this schema as nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-nullable")]
+    pub x_nullable: Option<bool>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -450,6 +470,11 @@ pub struct BooleanSchema {
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
+
+    /// ReDoc extension that marks this schema as nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-nullable")]
+    pub x_nullable: Option<bool>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -521,6 +546,11 @@ pub struct ArraySchema {
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
+
+    /// ReDoc extension that marks this schema as nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-nullable")]
+    pub x_nullable: Option<bool>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -608,6 +638,11 @@ pub struct ObjectSchema {
     /// A free-form property to include an example of an instance for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<serde_json::Value>,
+
+    /// ReDoc extension that marks this schema as nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-nullable")]
+    pub x_nullable: Option<bool>,
 
     /// Takes an array of object definitions that are validated independently
     /// but together compose a single object
@@ -1064,7 +1099,7 @@ mod tests {
         assert_eq!(format!("{s}"), "allOf");
 
         // Empty allOf produces an error
-        let s = Schema::AllOf(Box::new(AllOfSchema::default()));
+        let s = Schema::AllOf(Box::default());
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         s.validate_with_context(&mut ctx, "p".into());
@@ -1115,7 +1150,7 @@ mod tests {
         assert_eq!(format!("{}", Schema::Number(Box::default())), "number");
         assert_eq!(format!("{}", Schema::Boolean(Box::default())), "boolean");
         assert_eq!(
-            format!("{}", Schema::Array(Box::new(ArraySchema::default()))),
+            format!("{}", Schema::Array(Box::default())),
             "array"
         );
         assert_eq!(format!("{}", Schema::Object(Box::default())), "object");
@@ -1162,5 +1197,30 @@ mod tests {
                 ],
             }),
         );
+    }
+
+    #[test]
+    fn x_nullable_round_trip() {
+        let value = serde_json::json!({
+            "type": "string",
+            "x-nullable": true
+        });
+        let schema = serde_json::from_value::<Schema>(value.clone()).unwrap();
+        match &schema {
+            Schema::String(schema) => assert_eq!(schema.x_nullable, Some(true)),
+            _ => panic!("expected string schema"),
+        }
+        assert_eq!(serde_json::to_value(schema).unwrap(), value);
+
+        let value = serde_json::json!({
+            "type": "object",
+            "x-nullable": true
+        });
+        let schema = serde_json::from_value::<Schema>(value.clone()).unwrap();
+        match &schema {
+            Schema::Object(schema) => assert_eq!(schema.x_nullable, Some(true)),
+            _ => panic!("expected object schema"),
+        }
+        assert_eq!(serde_json::to_value(schema).unwrap(), value);
     }
 }
