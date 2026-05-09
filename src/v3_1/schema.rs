@@ -412,23 +412,33 @@ pub struct IntegerSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<i64>>,
 
-    /// Declares the minimum value of the parameter.
+    /// Inclusive lower bound for the value.
+    /// Per JSON Schema 2020-12 §6.2.4, this keyword is any number even when
+    /// the parent schema's `type` is `"integer"`, so a fractional bound such
+    /// as `0.5` is valid (and constrains the integer instance to `>= 1`).
+    /// Stored as [`serde_json::Number`] so integer-shaped values like `100`
+    /// round-trip without becoming `100.0`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<i64>,
+    pub minimum: Option<serde_json::Number>,
 
-    /// Declares that the value of the parameter is strictly greater than the value of `minimum`
+    /// Strict (exclusive) lower bound for the value.
+    /// Per JSON Schema 2020-12 §6.2.5, the keyword value is any number — not
+    /// the boolean modifier from JSON Schema draft-04 / OAS 3.0.
     #[serde(rename = "exclusiveMinimum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_minimum: Option<bool>,
+    pub exclusive_minimum: Option<serde_json::Number>,
 
-    /// Declares the minimum value of the parameter.
+    /// Inclusive upper bound for the value.
+    /// See [`Self::minimum`] for the rationale on the type.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<i64>,
+    pub maximum: Option<serde_json::Number>,
 
-    /// Declares that the value of the parameter is strictly less than the value of `maximum`
+    /// Strict (exclusive) upper bound for the value.
+    /// Per JSON Schema 2020-12 §6.2.3, the keyword value is any number — not
+    /// the boolean modifier from JSON Schema draft-04 / OAS 3.0.
     #[serde(rename = "exclusiveMaximum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_maximum: Option<bool>,
+    pub exclusive_maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
@@ -509,19 +519,21 @@ pub struct NumberSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum: Option<f64>,
 
-    /// Declares that the value of the parameter is strictly greater than the value of `minimum`
+    /// Declares that the value of the parameter is strictly greater than this value.
+    /// In OpenAPI 3.1 / JSON Schema 2020-12 this is a numeric bound, not a boolean modifier.
     #[serde(rename = "exclusiveMinimum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_minimum: Option<bool>,
+    pub exclusive_minimum: Option<f64>,
 
-    /// Declares the minimum value of the parameter.
+    /// Declares the maximum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maximum: Option<f64>,
 
-    /// Declares that the value of the parameter is strictly less than the value of `maximum`
+    /// Declares that the value of the parameter is strictly less than this value.
+    /// In OpenAPI 3.1 / JSON Schema 2020-12 this is a numeric bound, not a boolean modifier.
     #[serde(rename = "exclusiveMaximum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_maximum: Option<bool>,
+    pub exclusive_maximum: Option<f64>,
 
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
@@ -1127,6 +1139,7 @@ impl ValidateWithContext<Spec> for MultiSchema {
         let allowed_types: HashSet<String> = HashSet::from_iter(vec![
             "string".into(),
             "number".into(),
+            "integer".into(),
             "object".into(),
             "array".into(),
             "boolean".into(),
@@ -1393,8 +1406,8 @@ mod tests {
             format: Some(IntegerFormat::Int32),
             default: Some(42),
             enum_values: Some(vec![1, 42, 105]),
-            minimum: Some(1),
-            maximum: Some(105),
+            minimum: Some(1.into()),
+            maximum: Some(105.into()),
             examples: Some(vec![serde_json::json!(1), serde_json::json!(42)]),
             ..Default::default()
         })));
@@ -1410,6 +1423,80 @@ mod tests {
         });
         assert_eq!(serde_json::to_value(&spec).unwrap(), value);
         assert_eq!(serde_json::from_value::<Schema>(value).unwrap(), spec);
+    }
+
+    #[test]
+    fn test_numeric_bounds_are_numbers() {
+        // OpenAPI 3.1 / JSON Schema 2020-12: minimum, maximum, exclusiveMinimum,
+        // and exclusiveMaximum are numbers — not booleans (the draft-04 form),
+        // and not constrained to integers when the parent type is "integer"
+        // (the keyword value is independent of the instance constraint).
+
+        // a) Integer-shaped JSON numbers (e.g. `0`, `100`) parse and
+        //    round-trip *without* becoming floats. This is required for
+        //    real-world OpenAPI documents (e.g. petstore.json) that write
+        //    `"maximum": 100` on an integer schema.
+        let json = serde_json::json!({
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "exclusiveMaximum": 100,
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).expect("must parse");
+        match &parsed {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Integer(int) => {
+                    assert_eq!(int.exclusive_minimum.as_ref().unwrap().as_i64(), Some(0));
+                    assert_eq!(int.exclusive_maximum.as_ref().unwrap().as_i64(), Some(100));
+                }
+                _ => panic!("expected Integer schema"),
+            },
+            _ => panic!("expected Single schema"),
+        }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        // b) Fractional bounds on `type: integer` MUST parse — JSON Schema
+        //    permits this; `minimum: 0.5` on an integer simply means
+        //    "instance is integer AND >= 0.5", i.e. >= 1.
+        let json = serde_json::json!({
+            "type": "integer",
+            "minimum": 0.5,
+            "maximum": 99.5,
+            "exclusiveMinimum": 0.5,
+            "exclusiveMaximum": 99.5,
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).expect("must parse");
+        match &parsed {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Integer(int) => {
+                    assert_eq!(int.minimum.as_ref().unwrap().as_f64(), Some(0.5));
+                    assert_eq!(int.maximum.as_ref().unwrap().as_f64(), Some(99.5));
+                    assert_eq!(int.exclusive_minimum.as_ref().unwrap().as_f64(), Some(0.5));
+                    assert_eq!(int.exclusive_maximum.as_ref().unwrap().as_f64(), Some(99.5));
+                }
+                _ => panic!("expected Integer schema"),
+            },
+            _ => panic!("expected Single schema"),
+        }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+
+        // c) Number schema accepts fractional bounds (sanity check).
+        let json = serde_json::json!({
+            "type": "number",
+            "exclusiveMinimum": 0.5,
+            "exclusiveMaximum": 1.5,
+        });
+        let parsed: Schema = serde_json::from_value(json.clone()).expect("must parse");
+        match &parsed {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Number(n) => {
+                    assert_eq!(n.exclusive_minimum, Some(0.5));
+                    assert_eq!(n.exclusive_maximum, Some(1.5));
+                }
+                _ => panic!("expected Number schema"),
+            },
+            _ => panic!("expected Single schema"),
+        }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
 
     #[test]
@@ -1557,6 +1644,29 @@ mod tests {
         });
         assert_eq!(serde_json::to_value(&spec).unwrap(), value);
         assert_eq!(serde_json::from_value::<Schema>(value).unwrap(), spec);
+
+        // Round-trip alone is not enough: validate that all primitive type
+        // names accepted by the deserializer are also accepted by the validator.
+        let spec_owner = Spec::default();
+        let mut ctx = Context::new(&spec_owner, crate::validation::Options::empty());
+        let multi = MultiSchema {
+            schema_types: vec![
+                "string".into(),
+                "integer".into(),
+                "number".into(),
+                "boolean".into(),
+                "object".into(),
+                "array".into(),
+                "null".into(),
+            ],
+            ..Default::default()
+        };
+        multi.validate_with_context(&mut ctx, "schema".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "all primitive types should be valid: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]

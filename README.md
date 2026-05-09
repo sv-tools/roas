@@ -27,20 +27,33 @@ or manually add the following lines:
 
 ```toml
 [dependencies]
-roas = "0.4"  
+roas = "0.6"
+```
+
+The default feature is `v3_0`. To parse v2.0 or v3.1 specs, enable the
+corresponding feature:
+
+```toml
+[dependencies]
+roas = { version = "0.6", default-features = false, features = ["v3_1"] }
 ```
 
 ## Examples
 
+The default feature is `v3_0`. The example below also uses `serde_json`
+directly, so add both crates:
+
+```shell
+cargo add roas serde_json
+```
+
 ```rust
-use roas::v3_1::spec::Spec;
+use roas::v3_0::spec::Spec;
 use roas::validation::{Options, Validate};
 
-...
-
-let spec = serde_json::from_str::<Spec>(raw_json).unwrap();
+let raw_json = r#"{ "openapi": "3.0.4", "info": { "title": "demo", "version": "1" }, "paths": {} }"#;
+let spec: Spec = serde_json::from_str(raw_json).unwrap();
 spec.validate(Options::IgnoreMissingTags | Options::IgnoreExternalReferences).unwrap();
-
-...
-
 ```
+
+For v3.1 (experimental), enable the `v3_1` feature and import from `roas::v3_1`.
