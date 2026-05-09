@@ -477,8 +477,12 @@ fn either_schema_or_content(
     content: &Option<BTreeMap<String, MediaType>>,
     path: String,
 ) {
-    if schema.is_some() && content.is_some() {
-        ctx.error(path.clone(), "schema and content are mutually exclusive");
+    // Spec: "A parameter MUST contain either a schema property, or a content
+    // property, but not both."
+    match (schema.is_some(), content.is_some()) {
+        (true, true) => ctx.error(path.clone(), "schema and content are mutually exclusive"),
+        (false, false) => ctx.error(path.clone(), "must define either `schema` or `content`"),
+        _ => {}
     }
     // Spec: "The map MUST only contain one entry."
     if let Some(content) = content
@@ -663,6 +667,60 @@ mod tests {
             ctx.errors
                 .iter()
                 .any(|e| e.contains("must contain exactly one media type entry")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn parameter_must_define_schema_or_content() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        // Query parameter with neither schema nor content.
+        let p = Parameter::Query(InQuery {
+            name: "q".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must define either `schema` or `content`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // Path parameter with neither schema nor content also surfaces the error.
+        let p = Parameter::Path(InPath {
+            name: "id".into(),
+            description: None,
+            required: true,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        });
+        let mut ctx = Context::new(&spec, Options::new());
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must define either `schema` or `content`")),
             "errors: {:?}",
             ctx.errors
         );

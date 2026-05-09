@@ -91,9 +91,10 @@ pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<BTreeMap<String, MediaType>>,
 
-    /// Maps a header name to its definition.
-    /// [RFC7230](https://www.rfc-editor.org/rfc/rfc7230) states header names are case insensitive.
-    /// If a response header is defined with the name `"Content-Type"`, it SHALL be ignored.
+    /// A map of operations links that can be followed from the response.
+    /// The key is a short name for the link (constrained to the same naming
+    /// pattern as Component map keys: `^[a-zA-Z0-9.\-_]+$`); the value is a
+    /// `Link` Object or a `Reference` to one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<BTreeMap<String, RefOr<Link>>>,
 
@@ -666,6 +667,9 @@ mod tests {
                         description: Some("A short description of the header.".to_owned()),
                         required: Some(true),
                         style: Some(InHeaderStyle::Simple),
+                        schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                            SingleSchema::Object(ObjectSchema::default()),
+                        )))),
                         ..Default::default()
                     }),
                 );
