@@ -96,12 +96,16 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         d.validate_with_context(&mut ctx, "d".to_owned());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("Missing") && e.contains("not found")),
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("Missing") && e.contains("not found")),
             "expected missing schema reported: {:?}",
             ctx.errors
         );
         assert!(
-            !ctx.errors.iter().any(|e| e.contains("schemas/Cat") && e.contains("not found")),
+            !ctx.errors
+                .iter()
+                .any(|e| e.contains("schemas/Cat") && e.contains("not found")),
             "Cat must resolve: {:?}",
             ctx.errors
         );

@@ -863,9 +863,7 @@ mod tests {
         let r = spec
             .define_request_body("RB", RequestBody::default())
             .unwrap();
-        assert!(
-            matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/requestBodies/RB")
-        );
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/requestBodies/RB"));
 
         let r = spec.define_header("H", Header::default()).unwrap();
         assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/headers/H"));
@@ -918,7 +916,10 @@ mod tests {
         let bad = "x y";
         assert!(spec.define_response(bad, Response::default()).is_err());
         assert!(spec.define_example(bad, Example::default()).is_err());
-        assert!(spec.define_request_body(bad, RequestBody::default()).is_err());
+        assert!(
+            spec.define_request_body(bad, RequestBody::default())
+                .is_err()
+        );
         assert!(spec.define_header(bad, Header::default()).is_err());
         assert!(
             spec.define_security_scheme(
@@ -973,7 +974,8 @@ mod tests {
             }),
         )
         .unwrap();
-        spec.define_request_body("RB", RequestBody::default()).unwrap();
+        spec.define_request_body("RB", RequestBody::default())
+            .unwrap();
         spec.define_header("H", Header::default()).unwrap();
         spec.define_example("E", Example::default()).unwrap();
         spec.define_callback("CB", Callback::default()).unwrap();
@@ -989,15 +991,60 @@ mod tests {
         )
         .unwrap();
 
-        assert!(<Spec as ResolveReference<Schema>>::resolve_reference(&spec, "#/components/schemas/S").is_some());
-        assert!(<Spec as ResolveReference<Response>>::resolve_reference(&spec, "#/components/responses/R").is_some());
-        assert!(<Spec as ResolveReference<Parameter>>::resolve_reference(&spec, "#/components/parameters/P").is_some());
-        assert!(<Spec as ResolveReference<RequestBody>>::resolve_reference(&spec, "#/components/requestBodies/RB").is_some());
-        assert!(<Spec as ResolveReference<Header>>::resolve_reference(&spec, "#/components/headers/H").is_some());
-        assert!(<Spec as ResolveReference<Example>>::resolve_reference(&spec, "#/components/examples/E").is_some());
-        assert!(<Spec as ResolveReference<Callback>>::resolve_reference(&spec, "#/components/callbacks/CB").is_some());
-        assert!(<Spec as ResolveReference<Link>>::resolve_reference(&spec, "#/components/links/L").is_some());
-        assert!(<Spec as ResolveReference<SecurityScheme>>::resolve_reference(&spec, "#/components/securitySchemes/SS").is_some());
+        assert!(
+            <Spec as ResolveReference<Schema>>::resolve_reference(&spec, "#/components/schemas/S")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Response>>::resolve_reference(
+                &spec,
+                "#/components/responses/R"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Parameter>>::resolve_reference(
+                &spec,
+                "#/components/parameters/P"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<RequestBody>>::resolve_reference(
+                &spec,
+                "#/components/requestBodies/RB"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Header>>::resolve_reference(&spec, "#/components/headers/H")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Example>>::resolve_reference(
+                &spec,
+                "#/components/examples/E"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Callback>>::resolve_reference(
+                &spec,
+                "#/components/callbacks/CB"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Link>>::resolve_reference(&spec, "#/components/links/L")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<SecurityScheme>>::resolve_reference(
+                &spec,
+                "#/components/securitySchemes/SS"
+            )
+            .is_some()
+        );
 
         // tags resolver finds tags by name.
         let spec = Spec {
@@ -1008,7 +1055,9 @@ mod tests {
             ..Default::default()
         };
         assert!(<Spec as ResolveReference<Tag>>::resolve_reference(&spec, "#/tags/pets").is_some());
-        assert!(<Spec as ResolveReference<Tag>>::resolve_reference(&spec, "#/tags/missing").is_none());
+        assert!(
+            <Spec as ResolveReference<Tag>>::resolve_reference(&spec, "#/tags/missing").is_none()
+        );
     }
 
     #[test]
@@ -1065,7 +1114,9 @@ mod tests {
         };
         let err = spec.validate(Options::new()).unwrap_err();
         assert!(
-            err.errors.iter().any(|e| e.contains("collapse to the same shape")),
+            err.errors
+                .iter()
+                .any(|e| e.contains("collapse to the same shape")),
             "expected equivalent-template error: {:?}",
             err.errors
         );

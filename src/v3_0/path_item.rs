@@ -1,9 +1,9 @@
 //! Path Items
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::operation::Operation;
 use crate::v3_0::parameter::Parameter;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
 use serde::de::{Error, MapAccess, Visitor};

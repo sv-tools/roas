@@ -1,10 +1,10 @@
 //! Operation Object
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::parameter::Parameter;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::request_body::RequestBody;
 use crate::v3_0::response::Responses;
 use crate::v3_0::server::Server;
@@ -309,9 +309,7 @@ mod tests {
         );
         // ExternalDocs URL empty surfaces.
         assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("op.externalDocs.url")),
+            ctx.errors.iter().any(|e| e.contains("op.externalDocs.url")),
             "errors: {:?}",
             ctx.errors
         );

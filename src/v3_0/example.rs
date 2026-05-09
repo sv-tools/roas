@@ -91,9 +91,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("mutually exclusive")),
+            ctx.errors.iter().any(|e| e.contains("mutually exclusive")),
             "errors: {:?}",
             ctx.errors
         );

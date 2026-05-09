@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::discriminator::Discriminator;
 use crate::v3_0::external_documentation::ExternalDocumentation;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::spec::Spec;
 use crate::v3_0::xml::XML;
 
@@ -1610,7 +1610,9 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         parsed.validate_with_context(&mut ctx, "s".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("additionalProperties")),
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("additionalProperties")),
             "expected additionalProperties walk error: {:?}",
             ctx.errors
         );
@@ -1648,13 +1650,34 @@ mod tests {
 
     #[test]
     fn schema_display_impl() {
-        assert_eq!(SingleSchema::String(StringSchema::default()).to_string(), "string");
-        assert_eq!(SingleSchema::Integer(IntegerSchema::default()).to_string(), "integer");
-        assert_eq!(SingleSchema::Number(NumberSchema::default()).to_string(), "number");
-        assert_eq!(SingleSchema::Boolean(BooleanSchema::default()).to_string(), "boolean");
-        assert_eq!(SingleSchema::Array(ArraySchema::default()).to_string(), "array");
-        assert_eq!(SingleSchema::Object(ObjectSchema::default()).to_string(), "object");
-        assert_eq!(SingleSchema::Null(NullSchema::default()).to_string(), "null");
+        assert_eq!(
+            SingleSchema::String(StringSchema::default()).to_string(),
+            "string"
+        );
+        assert_eq!(
+            SingleSchema::Integer(IntegerSchema::default()).to_string(),
+            "integer"
+        );
+        assert_eq!(
+            SingleSchema::Number(NumberSchema::default()).to_string(),
+            "number"
+        );
+        assert_eq!(
+            SingleSchema::Boolean(BooleanSchema::default()).to_string(),
+            "boolean"
+        );
+        assert_eq!(
+            SingleSchema::Array(ArraySchema::default()).to_string(),
+            "array"
+        );
+        assert_eq!(
+            SingleSchema::Object(ObjectSchema::default()).to_string(),
+            "object"
+        );
+        assert_eq!(
+            SingleSchema::Null(NullSchema::default()).to_string(),
+            "null"
+        );
     }
 
     #[test]

@@ -640,7 +640,8 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         Logo::default().validate_with_context(&mut ctx, "logo".to_owned());
         assert!(
-            ctx.errors.contains(&"logo.url: must not be empty".to_owned()),
+            ctx.errors
+                .contains(&"logo.url: must not be empty".to_owned()),
             "expected empty URL error: {:?}",
             ctx.errors
         );

@@ -43,9 +43,7 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> Result<(), St
         .as_ref()
         .is_some_and(|m| m.contains_key(&method_lower));
     if !exists {
-        return Err(format!(
-            "method `{method}` not declared on path `{path}`"
-        ));
+        return Err(format!("method `{method}` not declared on path `{path}`"));
     }
     Ok(())
 }
@@ -143,10 +141,7 @@ impl ValidateWithContext<Spec> for Link {
                 ctx.error(path.clone(), ".operationRef: must not be empty");
             } else if operation_ref.starts_with("#/") {
                 if let Err(msg) = resolve_internal_operation_ref(ctx.spec, operation_ref) {
-                    ctx.error(
-                        path.clone(),
-                        format_args!(".operationRef: {msg}"),
-                    );
+                    ctx.error(path.clone(), format_args!(".operationRef: {msg}"));
                 }
             } else if !ctx.is_option(Options::IgnoreExternalReferences) {
                 ctx.error(
@@ -208,7 +203,9 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         Link::default().validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must specify exactly one")),
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must specify exactly one")),
             "errors: {:?}",
             ctx.errors
         );

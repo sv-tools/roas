@@ -1,12 +1,12 @@
 //! Holds a set of reusable objects for different aspects of the OAS.
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_string_matches};
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::example::Example;
 use crate::v3_0::header::Header;
 use crate::v3_0::link::Link;
 use crate::v3_0::parameter::Parameter;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::request_body::RequestBody;
 use crate::v3_0::response::Response;
 use crate::v3_0::schema::Schema;
@@ -211,8 +211,8 @@ mod tests {
     use crate::v3_0::response::Response;
     use crate::v3_0::schema::{Schema, SingleSchema, StringSchema};
     use crate::v3_0::security_scheme::{
-        AuthorizationCodeOAuth2Flow, ClientCredentialsOAuth2Flow, ImplicitOAuth2Flow,
-        OAuth2Flows, OAuth2SecurityScheme, PasswordOAuth2Flow, SecurityScheme,
+        AuthorizationCodeOAuth2Flow, ClientCredentialsOAuth2Flow, ImplicitOAuth2Flow, OAuth2Flows,
+        OAuth2SecurityScheme, PasswordOAuth2Flow, SecurityScheme,
     };
     use serde_json::json;
 
@@ -243,23 +243,29 @@ mod tests {
     #[test]
     fn unused_components_each_kind_reports() {
         let comp = Components {
-            schemas: Some(map_with("S", Schema::Single(Box::new(SingleSchema::String(StringSchema::default()))))),
+            schemas: Some(map_with(
+                "S",
+                Schema::Single(Box::new(SingleSchema::String(StringSchema::default()))),
+            )),
             responses: Some(map_with("R", Response::default())),
-            parameters: Some(map_with("P", Parameter::Query(InQuery {
-                name: "q".into(),
-                description: None,
-                required: None,
-                deprecated: None,
-                allow_empty_value: None,
-                style: None,
-                explode: None,
-                allow_reserved: None,
-                schema: None,
-                example: None,
-                examples: None,
-                content: None,
-                extensions: None,
-            }))),
+            parameters: Some(map_with(
+                "P",
+                Parameter::Query(InQuery {
+                    name: "q".into(),
+                    description: None,
+                    required: None,
+                    deprecated: None,
+                    allow_empty_value: None,
+                    style: None,
+                    explode: None,
+                    allow_reserved: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                }),
+            )),
             examples: Some(map_with("E", Example::default())),
             request_bodies: Some(map_with("RB", RequestBody::default())),
             headers: Some(map_with("H", Header::default())),
@@ -344,7 +350,10 @@ mod tests {
     #[test]
     fn ignored_unused_options_silence_each_kind() {
         let comp = Components {
-            schemas: Some(map_with("S", Schema::Single(Box::new(SingleSchema::String(StringSchema::default()))))),
+            schemas: Some(map_with(
+                "S",
+                Schema::Single(Box::new(SingleSchema::String(StringSchema::default()))),
+            )),
             responses: Some(map_with("R", Response::default())),
             parameters: Some(map_with(
                 "P",
@@ -398,7 +407,9 @@ mod tests {
         let mut schemas: BTreeMap<String, RefOr<Schema>> = BTreeMap::new();
         schemas.insert(
             "bad name".to_owned(),
-            RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(StringSchema::default())))),
+            RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(
+                StringSchema::default(),
+            )))),
         );
         let comp = Components {
             schemas: Some(schemas),

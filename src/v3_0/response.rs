@@ -232,8 +232,8 @@ impl ValidateWithContext<Spec> for Response {
 impl ValidateWithContext<Spec> for Responses {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         // Spec: "The Responses Object MUST contain at least one response code".
-        let has_any = self.default.is_some()
-            || self.responses.as_ref().is_some_and(|m| !m.is_empty());
+        let has_any =
+            self.default.is_some() || self.responses.as_ref().is_some_and(|m| !m.is_empty());
         if !has_any {
             ctx.error(path.clone(), "must declare at least one response");
         }

@@ -73,7 +73,9 @@ fn path_template_variables(template: &str) -> BTreeSet<String> {
 /// Per OAS: "Templated paths with the same hierarchy but different templated
 /// names MUST NOT exist as they are identical."
 fn canonical_path(template: &str) -> String {
-    regex!(r"\{[^}]+\}").replace_all(template, "{}").into_owned()
+    regex!(r"\{[^}]+\}")
+        .replace_all(template, "{}")
+        .into_owned()
 }
 
 /// Validate operation-level parameter rules:
@@ -229,10 +231,22 @@ pub fn validate_security_requirements(
                         let scope_ref = format!("{scheme_ref}/{scope}");
                         ctx.visit(scope_ref);
                         let in_any = [
-                            o.flows.implicit.as_ref().map(|f| f.scopes.contains_key(scope)),
-                            o.flows.password.as_ref().map(|f| f.scopes.contains_key(scope)),
-                            o.flows.client_credentials.as_ref().map(|f| f.scopes.contains_key(scope)),
-                            o.flows.authorization_code.as_ref().map(|f| f.scopes.contains_key(scope)),
+                            o.flows
+                                .implicit
+                                .as_ref()
+                                .map(|f| f.scopes.contains_key(scope)),
+                            o.flows
+                                .password
+                                .as_ref()
+                                .map(|f| f.scopes.contains_key(scope)),
+                            o.flows
+                                .client_credentials
+                                .as_ref()
+                                .map(|f| f.scopes.contains_key(scope)),
+                            o.flows
+                                .authorization_code
+                                .as_ref()
+                                .map(|f| f.scopes.contains_key(scope)),
                         ]
                         .into_iter()
                         .flatten()
@@ -284,7 +298,10 @@ pub fn validate_tag_uniqueness(ctx: &mut Context<Spec>, tags: &[Tag]) {
 
 /// Validate that no two paths in `Spec.paths` collapse to the same
 /// canonical (template-stripped) form. Extension keys (`x-...`) are skipped.
-pub fn validate_path_template_uniqueness(ctx: &mut Context<Spec>, paths: &BTreeMap<String, PathItem>) {
+pub fn validate_path_template_uniqueness(
+    ctx: &mut Context<Spec>,
+    paths: &BTreeMap<String, PathItem>,
+) {
     let mut canonicals: HashMap<String, Vec<&str>> = HashMap::new();
     for key in paths.keys() {
         if key.starts_with("x-") {
@@ -669,7 +686,10 @@ mod tests {
         let spec: &'static Spec = Box::leak(Box::new(spec_with_components(comp)));
         let mut ctx = Context::new(spec, Options::new());
         let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        req.insert("oid".to_owned(), vec!["openid".to_owned(), "email".to_owned()]);
+        req.insert(
+            "oid".to_owned(),
+            vec!["openid".to_owned(), "email".to_owned()],
+        );
         validate_security_requirements(&mut ctx, "#.security", &[req]);
         assert!(
             ctx.errors.is_empty(),

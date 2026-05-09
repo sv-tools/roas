@@ -1,10 +1,10 @@
 //! Provides schema and examples for the media type
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::header::Header;
 use crate::v3_0::parameter::InQueryStyle;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::spec::Spec;
 use serde::{Deserialize, Serialize};

@@ -1,9 +1,9 @@
 //! Describes a single operation parameter.
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::media_type::MediaType;
+use crate::v3_0::reference::RefOr;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::spec::Spec;
 use serde::{Deserialize, Serialize};
@@ -523,11 +523,7 @@ mod tests {
 
     #[test]
     fn query_header_cookie_round_trip() {
-        for (loc, _style) in [
-            ("query", "form"),
-            ("header", "simple"),
-            ("cookie", "form"),
-        ] {
+        for (loc, _style) in [("query", "form"), ("header", "simple"), ("cookie", "form")] {
             let v = json!({"name": "n", "in": loc, "schema": {"type": "string"}});
             let p: Parameter = serde_json::from_value(v.clone()).unwrap();
             assert_eq!(serde_json::to_value(&p).unwrap(), v);
@@ -609,7 +605,11 @@ mod tests {
         });
         let mut ctx = Context::new(&spec, Options::new());
         p.validate_with_context(&mut ctx, "p".into());
-        assert!(ctx.errors.iter().any(|e| e.contains("example and examples")));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples"))
+        );
 
         let p = Parameter::Cookie(InCookie {
             name: "c".into(),
@@ -629,7 +629,11 @@ mod tests {
         });
         let mut ctx = Context::new(&spec, Options::new());
         p.validate_with_context(&mut ctx, "p".into());
-        assert!(ctx.errors.iter().any(|e| e.contains("example and examples")));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples"))
+        );
     }
 
     #[test]
