@@ -2003,6 +2003,198 @@ mod tests {
     }
 
     #[test]
+    fn from_conversions_each_variant() {
+        // Cover the From impls + Default impls that are otherwise only
+        // exercised through serde dispatch.
+        let _: Schema = SingleSchema::from(StringSchema::default()).into();
+        let _: Schema = SingleSchema::from(IntegerSchema::default()).into();
+        let _: Schema = SingleSchema::from(NumberSchema::default()).into();
+        let _: Schema = SingleSchema::from(BooleanSchema::default()).into();
+        let _: Schema = SingleSchema::from(ArraySchema::default()).into();
+        let _: Schema = SingleSchema::from(ObjectSchema::default()).into();
+        let _: Schema = SingleSchema::from(NullSchema::default()).into();
+
+        let _: Schema = AllOfSchema::default().into();
+        let _: Schema = AnyOfSchema::default().into();
+        let _: Schema = OneOfSchema::default().into();
+        let _: Schema = NotSchema {
+            not: RefOr::new_item(Schema::default()),
+            external_docs: None,
+            example: None,
+            examples: None,
+            extensions: None,
+        }
+        .into();
+        let _: Schema = MultiSchema::default().into();
+
+        // Defaults
+        assert!(matches!(Schema::default(), Schema::Single(_)));
+        assert!(matches!(SingleSchema::default(), SingleSchema::Object(_)));
+    }
+
+    #[test]
+    fn single_schema_display_each_variant() {
+        assert_eq!(
+            SingleSchema::String(StringSchema::default()).to_string(),
+            "string"
+        );
+        assert_eq!(
+            SingleSchema::Integer(IntegerSchema::default()).to_string(),
+            "integer"
+        );
+        assert_eq!(
+            SingleSchema::Number(NumberSchema::default()).to_string(),
+            "number"
+        );
+        assert_eq!(
+            SingleSchema::Boolean(BooleanSchema::default()).to_string(),
+            "boolean"
+        );
+        assert_eq!(
+            SingleSchema::Array(ArraySchema::default()).to_string(),
+            "array"
+        );
+        assert_eq!(
+            SingleSchema::Object(ObjectSchema::default()).to_string(),
+            "object"
+        );
+        assert_eq!(
+            SingleSchema::Null(NullSchema::default()).to_string(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn composition_validate_dispatches_with_discriminator() {
+        // Each composition variant's validate dispatch + discriminator walk
+        // (lines 1085-1107).
+        let spec = crate::v3_1::spec::Spec::default();
+
+        let bad_disc = || crate::v3_1::discriminator::Discriminator::default();
+        for s in [
+            Schema::AllOf(Box::new(AllOfSchema {
+                all_of: vec![],
+                discriminator: Some(bad_disc()),
+                ..Default::default()
+            })),
+            Schema::AnyOf(Box::new(AnyOfSchema {
+                any_of: vec![],
+                discriminator: Some(bad_disc()),
+                ..Default::default()
+            })),
+            Schema::OneOf(Box::new(OneOfSchema {
+                one_of: vec![],
+                discriminator: Some(bad_disc()),
+                ..Default::default()
+            })),
+        ] {
+            let mut ctx =
+                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains("propertyName") && e.contains("must not be empty")),
+                "expected discriminator empty-propertyName error: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn boolean_and_null_variants_validate() {
+        // BooleanSchema and NullSchema have no consistency rules to fire,
+        // but the dispatch path still needs to walk them — exercised via
+        // an external_docs URL coming back invalid.
+        let spec = crate::v3_1::spec::Spec::default();
+        let bad_docs = || crate::v3_1::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        for s in [
+            Schema::Single(Box::new(SingleSchema::Boolean(BooleanSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            }))),
+            Schema::Single(Box::new(SingleSchema::Null(NullSchema {
+                external_docs: Some(bad_docs()),
+                ..Default::default()
+            }))),
+        ] {
+            let mut ctx =
+                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors.iter().any(|e| e.contains("externalDocs.url")),
+                "expected externalDocs walk: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn keyword_consistency_violations_reported() {
+        let spec = crate::v3_1::spec::Spec::default();
+
+        let cases: Vec<(&str, Schema, &str)> = vec![
+            (
+                "string min/max",
+                Schema::Single(Box::new(SingleSchema::String(StringSchema {
+                    min_length: Some(10),
+                    max_length: Some(5),
+                    ..Default::default()
+                }))),
+                "minLength",
+            ),
+            (
+                "integer multipleOf <= 0",
+                Schema::Single(Box::new(SingleSchema::Integer(IntegerSchema {
+                    multiple_of: Some(0.0),
+                    ..Default::default()
+                }))),
+                "multipleOf",
+            ),
+            (
+                "number multipleOf < 0",
+                Schema::Single(Box::new(SingleSchema::Number(NumberSchema {
+                    multiple_of: Some(-1.0),
+                    ..Default::default()
+                }))),
+                "multipleOf",
+            ),
+            (
+                "array min/max items",
+                Schema::Single(Box::new(SingleSchema::Array(ArraySchema {
+                    min_items: Some(10),
+                    max_items: Some(5),
+                    ..Default::default()
+                }))),
+                "minItems",
+            ),
+            (
+                "object min/max properties",
+                Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+                    min_properties: Some(10),
+                    max_properties: Some(5),
+                    ..Default::default()
+                }))),
+                "minProperties",
+            ),
+        ];
+        for (label, schema, needle) in cases {
+            let mut ctx =
+                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            schema.validate_with_context(&mut ctx, "s".into());
+            assert!(
+                ctx.errors.iter().any(|e| e.contains(needle)),
+                "case `{label}`: expected `{needle}` error: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
     fn read_only_write_only_mutex() {
         // OAS spec rule (also a JSON Schema interaction): both flags
         // MUST NOT be true on the same schema. Centralised in

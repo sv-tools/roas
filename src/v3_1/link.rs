@@ -552,4 +552,196 @@ mod tests {
             ctx.errors
         );
     }
+
+    fn ok_responses() -> Responses {
+        Responses {
+            default: Some(RefOr::new_item(Response {
+                description: "ok".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn pi_with_get() -> PathItem {
+        let mut ops = BTreeMap::new();
+        ops.insert(
+            "get".to_owned(),
+            Operation {
+                responses: Some(ok_responses()),
+                ..Default::default()
+            },
+        );
+        PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn operation_ref_into_components_path_items() {
+        // Per OAS 3.1, operationRef can target an Operation in
+        // `#/components/pathItems/<name>/<method>`.
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            path_items: Some(BTreeMap::from([("Reusable".to_owned(), pi_with_get())])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/pathItems/Reusable/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "components.pathItems target should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_into_webhooks() {
+        let mut webhooks = Paths::default();
+        webhooks
+            .paths
+            .insert("petCreated".to_owned(), pi_with_get());
+        let spec = Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/webhooks/petCreated/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "webhook target should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_chain_paths_to_components_pathitems() {
+        // /pets is a $ref to #/components/pathItems/Reusable; the resolver
+        // should follow the chain across containers.
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            path_items: Some(BTreeMap::from([("Reusable".to_owned(), pi_with_get())])),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/pathItems/Reusable".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            "cross-container chain should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_cycle_errors() {
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1b".into()),
+                ..Default::default()
+            },
+        );
+        paths.paths.insert(
+            "/b".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1a".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1a/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("cyclic `$ref` chain")),
+            "expected cycle error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_dangling_components_path_items_target() {
+        let spec = spec_with_pets_get();
+        // Add the `/pets` PathItem with a $ref to a missing component.
+        let mut spec = spec;
+        let mut paths = spec.paths.take().unwrap();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/pathItems/Missing".into()),
+                ..Default::default()
+            },
+        );
+        spec.paths = Some(paths);
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in `#/components/pathItems`")),
+            "expected dangling-component-pathItem error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn server_validates_when_operation_ref_set() {
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            server: Some(crate::v3_1::server::Server {
+                url: "".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("server.url")),
+            "expected server.url error: {:?}",
+            ctx.errors
+        );
+    }
 }

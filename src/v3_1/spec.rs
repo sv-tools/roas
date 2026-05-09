@@ -1019,6 +1019,487 @@ mod tests {
     }
 
     #[test]
+    fn all_define_helpers_insert_and_return_ref() {
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::example::Example;
+        use crate::v3_1::header::Header;
+        use crate::v3_1::link::Link;
+        use crate::v3_1::parameter::{InQuery, Parameter};
+        use crate::v3_1::request_body::RequestBody;
+        use crate::v3_1::response::Response;
+        use crate::v3_1::schema::{SingleSchema, StringSchema};
+        use crate::v3_1::security_scheme::{HttpSecurityScheme, SecurityScheme};
+
+        let mut spec = Spec::default();
+
+        let r = spec
+            .define_schema(
+                "S",
+                Schema::Single(Box::new(SingleSchema::String(StringSchema::default()))),
+            )
+            .unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/schemas/S"));
+
+        let r = spec.define_response("R", Response::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/responses/R"));
+
+        let r = spec
+            .define_parameter(
+                "Q",
+                Parameter::Query(InQuery {
+                    name: "q".into(),
+                    description: None,
+                    required: None,
+                    deprecated: None,
+                    allow_empty_value: None,
+                    style: None,
+                    explode: None,
+                    allow_reserved: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                }),
+            )
+            .unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/parameters/Q"));
+
+        let r = spec.define_example("Ex", Example::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/examples/Ex"));
+
+        let r = spec
+            .define_request_body("RB", RequestBody::default())
+            .unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/requestBodies/RB"));
+
+        let r = spec.define_header("H", Header::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/headers/H"));
+
+        let r = spec
+            .define_security_scheme(
+                "S",
+                SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                    scheme: "Basic".into(),
+                    bearer_format: None,
+                    description: None,
+                    extensions: None,
+                })),
+            )
+            .unwrap();
+        assert!(
+            matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/securitySchemes/S")
+        );
+
+        let r = spec.define_link("L", Link::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/links/L"));
+
+        let r = spec.define_callback("CB", Callback::default()).unwrap();
+        assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/callbacks/CB"));
+
+        // define_path_item returns a `PathItem` whose `reference` is set to
+        // the component-pathItems URL — not a `RefOr`, since v3.1 PathItem
+        // containers hold bare `PathItem`.
+        let pi = spec.define_path_item("PI", PathItem::default()).unwrap();
+        assert_eq!(pi.reference.as_deref(), Some("#/components/pathItems/PI"),);
+
+        // All inserts ended up under the same Components object.
+        let comp = spec.components.as_ref().unwrap();
+        assert!(comp.schemas.as_ref().unwrap().contains_key("S"));
+        assert!(comp.responses.as_ref().unwrap().contains_key("R"));
+        assert!(comp.parameters.as_ref().unwrap().contains_key("Q"));
+        assert!(comp.examples.as_ref().unwrap().contains_key("Ex"));
+        assert!(comp.request_bodies.as_ref().unwrap().contains_key("RB"));
+        assert!(comp.headers.as_ref().unwrap().contains_key("H"));
+        assert!(comp.security_schemes.as_ref().unwrap().contains_key("S"));
+        assert!(comp.links.as_ref().unwrap().contains_key("L"));
+        assert!(comp.callbacks.as_ref().unwrap().contains_key("CB"));
+        assert!(comp.path_items.as_ref().unwrap().contains_key("PI"));
+    }
+
+    #[test]
+    fn define_helpers_reject_invalid_names() {
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::example::Example;
+        use crate::v3_1::header::Header;
+        use crate::v3_1::link::Link;
+        use crate::v3_1::request_body::RequestBody;
+        use crate::v3_1::response::Response;
+        use crate::v3_1::security_scheme::{HttpSecurityScheme, SecurityScheme};
+
+        let mut spec = Spec::default();
+        let bad = "x y";
+        assert!(spec.define_response(bad, Response::default()).is_err());
+        assert!(spec.define_example(bad, Example::default()).is_err());
+        assert!(
+            spec.define_request_body(bad, RequestBody::default())
+                .is_err()
+        );
+        assert!(spec.define_header(bad, Header::default()).is_err());
+        assert!(
+            spec.define_security_scheme(
+                bad,
+                SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                    scheme: "Basic".into(),
+                    ..Default::default()
+                })),
+            )
+            .is_err()
+        );
+        assert!(spec.define_link(bad, Link::default()).is_err());
+        assert!(spec.define_callback(bad, Callback::default()).is_err());
+        assert!(spec.define_path_item(bad, PathItem::default()).is_err());
+        assert!(spec.components.is_none());
+    }
+
+    #[test]
+    fn resolve_reference_paths_for_each_component_kind() {
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::example::Example;
+        use crate::v3_1::header::Header;
+        use crate::v3_1::link::Link;
+        use crate::v3_1::parameter::{InQuery, Parameter};
+        use crate::v3_1::request_body::RequestBody;
+        use crate::v3_1::response::Response;
+        use crate::v3_1::schema::{SingleSchema, StringSchema};
+        use crate::v3_1::security_scheme::{HttpSecurityScheme, SecurityScheme};
+
+        let mut spec = Spec::default();
+        spec.define_schema(
+            "S",
+            Schema::Single(Box::new(SingleSchema::String(StringSchema::default()))),
+        )
+        .unwrap();
+        spec.define_response("R", Response::default()).unwrap();
+        spec.define_parameter(
+            "P",
+            Parameter::Query(InQuery {
+                name: "q".into(),
+                description: None,
+                required: None,
+                deprecated: None,
+                allow_empty_value: None,
+                style: None,
+                explode: None,
+                allow_reserved: None,
+                schema: None,
+                example: None,
+                examples: None,
+                content: None,
+                extensions: None,
+            }),
+        )
+        .unwrap();
+        spec.define_request_body("RB", RequestBody::default())
+            .unwrap();
+        spec.define_header("H", Header::default()).unwrap();
+        spec.define_example("E", Example::default()).unwrap();
+        spec.define_callback("CB", Callback::default()).unwrap();
+        spec.define_link("L", Link::default()).unwrap();
+        spec.define_security_scheme(
+            "SS",
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                scheme: "Basic".into(),
+                ..Default::default()
+            })),
+        )
+        .unwrap();
+        spec.define_path_item("PI", PathItem::default()).unwrap();
+
+        assert!(
+            <Spec as ResolveReference<Schema>>::resolve_reference(&spec, "#/components/schemas/S")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Response>>::resolve_reference(
+                &spec,
+                "#/components/responses/R"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Parameter>>::resolve_reference(
+                &spec,
+                "#/components/parameters/P"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<RequestBody>>::resolve_reference(
+                &spec,
+                "#/components/requestBodies/RB"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Header>>::resolve_reference(&spec, "#/components/headers/H")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Example>>::resolve_reference(
+                &spec,
+                "#/components/examples/E"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Callback>>::resolve_reference(
+                &spec,
+                "#/components/callbacks/CB"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<Link>>::resolve_reference(&spec, "#/components/links/L")
+                .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<SecurityScheme>>::resolve_reference(
+                &spec,
+                "#/components/securitySchemes/SS"
+            )
+            .is_some()
+        );
+        assert!(
+            <Spec as ResolveReference<PathItem>>::resolve_reference(
+                &spec,
+                "#/components/pathItems/PI"
+            )
+            .is_some()
+        );
+
+        // Wrong-prefix returns None (strict strip_prefix behavior, not silently
+        // mismatched lookup).
+        assert!(
+            <Spec as ResolveReference<Schema>>::resolve_reference(
+                &spec,
+                "#/components/parameters/S"
+            )
+            .is_none()
+        );
+
+        // Tags resolver finds tags by name.
+        let spec = Spec {
+            tags: Some(vec![Tag {
+                name: "pets".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert!(<Spec as ResolveReference<Tag>>::resolve_reference(&spec, "#/tags/pets").is_some());
+        assert!(
+            <Spec as ResolveReference<Tag>>::resolve_reference(&spec, "#/tags/missing").is_none()
+        );
+    }
+
+    #[test]
+    fn version_display_all_variants() {
+        assert_eq!(Version::V3_1_0.to_string(), "3.1.0");
+        assert_eq!(Version::V3_1_1.to_string(), "3.1.1");
+        assert_eq!(Version::V3_1_2.to_string(), "3.1.2");
+    }
+
+    #[test]
+    fn json_schema_dialect_uri_validated() {
+        // Free-form URI is accepted (urn:..., relative path, etc.).
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            json_schema_dialect: Some("urn:example:dialect".into()),
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        assert!(spec.validate(Options::new()).is_ok());
+
+        // Whitespace in the value rejects.
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            json_schema_dialect: Some("not a uri".into()),
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("jsonSchemaDialect") && e.contains("must be a valid URI")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn op_id_unique_across_paths_webhooks_components_pathitems() {
+        // Pre-collection should detect a duplicate operationId across all
+        // three containers.
+        use crate::v3_1::components::Components;
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::response::Responses;
+
+        let make_op = |id: &str| Operation {
+            operation_id: Some(id.to_owned()),
+            responses: Some(Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // paths defines `dup`
+        let mut path_ops: BTreeMap<String, Operation> = BTreeMap::new();
+        path_ops.insert("get".to_owned(), make_op("dup"));
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                operations: Some(path_ops),
+                ..Default::default()
+            },
+        );
+
+        // components.pathItems defines another `dup`
+        let mut pi_ops: BTreeMap<String, Operation> = BTreeMap::new();
+        pi_ops.insert("get".to_owned(), make_op("dup"));
+        let comp = Components {
+            path_items: Some(BTreeMap::from([(
+                "Reusable".to_owned(),
+                PathItem {
+                    operations: Some(pi_ops),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("`dup` already in use")),
+            "expected duplicate-operationId across paths + components.pathItems: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn link_resolves_op_id_defined_in_components_path_items() {
+        // The forward-pass collection in Spec::validate must visit
+        // operationIds from components.pathItems before path/webhook
+        // validation runs, so a Link.operationId in Spec.paths can
+        // reference an op defined only in components.pathItems.
+        use crate::v3_1::components::Components;
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::response::Responses;
+
+        let mut pi_ops: BTreeMap<String, Operation> = BTreeMap::new();
+        pi_ops.insert(
+            "get".to_owned(),
+            Operation {
+                operation_id: Some("pickPet".to_owned()),
+                responses: Some(Responses {
+                    default: Some(RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let comp = Components {
+            path_items: Some(BTreeMap::from([(
+                "Reusable".to_owned(),
+                PathItem {
+                    operations: Some(pi_ops),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+
+        // Spec.paths /pets has an operation whose response includes a Link
+        // referencing `pickPet`.
+        let mut links_map = BTreeMap::new();
+        links_map.insert(
+            "next".to_owned(),
+            RefOr::new_item(Link {
+                operation_id: Some("pickPet".to_owned()),
+                ..Default::default()
+            }),
+        );
+        let response = Response {
+            description: "ok".into(),
+            links: Some(links_map),
+            ..Default::default()
+        };
+        let mut responses_map = BTreeMap::new();
+        responses_map.insert("200".to_owned(), RefOr::new_item(response));
+        let responses = Responses {
+            responses: Some(responses_map),
+            ..Default::default()
+        };
+        let mut path_ops: BTreeMap<String, Operation> = BTreeMap::new();
+        path_ops.insert(
+            "get".to_owned(),
+            Operation {
+                responses: Some(responses),
+                ..Default::default()
+            },
+        );
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                operations: Some(path_ops),
+                ..Default::default()
+            },
+        );
+
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        // Allow IgnoreUnusedSchemas etc; we only care that the link doesn't
+        // report missing.
+        let res = spec.validate(Options::new());
+        if let Err(err) = &res {
+            assert!(
+                err.errors
+                    .iter()
+                    .all(|e| !e.contains("missing operation with id `pickPet`")),
+                "Link.operationId should resolve via components.pathItems: {:?}",
+                err.errors
+            );
+        }
+    }
+
+    #[test]
     fn license_identifier_url_mutex() {
         let spec = Spec {
             info: Info {

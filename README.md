@@ -7,9 +7,10 @@ Rust OpenAPI Specification (v2.0, v3.0.X and v3.1.X)
 
 Parsing and generating OpenAPI Specification:
 
-* [x] OpenAPI Specification [v2.0](https://spec.openapis.org/oas/v2.0.html) (**v2**: old specification, disabled by default)
-* [x] OpenAPI Specification [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html) (**v3_0**: disable by default)
-* [x] OpenAPI Specification [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html) (**v3_1**:; default feature)
+* [x] OpenAPI Specification [v2.0](https://spec.openapis.org/oas/v2.0.html)
+* [x] OpenAPI Specification [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)
+* [x] OpenAPI Specification [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html) (**default**)
+* [ ] OpenAPI Specification [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html) (in progress)
 
 > [!CAUTION]
 > The project is in early development stage, so the API may change in the future.
