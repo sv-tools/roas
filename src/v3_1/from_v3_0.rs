@@ -130,7 +130,11 @@ fn walk_schema_object(obj: &mut Map<String, Value>) {
         // Inside a Schema: instance-valued keywords carry user data;
         // sub-schema keywords lead to more schemas; everything else is
         // schema-adjacent metadata (xml, discriminator, externalDocs)
-        // that we walk generically.
+        // that we walk generically. `x-*` Specification Extensions
+        // hold arbitrary JSON and must round-trip byte-for-byte.
+        if is_extension_key(k) {
+            continue;
+        }
         match k.as_str() {
             "example" | "examples" | "default" | "enum" | "const" => continue,
             "items"
@@ -154,6 +158,11 @@ fn walk_schema_object(obj: &mut Map<String, Value>) {
 
 fn walk_generic_object(obj: &mut Map<String, Value>) {
     for (k, v) in obj.iter_mut() {
+        // `x-*` Specification Extensions are opaque user payloads
+        // that must round-trip unchanged.
+        if is_extension_key(k) {
+            continue;
+        }
         match k.as_str() {
             // `schema` lives on Parameter / Header / MediaType; its
             // value is a Schema Object.
@@ -169,6 +178,14 @@ fn walk_generic_object(obj: &mut Map<String, Value>) {
             _ => walk(v, Pos::Generic),
         }
     }
+}
+
+/// Per OAS / JSON Schema, fields with the `x-` prefix are
+/// Specification Extensions: arbitrary user JSON the spec promises to
+/// preserve untouched. The walkers skip recursion through these so
+/// extension payloads round-trip byte-for-byte.
+fn is_extension_key(k: &str) -> bool {
+    k.starts_with("x-")
 }
 
 /// `type: <T>` + `nullable: true` → `type: [<T>, "null"]`, and a bare
@@ -300,6 +317,12 @@ fn walk_content_aware(value: &mut Value) {
                 rewrite_content_map(content);
             }
             for (k, v) in obj.iter_mut() {
+                // `x-*` extensions are opaque — the spec promises they
+                // round-trip byte-for-byte. Skip before any other
+                // dispatch.
+                if is_extension_key(k) {
+                    continue;
+                }
                 // Skip instance-valued payloads — a user-supplied
                 // example / default / enum / const that happens to
                 // contain a `content`-shaped sub-object would
@@ -1147,6 +1170,67 @@ mod tests {
         assert_eq!(schema["type"], "string");
         assert_eq!(schema["format"], "binary");
         assert_eq!(schema["description"], "the document bytes");
+    }
+
+    #[test]
+    fn x_extension_payloads_are_opaque_to_walkers() {
+        // `x-*` Specification Extensions must round-trip byte-for-byte
+        // even when they carry schema- or content-shaped sub-objects.
+        // Both the schema rewrites (nullable, exclusive*, base64,
+        // example→examples) and the content-map rewrite (octet-stream,
+        // multipart binary) must skip recursion through extensions.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Cfg": {
+                        "type": "object",
+                        "x-json-schema": {
+                            "type": "string",
+                            "nullable": true,
+                            "format": "base64",
+                            "example": "abc"
+                        },
+                        "x-vendor-content": {
+                            "content": {
+                                "application/octet-stream": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                },
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "f": {"type": "string", "format": "binary"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let cfg = &value["components"]["schemas"]["Cfg"];
+        // x-json-schema's payload survives intact.
+        let xjs = &cfg["x-json-schema"];
+        assert_eq!(xjs["type"], "string");
+        assert_eq!(xjs["nullable"], true);
+        assert_eq!(xjs["format"], "base64");
+        assert_eq!(xjs["example"], "abc");
+        assert!(xjs.get("contentEncoding").is_none());
+        assert!(xjs.get("examples").is_none());
+        // x-vendor-content's nested binary schemas survive intact too.
+        let xvc = &cfg["x-vendor-content"];
+        let octet = &xvc["content"]["application/octet-stream"]["schema"];
+        assert_eq!(octet["type"], "string");
+        assert_eq!(octet["format"], "binary");
+        let multipart_field = &xvc["content"]["multipart/form-data"]["schema"]["properties"]["f"];
+        assert_eq!(multipart_field["type"], "string");
+        assert_eq!(multipart_field["format"], "binary");
+        assert!(multipart_field.get("contentMediaType").is_none());
     }
 
     #[test]
