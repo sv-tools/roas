@@ -407,7 +407,7 @@ fn transform_operation(
             obj.insert("requestBody".into(), rb);
         }
     } else if !form_params.is_empty()
-        && let Some(rb) = build_form_request_body(form_params, &consumes)
+        && let Some(rb) = build_form_request_body_or_ref(form_params, &consumes)
     {
         obj.insert("requestBody".into(), rb);
     }
@@ -563,6 +563,35 @@ fn build_body_request_body(body: Option<Value>, consumes: &[String]) -> Option<V
 }
 
 /// Synthesise a `requestBody` from a list of v2 formData parameters.
+/// Pick the right shape for an operation's `requestBody` when its v2
+/// formData parameters might be a mix of inline entries and `$ref`s
+/// pointing at top-level formData components.
+///
+/// v3.0 has a single `requestBody` slot per operation and no way to
+/// compose multiple references into one body, so the rules are:
+///
+/// * If every `form_params` entry is a `$ref`, return the first one
+///   directly. The global remap step will retarget `#/parameters/<n>`
+///   to `#/components/requestBodies/<n>`. Additional refs are dropped
+///   (a v2 anti-pattern with no v3.0 equivalent).
+/// * Otherwise, drop any `$ref` entries (they can't compose with
+///   inline form fields in v3.0) and build a synthesised form-encoded
+///   request body from the remaining inline entries.
+fn build_form_request_body_or_ref(form_params: Vec<Value>, consumes: &[String]) -> Option<Value> {
+    let any_inline = form_params
+        .iter()
+        .any(|p| p.as_object().is_some_and(|o| !o.contains_key("$ref")));
+    if !any_inline {
+        // All-refs case: route the first ref straight to requestBody.
+        return form_params.into_iter().next();
+    }
+    let inline_only: Vec<Value> = form_params
+        .into_iter()
+        .filter(|p| p.as_object().is_some_and(|o| !o.contains_key("$ref")))
+        .collect();
+    build_form_request_body(inline_only, consumes)
+}
+
 fn build_form_request_body(form_params: Vec<Value>, consumes: &[String]) -> Option<Value> {
     if form_params.is_empty() {
         return None;
@@ -1210,6 +1239,70 @@ mod tests {
         assert_eq!(
             post["requestBody"]["$ref"],
             "#/components/requestBodies/PetBody"
+        );
+    }
+
+    #[test]
+    fn form_data_ref_becomes_request_body_ref() {
+        // A v2 operation that references a top-level formData parameter
+        // by `$ref` must end up with `requestBody: {$ref: …}` pointing
+        // at the synthesised `components.requestBodies/<name>` entry —
+        // not an empty form-encoded body.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "parameters": [{"$ref": "#/parameters/File"}],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            },
+            "parameters": {
+                "File": {"in": "formData", "name": "file", "type": "file"}
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        // The component is built once.
+        let file_rb = &value["components"]["requestBodies"]["File"];
+        let props = &file_rb["content"]["multipart/form-data"]["schema"]["properties"];
+        assert_eq!(props["file"]["format"], "binary");
+        // The operation references it.
+        let post = &value["paths"]["/upload"]["post"];
+        assert!(post["parameters"].is_null());
+        assert_eq!(
+            post["requestBody"]["$ref"],
+            "#/components/requestBodies/File"
+        );
+    }
+
+    #[test]
+    fn path_level_form_ref_promotes_to_each_operation() {
+        // Path-level $ref forms must propagate to each operation under
+        // the path that has no body of its own, same as path-level body
+        // and inline form parameters do.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "parameters": [{"$ref": "#/parameters/File"}],
+                    "post": {
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            },
+            "parameters": {
+                "File": {"in": "formData", "name": "file", "type": "file"}
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        assert_eq!(
+            value["paths"]["/upload"]["post"]["requestBody"]["$ref"],
+            "#/components/requestBodies/File"
         );
     }
 
