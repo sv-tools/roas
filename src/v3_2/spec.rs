@@ -413,6 +413,20 @@ impl TryFrom<String> for Version {
     }
 }
 
+impl Validate for Version {
+    fn validate(&self, _options: EnumSet<Options>) -> Result<(), Error> {
+        // Constructors and parsers all enforce the pattern, but
+        // re-checking here keeps `Validate` a self-contained contract.
+        if matches_oas_3_2_version(&self.0) {
+            Ok(())
+        } else {
+            Err(Error {
+                errors: vec![format!("#.openapi: must be {VERSION_SCHEMA_DESCRIPTION}")],
+            })
+        }
+    }
+}
+
 impl Spec {
     /// Insert a schema under `#/components/schemas/{name}` and return a `$ref` pointing to it.
     /// Replaces any existing entry with the same name.
@@ -788,6 +802,12 @@ impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
 
+        // Surface any `openapi` schema-pattern violations alongside the
+        // rest of the spec's errors instead of bailing out early.
+        if let Err(e) = self.openapi.validate(options) {
+            ctx.errors.extend(e.errors);
+        }
+
         self.info
             .validate_with_context(&mut ctx, "#.info".to_owned());
 
@@ -1044,6 +1064,19 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Version::default()).unwrap(),
             r#""3.2.0""#,
+        );
+    }
+
+    #[test]
+    fn test_version_validate() {
+        assert!(Version::default().validate(Options::new()).is_ok());
+        assert!(Version::V3_2_0().validate(Options::new()).is_ok());
+        assert!(
+            "3.2.99"
+                .parse::<Version>()
+                .unwrap()
+                .validate(Options::new())
+                .is_ok()
         );
     }
 

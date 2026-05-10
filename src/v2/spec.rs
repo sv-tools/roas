@@ -300,6 +300,20 @@ impl TryFrom<String> for Version {
     }
 }
 
+impl Validate for Version {
+    fn validate(&self, _options: EnumSet<Options>) -> Result<(), Error> {
+        // Constructors and parsers all enforce the literal, but
+        // re-checking here keeps `Validate` a self-contained contract.
+        if self.0 == SWAGGER_VERSION_LITERAL {
+            Ok(())
+        } else {
+            Err(Error {
+                errors: vec![format!("#.swagger: must be {SWAGGER_VERSION_DESCRIPTION}")],
+            })
+        }
+    }
+}
+
 /// The possible values of the transfer protocol of the API
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub enum Scheme {
@@ -474,6 +488,12 @@ impl ResolveReference<Tag> for Spec {
 impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
+
+        // Surface any `swagger` literal violations alongside the rest
+        // of the spec's errors instead of bailing out early.
+        if let Err(e) = self.swagger.validate(options) {
+            ctx.errors.extend(e.errors);
+        }
 
         self.info
             .validate_with_context(&mut ctx, "#.info".to_owned());
@@ -724,6 +744,19 @@ mod tests {
             .unwrap()
             .swagger,
             "2.0",
+        );
+    }
+
+    #[test]
+    fn test_swagger_version_validate() {
+        assert!(Version::default().validate(Options::new()).is_ok());
+        assert!(Version::V2_0().validate(Options::new()).is_ok());
+        assert!(
+            "2.0"
+                .parse::<Version>()
+                .unwrap()
+                .validate(Options::new())
+                .is_ok()
         );
     }
 
