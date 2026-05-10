@@ -55,13 +55,30 @@ impl Serialize for EmptySchema {
 
 impl<'de> Deserialize<'de> for EmptySchema {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let map: BTreeMap<String, serde::de::IgnoredAny> = BTreeMap::deserialize(de)?;
-        if !map.is_empty() {
-            return Err(serde::de::Error::custom(
-                "expected empty schema object `{}`",
-            ));
+        // Use a `MapAccess` visitor that peeks the first key instead
+        // of buffering the whole object into a `BTreeMap` only to
+        // check `is_empty()` — same constraint, zero allocation.
+        struct EmptyVisitor;
+        impl<'de> serde::de::Visitor<'de> for EmptyVisitor {
+            type Value = EmptySchema;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("empty schema object `{}`")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<EmptySchema, M::Error> {
+                if map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "expected empty schema object `{}`",
+                    ));
+                }
+                Ok(EmptySchema)
+            }
         }
-        Ok(EmptySchema)
+        de.deserialize_map(EmptyVisitor)
     }
 }
 
