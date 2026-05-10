@@ -967,6 +967,11 @@ fn walk_schema_object(
             "items"
             | "not"
             | "additionalProperties"
+            // `additionalItems` is the draft-04 / JSON Schema 2020-12
+            // tuple-tail keyword: a single sub-schema (or boolean
+            // schema). Walking it as Schema applies the schema
+            // rewrites to its body.
+            | "additionalItems"
             | "contains"
             | "propertyNames"
             | "if"
@@ -980,8 +985,30 @@ fn walk_schema_object(
             "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
                 walk(v, body_param_names, form_param_names, Pos::SchemaMap)
             }
+            // Draft-04 `dependencies` is a hybrid map: each entry's
+            // value is *either* an array of property names (instance
+            // data) *or* a sub-schema. Inspect at runtime and walk
+            // object-shaped entries as Schema; array-shaped entries
+            // are skipped.
+            "dependencies" => walk_dependencies(v, body_param_names, form_param_names),
             _ => walk(v, body_param_names, form_param_names, Pos::Generic),
         }
+    }
+}
+
+/// Walker for draft-04 `dependencies`. Each entry's value is either
+/// an array of property names (skip) or a sub-schema (walk).
+fn walk_dependencies(
+    value: &mut Value,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) {
+    let Value::Object(map) = value else { return };
+    for (_, entry) in map.iter_mut() {
+        if let Value::Object(_) = entry {
+            walk(entry, body_param_names, form_param_names, Pos::Schema);
+        }
+        // Array form (`["a", "b"]`) is a property-name list — skip.
     }
 }
 
@@ -1382,6 +1409,49 @@ mod tests {
         assert_eq!(v["default"]["$ref"], "#/definitions/Inner");
         assert_eq!(v["enum"][0]["x-nullable"], true);
         assert_eq!(v["enum"][0]["$ref"], "#/definitions/Other");
+    }
+
+    #[test]
+    fn additional_items_and_dependencies_sub_schemas_get_rewrites() {
+        // Draft-04 `additionalItems` is a single sub-schema; draft-04
+        // `dependencies` is a per-entry hybrid map (array of names OR
+        // sub-schema). Both must receive the schema-shape rewrites
+        // (`x-nullable` → `nullable`, string `discriminator` →
+        // object) when their values are schemas.
+        let mut v: Value = serde_json::json!({
+            "type": "object",
+            "additionalItems": {
+                "type": "string",
+                "x-nullable": true
+            },
+            "dependencies": {
+                // Array form: an instance-data property-name list.
+                // Stays verbatim.
+                "kind": ["name", "tag"],
+                // Schema form: receives the schema rewrites.
+                "extras": {
+                    "type": "object",
+                    "x-nullable": true,
+                    "discriminator": "category"
+                }
+            }
+        });
+        let body: HashSet<String> = HashSet::new();
+        let form: HashSet<String> = HashSet::new();
+        super::walk(&mut v, &body, &form, super::Pos::Schema);
+        // additionalItems sub-schema: x-nullable → nullable.
+        assert_eq!(v["additionalItems"]["nullable"], true);
+        assert!(v["additionalItems"].get("x-nullable").is_none());
+        // dependencies.extras: schema rewrites applied.
+        let extras = &v["dependencies"]["extras"];
+        assert_eq!(extras["nullable"], true);
+        assert_eq!(extras["discriminator"]["propertyName"], "category");
+        assert!(extras.get("x-nullable").is_none());
+        // dependencies.kind: array of property names — untouched.
+        assert_eq!(
+            v["dependencies"]["kind"],
+            serde_json::json!(["name", "tag"])
+        );
     }
 
     #[test]
