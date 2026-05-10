@@ -129,9 +129,15 @@ impl ValidateWithContext<Spec> for XML {
         // URI: a relative reference like `#/foo` or `bar/baz` is not
         // valid. Enforce a present `scheme:` prefix per RFC 3986
         // §3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
+        // Skip when the value already failed `validate_optional_uri`
+        // (whitespace / control chars) so users see a single,
+        // most-relevant error.
         if let Some(ns) = &self.namespace
             && !ns.is_empty()
             && !ctx.is_option(Options::IgnoreInvalidUrls)
+            && !ns
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
         {
             let mut chars = ns.chars();
             let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
