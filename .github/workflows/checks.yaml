@@ -29,7 +29,7 @@ jobs:
       publish: ${{ steps.rustmeta.outputs.publish }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: sv-tools/rust-metadata-action@7c4e86d8789650d9e60bc98a765e355604798d25 # v1.1.0
+      - uses: sv-tools/rust-metadata-action@0e9c699a85c7984d730be55a2001eea468bf0a54 # v1.1.1
         id: rustmeta
   BuildJob:
     name: Build per OS
