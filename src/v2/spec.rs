@@ -229,6 +229,14 @@ impl serde::Serialize for Version {
     }
 }
 
+/// The only valid Swagger version literal. Shared by every parsing
+/// path, serde's `expected` payload, and `InvalidVersion`'s `Display`.
+const SWAGGER_VERSION_LITERAL: &str = "2.0";
+
+/// Human-readable description of the constraint, shared by serde's
+/// `expected` payload and `InvalidVersion`'s `Display`.
+const SWAGGER_VERSION_DESCRIPTION: &str = "the literal Swagger version string `2.0`";
+
 impl<'de> serde::Deserialize<'de> for Version {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         // Delegate to `TryFrom<String>` so the owned `s` from serde
@@ -238,7 +246,7 @@ impl<'de> serde::Deserialize<'de> for Version {
         Version::try_from(String::deserialize(de)?).map_err(|InvalidVersion(s)| {
             serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(&s),
-                &"the literal Swagger version string `2.0`",
+                &SWAGGER_VERSION_DESCRIPTION,
             )
         })
     }
@@ -246,13 +254,25 @@ impl<'de> serde::Deserialize<'de> for Version {
 
 /// Returned by `Version::from_str` / `TryFrom<&str>` when the input is
 /// not the literal Swagger version string `2.0`.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("version {0:?} must be the literal Swagger version string `2.0`")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvalidVersion(pub String);
 
-impl Version {
-    fn from_str_inner(s: &str) -> Result<Self, InvalidVersion> {
-        if s == "2.0" {
+impl fmt::Display for InvalidVersion {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(
+            f,
+            "version {:?} must be {SWAGGER_VERSION_DESCRIPTION}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidVersion {}
+
+impl std::str::FromStr for Version {
+    type Err = InvalidVersion;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == SWAGGER_VERSION_LITERAL {
             Ok(Version(s.to_owned()))
         } else {
             Err(InvalidVersion(s.to_owned()))
@@ -260,26 +280,19 @@ impl Version {
     }
 }
 
-impl std::str::FromStr for Version {
-    type Err = InvalidVersion;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_str_inner(s)
-    }
-}
-
 impl TryFrom<&str> for Version {
     type Error = InvalidVersion;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Self::from_str_inner(s)
+        s.parse()
     }
 }
 
 impl TryFrom<String> for Version {
     type Error = InvalidVersion;
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        // Move the input directly rather than borrowing into
-        // `from_str_inner` and reallocating.
-        if s == "2.0" {
+        // Move the input directly rather than borrowing and
+        // reallocating.
+        if s == SWAGGER_VERSION_LITERAL {
             Ok(Version(s))
         } else {
             Err(InvalidVersion(s))
