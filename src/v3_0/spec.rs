@@ -334,8 +334,12 @@ impl serde::Serialize for Version {
 
 impl<'de> serde::Deserialize<'de> for Version {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(de)?;
-        Version::from_str_inner(&s).map_err(|_| {
+        // Delegate to `TryFrom<String>` so the owned `s` from serde
+        // moves straight into `Version(s)` on success (no `to_owned`
+        // round-trip). On failure, the offending string travels back
+        // through `InvalidVersion` and is borrowed once for the serde
+        // error message.
+        Version::try_from(String::deserialize(de)?).map_err(|InvalidVersion(s)| {
             serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(&s),
                 &"a version matching the OAS 3.0 schema pattern `^3\\.0\\.\\d+(-.+)?$`",
