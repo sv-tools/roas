@@ -25,12 +25,10 @@
 //!    * Schema `type: string, format: base64` anywhere becomes
 //!      `type: string, contentEncoding: base64`.
 //!    * `application/octet-stream` body schema
-//!      `{type: string, format: binary}` becomes the boolean schema
-//!      `true` — JSON Schema 2020-12's "matches anything" idiom. The
-//!      migration guide writes this as the empty schema `{}`; we emit
-//!      `true` because `v3_1::Schema::Bool(bool)` round-trips cleanly,
-//!      whereas an empty `{}` would normalise back to `{type: object}`
-//!      via `ObjectSchema::default()`.
+//!      `{type: string, format: binary}` becomes the empty schema
+//!      `{}` — the form the migration guide recommends, routed
+//!      through the [`crate::v3_1::schema::EmptySchema`] variant so
+//!      it round-trips byte-for-byte.
 //!
 //! Lossless edges:
 //!
@@ -282,12 +280,12 @@ fn normalize_base64_format(obj: &mut Map<String, Value>) {
 ///   `format: binary` was deprecated in 3.1 in favour of the standard
 ///   `contentMediaType` keyword.
 /// * For `application/octet-stream`, replace
-///   `{type: string, format: binary}` with the boolean schema `true`,
-///   the JSON Schema 2020-12 "matches anything" idiom. The migration
-///   guide presents the equivalent empty schema `{}`; we use `true`
-///   because `v3_1::Schema` carries a first-class `Bool(bool)` variant
-///   that round-trips cleanly, whereas `{}` would normalise back to
-///   `{type: object}` via `ObjectSchema::default()`.
+///   `{type: string, format: binary}` with the empty schema `{}`,
+///   the form the migration guide recommends. `v3_1::Schema` carries
+///   a first-class [`crate::v3_1::schema::EmptySchema`] variant that
+///   round-trips cleanly: `{}` deserialises as `Schema::Empty`
+///   (added in PR #117) instead of being normalised to
+///   `{type: object}` by `ObjectSchema::default()`.
 fn walk_content_aware(value: &mut Value) {
     match value {
         Value::Object(obj) => {
@@ -316,13 +314,16 @@ fn rewrite_content_map(content: &mut Map<String, Value>) {
             continue;
         };
         if mime == "application/octet-stream" {
-            // `{type: string, format: binary}` → `true` (the boolean
-            // "any value" schema). Anything else stays as-is — the
-            // user may have declared a typed schema like base64 text.
+            // `{type: string, format: binary}` → `{}` (the empty
+            // schema, JSON Schema 2020-12's "matches anything"
+            // idiom). Routes through `Schema::Empty(EmptySchema)`
+            // on the typed deserialisation. Anything else stays
+            // as-is — the user may have declared a typed schema
+            // like base64 text.
             if let Value::Object(s) = schema
                 && is_string_binary(s)
             {
-                *schema = Value::Bool(true);
+                *schema = Value::Object(Map::new());
             }
         } else if is_multipart_mime(mime)
             && let Value::Object(s) = schema
@@ -731,13 +732,13 @@ mod tests {
     }
 
     #[test]
-    fn octet_stream_binary_schema_becomes_boolean_true() {
+    fn octet_stream_binary_schema_becomes_empty_schema() {
         // `{type: string, format: binary}` under
         // `application/octet-stream` is the v3.0 idiom for "raw bytes
-        // body". v3.1's equivalent is the JSON Schema 2020-12 "matches
-        // anything" boolean schema — emitted as `true` so it survives
-        // the v3.1 typed round-trip via `Schema::Bool(true)` (an empty
-        // `{}` would normalise back to `{type: object}` instead).
+        // body". v3.1's equivalent is the empty schema `{}` (the
+        // form the official upgrade guide recommends), routed
+        // through the `Schema::Empty(EmptySchema)` variant so it
+        // round-trips byte-for-byte.
         let raw = r##"{
             "openapi": "3.0.4",
             "info": { "title": "t", "version": "1" },
@@ -759,7 +760,14 @@ mod tests {
         let value = convert(raw);
         let schema = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["application/octet-stream"]
             ["schema"];
-        assert_eq!(*schema, Value::Bool(true));
+        // The result is the literal empty object `{}`, neither
+        // `{type: object}` (the old ObjectSchema-default artefact)
+        // nor `true` (the boolean-schema fallback).
+        assert!(schema.is_object());
+        assert!(
+            schema.as_object().unwrap().is_empty(),
+            "octet-stream schema should be `{{}}`, got {schema}"
+        );
     }
 
     #[test]
