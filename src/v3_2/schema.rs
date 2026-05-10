@@ -26,7 +26,66 @@ pub enum Schema {
     OneOf(Box<OneOfSchema>),
     Not(Box<NotSchema>),
     Multi(Box<MultiSchema>),
+    /// The literal empty schema `{}`. Per JSON Schema 2020-12 this is
+    /// semantically equivalent to `true` ("matches anything") but
+    /// preserves the `{}` JSON representation.
+    ///
+    /// Must come before [`Schema::Single`]: `SingleSchema::Object`
+    /// uses `MustBe!("object")` with a `default`, so the typed
+    /// variant happily matches a bare `{}`. Putting `Empty` first
+    /// captures the empty-object idiom while leaving anything with at
+    /// least one field (even just `description`) to fall through to
+    /// `Single::Object`.
+    Empty(EmptySchema),
     Single(Box<SingleSchema>), // must be last
+}
+
+/// Marker for the empty schema `{}`. Round-trips to `{}` and rejects
+/// any non-empty object on deserialization, so a schema with even one
+/// field stays a typed `Single` / composition variant.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct EmptySchema;
+
+impl Serialize for EmptySchema {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        ser.serialize_map(Some(0))?.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for EmptySchema {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        // Use a `MapAccess` visitor that peeks the first key instead
+        // of buffering the whole object into a `BTreeMap` only to
+        // check `is_empty()` — same constraint, zero allocation.
+        struct EmptyVisitor;
+        impl<'de> serde::de::Visitor<'de> for EmptyVisitor {
+            type Value = EmptySchema;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("empty schema object `{}`")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<EmptySchema, M::Error> {
+                if map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "expected empty schema object `{}`",
+                    ));
+                }
+                Ok(EmptySchema)
+            }
+        }
+        de.deserialize_map(EmptyVisitor)
+    }
+}
+
+impl From<EmptySchema> for Schema {
+    fn from(s: EmptySchema) -> Self {
+        Schema::Empty(s)
+    }
 }
 
 impl From<bool> for Schema {
@@ -1076,6 +1135,8 @@ impl ValidateWithContext<Spec> for Schema {
         match self {
             // A boolean schema (true / false) has no fields to validate.
             Schema::Bool(_) => {}
+            // The empty schema `{}` is the unconstrained schema — nothing to validate.
+            Schema::Empty(_) => {}
             Schema::Single(s) => s.validate_with_context(ctx, path),
             Schema::Multi(s) => s.validate_with_context(ctx, path),
             Schema::AllOf(s) => {
@@ -1466,11 +1527,13 @@ mod tests {
             _ => panic!("expected Schema::Single, got {parsed:?}"),
         }
 
+        // A literal `{}` now matches `Schema::Empty` — see the
+        // `empty_schema_*` tests below for full coverage. Anything
+        // with at least one field (even without `type`) still
+        // dispatches to `Single::Object` because that variant has a
+        // default `schema_type`.
         let parsed: Schema = serde_json::from_value(serde_json::json!({})).expect("must parse");
-        assert!(matches!(
-            parsed,
-            Schema::Single(ref s) if matches!(s.as_ref(), SingleSchema::Object(_))
-        ));
+        assert_eq!(parsed, Schema::Empty(EmptySchema));
     }
 
     #[test]
@@ -2310,5 +2373,139 @@ mod tests {
             crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
         schema.validate_with_context(&mut ctx, "s".into());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn empty_schema_default_is_unit_value() {
+        // Trait-path call so clippy doesn't flag the redundant
+        // `::default()` on a unit struct while we still exercise the
+        // `Default` impl.
+        assert_eq!(EmptySchema, <EmptySchema as Default>::default());
+    }
+
+    #[test]
+    fn empty_schema_serializes_as_empty_object() {
+        let s = serde_json::to_string(&EmptySchema).unwrap();
+        assert_eq!(s, "{}");
+        let v = serde_json::to_value(EmptySchema).unwrap();
+        assert!(v.is_object());
+        assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_schema_deserializes_from_empty_object() {
+        let from_str: EmptySchema = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_str, EmptySchema);
+        let from_value: EmptySchema = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(from_value, EmptySchema);
+    }
+
+    #[test]
+    fn empty_schema_rejects_populated_object() {
+        let err = serde_json::from_value::<EmptySchema>(serde_json::json!({"k": 1}))
+            .expect_err("populated object must reject");
+        assert!(
+            err.to_string().contains("expected empty schema object"),
+            "error must explain the constraint: {err}"
+        );
+        let err = serde_json::from_value::<EmptySchema>(serde_json::json!({"x": null}))
+            .expect_err("single null entry must reject");
+        assert!(err.to_string().contains("expected empty schema object"));
+    }
+
+    #[test]
+    fn empty_schema_rejects_non_object_shapes() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!("{}"),
+            serde_json::json!([]),
+        ] {
+            assert!(
+                serde_json::from_value::<EmptySchema>(value.clone()).is_err(),
+                "{value} must not deserialize as EmptySchema",
+            );
+        }
+    }
+
+    #[test]
+    fn schema_from_empty_schema_dispatches_to_empty_variant() {
+        let schema: Schema = EmptySchema.into();
+        assert_eq!(schema, Schema::Empty(EmptySchema));
+        let schema: Schema = Schema::from(EmptySchema);
+        assert_eq!(schema, Schema::Empty(EmptySchema));
+        assert_eq!(
+            serde_json::to_value(&schema).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn empty_schema_round_trip_via_string_is_stable() {
+        let original = EmptySchema;
+        let encoded = serde_json::to_string(&original).unwrap();
+        let decoded: EmptySchema = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(original, decoded);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+    }
+
+    #[test]
+    fn empty_schema_round_trips_as_literal_empty_object() {
+        let json = serde_json::json!({});
+        let schema: Schema = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(schema, Schema::Empty(EmptySchema));
+        assert_eq!(serde_json::to_value(&schema).unwrap(), json);
+    }
+
+    #[test]
+    fn schema_with_only_description_remains_object() {
+        let json = serde_json::json!({"description": "just metadata"});
+        let schema: Schema = serde_json::from_value(json).unwrap();
+        match &schema {
+            Schema::Single(s) => match s.as_ref() {
+                SingleSchema::Object(o) => {
+                    assert_eq!(o.description.as_deref(), Some("just metadata"));
+                }
+                other => panic!("expected ObjectSchema, got {other}"),
+            },
+            other => panic!("expected Single, got {other:?}"),
+        }
+        let value = serde_json::to_value(&schema).unwrap();
+        assert_eq!(value["type"], "object");
+        assert_eq!(value["description"], "just metadata");
+    }
+
+    #[test]
+    fn explicit_object_schema_still_picks_object_variant() {
+        let json = serde_json::json!({"type": "object", "title": "T"});
+        let schema: Schema = serde_json::from_value(json.clone()).unwrap();
+        let Schema::Single(s) = &schema else {
+            panic!("expected Single, got {schema:?}");
+        };
+        let SingleSchema::Object(_) = s.as_ref() else {
+            panic!("expected ObjectSchema, got {s}");
+        };
+        assert_eq!(serde_json::to_value(&schema).unwrap(), json);
+    }
+
+    #[test]
+    fn empty_schema_validates_clean() {
+        let schema = Schema::Empty(EmptySchema);
+        let spec = crate::v3_2::spec::Spec::default();
+        let mut ctx =
+            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn empty_schema_distinct_from_bool_true() {
+        let bool_schema: Schema = serde_json::from_value(serde_json::json!(true)).unwrap();
+        let empty_schema: Schema = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(bool_schema, Schema::Bool(true));
+        assert_eq!(empty_schema, Schema::Empty(EmptySchema));
+        assert_ne!(bool_schema, empty_schema);
     }
 }
