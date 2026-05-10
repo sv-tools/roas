@@ -225,9 +225,16 @@ fn is_extension_key(k: &str) -> bool {
 }
 
 /// `type: <T>` + `nullable: true` → `type: [<T>, "null"]`, and a bare
-/// `nullable: true` with no `type` becomes `type: ["null"]`.
-/// `nullable: false` (or absent) is a no-op except that the redundant
-/// `nullable` field is dropped — v3.1 has no such keyword.
+/// `nullable: true` paired with `type: [<T>, …]` adds `"null"` to
+/// the array. `nullable: false` (or absent) is a no-op except that
+/// the redundant `nullable` field is dropped — v3.1 has no such
+/// keyword.
+///
+/// `nullable: true` on a schema with **no** `type` is a no-op
+/// modulo the dropped keyword: in OAS 3.0 a schema without `type`
+/// is already unconstrained (it allows any JSON value, including
+/// null), so we don't synthesise a `type: ["null"]` — that would
+/// flip the semantics from "matches anything" to "null only".
 ///
 /// The input arrives via `serde_json::to_value(&v3_0::Spec)`, so
 /// `nullable` is always either absent or a JSON boolean — anything
@@ -255,10 +262,9 @@ fn normalize_nullable(obj: &mut Map<String, Value>) {
             obj.insert("type".into(), other);
         }
         None => {
-            obj.insert(
-                "type".into(),
-                Value::Array(vec![Value::String("null".into())]),
-            );
+            // No `type` to add `null` to. Drop `nullable` (already
+            // removed above) and leave the schema typeless: a v3.0
+            // schema with no `type` already allows any value.
         }
     }
 }
@@ -581,6 +587,30 @@ mod tests {
         // Non-nullable schema is untouched.
         let maybe_bool = &value["components"]["schemas"]["MaybeBool"];
         assert_eq!(maybe_bool["type"], "boolean");
+    }
+
+    #[test]
+    fn nullable_without_type_stays_typeless() {
+        // OAS 3.0 `nullable: true` only adds `null` to an explicit
+        // `type`. A schema with no `type` is already unconstrained
+        // (allows any value including null), so the conversion must
+        // drop `nullable` without synthesising a `type: ["null"]` —
+        // that would change semantics from "any" to "null only".
+        //
+        // The typed `From<v3_0::Spec>` path can't actually deliver a
+        // typeless schema to `normalize_nullable` (v3_0's
+        // `ObjectSchema` re-serialises an explicit `type: object`),
+        // so exercise the walker directly on hand-built JSON to pin
+        // the defensive behaviour down.
+        let mut v: Value = serde_json::json!({"nullable": true, "description": "free-form"});
+        super::walk(&mut v, super::Pos::Schema);
+        let free = &v;
+        assert!(
+            free.get("type").is_none(),
+            "no `type` should be synthesised, got {free}"
+        );
+        assert!(free.get("nullable").is_none(), "nullable removed");
+        assert_eq!(free["description"], "free-form");
     }
 
     #[test]
