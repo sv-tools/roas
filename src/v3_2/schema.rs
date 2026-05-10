@@ -2359,6 +2359,70 @@ mod tests {
     }
 
     #[test]
+    fn empty_schema_default_is_unit_value() {
+        // Trait-path call so clippy doesn't flag the redundant
+        // `::default()` on a unit struct while we still exercise the
+        // `Default` impl.
+        assert_eq!(EmptySchema, <EmptySchema as Default>::default());
+    }
+
+    #[test]
+    fn empty_schema_serializes_as_empty_object() {
+        let s = serde_json::to_string(&EmptySchema).unwrap();
+        assert_eq!(s, "{}");
+        let v = serde_json::to_value(EmptySchema).unwrap();
+        assert!(v.is_object());
+        assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_schema_deserializes_from_empty_object() {
+        let from_str: EmptySchema = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_str, EmptySchema);
+        let from_value: EmptySchema = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(from_value, EmptySchema);
+    }
+
+    #[test]
+    fn empty_schema_rejects_populated_object() {
+        let err = serde_json::from_value::<EmptySchema>(serde_json::json!({"k": 1}))
+            .expect_err("populated object must reject");
+        assert!(
+            err.to_string().contains("expected empty schema object"),
+            "error must explain the constraint: {err}"
+        );
+        let err = serde_json::from_value::<EmptySchema>(serde_json::json!({"x": null}))
+            .expect_err("single null entry must reject");
+        assert!(err.to_string().contains("expected empty schema object"));
+    }
+
+    #[test]
+    fn empty_schema_rejects_non_object_shapes() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!("{}"),
+            serde_json::json!([]),
+        ] {
+            assert!(
+                serde_json::from_value::<EmptySchema>(value.clone()).is_err(),
+                "{value} must not deserialize as EmptySchema",
+            );
+        }
+    }
+
+    #[test]
+    fn empty_schema_round_trip_via_string_is_stable() {
+        let original = EmptySchema;
+        let encoded = serde_json::to_string(&original).unwrap();
+        let decoded: EmptySchema = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(original, decoded);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+    }
+
+    #[test]
     fn empty_schema_round_trips_as_literal_empty_object() {
         let json = serde_json::json!({});
         let schema: Schema = serde_json::from_value(json.clone()).unwrap();
