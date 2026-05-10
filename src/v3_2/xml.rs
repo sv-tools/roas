@@ -1,6 +1,6 @@
 //! XML Object
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_optional_url};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_url};
 use crate::v3_2::spec::Spec;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -104,6 +104,14 @@ pub struct XML {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrapped: Option<bool>,
 
+    /// XML node-type hint (added in OAS 3.2). One of `element` (default),
+    /// `attribute`, `text`, `cdata`, or `none`. When `nodeType` is set,
+    /// the legacy boolean fields `attribute` and `wrapped` MUST NOT be
+    /// used — `nodeType` supersedes them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "nodeType")]
+    pub node_type: Option<String>,
+
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -116,6 +124,31 @@ pub struct XML {
 impl ValidateWithContext<Spec> for XML {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_optional_url(&self.namespace, ctx, format!("{path}.namespace"));
+        if let Some(nt) = &self.node_type {
+            const ALLOWED: &[&str] = &["element", "attribute", "text", "cdata", "none"];
+            if !ALLOWED.contains(&nt.as_str()) {
+                ctx.error(
+                    format!("{path}.nodeType"),
+                    format_args!(
+                        "must be one of `element`, `attribute`, `text`, `cdata`, `none`, found `{nt}`"
+                    ),
+                );
+            }
+            // OAS 3.2 supersedes the legacy `attribute`/`wrapped` booleans
+            // with `nodeType`; mixing them is ambiguous.
+            if self.attribute.is_some() {
+                ctx.error(
+                    path.clone(),
+                    "`attribute` MUST NOT be present when `nodeType` is set",
+                );
+            }
+            if self.wrapped.is_some() {
+                ctx.error(
+                    path.clone(),
+                    "`wrapped` MUST NOT be present when `nodeType` is set",
+                );
+            }
+        }
     }
 }
 
@@ -139,6 +172,7 @@ mod tests {
                 prefix: Some("sample".to_owned()),
                 attribute: Some(true),
                 wrapped: Some(true),
+                node_type: None,
                 extensions: {
                     let mut map = BTreeMap::new();
                     map.insert("x-internal-id".to_owned(), serde_json::Value::Null);
@@ -182,6 +216,7 @@ mod tests {
                 prefix: Some("sample".to_owned()),
                 attribute: Some(true),
                 wrapped: Some(true),
+                node_type: None,
                 extensions: {
                     let mut map = BTreeMap::new();
                     map.insert("x-internal-id".to_owned(), serde_json::Value::Null);
@@ -202,6 +237,7 @@ mod tests {
             prefix: Some("sample".to_owned()),
             attribute: Some(true),
             wrapped: Some(true),
+            node_type: None,
             extensions: None,
         }
         .validate_with_context(&mut ctx, "xml".to_owned());

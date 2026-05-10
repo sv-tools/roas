@@ -17,17 +17,35 @@ pub struct Example {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// Embedded literal example.
-    /// The `value` field and `externalValue` field are mutually exclusive.
-    /// To represent examples of media types that cannot naturally represented in JSON or YAML,
-    /// use a string value to contain the example, escaping where necessary.
+    /// Embedded literal example, semantically equivalent to the parent
+    /// media type.
+    /// `value`, `serializedValue`, `dataValue`, and `externalValue` are
+    /// pairwise mutually exclusive.
+    /// To represent examples of media types that cannot naturally
+    /// represented in JSON or YAML, use a string value to contain the
+    /// example, escaping where necessary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
+
+    /// Pre-serialized form of the example, as it would appear on the wire
+    /// (added in OAS 3.2). Mutually exclusive with `value`, `dataValue`,
+    /// and `externalValue`.
+    #[serde(rename = "serializedValue")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serialized_value: Option<String>,
+
+    /// Structured / data-shape form of the example (added in OAS 3.2).
+    /// Useful when the example is a non-JSON-native value such as binary
+    /// data described by a Schema. Mutually exclusive with `value`,
+    /// `serializedValue`, and `externalValue`.
+    #[serde(rename = "dataValue")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_value: Option<serde_json::Value>,
 
     /// A URL that points to the literal example.
     /// This provides the capability to reference examples that cannot easily
     /// be included in JSON or YAML documents.
-    /// The `value` field and `externalValue` field are mutually exclusive.
+    /// Mutually exclusive with `value`, `serializedValue`, and `dataValue`.
     #[serde(rename = "externalValue")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_value: Option<String>,
@@ -43,10 +61,24 @@ pub struct Example {
 
 impl ValidateWithContext<Spec> for Example {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        if self.value.is_some() && self.external_value.is_some() {
+        // OAS 3.2: at most one of `value`, `serializedValue`, `dataValue`,
+        // `externalValue` may be present.
+        let present: Vec<&str> = [
+            ("value", self.value.is_some()),
+            ("serializedValue", self.serialized_value.is_some()),
+            ("dataValue", self.data_value.is_some()),
+            ("externalValue", self.external_value.is_some()),
+        ]
+        .iter()
+        .filter_map(|(name, p)| if *p { Some(*name) } else { None })
+        .collect();
+        if present.len() > 1 {
             ctx.error(
                 path.clone(),
-                "value and externalValue are mutually exclusive",
+                format_args!(
+                    "{} are mutually exclusive (at most one may be set)",
+                    present.join(", ")
+                ),
             );
         }
         validate_optional_url(&self.external_value, ctx, format!("{path}.externalValue"));

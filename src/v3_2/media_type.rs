@@ -75,14 +75,24 @@ pub struct MediaType {
     /// The key, being the property name, MUST exist in the schema as a property.
     /// The encoding object SHALL only apply to `requestBody` objects when
     /// the media type is `multipart` or `application/x-www-form-urlencoded`.
+    /// Mutually exclusive with `prefixEncoding` and `itemEncoding`
+    /// (an entry MAY use one shape or the other, not both).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<BTreeMap<String, Encoding>>,
 
-    /// Encoding information applied per-item to a sequential media type
-    /// (e.g. Server-Sent Events). Added in OAS 3.2.
+    /// Encoding for the prefix (header / framing) portion of a sequential
+    /// media type. Added in OAS 3.2. A single Encoding Object, not a map.
+    /// Mutually exclusive with `encoding`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "prefixEncoding")]
+    pub prefix_encoding: Option<Encoding>,
+
+    /// Encoding applied per-item to a sequential media type
+    /// (e.g. JSON Lines, Server-Sent Events). Added in OAS 3.2. A single
+    /// Encoding Object, not a map. Mutually exclusive with `encoding`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "itemEncoding")]
-    pub item_encoding: Option<BTreeMap<String, Encoding>>,
+    pub item_encoding: Option<Encoding>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -180,6 +190,24 @@ pub struct Encoding {
     #[serde(rename = "allowReserved")]
     pub allow_reserved: Option<bool>,
 
+    /// Nested encoding for properties when this Encoding describes a
+    /// `multipart/form-data` part whose body is itself structured.
+    /// Added in OAS 3.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<BTreeMap<String, Encoding>>,
+
+    /// Nested prefix-encoding for sequential parts. Added in OAS 3.2.
+    /// Mutually exclusive with `encoding`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "prefixEncoding")]
+    pub prefix_encoding: Option<Box<Encoding>>,
+
+    /// Nested per-item encoding for sequential parts. Added in OAS 3.2.
+    /// Mutually exclusive with `encoding`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "itemEncoding")]
+    pub item_encoding: Option<Box<Encoding>>,
+
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -205,15 +233,27 @@ impl ValidateWithContext<Spec> for MediaType {
                 example.validate_with_context(ctx, format!("{path}.examples[{name}]"));
             }
         }
+        // OAS 3.2: `encoding` MUST NOT coexist with `prefixEncoding` or
+        // `itemEncoding` — those describe sequential media types whereas
+        // `encoding` describes a multipart/form-data property map.
+        if self.encoding.is_some()
+            && (self.prefix_encoding.is_some() || self.item_encoding.is_some())
+        {
+            ctx.error(
+                path.clone(),
+                "`encoding` is mutually exclusive with `prefixEncoding`/`itemEncoding`",
+            );
+        }
         if let Some(encoding) = &self.encoding {
             for (name, encoding) in encoding {
                 encoding.validate_with_context(ctx, format!("{path}.encoding[{name}]"));
             }
         }
+        if let Some(encoding) = &self.prefix_encoding {
+            encoding.validate_with_context(ctx, format!("{path}.prefixEncoding"));
+        }
         if let Some(encoding) = &self.item_encoding {
-            for (name, encoding) in encoding {
-                encoding.validate_with_context(ctx, format!("{path}.itemEncoding[{name}]"));
-            }
+            encoding.validate_with_context(ctx, format!("{path}.itemEncoding"));
         }
     }
 }
@@ -224,6 +264,27 @@ impl ValidateWithContext<Spec> for Encoding {
             for (name, header) in headers {
                 header.validate_with_context(ctx, format!("{path}.headers[{name}]"));
             }
+        }
+        // OAS 3.2 nested encoding: same `encoding` ⊕ `prefixEncoding`
+        // / `itemEncoding` mutex as on MediaType.
+        if self.encoding.is_some()
+            && (self.prefix_encoding.is_some() || self.item_encoding.is_some())
+        {
+            ctx.error(
+                path.clone(),
+                "`encoding` is mutually exclusive with `prefixEncoding`/`itemEncoding`",
+            );
+        }
+        if let Some(encoding) = &self.encoding {
+            for (name, encoding) in encoding {
+                encoding.validate_with_context(ctx, format!("{path}.encoding[{name}]"));
+            }
+        }
+        if let Some(encoding) = &self.prefix_encoding {
+            encoding.validate_with_context(ctx, format!("{path}.prefixEncoding"));
+        }
+        if let Some(encoding) = &self.item_encoding {
+            encoding.validate_with_context(ctx, format!("{path}.itemEncoding"));
         }
     }
 }
@@ -295,6 +356,9 @@ mod tests {
                 style: None,
                 explode: None,
                 allow_reserved: None,
+                encoding: None,
+                prefix_encoding: None,
+                item_encoding: None,
                 extensions: None,
             },
         );
@@ -304,6 +368,7 @@ mod tests {
             example: None,
             examples: Some(examples),
             encoding: Some(encoding),
+            prefix_encoding: None,
             item_encoding: None,
             extensions: None,
         };

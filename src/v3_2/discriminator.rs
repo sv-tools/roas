@@ -22,32 +22,42 @@ pub struct Discriminator {
     /// An object to hold mappings between payload values and schema names or references.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mapping: Option<BTreeMap<String, String>>,
+
+    /// Default mapping target (added in OAS 3.2). Used when the discriminator
+    /// property is missing or its value doesn't appear in `mapping`.
+    /// Resolved as either a component schema name
+    /// (`#/components/schemas/<value>`) or a full URI reference, with the
+    /// same shape rules as `mapping` values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "defaultMapping")]
+    pub default_mapping: Option<String>,
 }
 
 impl ValidateWithContext<Spec> for Discriminator {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.property_name, ctx, format!("{path}.propertyName"));
 
+        let resolve = |v: &str| -> String {
+            // Mapping values are EITHER component schema *names* (resolved
+            // against `#/components/schemas/<name>`) OR URI references per
+            // RFC 3986. Component names match `^[a-zA-Z0-9._-]+$` so any
+            // value containing `/`, `#`, or `:` is treated as a URI ref.
+            let is_uri_ref = v.contains('/') || v.starts_with('#') || v.contains(':');
+            if is_uri_ref {
+                v.to_owned()
+            } else {
+                format!("#/components/schemas/{v}")
+            }
+        };
         if let Some(mapping) = &self.mapping {
             for (k, v) in mapping {
-                // Per OAS 3.1, mapping values are EITHER component schema
-                // *names* (resolved against `#/components/schemas/<name>`)
-                // OR URI references per RFC 3986. We distinguish by the
-                // shape of valid component names: per
-                // `Components.<map>` keys, names match
-                // `^[a-zA-Z0-9._-]+$` — no `/`, no `#`, no `:`. So any
-                // value containing `/`, `#`, or `:` is treated as a URI
-                // reference and used as-is. Anything else is taken as a
-                // component schema name.
-                let is_uri_ref = v.contains('/') || v.starts_with('#') || v.contains(':');
-                let reference = if is_uri_ref {
-                    v.clone()
-                } else {
-                    format!("#/components/schemas/{v}")
-                };
-                let schema_ref = RefOr::<Schema>::new_ref(reference);
-                schema_ref.validate_with_context(ctx, format!("{path}.mapping[{k}]"));
+                RefOr::<Schema>::new_ref(resolve(v))
+                    .validate_with_context(ctx, format!("{path}.mapping[{k}]"));
             }
+        }
+        if let Some(v) = &self.default_mapping {
+            RefOr::<Schema>::new_ref(resolve(v))
+                .validate_with_context(ctx, format!("{path}.defaultMapping"));
         }
     }
 }
@@ -99,6 +109,7 @@ mod tests {
                 ("cat".to_owned(), "Cat".to_owned()),
                 ("missing".to_owned(), "Missing".to_owned()),
             ])),
+            default_mapping: None,
         };
         let mut ctx = Context::new(&spec, Options::new());
         d.validate_with_context(&mut ctx, "d".to_owned());
