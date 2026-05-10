@@ -84,6 +84,14 @@ enum Pos {
     /// `properties`, `components.schemas`). Each entry's value is a
     /// schema.
     SchemaMap,
+    /// The current value is a `Link` Object. Its `parameters` and
+    /// `requestBody` fields hold arbitrary JSON (free-form
+    /// runtime-expression maps and bodies) and must not be walked.
+    Link,
+    /// The current value is a `BTreeMap<String, Link>` (e.g.
+    /// `components.links`, `Response.links`). Each entry's value is
+    /// a Link.
+    LinkMap,
 }
 
 /// Apply schema-shape rewrites — `nullable: true` → `type` array, the
@@ -109,6 +117,12 @@ fn walk(value: &mut Value, pos: Pos) {
                     walk(v, Pos::Schema);
                 }
             }
+            Pos::Link => walk_link_object(obj),
+            Pos::LinkMap => {
+                for (_, v) in obj.iter_mut() {
+                    walk(v, Pos::Link);
+                }
+            }
             Pos::Generic => walk_generic_object(obj),
         },
         Value::Array(arr) => {
@@ -117,6 +131,25 @@ fn walk(value: &mut Value, pos: Pos) {
             }
         }
         _ => {}
+    }
+}
+
+/// Walk a Link Object's keys. Link's `parameters`
+/// (`Map<String, runtime-expression>`) and `requestBody` (free-form
+/// JSON / runtime expression) are opaque user payloads and must not
+/// be touched — they may legally contain `schema`, `nullable`,
+/// `content`, etc. without being OpenAPI schema or content shapes.
+fn walk_link_object(obj: &mut Map<String, Value>) {
+    for (k, v) in obj.iter_mut() {
+        if is_extension_key(k) {
+            continue;
+        }
+        match k.as_str() {
+            "parameters" | "requestBody" => continue,
+            // `server` and any future Link fields are walked
+            // generically.
+            _ => walk(v, Pos::Generic),
+        }
     }
 }
 
@@ -169,6 +202,9 @@ fn walk_generic_object(obj: &mut Map<String, Value>) {
             "schema" => walk(v, Pos::Schema),
             // `schemas` is the components-level map of named schemas.
             "schemas" => walk(v, Pos::SchemaMap),
+            // `links` is a map of named Link Objects. Both
+            // `components.links` and `Response.links` use this key.
+            "links" => walk(v, Pos::LinkMap),
             // ExampleObject's instance value, and the
             // example / examples carriers on MediaType / Parameter /
             // Header. Either an instance value, or a map of
@@ -311,9 +347,18 @@ fn type_includes_string(obj: &Map<String, Value>) -> bool {
 ///   (added in PR #117) instead of being normalised to
 ///   `{type: object}` by `ObjectSchema::default()`.
 fn walk_content_aware(value: &mut Value) {
+    walk_content_aware_with(value, /* in_link = */ false);
+}
+
+fn walk_content_aware_with(value: &mut Value, in_link: bool) {
     match value {
         Value::Object(obj) => {
-            if let Some(Value::Object(content)) = obj.get_mut("content") {
+            // The `content` key on a Link is a property name, not the
+            // OAS Content Map; in fact Link doesn't define `content`
+            // at all, but a free-form `Link.requestBody` could
+            // contain one. Skip the rewrite entirely while inside a
+            // Link.
+            if !in_link && let Some(Value::Object(content)) = obj.get_mut("content") {
                 rewrite_content_map(content);
             }
             for (k, v) in obj.iter_mut() {
@@ -321,6 +366,17 @@ fn walk_content_aware(value: &mut Value) {
                 // round-trip byte-for-byte. Skip before any other
                 // dispatch.
                 if is_extension_key(k) {
+                    continue;
+                }
+                if in_link {
+                    // Link's `parameters` (map of arbitrary JSON) and
+                    // `requestBody` (free-form) are opaque payloads.
+                    if matches!(k.as_str(), "parameters" | "requestBody") {
+                        continue;
+                    }
+                    // Other Link fields (server, description) are
+                    // walked normally — no Link entries below them.
+                    walk_content_aware_with(v, false);
                     continue;
                 }
                 // Skip instance-valued payloads — a user-supplied
@@ -333,12 +389,22 @@ fn walk_content_aware(value: &mut Value) {
                 ) {
                     continue;
                 }
-                walk_content_aware(v);
+                // `links` is a map of named Link objects; transition
+                // into Link context for the entries.
+                if k == "links" {
+                    if let Value::Object(map) = v {
+                        for (_, entry) in map.iter_mut() {
+                            walk_content_aware_with(entry, true);
+                        }
+                    }
+                    continue;
+                }
+                walk_content_aware_with(v, false);
             }
         }
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                walk_content_aware(v);
+                walk_content_aware_with(v, in_link);
             }
         }
         _ => {}
@@ -1170,6 +1236,66 @@ mod tests {
         assert_eq!(schema["type"], "string");
         assert_eq!(schema["format"], "binary");
         assert_eq!(schema["description"], "the document bytes");
+    }
+
+    #[test]
+    fn link_parameters_and_request_body_are_opaque_to_walkers() {
+        // `Link.parameters` is a `BTreeMap<String, Value>` and
+        // `Link.requestBody` is a `Value` — both hold arbitrary JSON
+        // (runtime expressions, free-form payloads). Neither walker
+        // should rewrite their contents even if those contents
+        // contain schema-shaped or content-shaped JSON.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "operationId": "getX",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "links": {
+                                    "trap": {
+                                        "operationId": "getX",
+                                        "parameters": {
+                                            "p": {
+                                                "schema": {
+                                                    "type": "string",
+                                                    "nullable": true,
+                                                    "format": "base64"
+                                                }
+                                            }
+                                        },
+                                        "requestBody": {
+                                            "content": {
+                                                "application/octet-stream": {
+                                                    "schema": {"type": "string", "format": "binary"}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let link = &value["paths"]["/x"]["get"]["responses"]["200"]["links"]["trap"];
+        // Link.parameters payload is preserved verbatim (no
+        // nullable→type-array, no format→contentEncoding).
+        let p_schema = &link["parameters"]["p"]["schema"];
+        assert_eq!(p_schema["type"], "string");
+        assert_eq!(p_schema["nullable"], true);
+        assert_eq!(p_schema["format"], "base64");
+        assert!(p_schema.get("contentEncoding").is_none());
+        // Link.requestBody payload is preserved verbatim (no
+        // octet-stream binary→{}, no contentMediaType rewrite).
+        let body_schema = &link["requestBody"]["content"]["application/octet-stream"]["schema"];
+        assert_eq!(body_schema["type"], "string");
+        assert_eq!(body_schema["format"], "binary");
     }
 
     #[test]
