@@ -89,13 +89,20 @@ fn transform_spec(spec: &mut Value) {
         .iter()
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect();
+    // A non-empty `x-servers` (Redoc extension) wins; empty or absent
+    // falls back to assembling from host/basePath/schemes so users
+    // don't lose their server info to an empty list.
     let x_servers = obj.remove("x-servers");
-    if let Some(Value::Array(servers)) = x_servers {
-        if !servers.is_empty() {
-            obj.insert("servers".into(), Value::Array(servers));
+    let promoted_x_servers = match x_servers {
+        Some(Value::Array(arr)) if !arr.is_empty() => {
+            obj.insert("servers".into(), Value::Array(arr));
+            true
         }
-    } else if let Some(servers) =
-        assemble_servers(host.as_deref(), base_path.as_deref(), &spec_schemes_str)
+        _ => false,
+    };
+    if !promoted_x_servers
+        && let Some(servers) =
+            assemble_servers(host.as_deref(), base_path.as_deref(), &spec_schemes_str)
     {
         obj.insert("servers".into(), servers);
     }
@@ -505,16 +512,44 @@ fn transform_items(items: &mut Value) {
 }
 
 fn collection_format_to_style(cf: &str, location: &str) -> Option<(&'static str, bool)> {
+    // v3.0 restricts `style` per location:
+    //   path:   matrix | label | simple
+    //   header: simple
+    //   query / cookie: form | spaceDelimited | pipeDelimited | deepObject
+    // Anything outside the location's allowed set would make the
+    // converted JSON fail to deserialize as a v3_0::Parameter, so we
+    // fall back to `simple` for non-query / non-cookie sites.
     match (cf, location) {
         ("csv", "query" | "cookie") => Some(("form", false)),
         ("csv", _) => Some(("simple", false)),
-        ("ssv", _) => Some(("spaceDelimited", false)),
-        ("pipes", _) => Some(("pipeDelimited", false)),
+        ("ssv", "query" | "cookie") => Some(("spaceDelimited", false)),
+        ("pipes", "query" | "cookie") => Some(("pipeDelimited", false)),
         ("multi", "query" | "cookie") => Some(("form", true)),
+        // ssv / pipes / multi outside query|cookie → use the only
+        // location-valid style and keep the array semantics on
+        // `explode`.
+        ("ssv" | "pipes", _) => Some(("simple", false)),
         ("multi", _) => Some(("simple", true)),
         // tsv has no v3.0 equivalent.
         _ => None,
     }
+}
+
+/// Wrap each `(name, raw value)` pair from a v2 `x-examples` map (or
+/// any similarly-shaped name → value table) as a v3.0 Example Object
+/// (`{value: <raw>}`). v3.0's `MediaType.examples` is typed
+/// `BTreeMap<String, RefOr<Example>>` so a bare JSON value would fail
+/// to deserialize.
+fn wrap_named_values_as_examples(map: Map<String, Value>) -> Value {
+    let wrapped: Map<String, Value> = map
+        .into_iter()
+        .map(|(name, raw)| {
+            let mut example = Map::new();
+            example.insert("value".into(), raw);
+            (name, Value::Object(example))
+        })
+        .collect();
+    Value::Object(wrapped)
 }
 
 /// Build a `requestBody` from a single v2 body parameter. Returns `None`
@@ -534,7 +569,14 @@ fn build_body_request_body(body: Option<Value>, consumes: &[String]) -> Option<V
     let description = p.remove("description");
     let required = p.remove("required");
     let schema = p.remove("schema");
-    let examples = p.remove("x-examples");
+    // v2's `x-examples` is `BTreeMap<String, serde_json::Value>` —
+    // bare values, not Example Objects. Wrap each entry as
+    // `{value: <original>}` so the result deserializes against
+    // `MediaType.examples: BTreeMap<String, RefOr<Example>>`.
+    let examples = p.remove("x-examples").and_then(|v| match v {
+        Value::Object(map) => Some(wrap_named_values_as_examples(map)),
+        _ => None,
+    });
     let mut content = Map::new();
     let mime_types = if consumes.is_empty() {
         vec!["application/json".to_owned()]
@@ -621,7 +663,10 @@ fn build_form_request_body(form_params: Vec<Value>, consumes: &[String]) -> Opti
             required.push(Value::String(name.clone()));
         }
         // Strip parameter-only fields and treat what remains as a Schema.
-        for k in &["in", "description", "allowEmptyValue", "collectionFormat"] {
+        // `description` survives — it's a valid Schema keyword and the
+        // single most useful piece of v2 metadata to keep on each
+        // multipart property.
+        for k in &["in", "allowEmptyValue", "collectionFormat"] {
             p_obj.remove(*k);
         }
         if p_obj.get("type").and_then(|v| v.as_str()) == Some("file") {
@@ -1148,8 +1193,10 @@ mod tests {
             value["paths"]["/x"]["get"]["responses"]["default"]["$ref"],
             "#/components/responses/Err"
         );
-        // Nested ref (response.schema) was remapped before we lifted
-        // schema into content.
+        // Nested ref inside the lifted `content[<mime>].schema`: the
+        // global `remap_refs` walk runs after `transform_response` has
+        // moved the schema under `content`, so a `$ref` to a v2
+        // definition still gets retargeted to `#/components/schemas/`.
         let err_resp = &value["components"]["responses"]["Err"];
         let schema_ref = &err_resp["content"]["application/json"]["schema"]["$ref"];
         assert_eq!(schema_ref, "#/components/schemas/Err");
