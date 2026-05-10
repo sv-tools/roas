@@ -202,9 +202,13 @@ fn transform_spec(spec: &mut Value) {
         obj.insert("components".into(), Value::Object(components));
     }
 
-    // Walk the entire document for cross-cutting transforms.
-    remap_refs(spec, &body_param_names, &form_param_names);
-    transform_schemas_recursive(spec);
+    // Walk the entire document for cross-cutting transforms (ref
+    // remapping + schema-shape rewrites). The walk is position-aware
+    // so opaque payloads (`example` / `default` / `enum` / `const` /
+    // ExampleObject `value`, `x-*` Specification Extensions,
+    // `Link.parameters` / `Link.requestBody`) round-trip
+    // byte-for-byte.
+    walk(spec, &body_param_names, &form_param_names, Pos::Generic);
 }
 
 /// Context threaded into every path / operation transform. Borrowed by
@@ -876,34 +880,173 @@ fn transform_security_definitions(value: &mut Value) {
     }
 }
 
-/// Recursively walk the document and rewrite every `$ref` whose path
-/// targets a v2 location to its v3.0 components-shaped equivalent.
-///
-/// `body_param_names` and `form_param_names` carry the names of v2
-/// top-level parameters whose `in:` was `body` / `formData`; pointers to
-/// those land in `#/components/requestBodies/…` instead of
-/// `#/components/parameters/…`.
-fn remap_refs(
+/// Position of the current node relative to OAS structural
+/// boundaries. Threading this through the walker keeps the
+/// schema-only rewrites (`x-nullable` → `nullable`, string
+/// `discriminator` → `{propertyName}` object) and the `$ref`
+/// remapping from touching opaque user payloads while still
+/// reaching every real sub-schema.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pos {
+    /// Not yet inside a schema or Link. Refs are still remapped; the
+    /// walker watches for `schema` / `schemas` / `links` to transition.
+    Generic,
+    /// The current object IS a Schema. Apply schema rewrites and
+    /// recurse into sub-schemas while skipping instance-valued
+    /// JSON-Schema keywords (`example`/`examples`/`default`/`enum`/
+    /// `const`).
+    Schema,
+    /// The current object is a `BTreeMap<String, Schema>` (e.g.
+    /// `components.schemas`, `properties`). Each entry's value is a
+    /// schema.
+    SchemaMap,
+    /// The current object IS a Link Object. `parameters` and
+    /// `requestBody` hold arbitrary JSON and are not walked.
+    Link,
+    /// The current object is a `BTreeMap<String, Link>` (e.g.
+    /// `components.links`, `Response.links`). Each entry's value is
+    /// a Link.
+    LinkMap,
+}
+
+fn walk(
     value: &mut Value,
     body_param_names: &HashSet<String>,
     form_param_names: &HashSet<String>,
+    pos: Pos,
 ) {
     match value {
-        Value::Object(obj) => {
-            if let Some(Value::String(s)) = obj.get_mut("$ref") {
-                *s = remap_ref_path(s, body_param_names, form_param_names);
+        Value::Object(obj) => match pos {
+            Pos::Schema => walk_schema_object(obj, body_param_names, form_param_names),
+            Pos::SchemaMap => {
+                for (_, v) in obj.iter_mut() {
+                    walk(v, body_param_names, form_param_names, Pos::Schema);
+                }
             }
-            for (_, v) in obj.iter_mut() {
-                remap_refs(v, body_param_names, form_param_names);
+            Pos::Link => walk_link_object(obj, body_param_names, form_param_names),
+            Pos::LinkMap => {
+                for (_, v) in obj.iter_mut() {
+                    walk(v, body_param_names, form_param_names, Pos::Link);
+                }
             }
-        }
+            Pos::Generic => walk_generic_object(obj, body_param_names, form_param_names),
+        },
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                remap_refs(v, body_param_names, form_param_names);
+                walk(v, body_param_names, form_param_names, pos);
             }
         }
         _ => {}
     }
+}
+
+fn walk_schema_object(
+    obj: &mut Map<String, Value>,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) {
+    remap_ref_in_place(obj, body_param_names, form_param_names);
+    // `x-nullable` → `nullable`.
+    if let Some(v) = obj.remove("x-nullable") {
+        obj.insert("nullable".into(), v);
+    }
+    // v2 discriminator is a string; v3.0 expects an object.
+    if let Some(Value::String(name)) = obj.get("discriminator").cloned() {
+        let mut d = Map::new();
+        d.insert("propertyName".into(), Value::String(name));
+        obj.insert("discriminator".into(), Value::Object(d));
+    }
+    for (k, v) in obj.iter_mut() {
+        if is_extension_key(k) {
+            continue;
+        }
+        match k.as_str() {
+            // Schema instance-valued keywords carry arbitrary user
+            // JSON, never sub-schemas.
+            "example" | "examples" | "default" | "enum" | "const" => continue,
+            "items"
+            | "not"
+            | "additionalProperties"
+            | "contains"
+            | "propertyNames"
+            | "if"
+            | "then"
+            | "else"
+            | "unevaluatedItems"
+            | "unevaluatedProperties" => walk(v, body_param_names, form_param_names, Pos::Schema),
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => {
+                walk(v, body_param_names, form_param_names, Pos::Schema)
+            }
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                walk(v, body_param_names, form_param_names, Pos::SchemaMap)
+            }
+            _ => walk(v, body_param_names, form_param_names, Pos::Generic),
+        }
+    }
+}
+
+fn walk_generic_object(
+    obj: &mut Map<String, Value>,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) {
+    remap_ref_in_place(obj, body_param_names, form_param_names);
+    for (k, v) in obj.iter_mut() {
+        if is_extension_key(k) {
+            continue;
+        }
+        match k.as_str() {
+            // `schema` lives on Parameter / Header / MediaType; its
+            // value is a Schema Object.
+            "schema" => walk(v, body_param_names, form_param_names, Pos::Schema),
+            // `schemas` is the components-level map of named schemas.
+            "schemas" => walk(v, body_param_names, form_param_names, Pos::SchemaMap),
+            // `links` is a map of named Link Objects.
+            "links" => walk(v, body_param_names, form_param_names, Pos::LinkMap),
+            // ExampleObject's instance value, and the example /
+            // examples carriers on MediaType / Parameter / Header.
+            // Skip recursion entirely — none of these hold schemas.
+            "example" | "examples" | "value" => continue,
+            _ => walk(v, body_param_names, form_param_names, Pos::Generic),
+        }
+    }
+}
+
+/// Walk a Link Object's keys. `parameters` (a `Map<String, runtime-
+/// expression>`) and `requestBody` (free-form runtime expression)
+/// hold opaque user payloads and must round-trip byte-for-byte.
+fn walk_link_object(
+    obj: &mut Map<String, Value>,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) {
+    remap_ref_in_place(obj, body_param_names, form_param_names);
+    for (k, v) in obj.iter_mut() {
+        if is_extension_key(k) {
+            continue;
+        }
+        match k.as_str() {
+            "parameters" | "requestBody" => continue,
+            _ => walk(v, body_param_names, form_param_names, Pos::Generic),
+        }
+    }
+}
+
+fn remap_ref_in_place(
+    obj: &mut Map<String, Value>,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) {
+    if let Some(Value::String(s)) = obj.get_mut("$ref") {
+        *s = remap_ref_path(s, body_param_names, form_param_names);
+    }
+}
+
+/// OAS / JSON Schema Specification Extension prefix. The walker
+/// skips recursion through `x-*` keys so user-supplied extension
+/// payloads round-trip byte-for-byte.
+fn is_extension_key(k: &str) -> bool {
+    k.starts_with("x-")
 }
 
 fn remap_ref_path(
@@ -929,35 +1072,6 @@ fn remap_ref_path(
         }
     }
     s.to_owned()
-}
-
-/// Walk the document and apply two schema-shape rewrites at every node
-/// that looks like a Schema Object: `x-nullable` → `nullable`, and string
-/// `discriminator` → `Discriminator { propertyName }` object.
-fn transform_schemas_recursive(value: &mut Value) {
-    match value {
-        Value::Object(obj) => {
-            // Rewrite x-nullable in place.
-            if let Some(v) = obj.remove("x-nullable") {
-                obj.insert("nullable".into(), v);
-            }
-            // v2 discriminator is a string; v3.0 expects an object.
-            if let Some(Value::String(name)) = obj.get("discriminator").cloned() {
-                let mut d = Map::new();
-                d.insert("propertyName".into(), Value::String(name));
-                obj.insert("discriminator".into(), Value::Object(d));
-            }
-            for (_, v) in obj.iter_mut() {
-                transform_schemas_recursive(v);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                transform_schemas_recursive(v);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn string(v: Value) -> Option<String> {
@@ -1226,6 +1340,109 @@ mod tests {
         assert_eq!(content["application/json"]["example"], "hi");
         // Off-list example surfaces too.
         assert_eq!(content["text/plain"]["example"], "plain");
+    }
+
+    #[test]
+    fn schema_example_default_payloads_are_preserved_byte_for_byte() {
+        // Schema-instance-valued keywords carry arbitrary user JSON
+        // (the keys below mirror v2 schema shape on purpose:
+        // `x-nullable`, string `discriminator`, `{$ref: …}`). The
+        // position-aware walker skips recursion into them when inside
+        // a Schema so they round-trip byte-for-byte.
+        //
+        // Exercise the walker directly on hand-built JSON since v2's
+        // typed `Schema` drops fields the variant doesn't declare
+        // (e.g. `enum` on `ObjectSchema`) at the deserialization step.
+        let mut v: Value = serde_json::json!({
+            "type": "object",
+            "example": {
+                "x-nullable": true,
+                "discriminator": "kind",
+                "$ref": "#/definitions/Inner"
+            },
+            "default": {
+                "x-nullable": false,
+                "$ref": "#/definitions/Inner"
+            },
+            "enum": [
+                {"x-nullable": true, "$ref": "#/definitions/Other"}
+            ]
+        });
+        let body: HashSet<String> = HashSet::new();
+        let form: HashSet<String> = HashSet::new();
+        super::walk(&mut v, &body, &form, super::Pos::Schema);
+        // Example payload: every field preserved verbatim — no
+        // x-nullable rename, no discriminator object form, no $ref
+        // remap.
+        assert_eq!(v["example"]["x-nullable"], true);
+        assert_eq!(v["example"]["discriminator"], "kind");
+        assert_eq!(v["example"]["$ref"], "#/definitions/Inner");
+        // Default and enum payloads same story.
+        assert_eq!(v["default"]["x-nullable"], false);
+        assert_eq!(v["default"]["$ref"], "#/definitions/Inner");
+        assert_eq!(v["enum"][0]["x-nullable"], true);
+        assert_eq!(v["enum"][0]["$ref"], "#/definitions/Other");
+    }
+
+    #[test]
+    fn x_extension_payload_is_opaque_to_walker() {
+        // `x-*` Specification Extensions are user JSON; the walker
+        // must not apply schema rewrites or `$ref` remapping to
+        // anything inside them.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "definitions": {
+                "Doc": {
+                    "type": "object",
+                    "x-trap": {
+                        "x-nullable": true,
+                        "discriminator": "kind",
+                        "$ref": "#/definitions/Inner"
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let trap = &value["components"]["schemas"]["Doc"]["x-trap"];
+        assert_eq!(trap["x-nullable"], true);
+        assert_eq!(trap["discriminator"], "kind");
+        assert_eq!(trap["$ref"], "#/definitions/Inner");
+    }
+
+    #[test]
+    fn responses_default_status_code_still_walks_normally() {
+        // `default` is a JSON Schema instance-valued keyword inside a
+        // schema, but it's also a status-code key in the Responses
+        // object. The Generic-position walker must not treat
+        // `default` as opaque outside of a schema — its $ref needs
+        // remapping. Pin this regression down: the converted spec
+        // must validate (which requires the ref to resolve).
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "produces": ["application/json"],
+                        "responses": {
+                            "default": {
+                                "description": "err",
+                                "schema": {"$ref": "#/definitions/Err"}
+                            }
+                        }
+                    }
+                }
+            },
+            "definitions": {"Err": {"type": "object"}}
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let schema_ref = &value["paths"]["/x"]["get"]["responses"]["default"]["content"]["application/json"]
+            ["schema"]["$ref"];
+        assert_eq!(schema_ref, "#/components/schemas/Err");
     }
 
     #[test]
