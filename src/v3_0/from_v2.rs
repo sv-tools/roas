@@ -22,7 +22,16 @@
 //!   header objects with a nested `schema`.
 //! * `definitions` / top-level `parameters` / `responses` /
 //!   `securityDefinitions` move into `components.{schemas|parameters|
-//!   responses|securitySchemes}`. All `$ref`s are remapped accordingly.
+//!   responses|securitySchemes}`. Top-level body / formData parameters
+//!   migrate to `components.requestBodies` instead, and operation `$ref`s
+//!   that point at them are re-routed there. All other `$ref`s are
+//!   remapped accordingly.
+//! * Path-item body / formData parameters are promoted to each operation
+//!   under the path that has no body of its own. Path-item non-body
+//!   parameters survive as v3.0 path-item parameters.
+//! * Operation-level `schemes` becomes operation-level `servers`,
+//!   inheriting `host`/`basePath` from the spec but overriding the
+//!   scheme(s).
 //! * Schema discriminators rewritten from `discriminator: "<name>"` to
 //!   `discriminator: { propertyName: "<name>" }`. `x-nullable` becomes
 //!   `nullable`.
@@ -32,11 +41,11 @@
 //!
 //! Lossy edges deliberately accepted:
 //!
-//! * Operation-level `schemes` is dropped (no per-operation server override
-//!   in v3.0; the spec-level `servers` already encodes the schemes).
 //! * `collectionFormat: tsv` is dropped (no v3.0 equivalent).
 //! * `allowEmptyValue` is preserved on `Query` parameters, dropped elsewhere.
 //! * v2 `Items` array-of-arrays nesting becomes a recursively-built `Schema`.
+//! * `discriminator` on a plain `ObjectSchema` is dropped — v3.0 carries
+//!   it only on composition (`allOf` / `oneOf` / `anyOf`) shapes.
 //!
 //! The conversion serialises the v2 input with serde, runs the transforms,
 //! and deserialises as a v3.0 spec. If the input is a valid v2 document the
@@ -46,6 +55,7 @@
 use crate::v2::spec::Spec as V2Spec;
 use crate::v3_0::spec::Spec as V3Spec;
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 
 impl From<V2Spec> for V3Spec {
     fn from(v2: V2Spec) -> Self {
@@ -67,46 +77,95 @@ fn transform_spec(spec: &mut Value) {
 
     // host + basePath + schemes → servers, unless the doc already has a
     // x-servers list (Redoc extension that v2 users used as a v3 backport;
-    // we promote it to native servers).
+    // we promote it to native servers). Keep host / basePath available
+    // for per-operation server overrides.
     let host = obj.remove("host").and_then(string);
     let base_path = obj.remove("basePath").and_then(string);
-    let schemes = obj
+    let spec_schemes = obj
         .remove("schemes")
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
+    let spec_schemes_str: Vec<String> = spec_schemes
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
     let x_servers = obj.remove("x-servers");
     if let Some(Value::Array(servers)) = x_servers {
         if !servers.is_empty() {
             obj.insert("servers".into(), Value::Array(servers));
         }
-    } else if let Some(servers) = assemble_servers(host, base_path, &schemes) {
+    } else if let Some(servers) =
+        assemble_servers(host.as_deref(), base_path.as_deref(), &spec_schemes_str)
+    {
         obj.insert("servers".into(), servers);
     }
 
     let spec_consumes = take_string_array(obj, "consumes");
     let spec_produces = take_string_array(obj, "produces");
 
-    // Reshape the components container before walking paths so $ref
-    // remapping works against the new layout.
+    // Top-level parameters need to be split: body / formData entries
+    // can't survive as v3.0 `Parameter` components (v3.0 has no body or
+    // formData parameter location), so they migrate to
+    // `components.requestBodies` instead. Operation `$ref`s pointing at
+    // them get re-routed accordingly when we walk operations below.
+    let mut body_param_names: HashSet<String> = HashSet::new();
+    let mut form_param_names: HashSet<String> = HashSet::new();
+    let mut converted_parameters: Map<String, Value> = Map::new();
+    let mut request_bodies: Map<String, Value> = Map::new();
+    if let Some(Value::Object(parameters)) = obj.remove("parameters") {
+        for (name, value) in parameters {
+            match parameter_location(&value) {
+                Some("body") => {
+                    body_param_names.insert(name.clone());
+                    if let Some(rb) = build_body_request_body(Some(value), &spec_consumes) {
+                        request_bodies.insert(name, rb);
+                    }
+                }
+                Some("formData") => {
+                    form_param_names.insert(name.clone());
+                    if let Some(rb) = build_form_request_body(vec![value], &spec_consumes) {
+                        request_bodies.insert(name, rb);
+                    }
+                }
+                _ => {
+                    if let Some(p) = transform_non_body_parameter(value) {
+                        converted_parameters.insert(name, p);
+                    }
+                }
+            }
+        }
+    }
+
     let definitions = obj.remove("definitions");
-    let parameters = obj.remove("parameters");
     let responses = obj.remove("responses");
     let security_definitions = obj.remove("securityDefinitions");
-    if definitions.is_some()
-        || parameters.is_some()
+
+    let path_ctx = PathCtx {
+        spec_consumes: &spec_consumes,
+        spec_produces: &spec_produces,
+        body_param_names: &body_param_names,
+        form_param_names: &form_param_names,
+        host: host.as_deref(),
+        base_path: base_path.as_deref(),
+    };
+    if let Some(paths) = obj.get_mut("paths") {
+        transform_paths(paths, &path_ctx);
+    }
+
+    // Reshape the components container after walking paths so the
+    // request-bodies map captures everything the spec exposes.
+    let has_components = definitions.is_some()
+        || !converted_parameters.is_empty()
         || responses.is_some()
         || security_definitions.is_some()
-    {
+        || !request_bodies.is_empty();
+    if has_components {
         let mut components = Map::new();
         if let Some(d) = definitions {
             components.insert("schemas".into(), d);
         }
-        if let Some(p) = parameters {
-            // v2 top-level parameters can include body params; the
-            // per-parameter transform below rewrites them. We promote them
-            // even when individual entries become RequestBody-like — v3.0
-            // tools can still reference them as Parameter components.
-            components.insert("parameters".into(), p);
+        if !converted_parameters.is_empty() {
+            components.insert("parameters".into(), Value::Object(converted_parameters));
         }
         if let Some(mut r) = responses {
             // Components-level responses also need their `schema` lifted
@@ -119,6 +178,9 @@ fn transform_spec(spec: &mut Value) {
             }
             components.insert("responses".into(), r);
         }
+        if !request_bodies.is_empty() {
+            components.insert("requestBodies".into(), Value::Object(request_bodies));
+        }
         if let Some(mut sd) = security_definitions {
             transform_security_definitions(&mut sd);
             components.insert("securitySchemes".into(), sd);
@@ -126,31 +188,39 @@ fn transform_spec(spec: &mut Value) {
         obj.insert("components".into(), Value::Object(components));
     }
 
-    if let Some(paths) = obj.get_mut("paths") {
-        transform_paths(paths, &spec_consumes, &spec_produces);
-    }
-
     // Walk the entire document for cross-cutting transforms.
-    remap_refs(spec);
+    remap_refs(spec, &body_param_names, &form_param_names);
     transform_schemas_recursive(spec);
+}
+
+/// Context threaded into every path / operation transform. Borrowed by
+/// reference so it stays out of the recursive-walk hot path.
+struct PathCtx<'a> {
+    spec_consumes: &'a [String],
+    spec_produces: &'a [String],
+    body_param_names: &'a HashSet<String>,
+    form_param_names: &'a HashSet<String>,
+    host: Option<&'a str>,
+    base_path: Option<&'a str>,
 }
 
 /// Build a `servers` array from v2's host/basePath/schemes, returning
 /// `None` if there is no useful data (in which case v3.0 uses the default
 /// "/").
 fn assemble_servers(
-    host: Option<String>,
-    base_path: Option<String>,
-    schemes: &[Value],
+    host: Option<&str>,
+    base_path: Option<&str>,
+    schemes: &[String],
 ) -> Option<Value> {
     if host.is_none() && base_path.is_none() && schemes.is_empty() {
         return None;
     }
     let host = host.unwrap_or_default();
     let base = base_path.unwrap_or_default();
-    let schemes: Vec<&str> = schemes.iter().filter_map(|v| v.as_str()).collect();
-    let schemes: Vec<&str> = if schemes.is_empty() {
-        vec!["https"]
+    let default_schemes;
+    let schemes: &[String] = if schemes.is_empty() {
+        default_schemes = vec!["https".to_owned()];
+        &default_schemes
     } else {
         schemes
     };
@@ -159,7 +229,7 @@ fn assemble_servers(
         let url = if host.is_empty() && base.is_empty() {
             format!("{scheme}://")
         } else if host.is_empty() {
-            base.clone()
+            base.to_owned()
         } else {
             format!("{scheme}://{host}{base}")
         };
@@ -170,7 +240,7 @@ fn assemble_servers(
     Some(Value::Array(out))
 }
 
-fn transform_paths(paths: &mut Value, spec_consumes: &[String], spec_produces: &[String]) {
+fn transform_paths(paths: &mut Value, ctx: &PathCtx<'_>) {
     let Value::Object(obj) = paths else { return };
     for (name, item) in obj.iter_mut() {
         if name.starts_with("x-") {
@@ -179,25 +249,75 @@ fn transform_paths(paths: &mut Value, spec_consumes: &[String], spec_produces: &
         let Value::Object(item_obj) = item else {
             continue;
         };
-        // Path-level parameters get the same per-parameter rewrite as
-        // operations'. They cannot contribute a body / form requestBody at
-        // the path level (v3.0 has no path-level requestBody), so anything
-        // that would go there is dropped with a comment.
-        if let Some(parameters) = item_obj.get_mut("parameters")
-            && let Value::Array(arr) = parameters
-        {
-            *arr = arr
-                .iter()
-                .filter_map(|p| transform_non_body_parameter(p.clone()))
-                .collect();
+        // Path-level body / formData parameters apply to every operation
+        // under the path in v2. v3.0 has no path-level requestBody, so we
+        // pull them out here and let `transform_operation` use them as a
+        // fallback when an operation has no body of its own.
+        let mut path_body: Option<Value> = None;
+        let mut path_forms: Vec<Value> = Vec::new();
+        if let Some(Value::Array(parameters)) = item_obj.remove("parameters") {
+            let mut new_path_params: Vec<Value> = Vec::with_capacity(parameters.len());
+            for p in parameters {
+                match classify_parameter(&p, ctx.body_param_names, ctx.form_param_names) {
+                    ParamKind::Body => {
+                        path_body = Some(p);
+                    }
+                    ParamKind::Form => {
+                        path_forms.push(p);
+                    }
+                    ParamKind::Other => {
+                        if let Some(rewritten) = transform_non_body_parameter(p) {
+                            new_path_params.push(rewritten);
+                        }
+                    }
+                }
+            }
+            if !new_path_params.is_empty() {
+                item_obj.insert("parameters".into(), Value::Array(new_path_params));
+            }
         }
         for (method, op) in item_obj.iter_mut() {
             if !is_http_method(method) {
                 continue;
             }
-            transform_operation(op, spec_consumes, spec_produces);
+            transform_operation(op, ctx, path_body.as_ref(), &path_forms);
         }
     }
+}
+
+/// What v3.0 slot a v2 parameter (inline or `$ref`) maps to.
+enum ParamKind {
+    Body,
+    Form,
+    Other,
+}
+
+fn classify_parameter(
+    p: &Value,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) -> ParamKind {
+    match parameter_location(p) {
+        Some("body") => return ParamKind::Body,
+        Some("formData") => return ParamKind::Form,
+        Some(_) => return ParamKind::Other,
+        None => {}
+    }
+    // No `in:` — must be a `$ref`. Resolve against the top-level
+    // parameter name we extracted from the v2 doc.
+    if let Some(name) = ref_local_name(p, "#/parameters/") {
+        if body_param_names.contains(name) {
+            return ParamKind::Body;
+        }
+        if form_param_names.contains(name) {
+            return ParamKind::Form;
+        }
+    }
+    ParamKind::Other
+}
+
+fn ref_local_name<'a>(p: &'a Value, prefix: &str) -> Option<&'a str> {
+    p.get("$ref")?.as_str()?.strip_prefix(prefix)
 }
 
 fn is_http_method(name: &str) -> bool {
@@ -207,22 +327,36 @@ fn is_http_method(name: &str) -> bool {
     )
 }
 
-fn transform_operation(op: &mut Value, spec_consumes: &[String], spec_produces: &[String]) {
+fn transform_operation(
+    op: &mut Value,
+    ctx: &PathCtx<'_>,
+    path_body: Option<&Value>,
+    path_forms: &[Value],
+) {
     let Value::Object(obj) = op else { return };
 
     let consumes = take_string_array(obj, "consumes");
     let consumes: Vec<String> = if consumes.is_empty() {
-        spec_consumes.to_vec()
+        ctx.spec_consumes.to_vec()
     } else {
         consumes
     };
     let produces = take_string_array(obj, "produces");
     let produces: Vec<String> = if produces.is_empty() {
-        spec_produces.to_vec()
+        ctx.spec_produces.to_vec()
     } else {
         produces
     };
-    obj.remove("schemes"); // no per-operation servers in v3.0; spec-level servers cover this.
+
+    // v2 `schemes` overrides the spec-level scheme list for this
+    // operation; v3.0 has operation-level `servers` that achieve the
+    // same effect.
+    let op_schemes = take_string_array(obj, "schemes");
+    if !op_schemes.is_empty()
+        && let Some(servers) = assemble_servers(ctx.host, ctx.base_path, &op_schemes)
+    {
+        obj.insert("servers".into(), servers);
+    }
 
     // Pull body and formData out before rewriting the rest.
     let mut body_param: Option<Value> = None;
@@ -230,12 +364,22 @@ fn transform_operation(op: &mut Value, spec_consumes: &[String], spec_produces: 
     let mut other_params: Vec<Value> = Vec::new();
     if let Some(Value::Array(parameters)) = obj.remove("parameters") {
         for p in parameters {
-            match parameter_location(&p) {
-                Some("body") => body_param = Some(p),
-                Some("formData") => form_params.push(p),
-                _ => other_params.push(p),
+            match classify_parameter(&p, ctx.body_param_names, ctx.form_param_names) {
+                ParamKind::Body => body_param = Some(p),
+                ParamKind::Form => form_params.push(p),
+                ParamKind::Other => other_params.push(p),
             }
         }
+    }
+    // Path-level body / formData fall through when the operation has
+    // none of its own.
+    if body_param.is_none()
+        && let Some(pb) = path_body
+    {
+        body_param = Some(pb.clone());
+    }
+    if form_params.is_empty() && !path_forms.is_empty() {
+        form_params = path_forms.to_vec();
     }
 
     let mut new_params = Vec::with_capacity(other_params.len());
@@ -248,9 +392,18 @@ fn transform_operation(op: &mut Value, spec_consumes: &[String], spec_produces: 
         obj.insert("parameters".into(), Value::Array(new_params));
     }
 
-    if let Some(rb) = build_body_request_body(body_param, &consumes) {
-        obj.insert("requestBody".into(), rb);
-    } else if let Some(rb) = build_form_request_body(form_params, &consumes) {
+    // A `$ref` body is moved straight to `requestBody` — `remap_refs`
+    // will rewrite the path against `body_param_names` so the final
+    // pointer lands in `#/components/requestBodies/`.
+    if let Some(body) = body_param {
+        if body.as_object().is_some_and(|o| o.contains_key("$ref")) {
+            obj.insert("requestBody".into(), body);
+        } else if let Some(rb) = build_body_request_body(Some(body), &consumes) {
+            obj.insert("requestBody".into(), rb);
+        }
+    } else if !form_params.is_empty()
+        && let Some(rb) = build_form_request_body(form_params, &consumes)
+    {
         obj.insert("requestBody".into(), rb);
     }
 
@@ -361,17 +514,11 @@ fn collection_format_to_style(cf: &str, location: &str) -> Option<(&'static str,
 /// when there is no body parameter.
 fn build_body_request_body(body: Option<Value>, consumes: &[String]) -> Option<Value> {
     let body = body?;
+    // Inline-only path: $ref bodies are routed by the caller (operation
+    // transform stores the ref directly under `requestBody`; the global
+    // remap step retargets the pointer).
     if body.as_object().is_some_and(|o| o.contains_key("$ref")) {
-        // Body params referenced by $ref end up dangling — v3.0 has no
-        // direct equivalent of a `Parameter` ref pointing at a body. Move
-        // them into requestBody best-effort by re-pointing the ref.
-        if let Some(s) = body.get("$ref").and_then(|v| v.as_str()) {
-            let new_ref = s.replace("#/parameters/", "#/components/requestBodies/");
-            let mut wrapper = Map::new();
-            wrapper.insert("$ref".into(), Value::String(new_ref));
-            return Some(Value::Object(wrapper));
-        }
-        return None;
+        return Some(body);
     }
 
     let Value::Object(mut p) = body else {
@@ -580,30 +727,48 @@ fn transform_security_definitions(value: &mut Value) {
 
 /// Recursively walk the document and rewrite every `$ref` whose path
 /// targets a v2 location to its v3.0 components-shaped equivalent.
-fn remap_refs(value: &mut Value) {
+///
+/// `body_param_names` and `form_param_names` carry the names of v2
+/// top-level parameters whose `in:` was `body` / `formData`; pointers to
+/// those land in `#/components/requestBodies/…` instead of
+/// `#/components/parameters/…`.
+fn remap_refs(
+    value: &mut Value,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) {
     match value {
         Value::Object(obj) => {
             if let Some(Value::String(s)) = obj.get_mut("$ref") {
-                *s = remap_ref_path(s);
+                *s = remap_ref_path(s, body_param_names, form_param_names);
             }
             for (_, v) in obj.iter_mut() {
-                remap_refs(v);
+                remap_refs(v, body_param_names, form_param_names);
             }
         }
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                remap_refs(v);
+                remap_refs(v, body_param_names, form_param_names);
             }
         }
         _ => {}
     }
 }
 
-fn remap_ref_path(s: &str) -> String {
+fn remap_ref_path(
+    s: &str,
+    body_param_names: &HashSet<String>,
+    form_param_names: &HashSet<String>,
+) -> String {
+    if let Some(rest) = s.strip_prefix("#/parameters/") {
+        if body_param_names.contains(rest) || form_param_names.contains(rest) {
+            return format!("#/components/requestBodies/{rest}");
+        }
+        return format!("#/components/parameters/{rest}");
+    }
     // Order matters: longer prefixes first so we don't shadow shorter ones.
     const MAPPINGS: &[(&str, &str)] = &[
         ("#/definitions/", "#/components/schemas/"),
-        ("#/parameters/", "#/components/parameters/"),
         ("#/responses/", "#/components/responses/"),
         ("#/securityDefinitions/", "#/components/securitySchemes/"),
     ];
@@ -952,6 +1117,166 @@ mod tests {
         let err_resp = &value["components"]["responses"]["Err"];
         let schema_ref = &err_resp["content"]["application/json"]["schema"]["$ref"];
         assert_eq!(schema_ref, "#/components/schemas/Err");
+    }
+
+    #[test]
+    fn top_level_non_body_parameter_gets_nested_schema() {
+        // Reusable v2 query parameter must keep its `type/items/...`
+        // collected into a `schema` so v3.0 can deserialize it.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items": {
+                    "get": {
+                        "parameters": [{"$ref": "#/parameters/Limit"}],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            },
+            "parameters": {
+                "Limit": {
+                    "in": "query",
+                    "name": "limit",
+                    "type": "integer",
+                    "format": "int32"
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let limit = &value["components"]["parameters"]["Limit"];
+        assert_eq!(limit["in"], "query");
+        assert_eq!(limit["schema"]["type"], "integer");
+        assert_eq!(limit["schema"]["format"], "int32");
+        assert!(limit.get("type").is_none(), "type folded into schema");
+        // The operation's $ref keeps targeting the parameter (not body).
+        let p_ref = &value["paths"]["/items"]["get"]["parameters"][0]["$ref"];
+        assert_eq!(p_ref, "#/components/parameters/Limit");
+    }
+
+    #[test]
+    fn top_level_body_parameter_becomes_request_body_component() {
+        // Reusable v2 body parameter must end up in
+        // `components.requestBodies`, not `components.parameters`, and
+        // operation `$ref`s pointing at it must move out of `parameters`
+        // into `requestBody`.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "parameters": [{"$ref": "#/parameters/PetBody"}],
+                        "responses": { "201": { "description": "ok" } }
+                    }
+                }
+            },
+            "parameters": {
+                "PetBody": {
+                    "in": "body",
+                    "name": "pet",
+                    "required": true,
+                    "schema": {"$ref": "#/definitions/Pet"}
+                }
+            },
+            "definitions": {"Pet": {"type": "object"}}
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        // Pet body lives in components.requestBodies, not parameters.
+        assert!(
+            value["components"]["parameters"]["PetBody"].is_null(),
+            "body must NOT land in components.parameters"
+        );
+        let pet_body = &value["components"]["requestBodies"]["PetBody"];
+        assert_eq!(pet_body["required"], true);
+        let schema_ref = &pet_body["content"]["application/json"]["schema"]["$ref"];
+        assert_eq!(schema_ref, "#/components/schemas/Pet");
+        // Operation: parameters dropped, requestBody is a $ref to the
+        // requestBodies component.
+        let post = &value["paths"]["/pets"]["post"];
+        assert!(
+            post["parameters"].is_null(),
+            "body $ref removed from parameters"
+        );
+        assert_eq!(
+            post["requestBody"]["$ref"],
+            "#/components/requestBodies/PetBody"
+        );
+    }
+
+    #[test]
+    fn path_level_body_promotes_to_each_operation() {
+        // Path-item parameters apply to every operation under the path
+        // in v2. v3.0 has no path-level requestBody, so the body must
+        // promote to each operation that doesn't have one of its own.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items/{id}": {
+                    "parameters": [
+                        {"in": "path", "name": "id", "type": "string", "required": true},
+                        {"in": "body", "name": "patch", "schema": {"type": "object"}}
+                    ],
+                    "put": {
+                        "responses": { "200": { "description": "ok" } }
+                    },
+                    "post": {
+                        "parameters": [
+                            {"in": "body", "name": "create", "schema": {"type": "string"}}
+                        ],
+                        "responses": { "201": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        // PUT inherits the path-level body.
+        let put = &value["paths"]["/items/{id}"]["put"];
+        assert_eq!(
+            put["requestBody"]["content"]["application/json"]["schema"]["type"],
+            "object"
+        );
+        // POST keeps its own body and ignores the path-level fallback.
+        let post = &value["paths"]["/items/{id}"]["post"];
+        assert_eq!(
+            post["requestBody"]["content"]["application/json"]["schema"]["type"],
+            "string"
+        );
+        // Path-level path parameter survives as path-level v3.0 parameter.
+        let path_params = &value["paths"]["/items/{id}"]["parameters"];
+        assert_eq!(path_params[0]["name"], "id");
+        assert_eq!(path_params[0]["schema"]["type"], "string");
+    }
+
+    #[test]
+    fn operation_level_schemes_become_operation_servers() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "host": "api.example.com",
+            "basePath": "/v1",
+            "schemes": ["https"],
+            "paths": {
+                "/secure": {
+                    "get": {
+                        "schemes": ["wss"],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        // Spec-level servers reflect the spec-level https scheme.
+        let spec_url = &value["servers"][0]["url"];
+        assert_eq!(spec_url, "https://api.example.com/v1");
+        // Operation-level servers override with wss.
+        let op_url = &value["paths"]["/secure"]["get"]["servers"][0]["url"];
+        assert_eq!(op_url, "wss://api.example.com/v1");
     }
 
     #[test]
