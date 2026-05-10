@@ -99,15 +99,14 @@ pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<BTreeMap<String, MediaType>>,
 
-    /// Maps a header name to its definition.
-    /// [RFC7230](https://www.rfc-editor.org/rfc/rfc7230) states header names are case insensitive.
-    /// If a response header is defined with the name `"Content-Type"`, it SHALL be ignored.
+    /// A map of operations links that can be followed from the response.
+    /// The key of the map is a short name for the link, following the
+    /// component-name pattern (`^[a-zA-Z0-9.\-_]+$`). Each value is a Link
+    /// Object or a Reference Object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<BTreeMap<String, RefOr<Link>>>,
 
-    /// A map of operations links that can be followed from the response.
-    /// The key of the map is a short name for the link,
-    /// following the naming constraints of the names for Component Objects.
+    /// `^x-` Specification Extensions.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,7 +220,7 @@ impl ValidateWithContext<Spec> for Response {
         }
         if let Some(media_types) = &self.content {
             for (name, media_type) in media_types {
-                media_type.validate_with_context(ctx, format!("{path}.mediaTypes[{name}]"));
+                media_type.validate_with_context(ctx, format!("{path}.content[{name}]"));
             }
         }
         if let Some(links) = &self.links {

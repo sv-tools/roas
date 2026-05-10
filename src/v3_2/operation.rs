@@ -111,8 +111,8 @@ impl ValidateWithContext<Spec> for Operation {
 
         if let Some(tags) = &self.tags {
             for (i, tag) in tags.iter().enumerate() {
-                let path = format!("{path}.tags[{i}]");
-                validate_required_string(tag, ctx, path.clone());
+                let tag_path = format!("{path}.tags[{i}]");
+                validate_required_string(tag, ctx, tag_path.clone());
                 if tag.is_empty() {
                     continue;
                 }
@@ -122,13 +122,13 @@ impl ValidateWithContext<Spec> for Operation {
                         spec_tag.validate_with_context(ctx, reference);
                     }
                 } else if !ctx.is_option(Options::IgnoreMissingTags) {
-                    ctx.error(path, format_args!(".tags[{i}]: `{tag}` not found in spec"));
+                    ctx.error(tag_path, format_args!("`{tag}` not found in spec"));
                 }
             }
         }
 
         if let Some(parameters) = &self.parameters {
-            for (i, parameter) in parameters.clone().iter().enumerate() {
+            for (i, parameter) in parameters.iter().enumerate() {
                 parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
             }
         }

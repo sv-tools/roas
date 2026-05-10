@@ -475,7 +475,12 @@ impl ValidateWithContext<Spec> for Parameter {
 impl ValidateWithContext<Spec> for InPath {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
-        must_be_required(&Some(self.required), ctx, path.clone(), self.name.clone());
+        if !self.required {
+            ctx.error(
+                format!("{path}.required"),
+                "must be `true` for `in: path` parameters",
+            );
+        }
         either_example_or_examples(ctx, &self.example, &self.examples, path.clone());
         either_schema_or_content(ctx, &self.schema, &self.content, path.clone());
         walk_schema_examples_content(ctx, &self.schema, &self.examples, &self.content, &path);
@@ -562,12 +567,6 @@ fn walk_schema_examples_content(
     }
 }
 
-fn must_be_required(p: &Option<bool>, ctx: &mut Context<Spec>, path: String, name: String) {
-    if !p.is_some_and(|x| x) {
-        ctx.error(path, format_args!(".{name}: must be required"));
-    }
-}
-
 fn either_example_or_examples(
     ctx: &mut Context<Spec>,
     example: &Option<serde_json::Value>,
@@ -635,7 +634,8 @@ mod tests {
         });
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be required")),
+            ctx.errors.iter().any(|e| e.contains("p.required")
+                && e.contains("must be `true` for `in: path` parameters")),
             "errors: {:?}",
             ctx.errors
         );

@@ -1,6 +1,6 @@
 //! XML Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_url};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_uri};
 use crate::v3_2::spec::Spec;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -123,7 +123,7 @@ pub struct XML {
 
 impl ValidateWithContext<Spec> for XML {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&self.namespace, ctx, format!("{path}.namespace"));
+        validate_optional_uri(&self.namespace, ctx, format!("{path}.namespace"));
         if let Some(nt) = &self.node_type {
             const ALLOWED: &[&str] = &["element", "attribute", "text", "cdata", "none"];
             if !ALLOWED.contains(&nt.as_str()) {
@@ -250,15 +250,27 @@ mod tests {
         .validate_with_context(&mut ctx, "xml".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
+        // Non-HTTP absolute URIs (urn:, mailto:, etc.) are accepted —
+        // OAS 3.2 specifies an absolute URI here, not specifically a URL.
+        let mut ctx = Context::new(&spec, Options::new());
         XML {
-            namespace: Some("foo-bar".to_owned()),
+            namespace: Some("urn:example:ns:1".to_owned()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "xml".to_owned());
+        assert!(ctx.errors.is_empty(), "urn accepted: {:?}", ctx.errors);
+
+        // Whitespace / control chars are rejected.
+        let mut ctx = Context::new(&spec, Options::new());
+        XML {
+            namespace: Some("not a uri".to_owned()),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "xml".to_owned());
         assert_eq!(
             ctx.errors,
-            vec!["xml.namespace: must be a valid URL, found `foo-bar`"],
-            "invalid URL: {:?}",
+            vec!["xml.namespace: must be a valid URI, found `not a uri`"],
+            "invalid URI: {:?}",
             ctx.errors
         );
     }

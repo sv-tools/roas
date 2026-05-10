@@ -103,26 +103,31 @@ pub struct ServerVariable {
 impl ValidateWithContext<Spec> for Server {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.url, ctx, format!("{path}.url"));
-        let mut visited = HashSet::<String>::new();
+        let mut defined = HashSet::<String>::new();
         if let Some(variables) = &self.variables {
             for (name, variable) in variables {
                 variable.validate_with_context(ctx, format!("{path}.variables[{name}]"));
-                visited.insert(name.clone());
+                defined.insert(name.clone());
             }
         };
+        // Track placeholders separately so a `{var}` that appears more than
+        // once in the URL doesn't get spuriously reported as undefined on
+        // its second occurrence.
+        let mut used = HashSet::<String>::new();
         for (_, [name]) in regex!(r"\{([a-zA-Z0-9.\-_]+)}")
             .captures_iter(&self.url)
             .map(|c| c.extract())
         {
-            if !visited.remove(name) {
+            if !defined.contains(name) {
                 ctx.error(
                     path.clone(),
                     format_args!(".url: `{name}` is not defined in `variables`"),
                 );
             }
+            used.insert(name.to_owned());
         }
         if !ctx.is_option(Options::IgnoreUnusedServerVariables) {
-            for name in visited {
+            for name in defined.difference(&used) {
                 ctx.error(
                     path.clone(),
                     format_args!(".variables[{name}]: unused in `url`"),
@@ -547,6 +552,36 @@ mod tests {
             ctx.errors.len(),
             0,
             "ignore used variable: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn repeated_placeholder_in_url_does_not_false_undefined() {
+        // A `{var}` that appears more than once in the URL must resolve
+        // each time without the second occurrence being flagged as
+        // undefined.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Server {
+            url: "https://{host}/{host}".to_owned(),
+            variables: Some({
+                let mut vars = BTreeMap::new();
+                vars.insert(
+                    String::from("host"),
+                    ServerVariable {
+                        default: String::from("api.example.com"),
+                        ..Default::default()
+                    },
+                );
+                vars
+            }),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, String::from("server"));
+        assert!(
+            ctx.errors.is_empty(),
+            "no errors expected for repeated placeholder: {:?}",
             ctx.errors
         );
     }
