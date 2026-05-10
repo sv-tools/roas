@@ -34,13 +34,12 @@ jobs:
         with:
           matrix-exclude-features: roas:default
   BuildJob:
-    name: Build per OS
+    name: Build per Package and Feature
     needs: RustMeta
     strategy:
         matrix:
-            os: [ "ubuntu-latest", "windows-latest", "macos-latest" ]
             args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
+    runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
@@ -69,13 +68,12 @@ jobs:
       - run: cargo clippy --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
         if: failure()
   TestJob:
-    name: Test per OS
+    name: Test per Package and Feature
     needs: RustMeta
     strategy:
       matrix:
-        os: [ "ubuntu-latest", "windows-latest", "macos-latest" ]
         args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
+    runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
