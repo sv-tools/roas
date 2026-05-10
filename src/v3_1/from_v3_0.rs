@@ -427,9 +427,12 @@ fn rewrite_content_map(content: &mut Map<String, Value>) {
         };
         // OAS media-type keys may carry parameters (`application/
         // octet-stream; charset=binary`); compare against just the
-        // `type/subtype` head.
+        // `type/subtype` head. Per RFC 7231 the type / subtype tokens
+        // are case-insensitive (`Application/Octet-Stream` is the
+        // same media type as `application/octet-stream`), so use
+        // ASCII-case-insensitive comparisons throughout.
         let mime_main = mime_main_type(mime);
-        if mime_main == "application/octet-stream" {
+        if mime_main.eq_ignore_ascii_case("application/octet-stream") {
             // `{type: string, format: binary}` → `{}` (the empty
             // schema, JSON Schema 2020-12's "matches anything"
             // idiom). Routes through `Schema::Empty(EmptySchema)`
@@ -462,7 +465,9 @@ fn mime_main_type(mime: &str) -> &str {
 }
 
 fn is_multipart_mime(mime: &str) -> bool {
-    mime.starts_with("multipart/")
+    // Type/subtype tokens are ASCII-case-insensitive per RFC 7231.
+    let prefix = "multipart/";
+    mime.len() >= prefix.len() && mime[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 fn is_string_binary(schema: &Map<String, Value>) -> bool {
@@ -1165,6 +1170,51 @@ mod tests {
             multipart_field.get("contentMediaType").is_none(),
             "example payload must not gain contentMediaType"
         );
+    }
+
+    #[test]
+    fn media_type_match_is_case_insensitive() {
+        // RFC 7231 type/subtype tokens are ASCII-case-insensitive,
+        // so `Application/Octet-Stream` and `Multipart/Form-Data`
+        // must trigger the same rewrites as their lowercase forms.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "Application/Octet-Stream": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                },
+                                "Multipart/Form-Data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "f": {"type": "string", "format": "binary"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        // Octet-stream with mixed-case key still becomes `{}`.
+        let octet = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["Application/Octet-Stream"]
+            ["schema"];
+        assert!(octet.is_object());
+        assert!(octet.as_object().unwrap().is_empty());
+        // Multipart with mixed-case key still rewrites the binary field.
+        let f = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["Multipart/Form-Data"]
+            ["schema"]["properties"]["f"];
+        assert_eq!(f["type"], "string");
+        assert_eq!(f["contentMediaType"], "application/octet-stream");
+        assert!(f.get("format").is_none());
     }
 
     #[test]
