@@ -1,6 +1,8 @@
 //! XML Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_uri};
+use crate::common::helpers::{
+    Context, PushError, ValidateWithContext, has_uri_unsafe_bytes, validate_optional_uri,
+};
 use crate::v3_2::spec::Spec;
 use crate::validation::Options;
 use serde::{Deserialize, Serialize};
@@ -129,9 +131,13 @@ impl ValidateWithContext<Spec> for XML {
         // URI: a relative reference like `#/foo` or `bar/baz` is not
         // valid. Enforce a present `scheme:` prefix per RFC 3986
         // §3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
+        // Skip when the value already failed `validate_optional_uri`
+        // (whitespace / control chars) so users see a single,
+        // most-relevant error.
         if let Some(ns) = &self.namespace
             && !ns.is_empty()
             && !ctx.is_option(Options::IgnoreInvalidUrls)
+            && !has_uri_unsafe_bytes(ns)
         {
             let mut chars = ns.chars();
             let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
@@ -285,18 +291,38 @@ mod tests {
         .validate_with_context(&mut ctx, "xml".to_owned());
         assert!(ctx.errors.is_empty(), "urn accepted: {:?}", ctx.errors);
 
-        // Whitespace / control chars are rejected.
-        let mut ctx = Context::new(&spec, Options::new());
-        XML {
-            namespace: Some("not a uri".to_owned()),
-            ..Default::default()
+        // Whitespace / control chars are rejected — and the absolute-URI
+        // scheme check short-circuits, so the user sees a single
+        // "must be a valid URI" error rather than two errors at the same
+        // path.
+        for ns in ["not a uri", "tab\there", "ctrl\x01char"] {
+            let mut ctx = Context::new(&spec, Options::new());
+            XML {
+                namespace: Some(ns.to_owned()),
+                ..Default::default()
+            }
+            .validate_with_context(&mut ctx, "xml".to_owned());
+            let valid_uri_errs = ctx
+                .errors
+                .iter()
+                .filter(|e| e.contains("must be a valid URI"))
+                .count();
+            let absolute_uri_errs = ctx
+                .errors
+                .iter()
+                .filter(|e| e.contains("must be an absolute URI"))
+                .count();
+            assert_eq!(
+                valid_uri_errs, 1,
+                "exactly one 'must be a valid URI' for `{ns}`: {:?}",
+                ctx.errors
+            );
+            assert_eq!(
+                absolute_uri_errs, 0,
+                "no redundant 'must be an absolute URI' for `{ns}`: {:?}",
+                ctx.errors
+            );
         }
-        .validate_with_context(&mut ctx, "xml".to_owned());
-        assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
-            "invalid URI: {:?}",
-            ctx.errors
-        );
 
         // Relative refs (no scheme) are rejected: namespace MUST be an
         // absolute URI per the OAS XML Object spec.
