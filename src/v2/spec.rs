@@ -274,7 +274,13 @@ impl TryFrom<&str> for Version {
 impl TryFrom<String> for Version {
     type Error = InvalidVersion;
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::from_str_inner(&s)
+        // Move the input directly rather than borrowing into
+        // `from_str_inner` and reallocating.
+        if s == "2.0" {
+            Ok(Version(s))
+        } else {
+            Err(InvalidVersion(s))
+        }
     }
 }
 

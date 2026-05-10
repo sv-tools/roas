@@ -381,7 +381,19 @@ impl TryFrom<&str> for Version {
 impl TryFrom<String> for Version {
     type Error = InvalidVersion;
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::from_str_inner(&s)
+        // Move the input directly rather than borrowing into
+        // `from_str_inner` and reallocating. The `3.0` short alias
+        // still needs a fresh `3.0.4` string; every other path
+        // consumes `s` in place.
+        if s == "3.0" {
+            return Ok(Version("3.0.4".to_owned()));
+        }
+        let re = lazy_regex::regex!(r"^3\.0\.\d+(-.+)?$");
+        if re.is_match(&s) {
+            Ok(Version(s))
+        } else {
+            Err(InvalidVersion(s))
+        }
     }
 }
 
