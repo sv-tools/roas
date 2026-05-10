@@ -292,7 +292,17 @@ fn walk_content_aware(value: &mut Value) {
             if let Some(Value::Object(content)) = obj.get_mut("content") {
                 rewrite_content_map(content);
             }
-            for (_, v) in obj.iter_mut() {
+            for (k, v) in obj.iter_mut() {
+                // Skip instance-valued payloads — a user-supplied
+                // example / default / enum / const that happens to
+                // contain a `content`-shaped sub-object would
+                // otherwise get its file-upload schemas rewritten.
+                if matches!(
+                    k.as_str(),
+                    "example" | "examples" | "default" | "enum" | "const" | "value"
+                ) {
+                    continue;
+                }
                 walk_content_aware(v);
             }
         }
@@ -328,7 +338,7 @@ fn rewrite_content_map(content: &mut Map<String, Value>) {
         } else if is_multipart_mime(mime)
             && let Value::Object(s) = schema
         {
-            rewrite_multipart_properties(s);
+            rewrite_string_binary_subschemas(s);
         }
     }
 }
@@ -342,18 +352,68 @@ fn is_string_binary(schema: &Map<String, Value>) -> bool {
         && schema.get("format").and_then(|v| v.as_str()) == Some("binary")
 }
 
-fn rewrite_multipart_properties(schema: &mut Map<String, Value>) {
-    let Some(Value::Object(properties)) = schema.get_mut("properties") else {
+/// Recursively walk a multipart schema tree and rewrite every
+/// `{type: string, format: binary}` subschema to
+/// `{type: string, contentMediaType: application/octet-stream}`.
+///
+/// v2/v3.0's `format: binary` annotation can sit anywhere inside a
+/// multipart schema — directly on a property, on `items` of an array
+/// property, on a nested `properties.<name>` schema, on `allOf`
+/// branches, etc. The walker visits all of them; instance-valued
+/// payloads (`example`, `default`, `enum`, …) are skipped so a
+/// user-supplied example whose shape happens to mirror a string-binary
+/// schema isn't mutated.
+fn rewrite_string_binary_subschemas(schema: &mut Map<String, Value>) {
+    if is_string_binary(schema) {
+        schema.remove("format");
+        schema.insert(
+            "contentMediaType".into(),
+            Value::String("application/octet-stream".into()),
+        );
+        // A string-binary schema is a leaf — no schema substructure
+        // to recurse into.
         return;
-    };
-    for (_, prop) in properties.iter_mut() {
-        let Value::Object(p) = prop else { continue };
-        if is_string_binary(p) {
-            p.remove("format");
-            p.insert(
-                "contentMediaType".into(),
-                Value::String("application/octet-stream".into()),
-            );
+    }
+    for (k, v) in schema.iter_mut() {
+        match k.as_str() {
+            // Schema-level instance keys carry user data, never schemas.
+            "example" | "examples" | "default" | "enum" | "const" => continue,
+            // Sub-schema keys (single nested schema).
+            "items"
+            | "not"
+            | "additionalProperties"
+            | "contains"
+            | "propertyNames"
+            | "if"
+            | "then"
+            | "else"
+            | "unevaluatedItems"
+            | "unevaluatedProperties" => {
+                if let Value::Object(s) = v {
+                    rewrite_string_binary_subschemas(s);
+                }
+            }
+            // Sub-schema arrays.
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => {
+                if let Value::Array(arr) = v {
+                    for entry in arr.iter_mut() {
+                        if let Value::Object(s) = entry {
+                            rewrite_string_binary_subschemas(s);
+                        }
+                    }
+                }
+            }
+            // Schema-by-name maps.
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                if let Value::Object(map) = v {
+                    for (_, entry) in map.iter_mut() {
+                        if let Value::Object(s) = entry {
+                            rewrite_string_binary_subschemas(s);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -835,6 +895,134 @@ mod tests {
         assert!(file.get("format").is_none(), "format dropped");
         // Non-binary properties stay as-is.
         assert_eq!(props["name"]["type"], "string");
+    }
+
+    #[test]
+    fn multipart_binary_array_items_uses_content_media_type() {
+        // `format: binary` can sit on `items` of an array property
+        // (multipart upload of multiple files). v3.1 expects the
+        // `contentMediaType` rewrite there too — not just on
+        // top-level properties.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "files": {
+                                                "type": "array",
+                                                "items": {"type": "string", "format": "binary"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let items = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["multipart/form-data"]
+            ["schema"]["properties"]["files"]["items"];
+        assert_eq!(items["type"], "string");
+        assert_eq!(items["contentMediaType"], "application/octet-stream");
+        assert!(items.get("format").is_none(), "format dropped on items too");
+    }
+
+    #[test]
+    fn multipart_nested_binary_property_uses_content_media_type() {
+        // A binary deep inside a nested object schema is rewritten too.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "envelope": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "blob": {"type": "string", "format": "binary"}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let blob = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["multipart/form-data"]
+            ["schema"]["properties"]["envelope"]["properties"]["blob"];
+        assert_eq!(blob["contentMediaType"], "application/octet-stream");
+        assert!(blob.get("format").is_none());
+    }
+
+    #[test]
+    fn content_aware_walk_skips_example_payload() {
+        // A schema whose `example` payload contains a `content` map
+        // and binary schemas must NOT be rewritten — that's
+        // user-supplied instance data, not an OAS Content map.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Doc": {
+                        "type": "object",
+                        "example": {
+                            "content": {
+                                "application/octet-stream": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                },
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "f": {"type": "string", "format": "binary"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let payload = &value["components"]["schemas"]["Doc"]["examples"][0];
+        // The example value's nested binary schema is preserved
+        // verbatim — no octet-stream-empty rewrite, no
+        // contentMediaType rewrite.
+        let octet_schema = &payload["content"]["application/octet-stream"]["schema"];
+        assert_eq!(octet_schema["type"], "string");
+        assert_eq!(octet_schema["format"], "binary");
+        let multipart_field =
+            &payload["content"]["multipart/form-data"]["schema"]["properties"]["f"];
+        assert_eq!(multipart_field["type"], "string");
+        assert_eq!(multipart_field["format"], "binary");
+        assert!(
+            multipart_field.get("contentMediaType").is_none(),
+            "example payload must not gain contentMediaType"
+        );
     }
 
     #[test]
