@@ -232,14 +232,49 @@ impl serde::Serialize for Version {
 impl<'de> serde::Deserialize<'de> for Version {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let s = String::deserialize(de)?;
-        if s == "2.0" {
-            Ok(Version(s))
-        } else {
-            Err(serde::de::Error::invalid_value(
+        Version::from_str_inner(&s).map_err(|_| {
+            serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(&s),
                 &"the literal Swagger version string `2.0`",
-            ))
+            )
+        })
+    }
+}
+
+/// Returned by `Version::from_str` / `TryFrom<&str>` when the input is
+/// not the literal Swagger version string `2.0`.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("version {0:?} must be the literal Swagger version string `2.0`")]
+pub struct InvalidVersion(pub String);
+
+impl Version {
+    fn from_str_inner(s: &str) -> Result<Self, InvalidVersion> {
+        if s == "2.0" {
+            Ok(Version(s.to_owned()))
+        } else {
+            Err(InvalidVersion(s.to_owned()))
         }
+    }
+}
+
+impl std::str::FromStr for Version {
+    type Err = InvalidVersion;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_str_inner(s)
+    }
+}
+
+impl TryFrom<&str> for Version {
+    type Error = InvalidVersion;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::from_str_inner(s)
+    }
+}
+
+impl TryFrom<String> for Version {
+    type Error = InvalidVersion;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::from_str_inner(&s)
     }
 }
 
@@ -667,6 +702,28 @@ mod tests {
             .unwrap()
             .swagger,
             "2.0",
+        );
+    }
+
+    #[test]
+    fn test_swagger_version_parse_programmatically() {
+        use std::str::FromStr;
+        // The literal string round-trips through FromStr / TryFrom.
+        assert_eq!(Version::from_str("2.0").unwrap(), Version::V2_0());
+        assert_eq!(
+            <Version as TryFrom<&str>>::try_from("2.0").unwrap(),
+            Version::V2_0()
+        );
+        assert_eq!(
+            <Version as TryFrom<String>>::try_from("2.0".to_owned()).unwrap(),
+            Version::V2_0()
+        );
+        // Anything else is rejected with a typed error.
+        let err = Version::from_str("3.0.0").unwrap_err();
+        assert_eq!(err, InvalidVersion("3.0.0".to_owned()));
+        assert!(
+            err.to_string().contains("`2.0`"),
+            "error message names the only valid value: {err}"
         );
     }
 

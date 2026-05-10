@@ -160,7 +160,13 @@ pub struct Spec {
     /// the OpenAPI document.
     /// This is not related to the API info.version string.
     ///
-    /// The value MUST be one of ["3.0.0", "3.0.1", "3.0.2", "3.0.3", "3.0.4"].
+    /// The value MUST match the OAS 3.0 schema pattern
+    /// `^3\.0\.\d+(-.+)?$`, i.e. any `3.0.x` patch release with an
+    /// optional prerelease suffix.
+    /// The bare `3.0` short alias is also accepted on the wire and
+    /// normalised to `3.0.4`. See [`Version`] for constructors and the
+    /// `FromStr` / `TryFrom<&str>` parsers used to build arbitrary
+    /// schema-conformant values programmatically.
     pub openapi: Version,
 
     /// **Required** Provides metadata about the API.
@@ -329,18 +335,53 @@ impl serde::Serialize for Version {
 impl<'de> serde::Deserialize<'de> for Version {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let s = String::deserialize(de)?;
+        Version::from_str_inner(&s).map_err(|_| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &"a version matching the OAS 3.0 schema pattern `^3\\.0\\.\\d+(-.+)?$`",
+            )
+        })
+    }
+}
+
+/// Returned by `Version::from_str` / `TryFrom<&str>` when the input
+/// does not match the OAS 3.0 schema pattern (see [`Version`]).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("version {0:?} must match the OAS 3.0 schema pattern `^3\\.0\\.\\d+(-.+)?$`")]
+pub struct InvalidVersion(pub String);
+
+impl Version {
+    fn from_str_inner(s: &str) -> Result<Self, InvalidVersion> {
         if s == "3.0" {
             return Ok(Version("3.0.4".to_owned()));
         }
         let re = lazy_regex::regex!(r"^3\.0\.\d+(-.+)?$");
-        if re.is_match(&s) {
-            Ok(Version(s))
+        if re.is_match(s) {
+            Ok(Version(s.to_owned()))
         } else {
-            Err(serde::de::Error::invalid_value(
-                serde::de::Unexpected::Str(&s),
-                &"a version matching the OAS 3.0 schema pattern `^3\\.0\\.\\d+(-.+)?$`",
-            ))
+            Err(InvalidVersion(s.to_owned()))
         }
+    }
+}
+
+impl std::str::FromStr for Version {
+    type Err = InvalidVersion;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_str_inner(s)
+    }
+}
+
+impl TryFrom<&str> for Version {
+    type Error = InvalidVersion;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::from_str_inner(s)
+    }
+}
+
+impl TryFrom<String> for Version {
+    type Error = InvalidVersion;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::from_str_inner(&s)
     }
 }
 
@@ -796,6 +837,39 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Version::default()).unwrap(),
             r#""3.0.4""#,
+        );
+    }
+
+    #[test]
+    fn test_version_parse_programmatically() {
+        use std::str::FromStr;
+        // FromStr accepts schema-conformant patch/prerelease values
+        // without going through Serde.
+        assert_eq!(
+            Version::from_str("3.0.99").unwrap(),
+            Version("3.0.99".to_owned())
+        );
+        assert_eq!(
+            Version::from_str("3.0.0-rc1").unwrap(),
+            Version("3.0.0-rc1".to_owned())
+        );
+        // Bare `3.0` short alias normalises to `3.0.4`.
+        assert_eq!(Version::from_str("3.0").unwrap(), Version::V3_0_4());
+        // TryFrom<&str> and TryFrom<String> agree.
+        assert_eq!(
+            <Version as TryFrom<&str>>::try_from("3.0.7").unwrap(),
+            Version("3.0.7".to_owned())
+        );
+        assert_eq!(
+            <Version as TryFrom<String>>::try_from("3.0.7".to_owned()).unwrap(),
+            Version("3.0.7".to_owned())
+        );
+        // Garbage rejects with a typed error carrying the offending input.
+        let err = Version::from_str("foo").unwrap_err();
+        assert_eq!(err, InvalidVersion("foo".to_owned()));
+        assert!(
+            err.to_string().contains("3\\.0\\.\\d+(-.+)?$"),
+            "error message echoes the schema regex: {err}"
         );
     }
 
