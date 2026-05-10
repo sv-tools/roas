@@ -124,4 +124,49 @@ mod tests {
             ctx.errors
         );
     }
+
+    #[test]
+    fn data_value_serialized_value_round_trip() {
+        // OAS 3.2: dataValue (Any) and serializedValue (string) round-trip
+        // through their typed fields, separately from `value`.
+        let v = serde_json::json!({
+            "summary": "structured",
+            "dataValue": {"id": 1, "name": "spot"}
+        });
+        let ex: Example = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(
+            ex.data_value,
+            Some(serde_json::json!({"id": 1, "name": "spot"}))
+        );
+        assert_eq!(serde_json::to_value(&ex).unwrap(), v);
+
+        let v = serde_json::json!({
+            "serializedValue": "id=1&name=spot"
+        });
+        let ex: Example = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(ex.serialized_value.as_deref(), Some("id=1&name=spot"));
+        assert_eq!(serde_json::to_value(&ex).unwrap(), v);
+    }
+
+    #[test]
+    fn three_way_value_mutex_reports() {
+        // value + serializedValue + dataValue all set ⇒ flagged.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Example {
+            value: Some(json!(1)),
+            serialized_value: Some("1".into()),
+            data_value: Some(json!({"k": 1})),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "ex".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("mutually exclusive")
+                && e.contains("value")
+                && e.contains("serializedValue")
+                && e.contains("dataValue")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
 }

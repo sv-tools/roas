@@ -550,4 +550,17 @@ mod tests {
             ctx.errors
         );
     }
+
+    #[test]
+    fn name_round_trip() {
+        // OAS 3.2: Server.name is an optional human-readable identifier.
+        let v = serde_json::json!({
+            "url": "https://api.example.com",
+            "name": "Production",
+            "description": "Prod API"
+        });
+        let s: Server = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(s.name.as_deref(), Some("Production"));
+        assert_eq!(serde_json::to_value(&s).unwrap(), v);
+    }
 }

@@ -2,7 +2,7 @@
 
 use crate::common::helpers::{
     Context, PushError, ValidateWithContext, validate_email, validate_optional_url,
-    validate_required_string, validate_required_url,
+    validate_required_string,
 };
 use crate::v3_2::spec::Spec;
 use crate::validation::Options;
@@ -57,11 +57,6 @@ pub struct Info {
     /// **Required** The version of the OpenAPI document
     /// (which is distinct from the OpenAPI Specification version or the API implementation version).
     pub version: String,
-
-    /// ReDoc/Redocly extension that configures the API logo in generated documentation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "x-logo")]
-    pub x_logo: Option<Logo>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -141,32 +136,6 @@ pub struct License {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// ReDoc/Redocly `x-logo` extension object.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct Logo {
-    /// **Required** URL pointing to the logo image.
-    pub url: String,
-
-    /// Optional background color, commonly a hex RGB value.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub background_color: Option<String>,
-
-    /// Optional alt text for the logo image.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alt_text: Option<String>,
-
-    /// Optional link target for the logo.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub href: Option<String>,
-
-    /// Allows extensions on the logo extension object.
-    #[serde(flatten)]
-    #[serde(with = "crate::common::extensions")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
-}
-
 impl ValidateWithContext<Spec> for Info {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         if !ctx.is_option(Options::IgnoreEmptyInfoTitle) {
@@ -182,10 +151,6 @@ impl ValidateWithContext<Spec> for Info {
 
         if let Some(license) = &self.license {
             license.validate_with_context(ctx, format!("{path}.license"));
-        }
-
-        if let Some(logo) = &self.x_logo {
-            logo.validate_with_context(ctx, format!("{path}.x-logo"));
         }
     }
 }
@@ -212,13 +177,6 @@ impl ValidateWithContext<Spec> for License {
             validate_required_string(id, ctx, format!("{path}.identifier"));
         }
         validate_optional_url(&self.url, ctx, format!("{path}.url"));
-    }
-}
-
-impl ValidateWithContext<Spec> for Logo {
-    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.url, ctx, format!("{path}.url"));
-        validate_optional_url(&self.href, ctx, format!("{path}.href"));
     }
 }
 
@@ -645,27 +603,31 @@ mod tests {
     }
 
     #[test]
-    fn x_logo_round_trip_and_validate() {
+    fn x_logo_round_trip_via_generic_extensions() {
+        // 3.2 dropped typed support for the Redoc-specific `x-logo`. The
+        // key still survives round-trip through the generic `extensions`
+        // map.
+        let logo_value = json!({
+            "url": "https://example.com/logo.png",
+            "altText": "Example",
+            "href": "https://example.com"
+        });
         let info: Info = serde_json::from_value(json!({
             "title": "Swagger Sample App",
             "version": "1.0.1",
-            "x-logo": {
-                "url": "https://example.com/logo.png",
-                "altText": "Example",
-                "href": "https://example.com"
-            }
+            "x-logo": logo_value.clone(),
         }))
         .unwrap();
+        assert_eq!(
+            info.extensions.as_ref().and_then(|m| m.get("x-logo")),
+            Some(&logo_value)
+        );
         assert_eq!(
             serde_json::to_value(&info).unwrap(),
             json!({
                 "title": "Swagger Sample App",
                 "version": "1.0.1",
-                "x-logo": {
-                    "url": "https://example.com/logo.png",
-                    "altText": "Example",
-                    "href": "https://example.com"
-                }
+                "x-logo": logo_value,
             })
         );
 
@@ -673,14 +635,5 @@ mod tests {
         let mut ctx = Context::new(&spec, Default::default());
         info.validate_with_context(&mut ctx, "info".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
-
-        let mut ctx = Context::new(&spec, Default::default());
-        Logo::default().validate_with_context(&mut ctx, "info.x-logo".to_owned());
-        assert_eq!(
-            ctx.errors,
-            vec!["info.x-logo.url: must not be empty"],
-            "logo url: {:?}",
-            ctx.errors
-        );
     }
 }

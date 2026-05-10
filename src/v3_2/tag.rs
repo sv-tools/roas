@@ -45,11 +45,6 @@ pub struct Tag {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
 
-    /// ReDoc/Redocly extension with a display name for navigation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "x-displayName")]
-    pub x_display_name: Option<String>,
-
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -243,13 +238,87 @@ mod tests {
     }
 
     #[test]
-    fn x_display_name_round_trip() {
+    fn summary_kind_parent_round_trip() {
+        let v = serde_json::json!({
+            "name": "international",
+            "summary": "International",
+            "description": "Cross-border flights",
+            "kind": "nav",
+            "parent": "flights"
+        });
+        let tag: Tag = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(tag.summary.as_deref(), Some("International"));
+        assert_eq!(tag.kind.as_deref(), Some("nav"));
+        assert_eq!(tag.parent.as_deref(), Some("flights"));
+        assert_eq!(serde_json::to_value(&tag).unwrap(), v);
+    }
+
+    #[test]
+    fn parent_must_exist_in_spec_tags() {
+        let spec = Spec {
+            tags: Some(vec![Tag {
+                name: "flights".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        // OK case: parent resolves.
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Tag {
+            name: "international".into(),
+            parent: Some("flights".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "t".into());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        // Dangling parent.
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Tag {
+            name: "x".into(),
+            parent: Some("missing".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "t".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("parent") && e.contains("missing")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // Self-parent.
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Tag {
+            name: "loop".into(),
+            parent: Some("loop".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "t".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must not name itself")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn x_display_name_round_trip_via_generic_extensions() {
+        // 3.2 supersedes the Redoc-specific `x-displayName` with `summary`.
+        // The key still survives round-trip through the generic
+        // `extensions` map.
         let tag: Tag = serde_json::from_value(serde_json::json!({
             "name": "pet",
             "x-displayName": "Pets"
         }))
         .unwrap();
-        assert_eq!(tag.x_display_name, Some("Pets".to_owned()));
+        assert_eq!(
+            tag.extensions.as_ref().and_then(|m| m.get("x-displayName")),
+            Some(&serde_json::Value::String("Pets".to_owned()))
+        );
         assert_eq!(
             serde_json::to_value(tag).unwrap(),
             serde_json::json!({

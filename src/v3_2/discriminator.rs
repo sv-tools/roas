@@ -119,4 +119,29 @@ mod tests {
             ctx.errors
         );
     }
+
+    #[test]
+    fn default_mapping_round_trip_and_resolution() {
+        // OAS 3.2: defaultMapping resolves like mapping values.
+        let v = serde_json::json!({
+            "propertyName": "type",
+            "mapping": {"cat": "Cat"},
+            "defaultMapping": "Animal"
+        });
+        let d: Discriminator = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(d.default_mapping.as_deref(), Some("Animal"));
+        assert_eq!(serde_json::to_value(&d).unwrap(), v);
+
+        // Validation: dangling defaultMapping target reports.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        d.validate_with_context(&mut ctx, "d".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("defaultMapping") && e.contains("Animal")),
+            "expected dangling defaultMapping target: {:?}",
+            ctx.errors
+        );
+    }
 }
