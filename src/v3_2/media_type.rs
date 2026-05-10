@@ -41,6 +41,11 @@ use crate::v3_2::spec::Spec;
 /// ```
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct MediaType {
+    /// A description of the media type entry (added in OAS 3.2).
+    /// CommonMark syntax MAY be used for rich text representation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
     /// The schema defining the content of the request, response, or parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<RefOr<Schema>>,
@@ -80,12 +85,13 @@ pub struct MediaType {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<BTreeMap<String, Encoding>>,
 
-    /// Encoding for the prefix (header / framing) portion of a sequential
-    /// media type. Added in OAS 3.2. A single Encoding Object, not a map.
-    /// Mutually exclusive with `encoding`.
+    /// Encoding for the prefix (header / framing) portion(s) of a sequential
+    /// media type. Added in OAS 3.2. An array of Encoding Objects, applied
+    /// in order to the leading prefix items. Mutually exclusive with
+    /// `encoding`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "prefixEncoding")]
-    pub prefix_encoding: Option<Encoding>,
+    pub prefix_encoding: Option<Vec<Encoding>>,
 
     /// Encoding applied per-item to a sequential media type
     /// (e.g. JSON Lines, Server-Sent Events). Added in OAS 3.2. A single
@@ -196,11 +202,11 @@ pub struct Encoding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<BTreeMap<String, Encoding>>,
 
-    /// Nested prefix-encoding for sequential parts. Added in OAS 3.2.
+    /// Nested prefix-encoding(s) for sequential parts. Added in OAS 3.2.
     /// Mutually exclusive with `encoding`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "prefixEncoding")]
-    pub prefix_encoding: Option<Box<Encoding>>,
+    pub prefix_encoding: Option<Vec<Encoding>>,
 
     /// Nested per-item encoding for sequential parts. Added in OAS 3.2.
     /// Mutually exclusive with `encoding`.
@@ -249,8 +255,10 @@ impl ValidateWithContext<Spec> for MediaType {
                 encoding.validate_with_context(ctx, format!("{path}.encoding[{name}]"));
             }
         }
-        if let Some(encoding) = &self.prefix_encoding {
-            encoding.validate_with_context(ctx, format!("{path}.prefixEncoding"));
+        if let Some(encodings) = &self.prefix_encoding {
+            for (i, encoding) in encodings.iter().enumerate() {
+                encoding.validate_with_context(ctx, format!("{path}.prefixEncoding[{i}]"));
+            }
         }
         if let Some(encoding) = &self.item_encoding {
             encoding.validate_with_context(ctx, format!("{path}.itemEncoding"));
@@ -280,8 +288,10 @@ impl ValidateWithContext<Spec> for Encoding {
                 encoding.validate_with_context(ctx, format!("{path}.encoding[{name}]"));
             }
         }
-        if let Some(encoding) = &self.prefix_encoding {
-            encoding.validate_with_context(ctx, format!("{path}.prefixEncoding"));
+        if let Some(encodings) = &self.prefix_encoding {
+            for (i, encoding) in encodings.iter().enumerate() {
+                encoding.validate_with_context(ctx, format!("{path}.prefixEncoding[{i}]"));
+            }
         }
         if let Some(encoding) = &self.item_encoding {
             encoding.validate_with_context(ctx, format!("{path}.itemEncoding"));
@@ -363,6 +373,7 @@ mod tests {
             },
         );
         let mt = MediaType {
+            description: None,
             schema: None,
             item_schema: None,
             example: None,

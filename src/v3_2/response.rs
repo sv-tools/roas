@@ -1,6 +1,6 @@
 //! Response Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
+use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_2::header::Header;
 use crate::v3_2::link::Link;
@@ -82,9 +82,16 @@ pub struct Responses {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Response {
-    /// **Required** A short description of the response.
+    /// A short summary of the response (added in OAS 3.2). Intended for
+    /// quick UI display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+
+    /// A description of the response.
     /// [CommonMark](https://spec.commonmark.org) syntax MAY be used for rich text representation.
-    pub description: String,
+    /// Optional in OAS 3.2 (the JSON Schema does not require it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 
     /// Maps a header name to its definition.
     /// [RFC7230](https://www.rfc-editor.org/rfc/rfc7230) states header names are case insensitive.
@@ -210,8 +217,15 @@ impl<'de> Deserialize<'de> for Responses {
 
 impl ValidateWithContext<Spec> for Response {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        if !ctx.is_option(Options::IgnoreEmptyResponseDescription) {
-            validate_required_string(&self.description, ctx, format!("{path}.description"));
+        // OAS 3.2: `description` is optional per the JSON Schema. When set,
+        // the legacy `IgnoreEmptyResponseDescription` toggle is moot — but
+        // we still flag a present-but-empty value (the field was set so it
+        // ought to carry text), unless the toggle is on.
+        if let Some(desc) = &self.description
+            && desc.is_empty()
+            && !ctx.is_option(Options::IgnoreEmptyResponseDescription)
+        {
+            ctx.error(format!("{path}.description"), "must not be empty");
         }
         if let Some(headers) = &self.headers {
             for (name, header) in headers {
@@ -299,7 +313,8 @@ mod tests {
             }))
             .unwrap(),
             Response {
-                description: "A simple response".to_owned(),
+                summary: None,
+                description: Some("A simple response".to_owned()),
                 headers: Some({
                     let mut map = BTreeMap::new();
                     map.insert(
@@ -355,7 +370,8 @@ mod tests {
     fn test_response_serialization() {
         assert_eq!(
             serde_json::to_value(Response {
-                description: "A simple response".to_owned(),
+                summary: None,
+                description: Some("A simple response".to_owned()),
                 headers: Some({
                     let mut map = BTreeMap::new();
                     map.insert(
@@ -470,7 +486,8 @@ mod tests {
             .unwrap(),
             Responses {
                 default: Some(RefOr::new_item(Response {
-                    description: "A simple response".to_owned(),
+                    summary: None,
+                    description: Some("A simple response".to_owned()),
                     headers: Some({
                         let mut map = BTreeMap::new();
                         map.insert(
@@ -523,7 +540,8 @@ mod tests {
                     map.insert(
                         "200".to_owned(),
                         RefOr::new_item(Response {
-                            description: "200 OK".to_owned(),
+                            summary: None,
+                            description: Some("200 OK".to_owned()),
                             ..Default::default()
                         }),
                     );
@@ -544,7 +562,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Responses {
                 default: Some(RefOr::new_item(Response {
-                    description: "A simple response".to_owned(),
+                    summary: None,
+                    description: Some("A simple response".to_owned()),
                     headers: Some({
                         let mut map = BTreeMap::new();
                         map.insert(
@@ -597,7 +616,8 @@ mod tests {
                     map.insert(
                         "200".to_owned(),
                         RefOr::new_item(Response {
-                            description: "200 OK".to_owned(),
+                            summary: None,
+                            description: Some("200 OK".to_owned()),
                             ..Default::default()
                         }),
                     );
@@ -651,7 +671,8 @@ mod tests {
 
         let mut ctx = Context::new(&spec, Options::new());
         Response {
-            description: "A simple response".to_owned(),
+            summary: None,
+            description: Some("A simple response".to_owned()),
             headers: Some({
                 let mut map = BTreeMap::new();
                 map.insert(
@@ -715,14 +736,27 @@ mod tests {
 
         let mut ctx = Context::new(&spec, Options::new());
         Response {
-            description: "A simple response".to_owned(),
+            summary: None,
+            description: Some("A simple response".to_owned()),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "response".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
+        // OAS 3.2 makes `description` optional — a Response without
+        // it is now valid.
         let mut ctx = Context::new(&spec, Options::new());
         Response::default().validate_with_context(&mut ctx, "response".to_owned());
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+
+        // But a present-but-empty description still flags (the field
+        // was set, so it ought to carry text).
+        let mut ctx = Context::new(&spec, Options::new());
+        Response {
+            description: Some(String::new()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "response".to_owned());
         assert!(
             ctx.errors
                 .contains(&"response.description: must not be empty".to_string()),
@@ -730,11 +764,16 @@ mod tests {
             ctx.errors
         );
 
+        // IgnoreEmptyResponseDescription silences the present-but-empty case.
         let mut ctx = Context::new(
             &spec,
             Options::only(&Options::IgnoreEmptyResponseDescription),
         );
-        Response::default().validate_with_context(&mut ctx, "response".to_owned());
+        Response {
+            description: Some(String::new()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "response".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }

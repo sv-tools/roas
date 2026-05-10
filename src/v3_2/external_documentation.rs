@@ -1,6 +1,6 @@
 //! References an external resource for extended documentation.
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_required_url};
+use crate::common::helpers::{Context, ValidateWithContext, validate_required_uri};
 use crate::v3_2::spec::Spec;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -35,7 +35,7 @@ pub struct ExternalDocumentation {
 
 impl ValidateWithContext<Spec> for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.url, ctx, format!("{path}.url"));
+        validate_required_uri(&self.url, ctx, format!("{path}.url"));
     }
 }
 
@@ -107,17 +107,19 @@ mod tests {
             ctx.errors
         );
 
+        // OAS 3.2 schema gives `url` `format: uri-reference`, so a
+        // relative path like `invalid-url` is structurally fine. Whitespace
+        // is what fails URI validation.
         let mut ctx = Context::new(&spec, Options::empty());
         let ed = ExternalDocumentation {
-            url: String::from("invalid-url"),
+            url: String::from("not a uri"),
             description: Some(String::from("Find more info here")),
             ..Default::default()
         };
         ed.validate_with_context(&mut ctx, String::from("externalDocs"));
         assert!(
-            ctx.errors.contains(
-                &"externalDocs.url: must be a valid URL, found `invalid-url`".to_string()
-            ),
+            ctx.errors
+                .contains(&"externalDocs.url: must be a valid URI, found `not a uri`".to_string()),
             "Validation should fail: {:?}",
             ctx.errors
         );
@@ -139,7 +141,7 @@ mod tests {
 
         let mut ctx = Context::new(&spec, Options::only(&Options::IgnoreInvalidUrls));
         let ed = ExternalDocumentation {
-            url: String::from("invalid-url"),
+            url: String::from("not a uri"),
             description: Some(String::from("Find more info here")),
             ..Default::default()
         };

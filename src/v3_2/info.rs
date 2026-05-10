@@ -1,7 +1,7 @@
 //! Provides metadata about the API.
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_email, validate_optional_url,
+    Context, PushError, ValidateWithContext, validate_email, validate_optional_uri,
     validate_required_string,
 };
 use crate::v3_2::spec::Spec;
@@ -157,7 +157,7 @@ impl ValidateWithContext<Spec> for Info {
 
 impl ValidateWithContext<Spec> for Contact {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_uri(&self.url, ctx, format!("{path}.url"));
         validate_email(&self.email, ctx, format!("{path}.email"));
     }
 }
@@ -176,7 +176,7 @@ impl ValidateWithContext<Spec> for License {
         if let Some(id) = &self.identifier {
             validate_required_string(id, ctx, format!("{path}.identifier"));
         }
-        validate_optional_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_uri(&self.url, ctx, format!("{path}.url"));
     }
 }
 

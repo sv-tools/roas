@@ -530,7 +530,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         ..Default::default()
                     }),
                 )])),
@@ -754,7 +754,7 @@ mod tests {
             responses: Some(BTreeMap::from([(
                 "200".to_owned(),
                 RefOr::new_item(Response {
-                    description: "ok".into(),
+                    description: Some("ok".into()),
                     ..Default::default()
                 }),
             )])),

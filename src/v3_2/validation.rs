@@ -692,6 +692,7 @@ mod tests {
         schemes.insert(
             "o".to_owned(),
             RefOr::new_item(SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+                deprecated: None,
                 flows,
                 description: None,
                 oauth2_metadata_url: None,
@@ -766,6 +767,7 @@ mod tests {
             "oid".to_owned(),
             RefOr::new_item(SecurityScheme::OpenIdConnect(Box::new(
                 OpenIdConnectSecurityScheme {
+                    deprecated: None,
                     open_id_connect_url: "https://x.example/.well-known".into(),
                     description: None,
                     extensions: None,
@@ -860,7 +862,7 @@ mod tests {
                         responses: Some(BTreeMap::from([(
                             "200".to_owned(),
                             RefOr::new_item(Response {
-                                description: "ok".into(),
+                                description: Some("ok".into()),
                                 ..Default::default()
                             }),
                         )])),

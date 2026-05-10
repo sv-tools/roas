@@ -1,8 +1,8 @@
 //! Security Scheme Object
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_optional_url, validate_required_string,
-    validate_required_url,
+    Context, PushError, ValidateWithContext, validate_optional_uri, validate_required_string,
+    validate_required_uri,
 };
 use crate::v3_2::spec::Spec;
 use serde::{Deserialize, Serialize};
@@ -93,6 +93,11 @@ pub struct MutualTLSSecurityScheme {
     pub description: Option<String>,
 
     /// `^x-` Specification Extensions.
+    /// Whether this security scheme is deprecated and SHOULD be
+    /// transitioned out of usage. Default `false`. Added in OAS 3.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +130,11 @@ pub struct HttpSecurityScheme {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    /// Whether this security scheme is deprecated and SHOULD be
+    /// transitioned out of usage. Default `false`. Added in OAS 3.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,6 +177,11 @@ pub struct ApiKeySecurityScheme {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    /// Whether this security scheme is deprecated and SHOULD be
+    /// transitioned out of usage. Default `false`. Added in OAS 3.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,6 +234,11 @@ pub struct OAuth2SecurityScheme {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    /// Whether this security scheme is deprecated and SHOULD be
+    /// transitioned out of usage. Default `false`. Added in OAS 3.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -422,6 +442,11 @@ pub struct OpenIdConnectSecurityScheme {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    /// Whether this security scheme is deprecated and SHOULD be
+    /// transitioned out of usage. Default `false`. Added in OAS 3.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -477,7 +502,7 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.flows
             .validate_with_context(ctx, format!("{path}.flow"));
-        validate_optional_url(
+        validate_optional_uri(
             &self.oauth2_metadata_url,
             ctx,
             format!("{path}.oauth2MetadataUrl"),
@@ -520,56 +545,56 @@ impl ValidateWithContext<Spec> for OAuth2Flows {
 
 impl ValidateWithContext<Spec> for ImplicitOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(
+        validate_required_uri(
             &self.authorization_url,
             ctx,
             format!("{path}.authorizationUrl"),
         );
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for PasswordOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for ClientCredentialsOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for AuthorizationCodeOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(
+        validate_required_uri(
             &self.authorization_url,
             ctx,
             format!("{path}.authorizationUrl"),
         );
-        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for DeviceAuthorizationOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(
+        validate_required_uri(
             &self.device_authorization_url,
             ctx,
             format!("{path}.deviceAuthorizationUrl"),
         );
-        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for OpenIdConnectSecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(
+        validate_required_uri(
             &self.open_id_connect_url,
             ctx,
             format!("{path}.openIdConnectUrl"),
@@ -1093,6 +1118,7 @@ mod tests {
                     ..Default::default()
                 },
                 description: Some(String::from("A short description for security scheme.")),
+                deprecated: None,
                 oauth2_metadata_url: None,
                 extensions: Some({
                     let mut map = BTreeMap::new();
@@ -1355,8 +1381,8 @@ mod tests {
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 implicit: Some(ImplicitOAuth2Flow {
-                    authorization_url: String::from("foo"),
-                    refresh_url: Some(String::from("bar")),
+                    authorization_url: String::from("not a uri"),
+                    refresh_url: Some(String::from("also not")),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1376,8 +1402,8 @@ mod tests {
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 password: Some(PasswordOAuth2Flow {
-                    token_url: String::from("foo"),
-                    refresh_url: Some(String::from("bar")),
+                    token_url: String::from("not a uri"),
+                    refresh_url: Some(String::from("also not")),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1397,8 +1423,8 @@ mod tests {
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 client_credentials: Some(ClientCredentialsOAuth2Flow {
-                    token_url: String::from("foo"),
-                    refresh_url: Some(String::from("bar")),
+                    token_url: String::from("not a uri"),
+                    refresh_url: Some(String::from("also not")),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1418,9 +1444,9 @@ mod tests {
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 authorization_code: Some(AuthorizationCodeOAuth2Flow {
-                    authorization_url: String::from("xyz"),
-                    token_url: String::from("foo"),
-                    refresh_url: Some(String::from("bar")),
+                    authorization_url: String::from("third bad"),
+                    token_url: String::from("not a uri"),
+                    refresh_url: Some(String::from("also not")),
                     ..Default::default()
                 }),
                 ..Default::default()

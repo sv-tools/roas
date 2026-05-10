@@ -149,10 +149,10 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
-        // Spec: Operation.responses is required.
-        match &self.responses {
-            Some(r) => r.validate_with_context(ctx, format!("{path}.responses")),
-            None => ctx.error(path.clone(), ".responses: required field is missing"),
+        // Per the OAS 3.2 JSON Schema, `responses` is no longer required
+        // (it was REQUIRED in 3.0 / 3.1). When present, validate it.
+        if let Some(responses) = &self.responses {
+            responses.validate_with_context(ctx, format!("{path}.responses"));
         }
 
         if let Some(external_doc) = &self.external_docs {
@@ -186,7 +186,7 @@ mod tests {
             responses: Some(BTreeMap::from([(
                 "200".to_owned(),
                 RefOr::new_item(Response {
-                    description: "ok".into(),
+                    description: Some("ok".into()),
                     ..Default::default()
                 }),
             )])),
@@ -195,15 +195,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_responses_required_field_reported() {
+    fn missing_responses_is_accepted() {
+        // Per the OAS 3.2 JSON Schema, `responses` is optional on
+        // Operation. An Operation without one should validate clean.
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
         Operation::default().validate_with_context(&mut ctx, "op".into());
         assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("op.responses: required field is missing")),
-            "errors: {:?}",
+            ctx.errors.iter().all(|e| !e.contains(".responses")),
+            "no responses errors expected: {:?}",
             ctx.errors
         );
     }

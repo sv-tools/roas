@@ -289,7 +289,7 @@ mod tests {
             RefOr::<MediaType>::new_ref("#/components/mediaTypes/JsonOk".to_owned()),
         );
         let resp = Response {
-            description: "ok".into(),
+            description: Some("ok".into()),
             content: Some(content),
             ..Default::default()
         };
@@ -342,7 +342,7 @@ mod tests {
             responses: Some(BTreeMap::from([(
                 "200".to_owned(),
                 RefOr::new_item(Response {
-                    description: "ok".into(),
+                    description: Some("ok".into()),
                     ..Default::default()
                 }),
             )])),
@@ -373,7 +373,7 @@ mod tests {
             responses: Some(map_with(
                 "R",
                 Response {
-                    description: "ok".into(),
+                    description: Some("ok".into()),
                     ..Default::default()
                 },
             )),
@@ -411,6 +411,7 @@ mod tests {
             security_schemes: Some(map_with(
                 "SS",
                 SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+                    deprecated: None,
                     flows: OAuth2Flows {
                         implicit: Some(ImplicitOAuth2Flow {
                             authorization_url: "https://x.example/auth".into(),
@@ -508,7 +509,7 @@ mod tests {
             responses: Some(map_with(
                 "R",
                 Response {
-                    description: "ok".into(),
+                    description: Some("ok".into()),
                     ..Default::default()
                 },
             )),

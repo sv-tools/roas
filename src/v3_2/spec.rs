@@ -942,7 +942,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         ..Default::default()
                     }),
                 )])),
@@ -1002,7 +1002,7 @@ mod tests {
                     responses: Some(BTreeMap::from([(
                         "200".to_owned(),
                         RefOr::new_item(Response {
-                            description: "ok".into(),
+                            description: Some("ok".into()),
                             ..Default::default()
                         }),
                     )])),
@@ -1055,7 +1055,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         ..Default::default()
                     }),
                 )])),
@@ -1167,6 +1167,7 @@ mod tests {
             .define_security_scheme(
                 "S",
                 SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                    deprecated: None,
                     scheme: "Basic".into(),
                     bearer_format: None,
                     description: None,
@@ -1492,7 +1493,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         ..Default::default()
                     }),
                 )])),
@@ -1566,7 +1567,7 @@ mod tests {
                     responses: Some(BTreeMap::from([(
                         "200".to_owned(),
                         RefOr::new_item(Response {
-                            description: "ok".into(),
+                            description: Some("ok".into()),
                             ..Default::default()
                         }),
                     )])),
@@ -1597,7 +1598,7 @@ mod tests {
             }),
         );
         let response = Response {
-            description: "ok".into(),
+            description: Some("ok".into()),
             links: Some(links_map),
             ..Default::default()
         };
@@ -1688,7 +1689,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         ..Default::default()
                     }),
                 )])),
@@ -1735,7 +1736,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         ..Default::default()
                     }),
                 )])),
@@ -1779,7 +1780,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         ..Default::default()
                     }),
                 )])),
@@ -1848,7 +1849,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         ..Default::default()
                     }),
                 )])),
@@ -1889,7 +1890,7 @@ mod tests {
                 responses: Some(BTreeMap::from([(
                     "200".to_owned(),
                     RefOr::new_item(Response {
-                        description: "ok".into(),
+                        description: Some("ok".into()),
                         links: Some(links),
                         ..Default::default()
                     }),

@@ -1,6 +1,6 @@
 //! Example object.
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_url};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_uri};
 use crate::v3_2::spec::Spec;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -61,27 +61,45 @@ pub struct Example {
 
 impl ValidateWithContext<Spec> for Example {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        // OAS 3.2: at most one of `value`, `serializedValue`, `dataValue`,
-        // `externalValue` may be present.
-        let present: Vec<&str> = [
-            ("value", self.value.is_some()),
-            ("serializedValue", self.serialized_value.is_some()),
-            ("dataValue", self.data_value.is_some()),
-            ("externalValue", self.external_value.is_some()),
-        ]
-        .iter()
-        .filter_map(|(name, p)| if *p { Some(*name) } else { None })
-        .collect();
-        if present.len() > 1 {
-            ctx.error(
-                path.clone(),
-                format_args!(
-                    "{} are mutually exclusive (at most one may be set)",
-                    present.join(", ")
-                ),
-            );
+        // Per the OAS 3.2 JSON Schema, the `not.required` constraints are:
+        // value⊕externalValue, value⊕dataValue, value⊕serializedValue, and
+        // serializedValue⊕externalValue. dataValue may coexist with
+        // serializedValue or externalValue.
+        let pairs: &[(&str, bool, &str, bool)] = &[
+            (
+                "value",
+                self.value.is_some(),
+                "externalValue",
+                self.external_value.is_some(),
+            ),
+            (
+                "value",
+                self.value.is_some(),
+                "dataValue",
+                self.data_value.is_some(),
+            ),
+            (
+                "value",
+                self.value.is_some(),
+                "serializedValue",
+                self.serialized_value.is_some(),
+            ),
+            (
+                "serializedValue",
+                self.serialized_value.is_some(),
+                "externalValue",
+                self.external_value.is_some(),
+            ),
+        ];
+        for (a_name, a, b_name, b) in pairs {
+            if *a && *b {
+                ctx.error(
+                    path.clone(),
+                    format_args!("{a_name} and {b_name} are mutually exclusive"),
+                );
+            }
         }
-        validate_optional_url(&self.external_value, ctx, format!("{path}.externalValue"));
+        validate_optional_uri(&self.external_value, ctx, format!("{path}.externalValue"));
     }
 }
 
@@ -110,16 +128,36 @@ mod tests {
     }
 
     #[test]
-    fn external_value_url_validated() {
+    fn external_value_uri_reference_validated() {
+        // Per OAS 3.2 the schema gives `externalValue` `format: uri-reference`,
+        // so relative paths and non-HTTP schemes pass while whitespace /
+        // control-char garbage fails.
         let spec = Spec::default();
+
+        // urn: + relative path: accepted.
+        for ok in ["./fixtures/example.json", "urn:example:my-example"] {
+            let mut ctx = Context::new(&spec, Options::new());
+            Example {
+                external_value: Some(ok.to_owned()),
+                ..Default::default()
+            }
+            .validate_with_context(&mut ctx, "ex".into());
+            assert!(
+                ctx.errors.is_empty(),
+                "uri-reference `{ok}` should pass: {:?}",
+                ctx.errors
+            );
+        }
+
+        // Whitespace garbage: rejected.
         let mut ctx = Context::new(&spec, Options::new());
         Example {
-            external_value: Some("not-a-url".into()),
+            external_value: Some("not a uri".into()),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
             "errors: {:?}",
             ctx.errors
         );
@@ -149,23 +187,70 @@ mod tests {
     }
 
     #[test]
-    fn three_way_value_mutex_reports() {
-        // value + serializedValue + dataValue all set ⇒ flagged.
+    fn schema_pairwise_mutex_rules() {
+        // value⊕serializedValue, value⊕dataValue, value⊕externalValue,
+        // serializedValue⊕externalValue. dataValue+serializedValue and
+        // dataValue+externalValue are PERMITTED per the OAS 3.2 JSON
+        // Schema.
         let spec = Spec::default();
+
+        // value+serializedValue ⇒ flagged.
         let mut ctx = Context::new(&spec, Options::new());
         Example {
             value: Some(json!(1)),
             serialized_value: Some("1".into()),
-            data_value: Some(json!({"k": 1})),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("mutually exclusive")
-                && e.contains("value")
-                && e.contains("serializedValue")
-                && e.contains("dataValue")),
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("value and serializedValue are mutually exclusive")),
             "errors: {:?}",
+            ctx.errors
+        );
+
+        // serializedValue+externalValue ⇒ flagged.
+        let mut ctx = Context::new(&spec, Options::new());
+        Example {
+            serialized_value: Some("1".into()),
+            external_value: Some("https://example.com/x".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "ex".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("serializedValue and externalValue are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // dataValue+serializedValue ⇒ accepted.
+        let mut ctx = Context::new(&spec, Options::new());
+        Example {
+            data_value: Some(json!({"k": 1})),
+            serialized_value: Some("k=1".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "ex".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+            "dataValue + serializedValue should be permitted: {:?}",
+            ctx.errors
+        );
+
+        // dataValue+externalValue ⇒ accepted.
+        let mut ctx = Context::new(&spec, Options::new());
+        Example {
+            data_value: Some(json!({"k": 1})),
+            external_value: Some("https://example.com/x".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "ex".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+            "dataValue + externalValue should be permitted: {:?}",
             ctx.errors
         );
     }
