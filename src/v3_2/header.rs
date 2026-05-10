@@ -68,7 +68,7 @@ pub struct Header {
     /// A map containing the representations for the parameter.
     /// The key is the media type and the value describes it. The map MUST only contain one entry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<BTreeMap<String, MediaType>>,
+    pub content: Option<BTreeMap<String, RefOr<MediaType>>>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -213,8 +213,14 @@ mod tests {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         let mut content = BTreeMap::new();
-        content.insert("application/json".to_owned(), MediaType::default());
-        content.insert("text/plain".to_owned(), MediaType::default());
+        content.insert(
+            "application/json".to_owned(),
+            RefOr::new_item(MediaType::default()),
+        );
+        content.insert(
+            "text/plain".to_owned(),
+            RefOr::new_item(MediaType::default()),
+        );
         Header {
             content: Some(content),
             ..Default::default()

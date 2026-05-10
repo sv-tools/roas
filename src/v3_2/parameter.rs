@@ -107,7 +107,7 @@ pub struct InPath {
     /// A map containing the representations for the parameter.
     /// The key is the media type and the value describes it. The map MUST only contain one entry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<BTreeMap<String, MediaType>>,
+    pub content: Option<BTreeMap<String, RefOr<MediaType>>>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -216,7 +216,7 @@ pub struct InQuery {
     /// A map containing the representations for the parameter.
     /// The key is the media type and the value describes it. The map MUST only contain one entry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<BTreeMap<String, MediaType>>,
+    pub content: Option<BTreeMap<String, RefOr<MediaType>>>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -314,7 +314,7 @@ pub struct InHeader {
     /// A map containing the representations for the parameter.
     /// The key is the media type and the value describes it. The map MUST only contain one entry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<BTreeMap<String, MediaType>>,
+    pub content: Option<BTreeMap<String, RefOr<MediaType>>>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -397,7 +397,7 @@ pub struct InCookie {
     /// A map containing the representations for the parameter.
     /// The key is the media type and the value describes it. The map MUST only contain one entry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<BTreeMap<String, MediaType>>,
+    pub content: Option<BTreeMap<String, RefOr<MediaType>>>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -443,7 +443,7 @@ pub struct InQuerystring {
     /// **Required** A map containing the representations for the parameter.
     /// `style`, `explode`, `schema`, and `allowReserved` are not allowed
     /// when `in: "querystring"`.
-    pub content: BTreeMap<String, MediaType>,
+    pub content: BTreeMap<String, RefOr<MediaType>>,
 
     /// Example of the parameter's potential value.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -549,7 +549,7 @@ fn walk_schema_examples_content(
     ctx: &mut Context<Spec>,
     schema: &Option<RefOr<Schema>>,
     examples: &Option<BTreeMap<String, RefOr<Example>>>,
-    content: &Option<BTreeMap<String, MediaType>>,
+    content: &Option<BTreeMap<String, RefOr<MediaType>>>,
     path: &str,
 ) {
     if let Some(schema) = schema {
@@ -581,7 +581,7 @@ fn either_example_or_examples(
 fn either_schema_or_content(
     ctx: &mut Context<Spec>,
     schema: &Option<RefOr<Schema>>,
-    content: &Option<BTreeMap<String, MediaType>>,
+    content: &Option<BTreeMap<String, RefOr<MediaType>>>,
     path: String,
 ) {
     // Spec: "A parameter MUST contain either a schema property, or a content
@@ -675,8 +675,14 @@ mod tests {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
         let mut content = BTreeMap::new();
-        content.insert("application/json".to_owned(), MediaType::default());
-        content.insert("text/plain".to_owned(), MediaType::default());
+        content.insert(
+            "application/json".to_owned(),
+            RefOr::new_item(MediaType::default()),
+        );
+        content.insert(
+            "text/plain".to_owned(),
+            RefOr::new_item(MediaType::default()),
+        );
         let p = Parameter::Query(InQuery {
             name: "q".into(),
             description: None,

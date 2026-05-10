@@ -1,6 +1,7 @@
 //! Request Body Object
 
 use crate::common::helpers::{Context, ValidateWithContext};
+use crate::common::reference::RefOr;
 use crate::v3_2::media_type::MediaType;
 use crate::v3_2::spec::Spec;
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,7 @@ pub struct RequestBody {
     /// The key is a media type or media type range and the value describes it.
     /// For requests that match multiple keys, only the most specific key is applicable.
     /// e.g. `text/plain` overrides `text/*`
-    pub content: BTreeMap<String, MediaType>,
+    pub content: BTreeMap<String, RefOr<MediaType>>,
 
     /// Determines if the request body is required in the request.
     /// Defaults to `false`.

@@ -265,12 +265,76 @@ mod tests {
             "links": {"L": {"operationId": "op"}},
             "callbacks": {"CB": {"{$request.body#/cb}": {"post": {"responses": {"200": {"description": "ok"}}}}}},
             "pathItems": {"PI": {"get": {"responses": {"200": {"description": "ok"}}}}},
+            "mediaTypes": {"MT": {"schema": {"type": "object"}}},
             "x-tra": "yes"
         });
         let comp: Components = serde_json::from_value(v.clone()).unwrap();
         // Round-trip preserves all maps.
         let re: Components = serde_json::from_value(serde_json::to_value(&comp).unwrap()).unwrap();
         assert_eq!(re, comp);
+    }
+
+    #[test]
+    fn content_ref_into_components_media_types_marks_used() {
+        // OAS 3.2: `content` map values are RefOr<MediaType>, so
+        // `{"$ref": "#/components/mediaTypes/JsonOk"}` should resolve and
+        // mark the component as used (no spurious unused-detection error).
+        use crate::v3_2::media_type::MediaType;
+        use crate::v3_2::path_item::{PathItem, Paths};
+        use crate::v3_2::response::Response;
+
+        let mut content = BTreeMap::new();
+        content.insert(
+            "application/json".to_owned(),
+            RefOr::<MediaType>::new_ref("#/components/mediaTypes/JsonOk".to_owned()),
+        );
+        let resp = Response {
+            description: "ok".into(),
+            content: Some(content),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert(
+            "get".to_owned(),
+            crate::v3_2::operation::Operation {
+                responses: Some(crate::v3_2::response::Responses {
+                    responses: Some(BTreeMap::from([("200".to_owned(), RefOr::new_item(resp))])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/x".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+
+        let mt = MediaType {
+            schema: Some(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::Object(crate::v3_2::schema::ObjectSchema::default()),
+            )))),
+            ..Default::default()
+        };
+        let comp = Components {
+            media_types: Some(BTreeMap::from([("JsonOk".to_owned(), RefOr::new_item(mt))])),
+            ..Default::default()
+        };
+        let spec = crate::v3_2::spec::Spec {
+            info: crate::v3_2::info::Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        use crate::validation::Validate;
+        spec.validate(crate::validation::Options::new()).unwrap();
     }
 
     fn ok_responses() -> Responses {

@@ -97,7 +97,7 @@ pub struct Response {
     /// For responses that match multiple keys, only the most specific key is applicable.
     /// e.g. `text/plain` overrides `text/*`
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<BTreeMap<String, MediaType>>,
+    pub content: Option<BTreeMap<String, RefOr<MediaType>>>,
 
     /// A map of operations links that can be followed from the response.
     /// The key of the map is a short name for the link, following the
@@ -317,7 +317,7 @@ mod tests {
                     let mut map = BTreeMap::new();
                     map.insert(
                         "application/json".to_owned(),
-                        MediaType {
+                        RefOr::new_item(MediaType {
                             schema: Some(RefOr::new_item(Schema::Single(Box::new(
                                 SingleSchema::Object(ObjectSchema {
                                     title: Some("foo".to_owned()),
@@ -325,7 +325,7 @@ mod tests {
                                 }),
                             )))),
                             ..Default::default()
-                        },
+                        }),
                     );
                     map
                 }),
@@ -373,7 +373,7 @@ mod tests {
                     let mut map = BTreeMap::new();
                     map.insert(
                         "application/json".to_owned(),
-                        MediaType {
+                        RefOr::new_item(MediaType {
                             schema: Some(RefOr::new_item(Schema::Single(Box::new(
                                 SingleSchema::Object(ObjectSchema {
                                     title: Some("foo".to_owned()),
@@ -381,7 +381,7 @@ mod tests {
                                 }),
                             )))),
                             ..Default::default()
-                        },
+                        }),
                     );
                     map
                 }),
@@ -488,7 +488,7 @@ mod tests {
                         let mut map = BTreeMap::new();
                         map.insert(
                             "application/json".to_owned(),
-                            MediaType {
+                            RefOr::new_item(MediaType {
                                 schema: Some(RefOr::new_item(Schema::Single(Box::new(
                                     SingleSchema::Object(ObjectSchema {
                                         title: Some("foo".to_owned()),
@@ -496,7 +496,7 @@ mod tests {
                                     }),
                                 )))),
                                 ..Default::default()
-                            },
+                            }),
                         );
                         map
                     }),
@@ -562,7 +562,7 @@ mod tests {
                         let mut map = BTreeMap::new();
                         map.insert(
                             "application/json".to_owned(),
-                            MediaType {
+                            RefOr::new_item(MediaType {
                                 schema: Some(RefOr::new_item(Schema::Single(Box::new(
                                     SingleSchema::Object(ObjectSchema {
                                         title: Some("foo".to_owned()),
@@ -570,7 +570,7 @@ mod tests {
                                     }),
                                 )))),
                                 ..Default::default()
-                            },
+                            }),
                         );
                         map
                     }),
@@ -672,7 +672,7 @@ mod tests {
                 let mut map = BTreeMap::new();
                 map.insert(
                     "application/json".to_owned(),
-                    MediaType {
+                    RefOr::new_item(MediaType {
                         schema: Some(RefOr::new_item(Schema::Single(Box::new(
                             SingleSchema::Object(ObjectSchema {
                                 title: Some("foo".to_owned()),
@@ -680,7 +680,7 @@ mod tests {
                             }),
                         )))),
                         ..Default::default()
-                    },
+                    }),
                 );
                 map
             }),

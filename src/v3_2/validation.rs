@@ -852,7 +852,7 @@ mod tests {
                         examples: None,
                         content: Some(BTreeMap::from([(
                             "application/json".to_owned(),
-                            crate::v3_2::media_type::MediaType::default(),
+                            RefOr::new_item(crate::v3_2::media_type::MediaType::default()),
                         )])),
                         extensions: None,
                     }))]),
