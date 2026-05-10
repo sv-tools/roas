@@ -117,6 +117,11 @@ fn transform_spec(spec: &mut Value) {
     // them get re-routed accordingly when we walk operations below.
     let mut body_param_names: HashSet<String> = HashSet::new();
     let mut form_param_names: HashSet<String> = HashSet::new();
+    // Original (raw) v2 formData parameter definitions, keyed by name.
+    // Operations with mixed inline + `$ref` form params resolve refs
+    // against this map so the referenced field can be merged into the
+    // operation's synthesised multipart schema instead of being lost.
+    let mut form_param_defs: Map<String, Value> = Map::new();
     let mut converted_parameters: Map<String, Value> = Map::new();
     let mut request_bodies: Map<String, Value> = Map::new();
     if let Some(Value::Object(parameters)) = obj.remove("parameters") {
@@ -130,6 +135,7 @@ fn transform_spec(spec: &mut Value) {
                 }
                 Some("formData") => {
                     form_param_names.insert(name.clone());
+                    form_param_defs.insert(name.clone(), value.clone());
                     if let Some(rb) = build_form_request_body(vec![value], &spec_consumes) {
                         request_bodies.insert(name, rb);
                     }
@@ -152,6 +158,7 @@ fn transform_spec(spec: &mut Value) {
         spec_produces: &spec_produces,
         body_param_names: &body_param_names,
         form_param_names: &form_param_names,
+        form_param_defs: &form_param_defs,
         host: host.as_deref(),
         base_path: base_path.as_deref(),
     };
@@ -207,6 +214,7 @@ struct PathCtx<'a> {
     spec_produces: &'a [String],
     body_param_names: &'a HashSet<String>,
     form_param_names: &'a HashSet<String>,
+    form_param_defs: &'a Map<String, Value>,
     host: Option<&'a str>,
     base_path: Option<&'a str>,
 }
@@ -390,8 +398,12 @@ fn transform_operation(
     {
         body_param = Some(pb.clone());
     }
-    if form_params.is_empty() && !path_forms.is_empty() {
-        form_params = path_forms.to_vec();
+    // Path-level form params apply to every operation under the path
+    // in v2; operation-level entries override only the same name (per
+    // OAS2 §parameter resolution). Merge by name with operation-level
+    // winning so unrelated path-level fields aren't lost.
+    if !path_forms.is_empty() {
+        form_params = merge_form_params(path_forms, form_params);
     }
 
     let mut new_params = Vec::with_capacity(other_params.len());
@@ -414,7 +426,8 @@ fn transform_operation(
             obj.insert("requestBody".into(), rb);
         }
     } else if !form_params.is_empty()
-        && let Some(rb) = build_form_request_body_or_ref(form_params, &consumes)
+        && let Some(rb) =
+            build_form_request_body_or_ref(form_params, &consumes, ctx.form_param_defs)
     {
         obj.insert("requestBody".into(), rb);
     }
@@ -609,29 +622,86 @@ fn build_body_request_body(body: Option<Value>, consumes: &[String]) -> Option<V
 /// formData parameters might be a mix of inline entries and `$ref`s
 /// pointing at top-level formData components.
 ///
-/// v3.0 has a single `requestBody` slot per operation and no way to
-/// compose multiple references into one body, so the rules are:
+/// v3.0 has a single `requestBody` slot per operation, so the rules
+/// are:
 ///
-/// * If every `form_params` entry is a `$ref`, return the first one
-///   directly. The global remap step will retarget `#/parameters/<n>`
-///   to `#/components/requestBodies/<n>`. Additional refs are dropped
-///   (a v2 anti-pattern with no v3.0 equivalent).
-/// * Otherwise, drop any `$ref` entries (they can't compose with
-///   inline form fields in v3.0) and build a synthesised form-encoded
-///   request body from the remaining inline entries.
-fn build_form_request_body_or_ref(form_params: Vec<Value>, consumes: &[String]) -> Option<Value> {
-    let any_inline = form_params
-        .iter()
-        .any(|p| p.as_object().is_some_and(|o| !o.contains_key("$ref")));
-    if !any_inline {
-        // All-refs case: route the first ref straight to requestBody.
+/// * If there is exactly one parameter and it is a `$ref`, route it
+///   straight through. The global remap step retargets
+///   `#/parameters/<n>` to `#/components/requestBodies/<n>` so the
+///   operation can reuse the component. This preserves v2's
+///   "reference a single file upload" idiom.
+/// * Otherwise, resolve every `$ref` against the original v2 formData
+///   parameter definitions and merge the resulting inline entries
+///   into a single synthesised form-encoded request body. v2 permits
+///   multiple formData params (inline or via refs) and v3.0 can
+///   represent them all as properties on one object schema, so this
+///   keeps every named field instead of dropping any of them.
+fn build_form_request_body_or_ref(
+    form_params: Vec<Value>,
+    consumes: &[String],
+    form_param_defs: &Map<String, Value>,
+) -> Option<Value> {
+    if form_params.len() == 1
+        && form_params[0]
+            .as_object()
+            .is_some_and(|o| o.contains_key("$ref"))
+    {
         return form_params.into_iter().next();
     }
-    let inline_only: Vec<Value> = form_params
-        .into_iter()
-        .filter(|p| p.as_object().is_some_and(|o| !o.contains_key("$ref")))
+    let mut resolved = Vec::with_capacity(form_params.len());
+    for p in form_params {
+        match p.as_object() {
+            Some(o) if o.contains_key("$ref") => {
+                if let Some(name) = ref_local_name(&p, "#/parameters/")
+                    && let Some(def) = form_param_defs.get(name)
+                {
+                    resolved.push(def.clone());
+                }
+                // A ref that doesn't resolve in `form_param_defs` is
+                // pointing at a non-formData parameter (or an
+                // unresolvable name) and can't merge into a multipart
+                // schema — drop it rather than panic on the ambiguity.
+            }
+            _ => resolved.push(p),
+        }
+    }
+    build_form_request_body(resolved, consumes)
+}
+
+/// Merge two v2 formData parameter lists by `name`, with `overrides`
+/// winning over `base`. Used to apply v2's "operation parameters
+/// override path-level by (name, in)" rule on the formData slice while
+/// still keeping path-level fields the operation hasn't redefined.
+fn merge_form_params(base: &[Value], overrides: Vec<Value>) -> Vec<Value> {
+    let override_names: HashSet<String> = overrides
+        .iter()
+        .filter_map(|p| {
+            // For inline params the key is `name`. For `$ref` params we
+            // use the local component name as the dedupe key — refs
+            // from the override list shadow path-level entries pointing
+            // at the same component too.
+            p.get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .or_else(|| ref_local_name(p, "#/parameters/").map(str::to_owned))
+        })
         .collect();
-    build_form_request_body(inline_only, consumes)
+    let mut out = Vec::with_capacity(base.len() + overrides.len());
+    for p in base {
+        let key = p
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| ref_local_name(p, "#/parameters/").map(str::to_owned));
+        if let Some(k) = key
+            && override_names.contains(&k)
+        {
+            continue;
+        }
+        out.push(p.clone());
+    }
+    out.extend(overrides);
+    out
 }
 
 fn build_form_request_body(form_params: Vec<Value>, consumes: &[String]) -> Option<Value> {
@@ -1323,6 +1393,103 @@ mod tests {
             post["requestBody"]["$ref"],
             "#/components/requestBodies/File"
         );
+    }
+
+    #[test]
+    fn mixed_inline_and_ref_form_params_keep_every_field() {
+        // v2 permits an operation to use both an inline formData param
+        // and a `$ref` to a top-level formData component. v3.0 can
+        // represent them together as a single multipart schema, so the
+        // referenced field MUST be inlined into the operation body
+        // rather than dropped.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "parameters": [
+                            {"$ref": "#/parameters/File"},
+                            {"in": "formData", "name": "meta", "type": "string"}
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            },
+            "parameters": {
+                "File": {"in": "formData", "name": "file", "type": "file"}
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let post = &value["paths"]["/upload"]["post"];
+        // An inline form is present, so the operation body is the
+        // synthesised one — not a $ref to the component.
+        assert!(post["requestBody"].get("$ref").is_none());
+        let props = &post["requestBody"]["content"]["multipart/form-data"]["schema"]["properties"];
+        assert_eq!(props["meta"]["type"], "string");
+        // The referenced file field is inlined too.
+        assert_eq!(props["file"]["type"], "string");
+        assert_eq!(props["file"]["format"], "binary");
+    }
+
+    #[test]
+    fn path_level_form_field_merges_with_operation_form_field() {
+        // Path-level `file` plus operation-level `meta` — both must
+        // survive on the operation's body. Operation-level overrides
+        // are by `name` only; unrelated path-level fields stay.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "parameters": [
+                        {"in": "formData", "name": "file", "type": "file"}
+                    ],
+                    "post": {
+                        "parameters": [
+                            {"in": "formData", "name": "meta", "type": "string"}
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let body = &value["paths"]["/upload"]["post"]["requestBody"];
+        // Multipart because at least one field is `type: file`.
+        let props = &body["content"]["multipart/form-data"]["schema"]["properties"];
+        assert_eq!(props["meta"]["type"], "string");
+        assert_eq!(props["file"]["format"], "binary");
+    }
+
+    #[test]
+    fn operation_form_overrides_path_level_form_by_name() {
+        // Path-level `tag: string` and operation-level `tag: integer`
+        // share the same name; only the operation's version survives.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "parameters": [
+                        {"in": "formData", "name": "tag", "type": "string"}
+                    ],
+                    "post": {
+                        "parameters": [
+                            {"in": "formData", "name": "tag", "type": "integer"}
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let props = &value["paths"]["/x"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]
+            ["schema"]["properties"];
+        assert_eq!(props["tag"]["type"], "integer");
     }
 
     #[test]
