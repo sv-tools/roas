@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ExternalDocumentation {
     /// **Required** The URL for the target documentation.
-    /// Value MUST be in the format of a URL.
+    /// Value MUST be in the format of a URI reference (RFC 3986). Relative refs and non-HTTP schemes are allowed.
     pub url: String,
 
     /// A short description of the target documentation.

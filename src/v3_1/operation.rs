@@ -246,13 +246,13 @@ mod tests {
     #[test]
     fn missing_responses_is_accepted() {
         // Per the OAS 3.1 JSON Schema, `responses` is optional on
-        // Operation. An Operation without one validates clean.
+        // Operation. An entirely default Operation validates clean.
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
         Operation::default().validate_with_context(&mut ctx, "op".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".responses")),
-            "no responses errors expected: {:?}",
+            ctx.errors.is_empty(),
+            "default Operation should validate clean: {:?}",
             ctx.errors
         );
     }

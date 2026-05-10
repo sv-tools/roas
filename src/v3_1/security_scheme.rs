@@ -255,12 +255,12 @@ pub struct OAuth2Flows {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ImplicitOAuth2Flow {
     /// **Required** The authorization URL to be used for this flow.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(rename = "authorizationUrl")]
     pub authorization_url: String,
 
     /// The URL to be used for obtaining refresh tokens.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "refreshUrl")]
     pub refresh_url: Option<String>,
@@ -283,12 +283,12 @@ pub struct ImplicitOAuth2Flow {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct PasswordOAuth2Flow {
     /// **Required** The token URL to be used for this flow.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(rename = "tokenUrl")]
     pub token_url: String,
 
     /// The URL to be used for obtaining refresh tokens.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "refreshUrl")]
     pub refresh_url: Option<String>,
@@ -311,12 +311,12 @@ pub struct PasswordOAuth2Flow {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ClientCredentialsOAuth2Flow {
     /// **Required** The token URL to be used for this flow.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(rename = "tokenUrl")]
     pub token_url: String,
 
     /// The URL to be used for obtaining refresh tokens.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "refreshUrl")]
     pub refresh_url: Option<String>,
@@ -339,17 +339,17 @@ pub struct ClientCredentialsOAuth2Flow {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct AuthorizationCodeOAuth2Flow {
     /// **Required** The authorization URL to be used for this flow.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(rename = "authorizationUrl")]
     pub authorization_url: String,
 
     /// **Required** The token URL to be used for this flow.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(rename = "tokenUrl")]
     pub token_url: String,
 
     /// The URL to be used for obtaining refresh tokens.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "refreshUrl")]
     pub refresh_url: Option<String>,
@@ -371,7 +371,7 @@ pub struct AuthorizationCodeOAuth2Flow {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct OpenIdConnectSecurityScheme {
     /// **Required** OpenId Connect URL to discover OAuth2 configuration values.
-    /// This MUST be in the form of a URL.
+    /// This MUST be in the form of a URI reference (RFC 3986).
     #[serde(rename = "openIdConnectUrl")]
     pub open_id_connect_url: String,
 

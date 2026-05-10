@@ -367,7 +367,7 @@ impl<'de> serde::Deserialize<'de> for Version {
         } else {
             Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(&s),
-                &"`3.1.<patch>` semver, optionally with a `-<prerelease>` suffix",
+                &"a version matching the OAS 3.1 schema pattern `^3\\.1\\.\\d+(-.+)?$`",
             ))
         }
     }
@@ -905,7 +905,7 @@ mod tests {
             serde_json::from_value::<Version>(serde_json::json!("foo"))
                 .unwrap_err()
                 .to_string()
-                .contains("expected `3.1.<patch>` semver"),
+                .contains("3.1 schema pattern"),
             "foo as openapi version",
         );
 
@@ -937,7 +937,7 @@ mod tests {
             .unwrap()
             .openapi,
             Version::V3_1_2(),
-            "non-semver `3.1` must be rejected at the Spec level too",
+            "`3.1` short alias is accepted at the Spec level and normalises to `3.1.2`",
         );
         assert!(
             serde_json::from_value::<Spec>(serde_json::json!({
@@ -950,7 +950,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string()
-            .contains("expected `3.1.<patch>` semver"),
+            .contains("3.1 schema pattern"),
             "empty spec.openapi",
         );
         assert_eq!(

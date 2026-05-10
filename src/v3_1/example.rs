@@ -24,9 +24,9 @@ pub struct Example {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
 
-    /// A URL that points to the literal example.
-    /// This provides the capability to reference examples that cannot easily
-    /// be included in JSON or YAML documents.
+    /// A URI reference (RFC 3986) that points to the literal example.
+    /// Per the OAS 3.1 JSON Schema this is `format: uri-reference`, so
+    /// relative refs and non-HTTP schemes are allowed.
     /// The `value` field and `externalValue` field are mutually exclusive.
     #[serde(rename = "externalValue")]
     #[serde(skip_serializing_if = "Option::is_none")]
