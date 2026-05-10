@@ -1,6 +1,6 @@
 [package]
 name = "roas"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 description = "Rust OpenAPI Specification"
@@ -20,7 +20,7 @@ include = [
 publish=true
 
 [features]
-default = ["v3_1"]
+default = ["v3_2"]
 # Support for OpenAPI v2
 v2 = []
 
@@ -28,8 +28,10 @@ v2 = []
 v3_0 = []
 
 # Support for OpenAPI v3.1.x
-# Feature is experimental and may change in the future
 v3_1 = []
+
+# Support for OpenAPI v3.2.x
+v3_2 = []
 
 [dependencies]
 enumset = "1.1.10"

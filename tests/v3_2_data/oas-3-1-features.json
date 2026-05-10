@@ -1,0 +1,108 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "OpenAPI 3.1 Feature Examples",
+    "summary": "A compact description exercising OpenAPI 3.1-only fields.",
+    "description": "This fixture is assembled from OpenAPI 3.1.2 specification examples and fixed fields.",
+    "license": {
+      "name": "Apache 2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "1.0.0"
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "servers": [
+    {
+      "url": "https://api.example.com/{version}",
+      "variables": {
+        "version": {
+          "default": "v1",
+          "enum": [
+            "v1",
+            "v2"
+          ],
+          "description": "API version."
+        }
+      }
+    }
+  ],
+  "paths": {
+    "/status": {
+      "get": {
+        "summary": "Read service status",
+        "operationId": "getStatus",
+        "tags": [
+          "system"
+        ],
+        "security": [
+          {
+            "clientCertificate": []
+          },
+          {
+            "openid": [
+              "profile"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                },
+                "example": {
+                  "state": "ok",
+                  "message": null
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Status": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "down"
+            ]
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "clientCertificate": {
+        "type": "mutualTLS",
+        "description": "Mutual TLS client certificate authentication."
+      },
+      "openid": {
+        "type": "openIdConnect",
+        "openIdConnectUrl": "https://example.com/.well-known/openid-configuration"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "system",
+      "description": "Operational endpoints."
+    }
+  ]
+}

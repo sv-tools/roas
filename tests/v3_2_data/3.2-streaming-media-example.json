@@ -1,0 +1,74 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Streaming Updates API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/updates": {
+      "get": {
+        "summary": "Stream service updates",
+        "operationId": "streamUpdates",
+        "responses": {
+          "200": {
+            "description": "A stream of update events",
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "data"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events.jsonl": {
+      "get": {
+        "summary": "Stream JSON Lines events",
+        "operationId": "streamJsonLinesEvents",
+        "responses": {
+          "200": {
+            "description": "A JSON Lines stream of events",
+            "content": {
+              "application/jsonl": {
+                "itemSchema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "payload"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "payload": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

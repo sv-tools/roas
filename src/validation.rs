@@ -82,6 +82,10 @@ pub enum Options {
     /// Applies for v3.0, v3.1
     IgnoreUnusedCallbacks,
 
+    /// Ignore unused media types (added in OAS 3.2).
+    /// Applies for v3.2
+    IgnoreUnusedMediaTypes,
+
     /// Ignore empty Info.Title field.
     /// Applies for v2.0, v3.0, v3.1
     IgnoreEmptyInfoTitle,
@@ -112,6 +116,7 @@ pub const IGNORE_UNUSED: EnumSet<Options> = enum_set!(
         | Options::IgnoreUnusedSecuritySchemes
         | Options::IgnoreUnusedLinks
         | Options::IgnoreUnusedCallbacks
+        | Options::IgnoreUnusedMediaTypes
 );
 
 /// A predefined set of options to ignore required fields that are empty.
