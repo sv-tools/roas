@@ -19,14 +19,18 @@
 //! 4. Schema `example: <v>` becomes `examples: [<v>]` (the JSON Schema
 //!    keyword name and shape).
 //! 5. File-upload media types in `content` maps are migrated:
-//!    * `application/octet-stream` schema `{type: string, format:
-//!      binary}` becomes the empty schema `{}` (the new opaque-bytes
-//!      idiom).
 //!    * Schema `format: binary` properties inside `multipart/*` content
 //!      become `contentMediaType: application/octet-stream` (the
 //!      `format` keyword is dropped).
 //!    * Schema `type: string, format: base64` anywhere becomes
 //!      `type: string, contentEncoding: base64`.
+//!    * `application/octet-stream` body schema
+//!      `{type: string, format: binary}` becomes the boolean schema
+//!      `true` — JSON Schema 2020-12's "matches anything" idiom. The
+//!      migration guide writes this as the empty schema `{}`; we emit
+//!      `true` because `v3_1::Schema::Bool(bool)` round-trips cleanly,
+//!      whereas an empty `{}` would normalise back to `{type: object}`
+//!      via `ObjectSchema::default()`.
 //!
 //! Lossless edges:
 //!
@@ -218,15 +222,20 @@ fn normalize_base64_format(obj: &mut Map<String, Value>) {
 }
 
 /// Walk `content: { <mime>: { schema, … } }` maps and apply the
-/// content-aware file-upload rewrites:
+/// content-aware file-upload rewrites.
 ///
+/// * Inside any `multipart/*` media type, rewrite each property whose
+///   schema is `{type: string, format: binary}` into
+///   `{type: string, contentMediaType: application/octet-stream}` —
+///   `format: binary` was deprecated in 3.1 in favour of the standard
+///   `contentMediaType` keyword.
 /// * For `application/octet-stream`, replace
-///   `schema: {type: string, format: binary}` with `schema: {}` (the
-///   new opaque-bytes idiom).
-/// * Inside `multipart/*` (and any media type with a `multipart/`
-///   prefix), rewrite each property whose schema is `{type: string,
-///   format: binary}` into `{type: string, contentMediaType:
-///   application/octet-stream}`.
+///   `{type: string, format: binary}` with the boolean schema `true`,
+///   the JSON Schema 2020-12 "matches anything" idiom. The migration
+///   guide presents the equivalent empty schema `{}`; we use `true`
+///   because `v3_1::Schema` carries a first-class `Bool(bool)` variant
+///   that round-trips cleanly, whereas `{}` would normalise back to
+///   `{type: object}` via `ObjectSchema::default()`.
 fn walk_content_aware(value: &mut Value) {
     match value {
         Value::Object(obj) => {
@@ -251,17 +260,22 @@ fn rewrite_content_map(content: &mut Map<String, Value>) {
         let Value::Object(media) = media_type else {
             continue;
         };
-        let Some(Value::Object(schema)) = media.get_mut("schema") else {
+        let Some(schema) = media.get_mut("schema") else {
             continue;
         };
         if mime == "application/octet-stream" {
-            // `{type: string, format: binary}` → `{}`. Anything else
-            // stays as-is (the user may have declared a typed schema).
-            if is_string_binary(schema) {
-                schema.clear();
+            // `{type: string, format: binary}` → `true` (the boolean
+            // "any value" schema). Anything else stays as-is — the
+            // user may have declared a typed schema like base64 text.
+            if let Value::Object(s) = schema
+                && is_string_binary(s)
+            {
+                *schema = Value::Bool(true);
             }
-        } else if is_multipart_mime(mime) {
-            rewrite_multipart_properties(schema);
+        } else if is_multipart_mime(mime)
+            && let Value::Object(s) = schema
+        {
+            rewrite_multipart_properties(s);
         }
     }
 }
@@ -342,6 +356,99 @@ mod tests {
         // Non-nullable schema is untouched.
         let maybe_bool = &value["components"]["schemas"]["MaybeBool"];
         assert_eq!(maybe_bool["type"], "boolean");
+    }
+
+    #[test]
+    fn nullable_string_with_constraints_round_trips_via_extensions() {
+        // A nullable string with constraints (`minLength`, `pattern`,
+        // `enum`) becomes a `MultiSchema` whose first-class fields
+        // are very limited; the type-specific keywords are preserved
+        // through the schema extensions catch-all so they round-trip
+        // unchanged at the JSON level. Pin this down so the limitation
+        // is visible — adding first-class fields to MultiSchema is a
+        // separate piece of work.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Slug": {
+                        "type": "string",
+                        "nullable": true,
+                        "minLength": 3,
+                        "maxLength": 32,
+                        "pattern": "^[a-z][a-z0-9-]*$",
+                        "enum": ["alpha", "beta"]
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let slug = &value["components"]["schemas"]["Slug"];
+        assert_eq!(slug["type"], serde_json::json!(["string", "null"]));
+        assert_eq!(slug["minLength"], 3);
+        assert_eq!(slug["maxLength"], 32);
+        assert_eq!(slug["pattern"], "^[a-z][a-z0-9-]*$");
+        assert_eq!(slug["enum"], serde_json::json!(["alpha", "beta"]));
+    }
+
+    #[test]
+    fn nullable_object_with_properties_round_trips_via_extensions() {
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Pet": {
+                        "type": "object",
+                        "nullable": true,
+                        "required": ["id"],
+                        "properties": {
+                            "id": {"type": "integer"},
+                            "name": {"type": "string", "nullable": true}
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let pet = &value["components"]["schemas"]["Pet"];
+        assert_eq!(pet["type"], serde_json::json!(["object", "null"]));
+        assert_eq!(pet["required"], serde_json::json!(["id"]));
+        assert_eq!(pet["properties"]["id"]["type"], "integer");
+        // Recursive `nullable` rewrite reaches nested properties too.
+        assert_eq!(
+            pet["properties"]["name"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn nullable_array_with_items_round_trips_via_extensions() {
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Tags": {
+                        "type": "array",
+                        "nullable": true,
+                        "minItems": 1,
+                        "uniqueItems": true,
+                        "items": {"type": "string"}
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let tags = &value["components"]["schemas"]["Tags"];
+        assert_eq!(tags["type"], serde_json::json!(["array", "null"]));
+        assert_eq!(tags["minItems"], 1);
+        assert_eq!(tags["uniqueItems"], true);
+        assert_eq!(tags["items"]["type"], "string");
     }
 
     #[test]
@@ -437,7 +544,13 @@ mod tests {
     }
 
     #[test]
-    fn octet_stream_binary_schema_becomes_empty() {
+    fn octet_stream_binary_schema_becomes_boolean_true() {
+        // `{type: string, format: binary}` under
+        // `application/octet-stream` is the v3.0 idiom for "raw bytes
+        // body". v3.1's equivalent is the JSON Schema 2020-12 "matches
+        // anything" boolean schema — emitted as `true` so it survives
+        // the v3.1 typed round-trip via `Schema::Bool(true)` (an empty
+        // `{}` would normalise back to `{type: object}` instead).
         let raw = r##"{
             "openapi": "3.0.4",
             "info": { "title": "t", "version": "1" },
@@ -456,28 +569,40 @@ mod tests {
                 }
             }
         }"##;
-        let v30: V30Spec = v30_from_json(raw);
-        // Inspect the raw JSON form before v3_1 deserialization
-        // normalises an empty `{}` into `ObjectSchema::default()`.
-        let mut raw_value = serde_json::to_value(&v30).unwrap();
-        transform_spec(&mut raw_value);
-        let raw_schema = &raw_value["paths"]["/upload"]["post"]["requestBody"]["content"]["application/octet-stream"]
-            ["schema"];
-        assert!(raw_schema.is_object());
-        assert!(
-            raw_schema.as_object().unwrap().is_empty(),
-            "raw transformed schema should be empty, got {raw_schema}"
-        );
-        // Round-tripping the empty schema through `v3_1::Spec`
-        // normalises it to the explicit `{type: "object"}` form. That's
-        // a property of the v3.1 type system, not the conversion — pin
-        // it down so future schema-default changes are visible.
-        let v31: V31Spec = v30.into();
-        let value = serde_json::to_value(&v31).unwrap();
+        let value = convert(raw);
         let schema = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["application/octet-stream"]
             ["schema"];
-        assert_eq!(schema["type"], "object");
-        assert!(schema.get("format").is_none(), "binary format dropped");
+        assert_eq!(*schema, Value::Bool(true));
+    }
+
+    #[test]
+    fn octet_stream_with_non_binary_schema_is_kept() {
+        // A typed schema (e.g. base64 text) under
+        // `application/octet-stream` is not the binary idiom — keep it
+        // as-is (only `format: base64` flips to `contentEncoding`).
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/octet-stream": {
+                                    "schema": {"type": "string", "format": "base64"}
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let schema = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["application/octet-stream"]
+            ["schema"];
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["contentEncoding"], "base64");
     }
 
     #[test]
