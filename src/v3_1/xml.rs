@@ -1,7 +1,8 @@
 //! XML Object
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_optional_url};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_uri};
 use crate::v3_1::spec::Spec;
+use crate::validation::Options;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -115,7 +116,34 @@ pub struct XML {
 
 impl ValidateWithContext<Spec> for XML {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&self.namespace, ctx, format!("{path}.namespace"));
+        validate_optional_uri(&self.namespace, ctx, format!("{path}.namespace"));
+        // OAS XML Object: `namespace` MUST be an *absolute* URI. Require
+        // a present `<scheme>:` prefix per RFC 3986 §3.1. Skip when the
+        // value already failed `validate_optional_uri` (whitespace /
+        // control chars) so the user sees a single, most-relevant error.
+        if let Some(ns) = &self.namespace
+            && !ns.is_empty()
+            && !ctx.is_option(Options::IgnoreInvalidUrls)
+            && !ns
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        {
+            let mut chars = ns.chars();
+            let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+            let scheme_end = ns.find(':');
+            let scheme_ok = first_ok
+                && scheme_end.is_some_and(|i| {
+                    ns[..i]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                });
+            if !scheme_ok {
+                ctx.error(
+                    format!("{path}.namespace"),
+                    format_args!("must be an absolute URI (with `<scheme>:` prefix), found `{ns}`"),
+                );
+            }
+        }
     }
 }
 
@@ -214,16 +242,44 @@ mod tests {
         .validate_with_context(&mut ctx, "xml".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
+        // Non-HTTP absolute URIs (urn:, mailto:, …) are accepted per
+        // the OAS 3.1 schema's uri-reference format on namespaces, but
+        // the spec text demands an *absolute* URI — so no scheme means
+        // it's rejected.
+        let mut ctx = Context::new(&spec, Options::new());
         XML {
-            namespace: Some("foo-bar".to_owned()),
+            namespace: Some("urn:example:ns:1".to_owned()),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "xml".to_owned());
-        assert_eq!(
-            ctx.errors,
-            vec!["xml.namespace: must be a valid URL, found `foo-bar`"],
-            "invalid URL: {:?}",
+        assert!(ctx.errors.is_empty(), "urn accepted: {:?}", ctx.errors);
+
+        let mut ctx = Context::new(&spec, Options::new());
+        XML {
+            namespace: Some("not a uri".to_owned()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "xml".to_owned());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
+            "invalid URI: {:?}",
             ctx.errors
         );
+
+        for rel in ["#/foo", "bar/baz", "/relative/path"] {
+            let mut ctx = Context::new(&spec, Options::new());
+            XML {
+                namespace: Some(rel.to_owned()),
+                ..Default::default()
+            }
+            .validate_with_context(&mut ctx, "xml".to_owned());
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains("must be an absolute URI")),
+                "relative `{rel}` rejected: {:?}",
+                ctx.errors
+            );
+        }
     }
 }

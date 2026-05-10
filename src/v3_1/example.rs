@@ -1,6 +1,6 @@
 //! Example object.
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_url};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_uri};
 use crate::v3_1::spec::Spec;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,9 +24,9 @@ pub struct Example {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
 
-    /// A URL that points to the literal example.
-    /// This provides the capability to reference examples that cannot easily
-    /// be included in JSON or YAML documents.
+    /// A URI reference (RFC 3986) that points to the literal example.
+    /// Per the OAS 3.1 JSON Schema this is `format: uri-reference`, so
+    /// relative refs and non-HTTP schemes are allowed.
     /// The `value` field and `externalValue` field are mutually exclusive.
     #[serde(rename = "externalValue")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,7 +49,7 @@ impl ValidateWithContext<Spec> for Example {
                 "value and externalValue are mutually exclusive",
             );
         }
-        validate_optional_url(&self.external_value, ctx, format!("{path}.externalValue"));
+        validate_optional_uri(&self.external_value, ctx, format!("{path}.externalValue"));
     }
 }
 
@@ -78,16 +78,32 @@ mod tests {
     }
 
     #[test]
-    fn external_value_url_validated() {
+    fn external_value_uri_reference_validated() {
+        // Per the OAS 3.1 JSON Schema, `externalValue` is `format:
+        // uri-reference`: relative paths and non-HTTP schemes pass while
+        // whitespace / control-char garbage fails.
         let spec = Spec::default();
+        for ok in ["./fixtures/example.json", "urn:example:my-example"] {
+            let mut ctx = Context::new(&spec, Options::new());
+            Example {
+                external_value: Some(ok.to_owned()),
+                ..Default::default()
+            }
+            .validate_with_context(&mut ctx, "ex".into());
+            assert!(
+                ctx.errors.is_empty(),
+                "uri-reference `{ok}` should pass: {:?}",
+                ctx.errors
+            );
+        }
         let mut ctx = Context::new(&spec, Options::new());
         Example {
-            external_value: Some("not-a-url".into()),
+            external_value: Some("not a uri".into()),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
             "errors: {:?}",
             ctx.errors
         );

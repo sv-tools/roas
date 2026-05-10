@@ -1,9 +1,10 @@
 //! Provides metadata about the API.
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_email, validate_optional_url,
-    validate_required_string, validate_required_url,
+    Context, PushError, ValidateWithContext, validate_email, validate_optional_uri,
+    validate_optional_url, validate_required_string, validate_required_url,
 };
+
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
 use serde::{Deserialize, Serialize};
@@ -88,7 +89,7 @@ pub struct Contact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// The URL pointing to the contact information. MUST be in the format of a URL.
+    /// The URL pointing to the contact information. MUST be in the format of a URI reference (RFC 3986). Relative refs and non-HTTP schemes are allowed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
@@ -127,7 +128,7 @@ pub struct License {
     pub identifier: Option<String>,
 
     /// A URL to the license used for the API.
-    /// MUST be in the format of a URL.
+    /// MUST be in the format of a URI reference (RFC 3986). Relative refs and non-HTTP schemes are allowed.
     /// **Mutually exclusive with `identifier`.**
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -192,7 +193,7 @@ impl ValidateWithContext<Spec> for Info {
 
 impl ValidateWithContext<Spec> for Contact {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_uri(&self.url, ctx, format!("{path}.url"));
         validate_email(&self.email, ctx, format!("{path}.email"));
     }
 }
@@ -211,12 +212,15 @@ impl ValidateWithContext<Spec> for License {
         if let Some(id) = &self.identifier {
             validate_required_string(id, ctx, format!("{path}.identifier"));
         }
-        validate_optional_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_uri(&self.url, ctx, format!("{path}.url"));
     }
 }
 
 impl ValidateWithContext<Spec> for Logo {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // `x-logo` is a Redoc extension, not part of the OAS 3.1 JSON
+        // Schema. Redoc consumes real http(s) URLs, so keep URL-only
+        // validation here (don't lift to uri-reference).
         validate_required_url(&self.url, ctx, format!("{path}.url"));
         validate_optional_url(&self.href, ctx, format!("{path}.href"));
     }

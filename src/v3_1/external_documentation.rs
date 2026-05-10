@@ -1,7 +1,8 @@
 //! References an external resource for extended documentation.
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_required_url};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_uri};
 use crate::v3_1::spec::Spec;
+use crate::validation::Options;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -16,7 +17,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ExternalDocumentation {
     /// **Required** The URL for the target documentation.
-    /// Value MUST be in the format of a URL.
+    /// Value MUST be in the format of a URI reference (RFC 3986). Relative refs and non-HTTP schemes are allowed.
     pub url: String,
 
     /// A short description of the target documentation.
@@ -35,7 +36,17 @@ pub struct ExternalDocumentation {
 
 impl ValidateWithContext<Spec> for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.url, ctx, format!("{path}.url"));
+        // The OAS spec lists `url` as required. When
+        // `IgnoreEmptyExternalDocumentationUrl` is set we silence the
+        // required-string check, but still URI-validate any non-empty
+        // value.
+        if self.url.is_empty() {
+            if !ctx.is_option(Options::IgnoreEmptyExternalDocumentationUrl) {
+                ctx.error(format!("{path}.url"), "must not be empty");
+            }
+        } else {
+            validate_required_uri(&self.url, ctx, format!("{path}.url"));
+        }
     }
 }
 
@@ -107,17 +118,18 @@ mod tests {
             ctx.errors
         );
 
+        // OAS 3.1 schema gives `url` `format: uri-reference`, so
+        // a relative path is structurally fine. Whitespace fails.
         let mut ctx = Context::new(&spec, Options::empty());
         let ed = ExternalDocumentation {
-            url: String::from("invalid-url"),
+            url: String::from("not a uri"),
             description: Some(String::from("Find more info here")),
             ..Default::default()
         };
         ed.validate_with_context(&mut ctx, String::from("externalDocs"));
         assert!(
-            ctx.errors.contains(
-                &"externalDocs.url: must be a valid URL, found `invalid-url`".to_string()
-            ),
+            ctx.errors
+                .contains(&"externalDocs.url: must be a valid URI, found `not a uri`".to_string()),
             "Validation should fail: {:?}",
             ctx.errors
         );
@@ -139,7 +151,7 @@ mod tests {
 
         let mut ctx = Context::new(&spec, Options::only(&Options::IgnoreInvalidUrls));
         let ed = ExternalDocumentation {
-            url: String::from("invalid-url"),
+            url: String::from("not a uri"),
             description: Some(String::from("Find more info here")),
             ..Default::default()
         };

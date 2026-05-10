@@ -62,9 +62,9 @@ pub struct Operation {
     #[serde(rename = "requestBody")]
     pub request_body: Option<RefOr<RequestBody>>,
 
-    /// **Required** by OAS 3.1.2 — but stored as `Option<Responses>` so
-    /// real-world specs that elide the field still deserialize, with the
-    /// missing-field surfaced at validate-time rather than parse-time.
+    /// The OAS 3.1 JSON Schema does not require `responses`; an
+    /// Operation without it is valid. `Option<Responses>` reflects
+    /// that.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub responses: Option<Responses>,
 
@@ -191,10 +191,10 @@ impl ValidateWithContext<Spec> for Operation {
             }
         }
 
-        // Spec: Operation.responses is required.
-        match &self.responses {
-            Some(r) => r.validate_with_context(ctx, format!("{path}.responses")),
-            None => ctx.error(path.clone(), ".responses: required field is missing"),
+        // Per the OAS 3.1 JSON Schema, `responses` is not required on
+        // Operation. When present, validate it.
+        if let Some(responses) = &self.responses {
+            responses.validate_with_context(ctx, format!("{path}.responses"));
         }
 
         if let Some(external_doc) = &self.external_docs {
@@ -244,15 +244,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_responses_required_field_reported() {
+    fn missing_responses_is_accepted() {
+        // Per the OAS 3.1 JSON Schema, `responses` is optional on
+        // Operation. An entirely default Operation validates clean.
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
         Operation::default().validate_with_context(&mut ctx, "op".into());
         assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("op.responses: required field is missing")),
-            "errors: {:?}",
+            ctx.errors.is_empty(),
+            "default Operation should validate clean: {:?}",
             ctx.errors
         );
     }
