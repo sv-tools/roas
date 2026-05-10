@@ -193,20 +193,52 @@ pub struct Spec {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// The Swagger Specification version.
-/// Supports only `2.0` version.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-pub enum Version {
-    /// `2.0` version
-    #[default]
-    #[serde(rename = "2.0")]
-    V2_0,
+/// The Swagger Specification version. Per the Swagger 2.0 spec the
+/// `swagger` field MUST be the literal string `"2.0"` — no other value
+/// is accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version(String);
+
+impl Default for Version {
+    fn default() -> Self {
+        Self("2.0".to_owned())
+    }
+}
+
+impl Version {
+    /// Convenience constructor for the only valid `2.0` value.
+    #[allow(non_snake_case)]
+    pub fn V2_0() -> Self {
+        Self("2.0".to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Display for Version {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Self::V2_0 => write!(f, "2.0"),
+        f.write_str(&self.0)
+    }
+}
+
+impl serde::Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        if s == "2.0" {
+            Ok(Version(s))
+        } else {
+            Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &"the literal Swagger version string `2.0`",
+            ))
         }
     }
 }
@@ -505,7 +537,7 @@ mod tests {
             }))
             .unwrap(),
             Spec {
-                swagger: Version::V2_0,
+                swagger: Version::V2_0(),
                 info: Info {
                     title: String::from("foo"),
                     version: String::from("1"),
@@ -526,7 +558,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string(),
-            "unknown variant ``, expected `2.0`",
+            "invalid value: string \"\", expected the literal Swagger version string `2.0`",
             "empty swagger version",
         );
         assert_eq!(
@@ -539,7 +571,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string(),
-            "unknown variant `foo`, expected `2.0`",
+            "invalid value: string \"foo\", expected the literal Swagger version string `2.0`",
             "foo as swagger version",
         );
     }
@@ -604,7 +636,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<TestVersion>(
                 serde_json::to_string(&Spec {
-                    swagger: Version::V2_0,
+                    swagger: Version::V2_0(),
                     info: Info {
                         title: String::from("foo"),
                         version: String::from("1"),
@@ -794,7 +826,7 @@ mod tests {
 
     #[test]
     fn version_and_scheme_display() {
-        assert_eq!(format!("{}", Version::V2_0), "2.0");
+        assert_eq!(format!("{}", Version::V2_0()), "2.0");
         for (s, expected) in [
             (Scheme::HTTP, "http"),
             (Scheme::HTTPS, "https"),

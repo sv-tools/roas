@@ -269,39 +269,77 @@ pub struct TagGroup {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// The Swagger Specification version.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-pub enum Version {
-    /// `3.0.0` version
-    #[serde(rename = "3.0.0")]
-    V3_0_0,
+/// The OpenAPI Specification version. Per the OAS 3.0 JSON Schema, the
+/// `openapi` field matches `^3\.0\.\d+(-.+)?$` — any 3.0.x patch version,
+/// optionally with a prerelease suffix. The bare `3.0` short alias is
+/// accepted and normalised to `3.0.4`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version(String);
 
-    /// `3.0.1` version
-    #[serde(rename = "3.0.1")]
-    V3_0_1,
+impl Default for Version {
+    fn default() -> Self {
+        Self("3.0.4".to_owned())
+    }
+}
 
-    /// `3.0.2` version
-    #[serde(rename = "3.0.2")]
-    V3_0_2,
+impl Version {
+    /// Convenience constructor for the `3.0.0` value.
+    #[allow(non_snake_case)]
+    pub fn V3_0_0() -> Self {
+        Self("3.0.0".to_owned())
+    }
+    /// Convenience constructor for the `3.0.1` value.
+    #[allow(non_snake_case)]
+    pub fn V3_0_1() -> Self {
+        Self("3.0.1".to_owned())
+    }
+    /// Convenience constructor for the `3.0.2` value.
+    #[allow(non_snake_case)]
+    pub fn V3_0_2() -> Self {
+        Self("3.0.2".to_owned())
+    }
+    /// Convenience constructor for the `3.0.3` value.
+    #[allow(non_snake_case)]
+    pub fn V3_0_3() -> Self {
+        Self("3.0.3".to_owned())
+    }
+    /// Convenience constructor for the canonical `3.0.4` value.
+    #[allow(non_snake_case)]
+    pub fn V3_0_4() -> Self {
+        Self("3.0.4".to_owned())
+    }
 
-    /// `3.0.3` version
-    #[serde(rename = "3.0.3")]
-    V3_0_3,
-
-    /// `3.0.4` version
-    #[default]
-    #[serde(rename = "3.0.4", alias = "3.0")]
-    V3_0_4,
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Display for Version {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Self::V3_0_0 => write!(f, "3.0.0"),
-            Self::V3_0_1 => write!(f, "3.0.1"),
-            Self::V3_0_2 => write!(f, "3.0.2"),
-            Self::V3_0_3 => write!(f, "3.0.3"),
-            Self::V3_0_4 => write!(f, "3.0.4"),
+        f.write_str(&self.0)
+    }
+}
+
+impl serde::Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        if s == "3.0" {
+            return Ok(Version("3.0.4".to_owned()));
+        }
+        let re = lazy_regex::regex!(r"^3\.0\.\d+(-.+)?$");
+        if re.is_match(&s) {
+            Ok(Version(s))
+        } else {
+            Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &"a version matching the OAS 3.0 schema pattern `^3\\.0\\.\\d+(-.+)?$`",
+            ))
         }
     }
 }
@@ -667,20 +705,30 @@ mod tests {
     fn test_version_deserialize() {
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("3.0.0")).unwrap(),
-            Version::V3_0_0,
+            Version::V3_0_0(),
             "correct openapi version",
         );
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("3.0")).unwrap(),
-            Version::V3_0_4,
+            Version::V3_0_4(),
             "3.0 openapi version",
         );
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("foo"))
                 .unwrap_err()
                 .to_string(),
-            "unknown variant `foo`, expected one of `3.0.0`, `3.0.1`, `3.0.2`, `3.0.3`, `3.0`, `3.0.4`",
+            "invalid value: string \"foo\", expected a version matching the OAS 3.0 schema pattern `^3\\.0\\.\\d+(-.+)?$`",
             "foo as openapi version",
+        );
+        assert_eq!(
+            serde_json::from_value::<Version>(serde_json::json!("3.0.99")).unwrap(),
+            Version("3.0.99".to_owned()),
+            "future patch is accepted by the schema regex",
+        );
+        assert_eq!(
+            serde_json::from_value::<Version>(serde_json::json!("3.0.0-rc1")).unwrap(),
+            Version("3.0.0-rc1".to_owned()),
+            "prerelease suffix is accepted by the schema regex",
         );
         assert_eq!(
             serde_json::from_value::<Spec>(serde_json::json!({
@@ -693,7 +741,7 @@ mod tests {
             }))
             .unwrap()
             .openapi,
-            Version::V3_0_4,
+            Version::V3_0_4(),
             "3.0.4 spec.openapi",
         );
         assert_eq!(
@@ -707,7 +755,7 @@ mod tests {
             }))
             .unwrap()
             .openapi,
-            Version::V3_0_4,
+            Version::V3_0_4(),
             "3.0 spec.openapi",
         );
         assert_eq!(
@@ -721,7 +769,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string(),
-            "unknown variant ``, expected one of `3.0.0`, `3.0.1`, `3.0.2`, `3.0.3`, `3.0`, `3.0.4`",
+            "invalid value: string \"\", expected a version matching the OAS 3.0 schema pattern `^3\\.0\\.\\d+(-.+)?$`",
             "empty spec.openapi",
         );
         assert_eq!(
@@ -742,7 +790,7 @@ mod tests {
     #[test]
     fn test_version_serialize() {
         assert_eq!(
-            serde_json::to_string(&Version::V3_0_0).unwrap(),
+            serde_json::to_string(&Version::V3_0_0()).unwrap(),
             r#""3.0.0""#,
         );
         assert_eq!(
@@ -1137,11 +1185,11 @@ mod tests {
 
     #[test]
     fn version_display_all_variants() {
-        assert_eq!(Version::V3_0_0.to_string(), "3.0.0");
-        assert_eq!(Version::V3_0_1.to_string(), "3.0.1");
-        assert_eq!(Version::V3_0_2.to_string(), "3.0.2");
-        assert_eq!(Version::V3_0_3.to_string(), "3.0.3");
-        assert_eq!(Version::V3_0_4.to_string(), "3.0.4");
+        assert_eq!(Version::V3_0_0().to_string(), "3.0.0");
+        assert_eq!(Version::V3_0_1().to_string(), "3.0.1");
+        assert_eq!(Version::V3_0_2().to_string(), "3.0.2");
+        assert_eq!(Version::V3_0_3().to_string(), "3.0.3");
+        assert_eq!(Version::V3_0_4().to_string(), "3.0.4");
     }
 
     #[test]
