@@ -294,19 +294,59 @@ pub struct Spec {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// The Swagger Specification version.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-pub enum Version {
-    /// `3.2.0` version
-    #[default]
-    #[serde(rename = "3.2.0", alias = "3.2")]
-    V3_2_0,
+/// The OpenAPI Specification version. Per the OAS 3.2 JSON Schema, the
+/// `openapi` field matches `^3\.2\.\d+(-.+)?$` — i.e. any 3.2.x patch
+/// version, optionally with a prerelease suffix. We accept `3.2` as a
+/// short alias and normalise it to `3.2.0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version(String);
+
+impl Default for Version {
+    fn default() -> Self {
+        Self("3.2.0".to_owned())
+    }
+}
+
+impl Version {
+    /// Convenience constructor for the canonical `3.2.0` value.
+    #[allow(non_snake_case)]
+    pub fn V3_2_0() -> Self {
+        Self("3.2.0".to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Display for Version {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Self::V3_2_0 => write!(f, "3.2.0"),
+        f.write_str(&self.0)
+    }
+}
+
+impl serde::Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        // Per the spec pattern: `3.2.<digits>` optionally followed by
+        // `-<anything>` for prerelease. Also accept the short alias `3.2`.
+        if s == "3.2" {
+            return Ok(Version("3.2.0".to_owned()));
+        }
+        let re = lazy_regex::regex!(r"^3\.2\.\d+(-.+)?$");
+        if re.is_match(&s) {
+            Ok(Version(s))
+        } else {
+            Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &"`3.2.<patch>` semver, optionally with a `-<prerelease>` suffix",
+            ))
         }
     }
 }
@@ -699,12 +739,18 @@ impl Validate for Spec {
             "#.jsonSchemaDialect".to_owned(),
         );
 
-        // OAS 3.2 `$self` MUST be a URI when present.
+        // OAS 3.2 `$self` MUST be a URI without a fragment (the JSON
+        // Schema enforces `pattern: "^[^#]*$"`).
         crate::common::helpers::validate_optional_uri(
             &self.self_uri,
             &mut ctx,
             "#.$self".to_owned(),
         );
+        if let Some(self_uri) = &self.self_uri
+            && self_uri.contains('#')
+        {
+            ctx.error("#.$self".to_owned(), "MUST NOT contain a fragment (`#`)");
+        }
 
         if let Some(servers) = &self.servers {
             for (i, server) in servers.iter().enumerate() {
@@ -850,21 +896,29 @@ mod tests {
     fn test_version_deserialize() {
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("3.2.0")).unwrap(),
-            Version::V3_2_0,
+            Version::V3_2_0(),
             "correct openapi version",
         );
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("3.2")).unwrap(),
-            Version::V3_2_0,
+            Version::V3_2_0(),
             "`3.2` short alias is accepted",
         );
-        assert_eq!(
+        assert!(
             serde_json::from_value::<Version>(serde_json::json!("foo"))
                 .unwrap_err()
-                .to_string(),
-            "unknown variant `foo`, expected `3.2` or `3.2.0`",
+                .to_string()
+                .contains("expected `3.2.<patch>` semver"),
             "foo as openapi version",
         );
+
+        // Patch versions and prerelease suffixes are accepted per the
+        // schema pattern `^3\\.2\\.\\d+(-.+)?$`.
+        for ok in ["3.2.0", "3.2.1", "3.2.42", "3.2.0-rc1", "3.2.7-beta.3"] {
+            let v: Version = serde_json::from_value(serde_json::json!(ok))
+                .expect("must accept patch/prerelease");
+            assert_eq!(v.as_str(), ok, "round-trip `{ok}`");
+        }
         assert_eq!(
             serde_json::from_value::<Spec>(serde_json::json!({
                 "openapi": "3.2.0",
@@ -876,7 +930,7 @@ mod tests {
             }))
             .unwrap()
             .openapi,
-            Version::V3_2_0,
+            Version::V3_2_0(),
             "3.2.0 spec.openapi",
         );
         assert_eq!(
@@ -887,10 +941,10 @@ mod tests {
             }))
             .unwrap()
             .openapi,
-            Version::V3_2_0,
+            Version::V3_2_0(),
             "`3.2` short alias accepted at Spec level too",
         );
-        assert_eq!(
+        assert!(
             serde_json::from_value::<Spec>(serde_json::json!({
                 "openapi": "",
                 "info": {
@@ -900,8 +954,8 @@ mod tests {
                 "paths": {},
             }))
             .unwrap_err()
-            .to_string(),
-            "unknown variant ``, expected `3.2` or `3.2.0`",
+            .to_string()
+            .contains("expected `3.2.<patch>` semver"),
             "empty spec.openapi",
         );
         assert_eq!(
@@ -922,7 +976,7 @@ mod tests {
     #[test]
     fn test_version_serialize() {
         assert_eq!(
-            serde_json::to_string(&Version::V3_2_0).unwrap(),
+            serde_json::to_string(&Version::V3_2_0()).unwrap(),
             r#""3.2.0""#,
         );
         assert_eq!(
@@ -1382,7 +1436,7 @@ mod tests {
 
     #[test]
     fn version_display_all_variants() {
-        assert_eq!(Version::V3_2_0.to_string(), "3.2.0");
+        assert_eq!(Version::V3_2_0().to_string(), "3.2.0");
     }
 
     #[test]

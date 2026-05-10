@@ -512,19 +512,9 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
 
 impl ValidateWithContext<Spec> for OAuth2Flows {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        // OAS 3.2.0: at least one of implicit / password / clientCredentials
-        // / authorizationCode / deviceAuthorization MUST be defined.
-        if self.implicit.is_none()
-            && self.password.is_none()
-            && self.client_credentials.is_none()
-            && self.authorization_code.is_none()
-            && self.device_authorization.is_none()
-        {
-            ctx.error(
-                path.clone(),
-                "must define at least one of `implicit` / `password` / `clientCredentials` / `authorizationCode` / `deviceAuthorization`",
-            );
-        }
+        // Per the OAS 3.2 JSON Schema, `flows` does not require any of
+        // implicit / password / clientCredentials / authorizationCode /
+        // deviceAuthorization to be set — an empty `flows: {}` is valid.
         if let Some(flow) = &self.implicit {
             flow.validate_with_context(ctx, format!("{path}.implicit"));
         }
@@ -1368,12 +1358,11 @@ mod tests {
             ..Default::default()
         }))
         .validate_with_context(&mut ctx, String::from("securityScheme"));
-        // OAS 3.2.0: OAuthFlows MUST define at least one flow.
+        // Per the OAS 3.2 JSON Schema, an empty `flows: {}` is valid;
+        // no error expected.
         assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("must define at least one")),
-            "expected at-least-one-flow error: {:?}",
+            ctx.errors.is_empty(),
+            "empty flows accepted: {:?}",
             ctx.errors
         );
 
