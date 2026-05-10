@@ -1,5 +1,8 @@
 comment: false
 
+coverage:
+  range: 85..95
+
 component_management:
   default_rules:
     statuses:
