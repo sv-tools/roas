@@ -967,10 +967,12 @@ fn walk_schema_object(
             "items"
             | "not"
             | "additionalProperties"
-            // `additionalItems` is the draft-04 / JSON Schema 2020-12
-            // tuple-tail keyword: a single sub-schema (or boolean
-            // schema). Walking it as Schema applies the schema
-            // rewrites to its body.
+            // `additionalItems` is the draft-04 tuple-tail keyword
+            // — a single sub-schema (or boolean schema) describing
+            // items past the tuple prefix. JSON Schema 2020-12
+            // dropped it in favour of `prefixItems` + `items`; v2
+            // uses the draft-04 form. Walk as Schema so the
+            // rewrites reach its body.
             | "additionalItems"
             | "contains"
             | "propertyNames"
