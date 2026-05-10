@@ -50,8 +50,8 @@ pub struct EmptySchema;
 
 impl Serialize for EmptySchema {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        let map: BTreeMap<String, ()> = BTreeMap::new();
-        map.serialize(ser)
+        use serde::ser::SerializeMap;
+        ser.serialize_map(Some(0))?.end()
     }
 }
 
