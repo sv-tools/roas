@@ -1,8 +1,8 @@
 //! Security Scheme Object
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_optional_url, validate_required_string,
-    validate_required_url,
+    Context, PushError, ValidateWithContext, validate_optional_uri, validate_required_string,
+    validate_required_uri,
 };
 use crate::v3_1::spec::Spec;
 use serde::{Deserialize, Serialize};
@@ -472,44 +472,44 @@ impl ValidateWithContext<Spec> for OAuth2Flows {
 
 impl ValidateWithContext<Spec> for ImplicitOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(
+        validate_required_uri(
             &self.authorization_url,
             ctx,
             format!("{path}.authorizationUrl"),
         );
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for PasswordOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for ClientCredentialsOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for AuthorizationCodeOAuth2Flow {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(
+        validate_required_uri(
             &self.authorization_url,
             ctx,
             format!("{path}.authorizationUrl"),
         );
-        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
-        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+        validate_required_uri(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_uri(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
     }
 }
 
 impl ValidateWithContext<Spec> for OpenIdConnectSecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(
+        validate_required_uri(
             &self.open_id_connect_url,
             ctx,
             format!("{path}.openIdConnectUrl"),
@@ -1294,8 +1294,8 @@ mod tests {
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 implicit: Some(ImplicitOAuth2Flow {
-                    authorization_url: String::from("foo"),
-                    refresh_url: Some(String::from("bar")),
+                    authorization_url: String::from("not a uri"),
+                    refresh_url: Some(String::from("also not")),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1315,8 +1315,8 @@ mod tests {
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 password: Some(PasswordOAuth2Flow {
-                    token_url: String::from("foo"),
-                    refresh_url: Some(String::from("bar")),
+                    token_url: String::from("not a uri"),
+                    refresh_url: Some(String::from("also not")),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1336,8 +1336,8 @@ mod tests {
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 client_credentials: Some(ClientCredentialsOAuth2Flow {
-                    token_url: String::from("foo"),
-                    refresh_url: Some(String::from("bar")),
+                    token_url: String::from("not a uri"),
+                    refresh_url: Some(String::from("also not")),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1357,9 +1357,9 @@ mod tests {
         SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
             flows: OAuth2Flows {
                 authorization_code: Some(AuthorizationCodeOAuth2Flow {
-                    authorization_url: String::from("xyz"),
-                    token_url: String::from("foo"),
-                    refresh_url: Some(String::from("bar")),
+                    authorization_url: String::from("third bad"),
+                    token_url: String::from("not a uri"),
+                    refresh_url: Some(String::from("also not")),
                     ..Default::default()
                 }),
                 ..Default::default()

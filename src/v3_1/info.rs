@@ -1,8 +1,8 @@
 //! Provides metadata about the API.
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_email, validate_optional_url,
-    validate_required_string, validate_required_url,
+    Context, PushError, ValidateWithContext, validate_email, validate_optional_uri,
+    validate_required_string, validate_required_uri,
 };
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
@@ -192,7 +192,7 @@ impl ValidateWithContext<Spec> for Info {
 
 impl ValidateWithContext<Spec> for Contact {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_optional_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_uri(&self.url, ctx, format!("{path}.url"));
         validate_email(&self.email, ctx, format!("{path}.email"));
     }
 }
@@ -211,14 +211,14 @@ impl ValidateWithContext<Spec> for License {
         if let Some(id) = &self.identifier {
             validate_required_string(id, ctx, format!("{path}.identifier"));
         }
-        validate_optional_url(&self.url, ctx, format!("{path}.url"));
+        validate_optional_uri(&self.url, ctx, format!("{path}.url"));
     }
 }
 
 impl ValidateWithContext<Spec> for Logo {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_url(&self.url, ctx, format!("{path}.url"));
-        validate_optional_url(&self.href, ctx, format!("{path}.href"));
+        validate_required_uri(&self.url, ctx, format!("{path}.url"));
+        validate_optional_uri(&self.href, ctx, format!("{path}.href"));
     }
 }
 

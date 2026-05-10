@@ -308,29 +308,67 @@ pub struct TagGroup {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// The Swagger Specification version.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-pub enum Version {
-    /// `3.1.0` version
-    #[serde(rename = "3.1.0")]
-    V3_1_0,
+/// The OpenAPI Specification version. Per the OAS 3.1 JSON Schema, the
+/// `openapi` field matches `^3\.1\.\d+(-.+)?$` — any 3.1.x patch version,
+/// optionally with a prerelease suffix. The bare `3.1` short alias is
+/// accepted and normalised to `3.1.2`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version(String);
 
-    /// `3.1.1` version
-    #[serde(rename = "3.1.1")]
-    V3_1_1,
+impl Default for Version {
+    fn default() -> Self {
+        Self("3.1.2".to_owned())
+    }
+}
 
-    /// `3.1.2` version
-    #[default]
-    #[serde(rename = "3.1.2", alias = "3.1")]
-    V3_1_2,
+impl Version {
+    /// Convenience constructor for the `3.1.0` value.
+    #[allow(non_snake_case)]
+    pub fn V3_1_0() -> Self {
+        Self("3.1.0".to_owned())
+    }
+    /// Convenience constructor for the `3.1.1` value.
+    #[allow(non_snake_case)]
+    pub fn V3_1_1() -> Self {
+        Self("3.1.1".to_owned())
+    }
+    /// Convenience constructor for the canonical `3.1.2` value.
+    #[allow(non_snake_case)]
+    pub fn V3_1_2() -> Self {
+        Self("3.1.2".to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Display for Version {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Self::V3_1_0 => write!(f, "3.1.0"),
-            Self::V3_1_1 => write!(f, "3.1.1"),
-            Self::V3_1_2 => write!(f, "3.1.2"),
+        f.write_str(&self.0)
+    }
+}
+
+impl serde::Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        if s == "3.1" {
+            return Ok(Version("3.1.2".to_owned()));
+        }
+        let re = lazy_regex::regex!(r"^3\.1\.\d+(-.+)?$");
+        if re.is_match(&s) {
+            Ok(Version(s))
+        } else {
+            Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &"`3.1.<patch>` semver, optionally with a `-<prerelease>` suffix",
+            ))
         }
     }
 }
@@ -855,21 +893,27 @@ mod tests {
     fn test_version_deserialize() {
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("3.1.0")).unwrap(),
-            Version::V3_1_0,
+            Version::V3_1_0(),
             "correct openapi version",
         );
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("3.1")).unwrap(),
-            Version::V3_1_2,
+            Version::V3_1_2(),
             "alias to latest `3.1.X` version",
         );
-        assert_eq!(
+        assert!(
             serde_json::from_value::<Version>(serde_json::json!("foo"))
                 .unwrap_err()
-                .to_string(),
-            "unknown variant `foo`, expected one of `3.1.0`, `3.1.1`, `3.1`, `3.1.2`",
+                .to_string()
+                .contains("expected `3.1.<patch>` semver"),
             "foo as openapi version",
         );
+
+        // Patch versions and prerelease suffixes per the schema pattern.
+        for ok in ["3.1.0", "3.1.5", "3.1.42", "3.1.0-rc1", "3.1.7-beta.3"] {
+            let v: Version = serde_json::from_value(serde_json::json!(ok)).expect("must accept");
+            assert_eq!(v.as_str(), ok, "round-trip `{ok}`");
+        }
         assert_eq!(
             serde_json::from_value::<Spec>(serde_json::json!({
                 "openapi": "3.1.2",
@@ -881,7 +925,7 @@ mod tests {
             }))
             .unwrap()
             .openapi,
-            Version::V3_1_2,
+            Version::V3_1_2(),
             "3.1.2 spec.openapi",
         );
         assert_eq!(
@@ -892,10 +936,10 @@ mod tests {
             }))
             .unwrap()
             .openapi,
-            Version::V3_1_2,
+            Version::V3_1_2(),
             "non-semver `3.1` must be rejected at the Spec level too",
         );
-        assert_eq!(
+        assert!(
             serde_json::from_value::<Spec>(serde_json::json!({
                 "openapi": "",
                 "info": {
@@ -905,8 +949,8 @@ mod tests {
                 "paths": {},
             }))
             .unwrap_err()
-            .to_string(),
-            "unknown variant ``, expected one of `3.1.0`, `3.1.1`, `3.1`, `3.1.2`",
+            .to_string()
+            .contains("expected `3.1.<patch>` semver"),
             "empty spec.openapi",
         );
         assert_eq!(
@@ -927,7 +971,7 @@ mod tests {
     #[test]
     fn test_version_serialize() {
         assert_eq!(
-            serde_json::to_string(&Version::V3_1_0).unwrap(),
+            serde_json::to_string(&Version::V3_1_0()).unwrap(),
             r#""3.1.0""#,
         );
         assert_eq!(
@@ -1386,9 +1430,9 @@ mod tests {
 
     #[test]
     fn version_display_all_variants() {
-        assert_eq!(Version::V3_1_0.to_string(), "3.1.0");
-        assert_eq!(Version::V3_1_1.to_string(), "3.1.1");
-        assert_eq!(Version::V3_1_2.to_string(), "3.1.2");
+        assert_eq!(Version::V3_1_0().to_string(), "3.1.0");
+        assert_eq!(Version::V3_1_1().to_string(), "3.1.1");
+        assert_eq!(Version::V3_1_2().to_string(), "3.1.2");
     }
 
     #[test]

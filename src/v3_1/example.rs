@@ -1,6 +1,6 @@
 //! Example object.
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_url};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_uri};
 use crate::v3_1::spec::Spec;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -49,7 +49,7 @@ impl ValidateWithContext<Spec> for Example {
                 "value and externalValue are mutually exclusive",
             );
         }
-        validate_optional_url(&self.external_value, ctx, format!("{path}.externalValue"));
+        validate_optional_uri(&self.external_value, ctx, format!("{path}.externalValue"));
     }
 }
 
@@ -78,16 +78,32 @@ mod tests {
     }
 
     #[test]
-    fn external_value_url_validated() {
+    fn external_value_uri_reference_validated() {
+        // Per the OAS 3.1 JSON Schema, `externalValue` is `format:
+        // uri-reference`: relative paths and non-HTTP schemes pass while
+        // whitespace / control-char garbage fails.
         let spec = Spec::default();
+        for ok in ["./fixtures/example.json", "urn:example:my-example"] {
+            let mut ctx = Context::new(&spec, Options::new());
+            Example {
+                external_value: Some(ok.to_owned()),
+                ..Default::default()
+            }
+            .validate_with_context(&mut ctx, "ex".into());
+            assert!(
+                ctx.errors.is_empty(),
+                "uri-reference `{ok}` should pass: {:?}",
+                ctx.errors
+            );
+        }
         let mut ctx = Context::new(&spec, Options::new());
         Example {
-            external_value: Some("not-a-url".into()),
+            external_value: Some("not a uri".into()),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
             "errors: {:?}",
             ctx.errors
         );
