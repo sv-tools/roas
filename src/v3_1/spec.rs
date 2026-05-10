@@ -321,7 +321,7 @@ pub enum Version {
 
     /// `3.1.2` version
     #[default]
-    #[serde(rename = "3.1.2")]
+    #[serde(rename = "3.1.2", alias = "3.1")]
     V3_1_2,
 }
 
@@ -858,15 +858,16 @@ mod tests {
             Version::V3_1_0,
             "correct openapi version",
         );
-        assert!(
-            serde_json::from_value::<Version>(serde_json::json!("3.1")).is_err(),
-            "non-semver `3.1` must be rejected",
+        assert_eq!(
+            serde_json::from_value::<Version>(serde_json::json!("3.1")).unwrap(),
+            Version::V3_1_2,
+            "alias to latest `3.1.X` version",
         );
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("foo"))
                 .unwrap_err()
                 .to_string(),
-            "unknown variant `foo`, expected one of `3.1.0`, `3.1.1`, `3.1.2`",
+            "unknown variant `foo`, expected one of `3.1.0`, `3.1.1`, `3.1`, `3.1.2`",
             "foo as openapi version",
         );
         assert_eq!(
@@ -883,13 +884,15 @@ mod tests {
             Version::V3_1_2,
             "3.1.2 spec.openapi",
         );
-        assert!(
+        assert_eq!(
             serde_json::from_value::<Spec>(serde_json::json!({
                 "openapi": "3.1",
                 "info": {"title": "foo", "version": "1"},
                 "paths": {},
             }))
-            .is_err(),
+            .unwrap()
+            .openapi,
+            Version::V3_1_2,
             "non-semver `3.1` must be rejected at the Spec level too",
         );
         assert_eq!(
@@ -903,7 +906,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string(),
-            "unknown variant ``, expected one of `3.1.0`, `3.1.1`, `3.1.2`",
+            "unknown variant ``, expected one of `3.1.0`, `3.1.1`, `3.1`, `3.1.2`",
             "empty spec.openapi",
         );
         assert_eq!(

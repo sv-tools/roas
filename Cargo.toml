@@ -1,6 +1,6 @@
 [package]
 name = "roas"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 description = "Rust OpenAPI Specification"
@@ -17,6 +17,7 @@ include = [
     "LICENSE-APACHE",
     "LICENSE-MIT",
 ]
+publish=true
 
 [features]
 default = ["v3_1"]
