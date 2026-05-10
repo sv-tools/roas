@@ -38,6 +38,11 @@ pub struct Server {
     /// Variable substitutions will be made when a variable is named in {brackets}.
     pub url: String,
 
+    /// Short, human-readable name for this server (added in OAS 3.2).
+    /// Useful for UI selection of among multiple servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
     /// An optional string describing the host designated by the URL.
     /// [CommonMark](https://spec.commonmark.org)  syntax MAY be used for rich text representation.
     #[serde(skip_serializing_if = "Option::is_none")]

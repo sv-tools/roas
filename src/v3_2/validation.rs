@@ -319,6 +319,10 @@ pub fn validate_security_requirements(
                                 .authorization_code
                                 .as_ref()
                                 .map(|f| f.scopes.contains_key(scope)),
+                            o.flows
+                                .device_authorization
+                                .as_ref()
+                                .map(|f| f.scopes.contains_key(scope)),
                         ]
                         .into_iter()
                         .flatten()
@@ -690,6 +694,7 @@ mod tests {
             RefOr::new_item(SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
                 flows,
                 description: None,
+                oauth2_metadata_url: None,
                 extensions: None,
             }))),
         );

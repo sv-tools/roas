@@ -178,6 +178,9 @@ impl ValidateWithContext<Spec> for Components {
                     if let Some(flow) = &oauth2.flows.authorization_code {
                         check_unused(&flow.scopes);
                     }
+                    if let Some(flow) = &oauth2.flows.device_authorization {
+                        check_unused(&flow.scopes);
+                    }
                 }
             }
         }
@@ -370,9 +373,11 @@ mod tests {
                             scopes: BTreeMap::from([("delete".to_owned(), "Delete".to_owned())]),
                             extensions: None,
                         }),
+                        device_authorization: None,
                         extensions: None,
                     },
                     description: None,
+                    oauth2_metadata_url: None,
                     extensions: None,
                 })),
             )),

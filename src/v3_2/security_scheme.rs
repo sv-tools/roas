@@ -210,6 +210,12 @@ pub struct OAuth2SecurityScheme {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
+    /// URL of the OAuth 2.0 Authorization Server Metadata document
+    /// (RFC 8414), added in OAS 3.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "oauth2MetadataUrl")]
+    pub oauth2_metadata_url: Option<String>,
+
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
@@ -241,6 +247,12 @@ pub struct OAuth2Flows {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "authorizationCode")]
     pub authorization_code: Option<AuthorizationCodeOAuth2Flow>,
+
+    /// Configuration for the OAuth 2.0 Device Authorization Grant
+    /// (RFC 8628). Added in OAS 3.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "deviceAuthorization")]
+    pub device_authorization: Option<DeviceAuthorizationOAuth2Flow>,
 
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -329,6 +341,33 @@ pub struct ClientCredentialsOAuth2Flow {
     /// This object MAY be extended with Specification Extensions.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
     /// The value can be null, a primitive, an array or an object.
+    #[serde(flatten)]
+    #[serde(with = "crate::common::extensions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// Configuration details for the OAuth 2.0 Device Authorization Grant
+/// (RFC 8628). Added in OAS 3.2.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct DeviceAuthorizationOAuth2Flow {
+    /// **Required** The device-authorization endpoint URL.
+    #[serde(rename = "deviceAuthorizationUrl")]
+    pub device_authorization_url: String,
+
+    /// **Required** The token URL.
+    #[serde(rename = "tokenUrl")]
+    pub token_url: String,
+
+    /// The URL to be used for obtaining refresh tokens. MUST be a URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "refreshUrl")]
+    pub refresh_url: Option<String>,
+
+    /// **Required** The available scopes for the OAuth2 security scheme.
+    pub scopes: BTreeMap<String, String>,
+
+    /// `^x-` Specification Extensions.
     #[serde(flatten)]
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -438,21 +477,27 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         self.flows
             .validate_with_context(ctx, format!("{path}.flow"));
+        validate_optional_url(
+            &self.oauth2_metadata_url,
+            ctx,
+            format!("{path}.oauth2MetadataUrl"),
+        );
     }
 }
 
 impl ValidateWithContext<Spec> for OAuth2Flows {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        // Spec: at least one of implicit / password / clientCredentials /
-        // authorizationCode MUST be defined on an OAuthFlows Object.
+        // OAS 3.2.0: at least one of implicit / password / clientCredentials
+        // / authorizationCode / deviceAuthorization MUST be defined.
         if self.implicit.is_none()
             && self.password.is_none()
             && self.client_credentials.is_none()
             && self.authorization_code.is_none()
+            && self.device_authorization.is_none()
         {
             ctx.error(
                 path.clone(),
-                "must define at least one of `implicit` / `password` / `clientCredentials` / `authorizationCode`",
+                "must define at least one of `implicit` / `password` / `clientCredentials` / `authorizationCode` / `deviceAuthorization`",
             );
         }
         if let Some(flow) = &self.implicit {
@@ -466,6 +511,9 @@ impl ValidateWithContext<Spec> for OAuth2Flows {
         }
         if let Some(flow) = &self.authorization_code {
             flow.validate_with_context(ctx, format!("{path}.authorizationCode"));
+        }
+        if let Some(flow) = &self.device_authorization {
+            flow.validate_with_context(ctx, format!("{path}.deviceAuthorization"));
         }
     }
 }
@@ -501,6 +549,18 @@ impl ValidateWithContext<Spec> for AuthorizationCodeOAuth2Flow {
             &self.authorization_url,
             ctx,
             format!("{path}.authorizationUrl"),
+        );
+        validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
+        validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
+    }
+}
+
+impl ValidateWithContext<Spec> for DeviceAuthorizationOAuth2Flow {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        validate_required_url(
+            &self.device_authorization_url,
+            ctx,
+            format!("{path}.deviceAuthorizationUrl"),
         );
         validate_required_url(&self.token_url, ctx, format!("{path}.tokenUrl"));
         validate_optional_url(&self.refresh_url, ctx, format!("{path}.refreshUrl"));
@@ -1033,6 +1093,7 @@ mod tests {
                     ..Default::default()
                 },
                 description: Some(String::from("A short description for security scheme.")),
+                oauth2_metadata_url: None,
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert(
