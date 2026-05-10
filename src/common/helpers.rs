@@ -156,15 +156,20 @@ pub fn validate_optional_uri<T>(uri: &Option<String>, ctx: &mut Context<T>, path
         ctx.error(path, "must be a valid URI, found ``");
         return;
     }
-    // Reject obviously broken forms: any ASCII whitespace or control
-    // character (C0 0x00..0x1F or DEL 0x7F). The full RFC 3986 grammar
-    // is wide enough that everything else is best left to a parser.
-    if uri
-        .bytes()
-        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-    {
+    if has_uri_unsafe_bytes(uri) {
         ctx.error(path, format_args!("must be a valid URI, found `{uri}`"));
     }
+}
+
+/// Returns `true` if `s` contains any byte that an RFC 3986 URI cannot
+/// hold — ASCII whitespace or a C0/DEL control char. This is the shared
+/// "obviously broken" predicate used by `validate_optional_uri` /
+/// `validate_required_uri` and by callers (e.g. XML namespace
+/// validators) that want to skip a follow-up scheme check when the URI
+/// validator has already flagged the value.
+pub fn has_uri_unsafe_bytes(s: &str) -> bool {
+    s.bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
 }
 
 /// Required-URI validator: errors if the value is empty and otherwise
@@ -180,10 +185,7 @@ pub fn validate_required_uri<T>(uri: &String, ctx: &mut Context<T>, path: String
     if uri.is_empty() || ctx.is_option(Options::IgnoreInvalidUrls) {
         return;
     }
-    if uri
-        .bytes()
-        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-    {
+    if has_uri_unsafe_bytes(uri) {
         ctx.error(path, format_args!("must be a valid URI, found `{uri}`"));
     }
 }

@@ -1,6 +1,8 @@
 //! XML Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_uri};
+use crate::common::helpers::{
+    Context, PushError, ValidateWithContext, has_uri_unsafe_bytes, validate_optional_uri,
+};
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
 use serde::{Deserialize, Serialize};
@@ -124,9 +126,7 @@ impl ValidateWithContext<Spec> for XML {
         if let Some(ns) = &self.namespace
             && !ns.is_empty()
             && !ctx.is_option(Options::IgnoreInvalidUrls)
-            && !ns
-                .bytes()
-                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+            && !has_uri_unsafe_bytes(ns)
         {
             let mut chars = ns.chars();
             let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
