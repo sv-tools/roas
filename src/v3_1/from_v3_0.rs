@@ -172,20 +172,15 @@ fn walk_generic_object(obj: &mut Map<String, Value>) {
 }
 
 /// `type: <T>` + `nullable: true` → `type: [<T>, "null"]`, and a bare
-/// `nullable: true` with no `type` becomes `type: ["null"]`. A
-/// `nullable: false` (or absent) is left unchanged but the redundant
+/// `nullable: true` with no `type` becomes `type: ["null"]`.
+/// `nullable: false` (or absent) is a no-op except that the redundant
 /// `nullable` field is dropped — v3.1 has no such keyword.
+///
+/// The input arrives via `serde_json::to_value(&v3_0::Spec)`, so
+/// `nullable` is always either absent or a JSON boolean — anything
+/// else would have failed v3.0 deserialization upstream.
 fn normalize_nullable(obj: &mut Map<String, Value>) {
-    let nullable = match obj.remove("nullable") {
-        Some(Value::Bool(b)) => b,
-        Some(other) => {
-            // Non-bool value at `nullable` — restore and bail; the v3.1
-            // schema deserializer will surface it as an unknown field.
-            obj.insert("nullable".into(), other);
-            return;
-        }
-        None => return,
-    };
+    let nullable = matches!(obj.remove("nullable"), Some(Value::Bool(true)));
     if !nullable {
         return;
     }
@@ -335,7 +330,11 @@ fn rewrite_content_map(content: &mut Map<String, Value>) {
         let Some(schema) = media.get_mut("schema") else {
             continue;
         };
-        if mime == "application/octet-stream" {
+        // OAS media-type keys may carry parameters (`application/
+        // octet-stream; charset=binary`); compare against just the
+        // `type/subtype` head.
+        let mime_main = mime_main_type(mime);
+        if mime_main == "application/octet-stream" {
             // `{type: string, format: binary}` → `{}` (the empty
             // schema, JSON Schema 2020-12's "matches anything"
             // idiom). Routes through `Schema::Empty(EmptySchema)`
@@ -353,12 +352,18 @@ fn rewrite_content_map(content: &mut Map<String, Value>) {
             {
                 *schema = Value::Object(Map::new());
             }
-        } else if is_multipart_mime(mime)
+        } else if is_multipart_mime(mime_main)
             && let Value::Object(s) = schema
         {
             rewrite_string_binary_subschemas(s);
         }
     }
+}
+
+/// Return just the `type/subtype` portion of a media-type header
+/// value, stripping any RFC-7231 parameters after the first `;`.
+fn mime_main_type(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or(mime).trim()
 }
 
 fn is_multipart_mime(mime: &str) -> bool {
@@ -1041,6 +1046,70 @@ mod tests {
             multipart_field.get("contentMediaType").is_none(),
             "example payload must not gain contentMediaType"
         );
+    }
+
+    #[test]
+    fn octet_stream_with_media_type_parameters_is_rewritten() {
+        // RFC 7231 lets a media-type carry parameters
+        // (`application/octet-stream; charset=binary`). The rewrite
+        // must compare against the `type/subtype` head, not the full
+        // string, so parameterised keys still get the `{}` migration.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/octet-stream; charset=binary": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let schema = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["application/octet-stream; charset=binary"]
+            ["schema"];
+        assert!(schema.is_object());
+        assert!(schema.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn multipart_with_media_type_parameters_rewrites_binary_props() {
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data; boundary=ABCD": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "file": {"type": "string", "format": "binary"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let file = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["multipart/form-data; boundary=ABCD"]
+            ["schema"]["properties"]["file"];
+        assert_eq!(file["type"], "string");
+        assert_eq!(file["contentMediaType"], "application/octet-stream");
+        assert!(file.get("format").is_none());
     }
 
     #[test]
