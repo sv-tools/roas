@@ -2431,6 +2431,18 @@ mod tests {
     }
 
     #[test]
+    fn schema_from_empty_schema_dispatches_to_empty_variant() {
+        let schema: Schema = EmptySchema.into();
+        assert_eq!(schema, Schema::Empty(EmptySchema));
+        let schema: Schema = Schema::from(EmptySchema);
+        assert_eq!(schema, Schema::Empty(EmptySchema));
+        assert_eq!(
+            serde_json::to_value(&schema).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
     fn empty_schema_round_trip_via_string_is_stable() {
         let original = EmptySchema;
         let encoded = serde_json::to_string(&original).unwrap();

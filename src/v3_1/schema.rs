@@ -2533,6 +2533,23 @@ mod tests {
     }
 
     #[test]
+    fn schema_from_empty_schema_dispatches_to_empty_variant() {
+        // `impl From<EmptySchema> for Schema` is the constructor
+        // path used when callers want to build `Schema::Empty`
+        // without naming the variant directly. Make sure the impl
+        // exists and produces the right variant.
+        let schema: Schema = EmptySchema.into();
+        assert_eq!(schema, Schema::Empty(EmptySchema));
+        let schema: Schema = Schema::from(EmptySchema);
+        assert_eq!(schema, Schema::Empty(EmptySchema));
+        // Round-trips back to `{}` through `Schema`'s untagged enum.
+        assert_eq!(
+            serde_json::to_value(&schema).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
     fn empty_schema_round_trip_via_string_is_stable() {
         let original = EmptySchema;
         let encoded = serde_json::to_string(&original).unwrap();
