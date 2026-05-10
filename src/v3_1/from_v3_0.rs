@@ -466,8 +466,13 @@ fn mime_main_type(mime: &str) -> &str {
 
 fn is_multipart_mime(mime: &str) -> bool {
     // Type/subtype tokens are ASCII-case-insensitive per RFC 7231.
+    // `mime` ultimately comes from arbitrary user JSON keys and may
+    // contain non-ASCII / multi-byte UTF-8, so use the non-panicking
+    // `str::get` form rather than slicing at an arbitrary byte
+    // offset.
     let prefix = "multipart/";
-    mime.len() >= prefix.len() && mime[..prefix.len()].eq_ignore_ascii_case(prefix)
+    mime.get(..prefix.len())
+        .is_some_and(|h| h.eq_ignore_ascii_case(prefix))
 }
 
 fn is_string_binary(schema: &Map<String, Value>) -> bool {
@@ -1170,6 +1175,39 @@ mod tests {
             multipart_field.get("contentMediaType").is_none(),
             "example payload must not gain contentMediaType"
         );
+    }
+
+    #[test]
+    fn non_ascii_media_type_key_does_not_panic() {
+        // `is_multipart_mime` previously sliced the key at a
+        // hard-coded byte offset (`mime[..prefix.len()]`). Map keys
+        // can hold arbitrary UTF-8, so a non-ASCII / multi-byte head
+        // would panic. Use `str::get` instead — the conversion must
+        // tolerate (and pass through) arbitrary keys.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "🦀/binary": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        // Key is preserved verbatim and not rewritten — neither
+        // multipart nor octet-stream applies.
+        let schema = &value["paths"]["/x"]["post"]["requestBody"]["content"]["🦀/binary"]["schema"];
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["format"], "binary");
     }
 
     #[test]
