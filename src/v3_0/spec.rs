@@ -910,6 +910,53 @@ mod tests {
     }
 
     #[test]
+    fn test_version_validate_rejects_invalid() {
+        // The inner `String` is private, so external code can't build
+        // a malformed `Version`. Inside the module we can — exercise
+        // the rejection branch so the contract is locked in.
+        let invalid = Version("garbage".to_owned());
+        let err = invalid.validate(Options::new()).unwrap_err();
+        assert_eq!(err.errors.len(), 1);
+        assert!(
+            err.errors[0].contains("#.openapi") && err.errors[0].contains("3\\.0\\.\\d+(-.+)?$"),
+            "validate error names the field and the schema regex: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_spec_validate_surfaces_invalid_openapi() {
+        let mut spec = Spec {
+            openapi: Version("3.5.0".to_owned()),
+            ..Default::default()
+        };
+        // Make every other field acceptable so the only error is the
+        // openapi-pattern violation we're forcing.
+        spec.info.title = "test".to_owned();
+        spec.info.version = "1".to_owned();
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("#.openapi") && e.contains("3\\.0\\.\\d+(-.+)?$")),
+            "Spec::validate surfaces the openapi error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_version_try_from_string_normalizes_short_alias() {
+        // The move-friendly `TryFrom<String>` path special-cases the
+        // bare `3.0` alias and yields the canonical `3.0.4` value.
+        let v: Version = "3.0".to_owned().try_into().unwrap();
+        assert_eq!(v, Version::V3_0_4());
+        // And rejects garbage by moving the input into the error
+        // (no extra allocation).
+        let err: InvalidVersion = Version::try_from("nope".to_owned()).unwrap_err();
+        assert_eq!(err.0, "nope");
+    }
+
+    #[test]
     fn test_version_parse_programmatically() {
         use std::str::FromStr;
         // FromStr accepts schema-conformant patch/prerelease values

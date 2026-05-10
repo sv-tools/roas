@@ -761,6 +761,51 @@ mod tests {
     }
 
     #[test]
+    fn test_swagger_version_validate_rejects_invalid() {
+        // Inner `String` is private to outside callers, so the only
+        // way to reach the rejection branch is from inside the module.
+        let invalid = Version("3.0".to_owned());
+        let err = invalid.validate(Options::new()).unwrap_err();
+        assert_eq!(err.errors.len(), 1);
+        assert!(
+            err.errors[0].contains("#.swagger") && err.errors[0].contains("`2.0`"),
+            "validate error names the field and the literal: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_spec_validate_surfaces_invalid_swagger() {
+        let mut spec = Spec {
+            swagger: Version("3.0".to_owned()),
+            info: Info {
+                title: "test".to_owned(),
+                version: "1".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Cargo `..Default::default()` already sets paths/etc. to defaults.
+        let _ = &mut spec;
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("#.swagger") && e.contains("`2.0`")),
+            "Spec::validate surfaces the swagger error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_swagger_version_try_from_string_rejects_garbage() {
+        // The owned-input `TryFrom<String>` path moves the offending
+        // string straight into `InvalidVersion`, no clone.
+        let err: InvalidVersion = Version::try_from("nope".to_owned()).unwrap_err();
+        assert_eq!(err.0, "nope");
+    }
+
+    #[test]
     fn test_swagger_version_parse_programmatically() {
         use std::str::FromStr;
         // The literal string round-trips through FromStr / TryFrom.

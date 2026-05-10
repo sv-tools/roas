@@ -1081,6 +1081,44 @@ mod tests {
     }
 
     #[test]
+    fn test_version_validate_rejects_invalid() {
+        let invalid = Version("garbage".to_owned());
+        let err = invalid.validate(Options::new()).unwrap_err();
+        assert_eq!(err.errors.len(), 1);
+        assert!(
+            err.errors[0].contains("#.openapi") && err.errors[0].contains("3.2.<patch>"),
+            "validate error names the field and the schema description: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_spec_validate_surfaces_invalid_openapi() {
+        let mut spec = Spec {
+            openapi: Version("3.5.0".to_owned()),
+            ..Default::default()
+        };
+        spec.info.title = "test".to_owned();
+        spec.info.version = "1".to_owned();
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("#.openapi") && e.contains("3.2.<patch>")),
+            "Spec::validate surfaces the openapi error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_version_try_from_string_normalizes_short_alias() {
+        let v: Version = "3.2".to_owned().try_into().unwrap();
+        assert_eq!(v, Version::V3_2_0());
+        let err: InvalidVersion = Version::try_from("nope".to_owned()).unwrap_err();
+        assert_eq!(err.0, "nope");
+    }
+
+    #[test]
     fn test_version_parse_programmatically() {
         use std::str::FromStr;
         assert_eq!(
