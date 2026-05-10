@@ -34,8 +34,10 @@ fn is_response_code_key(key: &str) -> bool {
 /// The `default` MAY be used as a default response object for all HTTP codes that are
 /// not covered individually by the specification.
 ///
-/// The `Responses Object` MUST contain at least one response code,
-/// and it SHOULD be the response for a successful operation call.
+/// Per the OAS 3.1 JSON Schema's `anyOf`, a `Responses Object` is valid
+/// when it has either a `default` entry or at least one status-code /
+/// wildcard entry; only an entirely empty object is rejected. The spec
+/// text further recommends covering a successful operation call.
 ///
 /// Specification example:
 /// ```yaml
