@@ -167,16 +167,16 @@ pub fn validate_optional_uri<T>(uri: &Option<String>, ctx: &mut Context<T>, path
     }
 }
 
-/// Required-URI validator: errors if the value is empty (unless the
-/// `IgnoreEmptyExternalDocumentationUrl` toggle applies in the caller's
-/// context — that's left to the caller) and otherwise enforces the same
-/// `validate_optional_uri` rules. Used for fields the OAS 3.2 JSON
-/// Schema marks as `format: uri-reference`, where any RFC 3986 URI
-/// reference is allowed (including relative refs and non-HTTP schemes).
+/// Required-URI validator: errors if the value is empty and otherwise
+/// enforces the same `validate_optional_uri` rules. Used for fields the
+/// OAS 3.2 JSON Schema marks as `format: uri-reference`, where any
+/// RFC 3986 URI reference is allowed (including relative refs and
+/// non-HTTP schemes). Callers that want to silence empty values for a
+/// specific field should gate the call on the relevant `Options::*`
+/// toggle themselves — this helper does not bake in any field-specific
+/// option.
 pub fn validate_required_uri<T>(uri: &String, ctx: &mut Context<T>, path: String) {
-    if !ctx.is_option(Options::IgnoreEmptyExternalDocumentationUrl) {
-        validate_required_string(uri, ctx, path.clone());
-    }
+    validate_required_string(uri, ctx, path.clone());
     if uri.is_empty() || ctx.is_option(Options::IgnoreInvalidUrls) {
         return;
     }

@@ -1,7 +1,8 @@
 //! References an external resource for extended documentation.
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_required_uri};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_uri};
 use crate::v3_2::spec::Spec;
+use crate::validation::Options;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -35,7 +36,17 @@ pub struct ExternalDocumentation {
 
 impl ValidateWithContext<Spec> for ExternalDocumentation {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
-        validate_required_uri(&self.url, ctx, format!("{path}.url"));
+        // The OAS spec lists `url` as required. When
+        // `IgnoreEmptyExternalDocumentationUrl` is set we silence the
+        // required-string check, but still URI-validate any non-empty
+        // value (whitespace etc. would still be reported).
+        if self.url.is_empty() {
+            if !ctx.is_option(Options::IgnoreEmptyExternalDocumentationUrl) {
+                ctx.error(format!("{path}.url"), "must not be empty");
+            }
+        } else {
+            validate_required_uri(&self.url, ctx, format!("{path}.url"));
+        }
     }
 }
 

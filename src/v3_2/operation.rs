@@ -62,9 +62,9 @@ pub struct Operation {
     #[serde(rename = "requestBody")]
     pub request_body: Option<RefOr<RequestBody>>,
 
-    /// **Required** by OAS 3.2.0 — but stored as `Option<Responses>` so
-    /// real-world specs that elide the field still deserialize, with the
-    /// missing-field surfaced at validate-time rather than parse-time.
+    /// The OAS 3.2 JSON Schema does not require `responses`; an
+    /// Operation without it is valid. `Option<Responses>` reflects
+    /// that.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub responses: Option<Responses>,
 
