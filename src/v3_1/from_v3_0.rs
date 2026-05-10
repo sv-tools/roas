@@ -260,8 +260,12 @@ fn normalize_example_to_examples(obj: &mut Map<String, Value>) {
 /// contentEncoding: base64`. v3.1 follows JSON Schema 2020-12, which
 /// dropped the OAS-only `format: base64` in favour of the standard
 /// `contentEncoding` keyword.
+///
+/// Accepts both the bare-string `type: "string"` form and the array
+/// form `type: ["string", "null"]` produced upstream by
+/// [`normalize_nullable`] for nullable string schemas.
 fn normalize_base64_format(obj: &mut Map<String, Value>) {
-    if obj.get("type").and_then(|v| v.as_str()) != Some("string") {
+    if !type_includes_string(obj) {
         return;
     }
     if obj.get("format").and_then(|v| v.as_str()) != Some("base64") {
@@ -269,6 +273,14 @@ fn normalize_base64_format(obj: &mut Map<String, Value>) {
     }
     obj.remove("format");
     obj.insert("contentEncoding".into(), Value::String("base64".into()));
+}
+
+fn type_includes_string(obj: &Map<String, Value>) -> bool {
+    match obj.get("type") {
+        Some(Value::String(s)) => s == "string",
+        Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some("string")),
+        _ => false,
+    }
 }
 
 /// Walk `content: { <mime>: { schema, … } }` maps and apply the
@@ -327,11 +339,17 @@ fn rewrite_content_map(content: &mut Map<String, Value>) {
             // `{type: string, format: binary}` → `{}` (the empty
             // schema, JSON Schema 2020-12's "matches anything"
             // idiom). Routes through `Schema::Empty(EmptySchema)`
-            // on the typed deserialisation. Anything else stays
-            // as-is — the user may have declared a typed schema
-            // like base64 text.
+            // on the typed deserialisation.
+            //
+            // Only fires when the schema has nothing besides `type`
+            // and `format` — preserving any additional annotations
+            // (`description`, `title`, `nullable`, …) is safer than
+            // silently dropping them. Schemas with extras stay in
+            // their v3.0 form, which is still valid v3.1
+            // (`format: binary` is just a JSON Schema annotation).
             if let Value::Object(s) = schema
                 && is_string_binary(s)
+                && s.len() == 2
             {
                 *schema = Value::Object(Map::new());
             }
@@ -1023,6 +1041,70 @@ mod tests {
             multipart_field.get("contentMediaType").is_none(),
             "example payload must not gain contentMediaType"
         );
+    }
+
+    #[test]
+    fn octet_stream_binary_with_extra_fields_is_preserved() {
+        // A schema like `{type: string, format: binary, description}`
+        // expresses more than a bare byte-stream — preserve it as-is
+        // instead of dropping the description by replacing with `{}`.
+        // The v3.0 form is still valid v3.1 (`format: binary` is a
+        // JSON Schema annotation, not a constraint).
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/octet-stream": {
+                                    "schema": {
+                                        "type": "string",
+                                        "format": "binary",
+                                        "description": "the document bytes"
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let schema = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["application/octet-stream"]
+            ["schema"];
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["format"], "binary");
+        assert_eq!(schema["description"], "the document bytes");
+    }
+
+    #[test]
+    fn nullable_string_with_base64_format_gets_content_encoding() {
+        // `nullable: true` lifts `type: "string"` to `["string", "null"]`
+        // before the base64 rewrite runs. The base64 rewrite must
+        // accept that array form so the `format: base64` →
+        // `contentEncoding: base64` migration applies consistently.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Token": {
+                        "type": "string",
+                        "format": "base64",
+                        "nullable": true
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let token = &value["components"]["schemas"]["Token"];
+        assert_eq!(token["type"], serde_json::json!(["string", "null"]));
+        assert_eq!(token["contentEncoding"], "base64");
+        assert!(token.get("format").is_none());
     }
 
     #[test]
