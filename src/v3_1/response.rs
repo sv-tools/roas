@@ -739,4 +739,42 @@ mod tests {
         Response::default().validate_with_context(&mut ctx, "response".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
+
+    #[test]
+    fn responses_default_only_is_valid() {
+        // Per the OAS 3.1 JSON Schema's anyOf, a Responses Object with
+        // only `default` (and no status-code entries) is valid.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Responses {
+            default: Some(RefOr::new_item(Response {
+                description: "ok".to_owned(),
+                ..Default::default()
+            })),
+            responses: None,
+            extensions: None,
+        }
+        .validate_with_context(&mut ctx, "responses".to_owned());
+        assert!(
+            ctx.errors.is_empty(),
+            "default-only Responses should validate clean: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn responses_empty_is_rejected() {
+        // An entirely empty Responses Object (no `default`, no status
+        // codes) is the one shape the validator still flags.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Responses::default().validate_with_context(&mut ctx, "responses".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must declare at least one response")),
+            "empty Responses should be flagged: {:?}",
+            ctx.errors
+        );
+    }
 }
