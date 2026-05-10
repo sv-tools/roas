@@ -320,7 +320,7 @@ pub struct TagGroup {
 pub enum Version {
     /// `3.2.0` version
     #[default]
-    #[serde(rename = "3.2.0")]
+    #[serde(rename = "3.2.0", alias = "3.2")]
     V3_2_0,
 }
 
@@ -892,15 +892,16 @@ mod tests {
             Version::V3_2_0,
             "correct openapi version",
         );
-        assert!(
-            serde_json::from_value::<Version>(serde_json::json!("3.2")).is_err(),
-            "non-semver `3.2` must be rejected",
+        assert_eq!(
+            serde_json::from_value::<Version>(serde_json::json!("3.2")).unwrap(),
+            Version::V3_2_0,
+            "`3.2` short alias is accepted",
         );
         assert_eq!(
             serde_json::from_value::<Version>(serde_json::json!("foo"))
                 .unwrap_err()
                 .to_string(),
-            "unknown variant `foo`, expected `3.2.0`",
+            "unknown variant `foo`, expected `3.2` or `3.2.0`",
             "foo as openapi version",
         );
         assert_eq!(
@@ -917,14 +918,16 @@ mod tests {
             Version::V3_2_0,
             "3.2.0 spec.openapi",
         );
-        assert!(
+        assert_eq!(
             serde_json::from_value::<Spec>(serde_json::json!({
                 "openapi": "3.2",
                 "info": {"title": "foo", "version": "1"},
                 "paths": {},
             }))
-            .is_err(),
-            "non-semver `3.2` must be rejected at the Spec level too",
+            .unwrap()
+            .openapi,
+            Version::V3_2_0,
+            "`3.2` short alias accepted at Spec level too",
         );
         assert_eq!(
             serde_json::from_value::<Spec>(serde_json::json!({
@@ -937,7 +940,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string(),
-            "unknown variant ``, expected `3.2.0`",
+            "unknown variant ``, expected `3.2` or `3.2.0`",
             "empty spec.openapi",
         );
         assert_eq!(
