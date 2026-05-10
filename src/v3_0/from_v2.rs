@@ -212,11 +212,14 @@ fn assemble_servers(
     base_path: Option<&str>,
     schemes: &[String],
 ) -> Option<Value> {
-    if host.is_none() && base_path.is_none() && schemes.is_empty() {
+    let host = host.unwrap_or("").trim();
+    let base = base_path.unwrap_or("").trim();
+    if host.is_empty() && base.is_empty() {
+        // No host or basePath to anchor the URL. Bare `https://`-style
+        // entries aren't useful to downstream tooling — fall back to
+        // omitting `servers` so v3.0's implicit `/` default kicks in.
         return None;
     }
-    let host = host.unwrap_or_default();
-    let base = base_path.unwrap_or_default();
     let default_schemes;
     let schemes: &[String] = if schemes.is_empty() {
         default_schemes = vec!["https".to_owned()];
@@ -226,9 +229,8 @@ fn assemble_servers(
     };
     let mut out = Vec::with_capacity(schemes.len());
     for scheme in schemes {
-        let url = if host.is_empty() && base.is_empty() {
-            format!("{scheme}://")
-        } else if host.is_empty() {
+        let url = if host.is_empty() {
+            // Relative basePath only — schemes don't apply.
             base.to_owned()
         } else {
             format!("{scheme}://{host}{base}")
@@ -237,6 +239,9 @@ fn assemble_servers(
         entry.insert("url".into(), Value::String(url));
         out.push(Value::Object(entry));
     }
+    // If host was empty we will have produced N copies of the same
+    // base-path URL, one per scheme. Dedupe to keep the output minimal.
+    out.dedup();
     Some(Value::Array(out))
 }
 
@@ -422,8 +427,10 @@ fn parameter_location(p: &Value) -> Option<&str> {
 
 /// Rewrite a non-body, non-formData v2 parameter into a v3.0 parameter.
 ///
-/// Returns `None` for an entry that's already a `$ref` we don't need to
-/// touch — but we still remap the ref path elsewhere via [`remap_refs`].
+/// Always returns `Some`. `$ref` entries pass through untouched so the
+/// global [`remap_refs`] pass can retarget the pointer; inline entries
+/// have their flat type-shape fields collected into a nested `schema`
+/// and any `collectionFormat` translated into `style` + `explode`.
 fn transform_non_body_parameter(mut p: Value) -> Option<Value> {
     if p.is_object() && p.as_object().is_some_and(|o| o.contains_key("$ref")) {
         return Some(p);
@@ -1250,6 +1257,41 @@ mod tests {
         let path_params = &value["paths"]["/items/{id}"]["parameters"];
         assert_eq!(path_params[0]["name"], "id");
         assert_eq!(path_params[0]["schema"]["type"], "string");
+    }
+
+    #[test]
+    fn schemes_without_host_or_base_path_omits_servers() {
+        // Without a host or basePath there's nothing for the scheme to
+        // anchor. Returning a bare `https://` URL would mislead tooling,
+        // so we drop `servers` entirely and let v3.0's implicit `/`
+        // default apply.
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "schemes": ["https"],
+            "paths": {}
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        assert!(
+            v3.servers.is_none(),
+            "no servers expected, got {:?}",
+            v3.servers
+        );
+    }
+
+    #[test]
+    fn base_path_only_assembles_one_relative_server() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "basePath": "/v1",
+            "schemes": ["https", "http"],
+            "paths": {}
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let servers = v3.servers.as_ref().expect("servers populated");
+        assert_eq!(servers.len(), 1, "deduped to a single relative entry");
+        assert_eq!(servers[0].url, "/v1");
     }
 
     #[test]
