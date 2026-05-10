@@ -355,20 +355,98 @@ impl serde::Serialize for Version {
     }
 }
 
+/// Human-readable description of the OAS 3.1 version pattern, shared
+/// by serde's `expected` payload and `InvalidVersion`'s `Display`.
+/// The literal regex itself lives in [`matches_oas_3_1_version`] —
+/// keep both in sync if either ever changes.
+const VERSION_SCHEMA_DESCRIPTION: &str =
+    "a version matching the OAS 3.1 schema pattern `^3\\.1\\.\\d+(-.+)?$`";
+
+/// Single source of truth for the regex check. `lazy_regex::regex!`
+/// requires a string literal so we can't host the pattern in a `const`,
+/// but every parsing path goes through this one function.
+fn matches_oas_3_1_version(s: &str) -> bool {
+    lazy_regex::regex!(r"^3\.1\.\d+(-.+)?$").is_match(s)
+}
+
 impl<'de> serde::Deserialize<'de> for Version {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(de)?;
+        // Delegate to `TryFrom<String>` so the owned `s` from serde
+        // moves straight into `Version(s)` on success (no `to_owned`
+        // round-trip). On failure, the offending string travels back
+        // through `InvalidVersion` and is borrowed once for the serde
+        // error message.
+        Version::try_from(String::deserialize(de)?).map_err(|InvalidVersion(s)| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &VERSION_SCHEMA_DESCRIPTION,
+            )
+        })
+    }
+}
+
+/// Returned by `Version::from_str` / `TryFrom<&str>` when the input
+/// does not match the OAS 3.1 schema pattern (see [`Version`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidVersion(pub String);
+
+impl fmt::Display for InvalidVersion {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(
+            f,
+            "version {:?} must be {VERSION_SCHEMA_DESCRIPTION}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidVersion {}
+
+impl std::str::FromStr for Version {
+    type Err = InvalidVersion;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "3.1" {
             return Ok(Version("3.1.2".to_owned()));
         }
-        let re = lazy_regex::regex!(r"^3\.1\.\d+(-.+)?$");
-        if re.is_match(&s) {
+        if matches_oas_3_1_version(s) {
+            Ok(Version(s.to_owned()))
+        } else {
+            Err(InvalidVersion(s.to_owned()))
+        }
+    }
+}
+
+impl TryFrom<&str> for Version {
+    type Error = InvalidVersion;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for Version {
+    type Error = InvalidVersion;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if s == "3.1" {
+            return Ok(Version("3.1.2".to_owned()));
+        }
+        if matches_oas_3_1_version(&s) {
             Ok(Version(s))
         } else {
-            Err(serde::de::Error::invalid_value(
-                serde::de::Unexpected::Str(&s),
-                &"a version matching the OAS 3.1 schema pattern `^3\\.1\\.\\d+(-.+)?$`",
-            ))
+            Err(InvalidVersion(s))
+        }
+    }
+}
+
+impl Validate for Version {
+    fn validate(&self, _options: EnumSet<Options>) -> Result<(), Error> {
+        // Constructors and parsers all enforce the pattern, but
+        // re-checking here keeps `Validate` a self-contained contract.
+        if matches_oas_3_1_version(&self.0) {
+            Ok(())
+        } else {
+            Err(Error {
+                errors: vec![format!("#.openapi: must be {VERSION_SCHEMA_DESCRIPTION}")],
+            })
         }
     }
 }
@@ -718,6 +796,12 @@ impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
 
+        // Surface any `openapi` schema-pattern violations alongside the
+        // rest of the spec's errors instead of bailing out early.
+        if let Err(e) = self.openapi.validate(options) {
+            ctx.errors.extend(e.errors);
+        }
+
         self.info
             .validate_with_context(&mut ctx, "#.info".to_owned());
 
@@ -977,6 +1061,86 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Version::default()).unwrap(),
             r#""3.1.2""#,
+        );
+    }
+
+    #[test]
+    fn test_version_validate() {
+        assert!(Version::default().validate(Options::new()).is_ok());
+        assert!(Version::V3_1_0().validate(Options::new()).is_ok());
+        assert!(Version::V3_1_2().validate(Options::new()).is_ok());
+        assert!(
+            "3.1.99"
+                .parse::<Version>()
+                .unwrap()
+                .validate(Options::new())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_version_validate_rejects_invalid() {
+        let invalid = Version("garbage".to_owned());
+        let err = invalid.validate(Options::new()).unwrap_err();
+        assert_eq!(err.errors.len(), 1);
+        assert!(
+            err.errors[0].contains("#.openapi") && err.errors[0].contains("3\\.1\\.\\d+(-.+)?$"),
+            "validate error names the field and the schema regex: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_spec_validate_surfaces_invalid_openapi() {
+        let mut spec = Spec {
+            openapi: Version("3.5.0".to_owned()),
+            ..Default::default()
+        };
+        spec.info.title = "test".to_owned();
+        spec.info.version = "1".to_owned();
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("#.openapi") && e.contains("3\\.1\\.\\d+(-.+)?$")),
+            "Spec::validate surfaces the openapi error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_version_try_from_string_normalizes_short_alias() {
+        let v: Version = "3.1".to_owned().try_into().unwrap();
+        assert_eq!(v, Version::V3_1_2());
+        let err: InvalidVersion = Version::try_from("nope".to_owned()).unwrap_err();
+        assert_eq!(err.0, "nope");
+    }
+
+    #[test]
+    fn test_version_parse_programmatically() {
+        use std::str::FromStr;
+        assert_eq!(
+            Version::from_str("3.1.99").unwrap(),
+            Version("3.1.99".to_owned())
+        );
+        assert_eq!(
+            Version::from_str("3.1.0-rc1").unwrap(),
+            Version("3.1.0-rc1".to_owned())
+        );
+        assert_eq!(Version::from_str("3.1").unwrap(), Version::V3_1_2());
+        assert_eq!(
+            <Version as TryFrom<&str>>::try_from("3.1.7").unwrap(),
+            Version("3.1.7".to_owned())
+        );
+        assert_eq!(
+            <Version as TryFrom<String>>::try_from("3.1.7".to_owned()).unwrap(),
+            Version("3.1.7".to_owned())
+        );
+        let err = Version::from_str("foo").unwrap_err();
+        assert_eq!(err, InvalidVersion("foo".to_owned()));
+        assert!(
+            err.to_string().contains("3\\.1\\.\\d+(-.+)?$"),
+            "error message echoes the schema regex: {err}"
         );
     }
 

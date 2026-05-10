@@ -193,20 +193,123 @@ pub struct Spec {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// The Swagger Specification version.
-/// Supports only `2.0` version.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-pub enum Version {
-    /// `2.0` version
-    #[default]
-    #[serde(rename = "2.0")]
-    V2_0,
+/// The Swagger Specification version. Per the Swagger 2.0 spec the
+/// `swagger` field MUST be the literal string `"2.0"` — no other value
+/// is accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version(String);
+
+impl Default for Version {
+    fn default() -> Self {
+        Self("2.0".to_owned())
+    }
+}
+
+impl Version {
+    /// Convenience constructor for the only valid `2.0` value.
+    #[allow(non_snake_case)]
+    pub fn V2_0() -> Self {
+        Self("2.0".to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Display for Version {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Self::V2_0 => write!(f, "2.0"),
+        f.write_str(&self.0)
+    }
+}
+
+impl serde::Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.0)
+    }
+}
+
+/// The only valid Swagger version literal. Shared by every parsing
+/// path, serde's `expected` payload, and `InvalidVersion`'s `Display`.
+const SWAGGER_VERSION_LITERAL: &str = "2.0";
+
+/// Human-readable description of the constraint, shared by serde's
+/// `expected` payload and `InvalidVersion`'s `Display`.
+const SWAGGER_VERSION_DESCRIPTION: &str = "the literal Swagger version string `2.0`";
+
+impl<'de> serde::Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        // Delegate to `TryFrom<String>` so the owned `s` from serde
+        // moves straight into `Version(s)` on success. On failure, the
+        // offending string travels back through `InvalidVersion` and
+        // is borrowed once for the serde error message.
+        Version::try_from(String::deserialize(de)?).map_err(|InvalidVersion(s)| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &SWAGGER_VERSION_DESCRIPTION,
+            )
+        })
+    }
+}
+
+/// Returned by `Version::from_str` / `TryFrom<&str>` when the input is
+/// not the literal Swagger version string `2.0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidVersion(pub String);
+
+impl fmt::Display for InvalidVersion {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(
+            f,
+            "version {:?} must be {SWAGGER_VERSION_DESCRIPTION}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidVersion {}
+
+impl std::str::FromStr for Version {
+    type Err = InvalidVersion;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == SWAGGER_VERSION_LITERAL {
+            Ok(Version(s.to_owned()))
+        } else {
+            Err(InvalidVersion(s.to_owned()))
+        }
+    }
+}
+
+impl TryFrom<&str> for Version {
+    type Error = InvalidVersion;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<String> for Version {
+    type Error = InvalidVersion;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        // Move the input directly rather than borrowing and
+        // reallocating.
+        if s == SWAGGER_VERSION_LITERAL {
+            Ok(Version(s))
+        } else {
+            Err(InvalidVersion(s))
+        }
+    }
+}
+
+impl Validate for Version {
+    fn validate(&self, _options: EnumSet<Options>) -> Result<(), Error> {
+        // Constructors and parsers all enforce the literal, but
+        // re-checking here keeps `Validate` a self-contained contract.
+        if self.0 == SWAGGER_VERSION_LITERAL {
+            Ok(())
+        } else {
+            Err(Error {
+                errors: vec![format!("#.swagger: must be {SWAGGER_VERSION_DESCRIPTION}")],
+            })
         }
     }
 }
@@ -386,6 +489,12 @@ impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
 
+        // Surface any `swagger` literal violations alongside the rest
+        // of the spec's errors instead of bailing out early.
+        if let Err(e) = self.swagger.validate(options) {
+            ctx.errors.extend(e.errors);
+        }
+
         self.info
             .validate_with_context(&mut ctx, "#.info".to_owned());
 
@@ -505,7 +614,7 @@ mod tests {
             }))
             .unwrap(),
             Spec {
-                swagger: Version::V2_0,
+                swagger: Version::V2_0(),
                 info: Info {
                     title: String::from("foo"),
                     version: String::from("1"),
@@ -526,7 +635,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string(),
-            "unknown variant ``, expected `2.0`",
+            "invalid value: string \"\", expected the literal Swagger version string `2.0`",
             "empty swagger version",
         );
         assert_eq!(
@@ -539,7 +648,7 @@ mod tests {
             }))
             .unwrap_err()
             .to_string(),
-            "unknown variant `foo`, expected `2.0`",
+            "invalid value: string \"foo\", expected the literal Swagger version string `2.0`",
             "foo as swagger version",
         );
     }
@@ -604,7 +713,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<TestVersion>(
                 serde_json::to_string(&Spec {
-                    swagger: Version::V2_0,
+                    swagger: Version::V2_0(),
                     info: Info {
                         title: String::from("foo"),
                         version: String::from("1"),
@@ -635,6 +744,86 @@ mod tests {
             .unwrap()
             .swagger,
             "2.0",
+        );
+    }
+
+    #[test]
+    fn test_swagger_version_validate() {
+        assert!(Version::default().validate(Options::new()).is_ok());
+        assert!(Version::V2_0().validate(Options::new()).is_ok());
+        assert!(
+            "2.0"
+                .parse::<Version>()
+                .unwrap()
+                .validate(Options::new())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_swagger_version_validate_rejects_invalid() {
+        // Inner `String` is private to outside callers, so the only
+        // way to reach the rejection branch is from inside the module.
+        let invalid = Version("3.0".to_owned());
+        let err = invalid.validate(Options::new()).unwrap_err();
+        assert_eq!(err.errors.len(), 1);
+        assert!(
+            err.errors[0].contains("#.swagger") && err.errors[0].contains("`2.0`"),
+            "validate error names the field and the literal: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_spec_validate_surfaces_invalid_swagger() {
+        let mut spec = Spec {
+            swagger: Version("3.0".to_owned()),
+            info: Info {
+                title: "test".to_owned(),
+                version: "1".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Cargo `..Default::default()` already sets paths/etc. to defaults.
+        let _ = &mut spec;
+        let err = spec.validate(Options::new()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("#.swagger") && e.contains("`2.0`")),
+            "Spec::validate surfaces the swagger error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn test_swagger_version_try_from_string_rejects_garbage() {
+        // The owned-input `TryFrom<String>` path moves the offending
+        // string straight into `InvalidVersion`, no clone.
+        let err: InvalidVersion = Version::try_from("nope".to_owned()).unwrap_err();
+        assert_eq!(err.0, "nope");
+    }
+
+    #[test]
+    fn test_swagger_version_parse_programmatically() {
+        use std::str::FromStr;
+        // The literal string round-trips through FromStr / TryFrom.
+        assert_eq!(Version::from_str("2.0").unwrap(), Version::V2_0());
+        assert_eq!(
+            <Version as TryFrom<&str>>::try_from("2.0").unwrap(),
+            Version::V2_0()
+        );
+        assert_eq!(
+            <Version as TryFrom<String>>::try_from("2.0".to_owned()).unwrap(),
+            Version::V2_0()
+        );
+        // Anything else is rejected with a typed error.
+        let err = Version::from_str("3.0.0").unwrap_err();
+        assert_eq!(err, InvalidVersion("3.0.0".to_owned()));
+        assert!(
+            err.to_string().contains("`2.0`"),
+            "error message names the only valid value: {err}"
         );
     }
 
@@ -794,7 +983,7 @@ mod tests {
 
     #[test]
     fn version_and_scheme_display() {
-        assert_eq!(format!("{}", Version::V2_0), "2.0");
+        assert_eq!(format!("{}", Version::V2_0()), "2.0");
         for (s, expected) in [
             (Scheme::HTTP, "http"),
             (Scheme::HTTPS, "https"),
