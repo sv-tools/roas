@@ -70,30 +70,106 @@ fn transform_spec(spec: &mut Value) {
     transform_schemas_recursive(spec);
 }
 
-/// Apply schema-shape rewrites at every node that looks like a Schema.
-/// `nullable: true` collapses into a `type` array, the boolean
-/// `exclusive*` keyword paired with `minimum`/`maximum` collapses into
-/// a numeric `exclusive*`, single `example` becomes
-/// `examples: [example]`, and `format: base64` becomes
-/// `contentEncoding: base64`.
+/// Position of the current node relative to schema boundaries.
+/// Threading this through the recursive walker keeps the schema-only
+/// rewrites from touching instance-valued payloads while still
+/// reaching every real sub-schema.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pos {
+    /// We haven't entered a schema yet. The walker still needs to
+    /// recurse — schemas appear under known structural keys
+    /// (`schema`, `schemas`, `allOf` / `anyOf` / `oneOf`, `not`, …).
+    Generic,
+    /// The current value is itself a Schema Object.
+    Schema,
+    /// The current value is a `BTreeMap<String, Schema>` (e.g.
+    /// `properties`, `components.schemas`). Each entry's value is a
+    /// schema.
+    SchemaMap,
+}
+
+/// Apply schema-shape rewrites — `nullable: true` → `type` array, the
+/// boolean `exclusive*` modifier → numeric `exclusive*`, single
+/// `example` → `examples: [example]`, and `format: base64` →
+/// `contentEncoding: base64` — at every Schema Object reached via the
+/// document's structural shape. Sub-schemas inside `properties`,
+/// `items`, `allOf`, etc. are walked; instance-valued payloads
+/// (`example`, `examples`, `default`, `enum`, `const`, `ExampleObject.value`)
+/// are skipped so user-supplied JSON that happens to contain
+/// schema-shaped keys (e.g. an example with `type` and `nullable`)
+/// round-trips byte-for-byte.
 fn transform_schemas_recursive(value: &mut Value) {
+    walk(value, Pos::Generic);
+}
+
+fn walk(value: &mut Value, pos: Pos) {
     match value {
-        Value::Object(obj) => {
-            normalize_nullable(obj);
-            normalize_exclusive_bound(obj, "exclusiveMinimum", "minimum");
-            normalize_exclusive_bound(obj, "exclusiveMaximum", "maximum");
-            normalize_example_to_examples(obj);
-            normalize_base64_format(obj);
-            for (_, v) in obj.iter_mut() {
-                transform_schemas_recursive(v);
+        Value::Object(obj) => match pos {
+            Pos::Schema => walk_schema_object(obj),
+            Pos::SchemaMap => {
+                for (_, v) in obj.iter_mut() {
+                    walk(v, Pos::Schema);
+                }
             }
-        }
+            Pos::Generic => walk_generic_object(obj),
+        },
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                transform_schemas_recursive(v);
+                walk(v, pos);
             }
         }
         _ => {}
+    }
+}
+
+fn walk_schema_object(obj: &mut Map<String, Value>) {
+    normalize_nullable(obj);
+    normalize_exclusive_bound(obj, "exclusiveMinimum", "minimum");
+    normalize_exclusive_bound(obj, "exclusiveMaximum", "maximum");
+    normalize_example_to_examples(obj);
+    normalize_base64_format(obj);
+    for (k, v) in obj.iter_mut() {
+        // Inside a Schema: instance-valued keywords carry user data;
+        // sub-schema keywords lead to more schemas; everything else is
+        // schema-adjacent metadata (xml, discriminator, externalDocs)
+        // that we walk generically.
+        match k.as_str() {
+            "example" | "examples" | "default" | "enum" | "const" => continue,
+            "items"
+            | "not"
+            | "additionalProperties"
+            | "contains"
+            | "propertyNames"
+            | "if"
+            | "then"
+            | "else"
+            | "unevaluatedItems"
+            | "unevaluatedProperties" => walk(v, Pos::Schema),
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => walk(v, Pos::Schema),
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                walk(v, Pos::SchemaMap)
+            }
+            _ => walk(v, Pos::Generic),
+        }
+    }
+}
+
+fn walk_generic_object(obj: &mut Map<String, Value>) {
+    for (k, v) in obj.iter_mut() {
+        match k.as_str() {
+            // `schema` lives on Parameter / Header / MediaType; its
+            // value is a Schema Object.
+            "schema" => walk(v, Pos::Schema),
+            // `schemas` is the components-level map of named schemas.
+            "schemas" => walk(v, Pos::SchemaMap),
+            // ExampleObject's instance value, and the
+            // example / examples carriers on MediaType / Parameter /
+            // Header. Either an instance value, or a map of
+            // ExampleObjects (which themselves carry instance values
+            // — never schemas). Skip recursion entirely.
+            "example" | "examples" | "value" => continue,
+            _ => walk(v, Pos::Generic),
+        }
     }
 }
 
@@ -165,16 +241,14 @@ fn normalize_exclusive_bound(
     }
 }
 
-/// Single `example` → `examples: [example]`. Schemas that already have
-/// an `examples` array win; the deprecated `example` is dropped to
-/// match v3.1's "examples is the source of truth" stance. Only fires
-/// when the surrounding object looks like a Schema (declares `type` /
-/// composition keywords / `properties` / `items`); `Parameter`,
-/// `Header`, and `MediaType` keep their `example` field in v3.1.
+/// Single `example` → `examples: [example]`. Schemas that already
+/// have an `examples` array win; the deprecated `example` is dropped
+/// to match v3.1's "examples is the source of truth" stance. The
+/// caller is responsible for invoking this only on Schema Objects
+/// (the position-aware walker handles that via [`Pos::Schema`]);
+/// `Parameter`, `Header`, and `MediaType` keep their `example` field
+/// in v3.1.
 fn normalize_example_to_examples(obj: &mut Map<String, Value>) {
-    if !looks_like_schema(obj) {
-        return;
-    }
     let Some(example) = obj.remove("example") else {
         return;
     };
@@ -182,28 +256,6 @@ fn normalize_example_to_examples(obj: &mut Map<String, Value>) {
         return;
     }
     obj.insert("examples".into(), Value::Array(vec![example]));
-}
-
-/// Heuristic for "this object is a Schema Object". A schema declares
-/// at least one of: `type`, `allOf`/`anyOf`/`oneOf`/`not`, `$ref`
-/// (handled elsewhere), `properties`, `items`, `enum`, or
-/// `additionalProperties`. The check exists to keep the schema-only
-/// rewrites from firing on `Parameter`/`Header`/`MediaType` where
-/// `example` keeps its v3.0 single-value form.
-fn looks_like_schema(obj: &Map<String, Value>) -> bool {
-    const SCHEMA_KEYWORDS: &[&str] = &[
-        "type",
-        "allOf",
-        "anyOf",
-        "oneOf",
-        "not",
-        "properties",
-        "items",
-        "enum",
-        "additionalProperties",
-        "$ref",
-    ];
-    SCHEMA_KEYWORDS.iter().any(|k| obj.contains_key(*k))
 }
 
 /// `type: string, format: base64` → `type: string,
@@ -515,6 +567,141 @@ mod tests {
         let pet = &value["components"]["schemas"]["Pet"];
         assert_eq!(pet["examples"], serde_json::json!(["fedora"]));
         assert!(pet.get("example").is_none());
+    }
+
+    #[test]
+    fn schema_example_payload_is_preserved_byte_for_byte() {
+        // The example value is instance data — it can legitimately
+        // contain keys like `nullable`, `type`, `exclusiveMinimum`
+        // without being a schema. None of the schema rewrites should
+        // touch it.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Cfg": {
+                        "type": "object",
+                        "example": {
+                            "nullable": true,
+                            "type": "string",
+                            "exclusiveMinimum": true,
+                            "minimum": 0,
+                            "format": "base64"
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        // The example value migrates to an `examples` array (per the
+        // schema-level `example → examples` rewrite) but its contents
+        // round-trip verbatim.
+        let payload = &value["components"]["schemas"]["Cfg"]["examples"][0];
+        assert_eq!(payload["nullable"], true);
+        assert_eq!(payload["type"], "string");
+        assert_eq!(payload["exclusiveMinimum"], true);
+        assert_eq!(payload["minimum"], 0);
+        assert_eq!(payload["format"], "base64");
+    }
+
+    #[test]
+    fn schema_default_payload_is_preserved_byte_for_byte() {
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Cfg": {
+                        "type": "object",
+                        "default": {"type": "string", "nullable": true}
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let default = &value["components"]["schemas"]["Cfg"]["default"];
+        assert_eq!(default["type"], "string");
+        assert_eq!(default["nullable"], true);
+    }
+
+    #[test]
+    fn property_named_example_is_walked_as_a_subschema() {
+        // The schema rewrites must reach a sub-schema whose property
+        // name happens to be `example` (or any other instance-valued
+        // keyword). The instance-key skip is gated on the parent
+        // being a schema, so a `properties` map does NOT skip its
+        // child entries.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Cfg": {
+                        "type": "object",
+                        "properties": {
+                            "example": {"type": "string", "nullable": true},
+                            "default": {"type": "integer", "nullable": true}
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let props = &value["components"]["schemas"]["Cfg"]["properties"];
+        assert_eq!(
+            props["example"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(
+            props["default"]["type"],
+            serde_json::json!(["integer", "null"])
+        );
+    }
+
+    #[test]
+    fn media_type_examples_payload_is_preserved_byte_for_byte() {
+        // `MediaType.examples` is a map of named ExampleObjects. The
+        // ExampleObject's `value` field is instance data; recursing
+        // through the `examples` key would mutate it.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"type": "object"},
+                                        "examples": {
+                                            "trap": {
+                                                "value": {
+                                                    "type": "string",
+                                                    "nullable": true,
+                                                    "format": "base64"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let trap = &value["paths"]["/x"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["examples"]["trap"]["value"];
+        assert_eq!(trap["type"], "string");
+        assert_eq!(trap["nullable"], true);
+        assert_eq!(trap["format"], "base64");
     }
 
     #[test]
