@@ -6,6 +6,8 @@ pub mod components;
 pub mod discriminator;
 pub mod example;
 pub mod external_documentation;
+#[cfg(feature = "v3_1")]
+pub mod from_v3_1;
 pub mod header;
 pub mod info;
 pub mod link;
