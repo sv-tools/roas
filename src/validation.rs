@@ -1,7 +1,8 @@
 use enumset::{EnumSet, EnumSetType, enum_set};
-use lazy_regex::regex;
+use regex::Regex;
 use std::collections::HashSet;
 use std::fmt::{self, Display};
+use std::sync::LazyLock;
 use thiserror::Error as ThisError;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,10 +168,17 @@ pub struct InvalidComponentName {
     pub name: String,
 }
 
+/// Compiled form of [`COMPONENT_NAME_PATTERN`]. Single source of truth
+/// for both [`check_component_name`] and the error display on
+/// [`InvalidComponentName`].
+static COMPONENT_NAME_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(COMPONENT_NAME_PATTERN).expect("COMPONENT_NAME_PATTERN must be a valid regex")
+});
+
 /// Returns `Ok(())` if `name` matches [`COMPONENT_NAME_PATTERN`],
 /// otherwise an [`InvalidComponentName`] error.
 pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
-    if regex!(r"^[a-zA-Z0-9.\-_]+$").is_match(name) {
+    if COMPONENT_NAME_REGEX.is_match(name) {
         Ok(())
     } else {
         Err(InvalidComponentName {
@@ -250,7 +258,7 @@ impl<T> Context<'_, T> {
 }
 
 impl Context<'_, ()> {
-    pub fn new<T>(spec: &T, options: EnumSet<Options>) -> Context<'_, T> {
+    pub fn new<'a, T>(spec: &'a T, options: EnumSet<Options>) -> Context<'a, T> {
         Context {
             spec,
             visited: HashSet::new(),

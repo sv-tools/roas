@@ -5,6 +5,7 @@
 //! crate-internal helpers.
 
 use regex::Regex;
+#[cfg(feature = "v2")]
 use std::collections::HashSet;
 
 use crate::validation::{Context, Options, PushError, ValidateWithContext};
@@ -22,12 +23,15 @@ pub fn validate_email<T>(email: &Option<String>, ctx: &mut Context<T>, path: Str
     }
 }
 
+#[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 const HTTP: &str = "http://";
+#[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 const HTTPS: &str = "https://";
 
 /// Validates an optional URL string.
 /// If the URL is present, it checks if it is valid using `validate_required_url`.
 /// Records an error in the context if the URL is invalid.
+#[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path: String) {
     if let Some(url) = url {
         validate_required_url(url, ctx, path);
@@ -87,6 +91,7 @@ pub fn validate_required_uri<T>(uri: &String, ctx: &mut Context<T>, path: String
 
 /// Validates that the given URL string starts with "http://" or "https://".
 /// If the URL is invalid, records an error in the context.
+#[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
     if !ctx.is_option(Options::IgnoreEmptyExternalDocumentationUrl) {
         validate_required_string(url, ctx, path.clone());
@@ -122,6 +127,7 @@ pub fn validate_string_matches<T>(s: &str, pattern: &Regex, ctx: &mut Context<T>
 }
 
 // Validates an optional string against a regex pattern if present.
+#[cfg(feature = "v2")]
 pub fn validate_optional_string_matches<T>(
     s: &Option<String>,
     pattern: &Regex,
@@ -148,6 +154,7 @@ pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
 ///
 /// Used to enforce `uniqueItems: true` on lists where the schema requires it
 /// (schemes, MIME type lists, tags by name, scope arrays, etc.).
+#[cfg(feature = "v2")]
 pub fn validate_unique_by<T, K, S, F>(items: &[T], ctx: &mut Context<S>, path: String, key: F)
 where
     K: Eq + std::hash::Hash,
@@ -185,6 +192,7 @@ pub fn validate_not_visited<T, D>(
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
     #[test]
     fn test_validate_url() {
         let mut ctx = Context::new(&(), Options::new());
