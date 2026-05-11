@@ -147,27 +147,53 @@ impl<D> RefOr<D> {
     pub fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
-        D: ValidateWithContext<T>,
+        D: ValidateWithContext<T> + 'static + Clone + DeserializeOwned,
     {
         match self {
             RefOr::Ref(r) => {
                 r.validate_with_context::<T, D>(ctx, path.clone());
-                if ctx.visit(r.reference.clone()) {
-                    match self.get_item(ctx.spec) {
-                        Ok(d) => {
-                            d.validate_with_context(ctx, r.reference.clone());
+                if !ctx.visit(r.reference.clone()) {
+                    return;
+                }
+                if r.reference.starts_with("#/") {
+                    match ctx.spec.resolve_reference(&r.reference) {
+                        Some(d) => d.validate_with_context(ctx, r.reference.clone()),
+                        None => ctx.error(path, format_args!(".$ref: `{}` not found", r.reference)),
+                    }
+                    return;
+                }
+                // External reference: route through the loader if one is
+                // attached to the context. `as_deref_mut` keeps the
+                // mutable borrow on `ctx.loader` scoped to this expression
+                // so the resolved owned `D` (or `LoaderError`) outlives
+                // the borrow and lets us re-use `ctx` to validate it.
+                let resolved = ctx
+                    .loader
+                    .as_deref_mut()
+                    .map(|l| l.resolve_reference_as::<D>(&r.reference));
+                match resolved {
+                    Some(Ok(d)) => d.validate_with_context(ctx, r.reference.clone()),
+                    Some(Err(source)) => {
+                        if !ctx.is_option(Options::IgnoreExternalReferences) {
+                            ctx.error(
+                                path,
+                                format_args!(
+                                    ".$ref: failed to resolve external reference `{}`: {source}",
+                                    r.reference,
+                                ),
+                            );
                         }
-                        Err(e) => match e {
-                            ResolveError::NotFound(r) => {
-                                ctx.error(path, format_args!(".$ref: `{r}` not found"));
-                            }
-                            ResolveError::ExternalUnsupported(_)
-                            | ResolveError::External { .. } => {
-                                if !ctx.is_option(Options::IgnoreExternalReferences) {
-                                    ctx.error(path, format_args!(".$ref: {e}"));
-                                }
-                            }
-                        },
+                    }
+                    None => {
+                        if !ctx.is_option(Options::IgnoreExternalReferences) {
+                            ctx.error(
+                                path,
+                                format_args!(
+                                    ".$ref: resolving of an external reference `{}` is not supported",
+                                    r.reference,
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -222,7 +248,7 @@ impl<D> RefOr<D> {
     ) -> Result<Cow<'a, D>, ResolveError>
     where
         T: ResolveReference<D>,
-        D: Clone + DeserializeOwned,
+        D: 'static + Clone + DeserializeOwned,
     {
         match self {
             RefOr::Item(d) => Ok(Cow::Borrowed(d)),

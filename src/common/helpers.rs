@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fmt;
 use thiserror::Error;
 
+use crate::common::loader::Loader;
 use crate::validation::{Error, Options};
 
 /// Allowed character set for OpenAPI component / definition map keys.
@@ -40,9 +41,14 @@ pub trait ValidateWithContext<T> {
     fn validate_with_context(&self, ctx: &mut Context<T>, path: String);
 }
 
-#[derive(Debug, Clone, PartialEq)]
 pub struct Context<'a, T> {
     pub spec: &'a T,
+    /// Optional external-reference loader. When set, `RefOr::validate_with_context`
+    /// resolves non-`#/` `$ref`s through the loader and validates the
+    /// fetched value recursively. Defaults to `None`, in which case
+    /// external refs surface as `ExternalUnsupported` errors (suppressed
+    /// by [`Options::IgnoreExternalReferences`]).
+    pub loader: Option<&'a mut Loader>,
     pub visited: HashSet<String>,
     pub errors: Vec<String>,
     pub options: EnumSet<Options>,
@@ -97,10 +103,20 @@ impl Context<'_, ()> {
     pub fn new<T>(spec: &T, options: EnumSet<Options>) -> Context<'_, T> {
         Context {
             spec,
+            loader: None,
             visited: HashSet::new(),
             errors: Vec::new(),
             options,
         }
+    }
+}
+
+impl<'a, T> Context<'a, T> {
+    /// Attach an external-reference loader to the context. The loader's
+    /// lifetime must outlive the validation pass.
+    pub fn with_loader(mut self, loader: &'a mut Loader) -> Self {
+        self.loader = Some(loader);
+        self
     }
 }
 

@@ -6,6 +6,7 @@
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
@@ -101,10 +102,17 @@ pub enum LoaderError {
 }
 
 /// External resource loader with a fetcher registry and document cache.
+///
+/// Two layers of caching are maintained: the raw `Value` cache keyed by
+/// resource URI (so the same file/URL is fetched once), and a typed
+/// cache keyed by `(reference, TypeId)` (so a `$ref` deserialized into
+/// some concrete `T` is parsed only once across the run, regardless of
+/// how many places point to it).
 pub struct Loader {
     fetchers: BTreeMap<String, Box<dyn ResourceFetcher>>,
     async_fetchers: BTreeMap<String, Box<dyn AsyncResourceFetcher>>,
     cache: BTreeMap<Url, Value>,
+    typed_cache: BTreeMap<(String, TypeId), Box<dyn Any>>,
 }
 
 impl Loader {
@@ -114,6 +122,7 @@ impl Loader {
             fetchers: BTreeMap::new(),
             async_fetchers: BTreeMap::new(),
             cache: BTreeMap::new(),
+            typed_cache: BTreeMap::new(),
         }
     }
 
@@ -272,25 +281,49 @@ impl Loader {
     }
 
     /// Resolve and deserialize a reference into the requested type.
+    ///
+    /// Subsequent calls with the same `reference` and `T` return a clone
+    /// of the cached deserialized value rather than re-running serde over
+    /// the underlying `Value`.
     pub fn resolve_reference_as<T>(&mut self, reference: &str) -> Result<T, LoaderError>
     where
-        T: DeserializeOwned,
+        T: 'static + Clone + DeserializeOwned,
     {
+        let cache_key = (reference.to_string(), TypeId::of::<T>());
+        if let Some(entry) = self.typed_cache.get(&cache_key)
+            && let Some(cached) = entry.downcast_ref::<T>()
+        {
+            return Ok(cached.clone());
+        }
         let (key, _) = parse_reference(reference)?;
         let uri = key.to_string();
         let value = self.resolve_reference(reference)?;
-        serde_json::from_value(value.clone()).map_err(|source| LoaderError::Parse { uri, source })
+        let parsed: T = serde_json::from_value(value.clone())
+            .map_err(|source| LoaderError::Parse { uri, source })?;
+        self.typed_cache.insert(cache_key, Box::new(parsed.clone()));
+        Ok(parsed)
     }
 
     /// Asynchronously resolve and deserialize a reference into the requested type.
+    ///
+    /// Shares the typed cache with [`Self::resolve_reference_as`].
     pub async fn resolve_reference_as_async<T>(&mut self, reference: &str) -> Result<T, LoaderError>
     where
-        T: DeserializeOwned,
+        T: 'static + Clone + DeserializeOwned,
     {
+        let cache_key = (reference.to_string(), TypeId::of::<T>());
+        if let Some(entry) = self.typed_cache.get(&cache_key)
+            && let Some(cached) = entry.downcast_ref::<T>()
+        {
+            return Ok(cached.clone());
+        }
         let (key, _) = parse_reference(reference)?;
         let uri = key.to_string();
         let value = self.resolve_reference_async(reference).await?;
-        serde_json::from_value(value.clone()).map_err(|source| LoaderError::Parse { uri, source })
+        let parsed: T = serde_json::from_value(value.clone())
+            .map_err(|source| LoaderError::Parse { uri, source })?;
+        self.typed_cache.insert(cache_key, Box::new(parsed.clone()));
+        Ok(parsed)
     }
 }
 

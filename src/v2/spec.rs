@@ -4,6 +4,7 @@ use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
     validate_not_visited, validate_optional_string_matches, validate_unique_by,
 };
+use crate::common::loader::Loader;
 use crate::common::reference::RefOr;
 use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
@@ -485,9 +486,25 @@ impl ResolveReference<Tag> for Spec {
     }
 }
 
-impl Validate for Spec {
-    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
+impl Spec {
+    /// Validate the spec, resolving external `$ref`s through the given loader.
+    pub fn validate_with_loader(
+        &self,
+        options: EnumSet<Options>,
+        loader: &mut Loader,
+    ) -> Result<(), Error> {
+        self.validate_inner(options, Some(loader))
+    }
+
+    fn validate_inner<'a>(
+        &'a self,
+        options: EnumSet<Options>,
+        loader: Option<&'a mut Loader>,
+    ) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
+        if let Some(l) = loader {
+            ctx.loader = Some(l);
+        }
 
         // Surface any `swagger` literal violations alongside the rest
         // of the spec's errors instead of bailing out early.
@@ -597,6 +614,12 @@ impl Validate for Spec {
         }
 
         ctx.into()
+    }
+}
+
+impl Validate for Spec {
+    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
+        self.validate_inner(options, None)
     }
 }
 

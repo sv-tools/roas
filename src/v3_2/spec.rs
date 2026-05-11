@@ -6,6 +6,7 @@ use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
     validate_not_visited,
 };
+use crate::common::loader::Loader;
 use crate::common::reference::{RefOr, ResolveReference, resolve_in_map};
 use crate::v3_2::callback::Callback;
 use crate::v3_2::components::Components;
@@ -798,9 +799,32 @@ fn walk_op<'a>(
     }
 }
 
-impl Validate for Spec {
-    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
+impl Spec {
+    /// Validate the spec, resolving external `$ref`s through the given loader.
+    ///
+    /// Equivalent to [`Validate::validate`] when no loader is needed, but
+    /// when an external `$ref` is encountered, the loader is asked to
+    /// fetch and deserialize the target so the resolved value is
+    /// validated like any internal ref. External resolution failures
+    /// surface as validation errors unless
+    /// [`Options::IgnoreExternalReferences`] is set.
+    pub fn validate_with_loader(
+        &self,
+        options: EnumSet<Options>,
+        loader: &mut Loader,
+    ) -> Result<(), Error> {
+        self.validate_inner(options, Some(loader))
+    }
+
+    fn validate_inner<'a>(
+        &'a self,
+        options: EnumSet<Options>,
+        loader: Option<&'a mut Loader>,
+    ) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
+        if let Some(l) = loader {
+            ctx.loader = Some(l);
+        }
 
         // Surface any `openapi` schema-pattern violations alongside the
         // rest of the spec's errors instead of bailing out early.
@@ -970,9 +994,114 @@ impl Validate for Spec {
     }
 }
 
+impl Validate for Spec {
+    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
+        self.validate_inner(options, None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::IGNORE_UNUSED;
+
+    #[test]
+    fn validate_with_loader_resolves_external_schema_ref() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "test", "version": "1.0" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "PetRef": { "$ref": "external.json#/Pet" }
+                }
+            }
+        }))
+        .expect("spec must parse");
+
+        // No loader: the external `$ref` becomes a validation error.
+        let err = spec
+            .validate(IGNORE_UNUSED)
+            .expect_err("external ref must error when no loader is attached");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("external.json#/Pet") && e.contains("not supported")),
+            "expected `not supported` error, got: {:?}",
+            err.errors,
+        );
+
+        // With a preloaded resource: the loader resolves the ref and the
+        // resolved schema validates clean.
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({
+                    "Pet": { "type": "object", "properties": {} }
+                }),
+            )
+            .expect("preload must succeed");
+        spec.validate_with_loader(IGNORE_UNUSED, &mut loader)
+            .expect("validation must succeed when external ref is preloaded");
+
+        // With a loader that has no fetcher and no preload: the loader
+        // failure surfaces as a `failed to resolve` error.
+        let mut empty_loader = Loader::new();
+        let err = spec
+            .validate_with_loader(IGNORE_UNUSED, &mut empty_loader)
+            .expect_err("missing fetcher must surface as a validation error");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| { e.contains("external.json#/Pet") && e.contains("failed to resolve") }),
+            "expected `failed to resolve` error, got: {:?}",
+            err.errors,
+        );
+    }
+
+    #[test]
+    fn loader_typed_cache_avoids_redundant_deserialization() {
+        // Two separate `$ref`s to the same external pointer should
+        // deserialize the target only once thanks to the typed cache.
+        // We can't observe serde counts directly, but we can verify the
+        // pre-warmed cache survives a `validate_with_loader` pass.
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "test", "version": "1.0" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "A": { "$ref": "external.json#/Pet" },
+                    "B": { "$ref": "external.json#/Pet" }
+                }
+            }
+        }))
+        .expect("spec must parse");
+
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({
+                    "Pet": { "type": "object", "properties": {} }
+                }),
+            )
+            .unwrap();
+
+        spec.validate_with_loader(IGNORE_UNUSED, &mut loader)
+            .expect("two refs to the same external pointer must validate");
+
+        // Calling `resolve_reference_as` twice after validation must hit
+        // the typed cache and return equal owned schemas.
+        let first: Schema = loader
+            .resolve_reference_as("external.json#/Pet")
+            .expect("first lookup");
+        let second: Schema = loader
+            .resolve_reference_as("external.json#/Pet")
+            .expect("cached lookup");
+        assert_eq!(first, second, "cached typed value must round-trip equal");
+    }
 
     #[test]
     fn test_version_deserialize() {
