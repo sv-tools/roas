@@ -244,7 +244,7 @@ pub fn validate_security_requirements(
     for (i, req) in requirements.iter().enumerate() {
         for (name, scopes) in req {
             // OAS 2.0 schema: each scope array is `uniqueItems: true`.
-            validate_unique_by(scopes, ctx, format!("{path}[{i}].`{name}`.scopes"), |s| {
+            validate_unique_by(scopes, ctx, format!("{path}: [{i}].`{name}`"), |s| {
                 s.clone()
             });
             let Some(defs) = defs else {
@@ -958,7 +958,7 @@ mod tests {
         assert!(
             ctx.errors
                 .iter()
-                .any(|e| e.contains(".scopes[1]") && e.contains("duplicate value")),
+                .any(|e| e == "#.security: [0].`o`[1]: duplicate value"),
             "errors: {:?}",
             ctx.errors
         );
