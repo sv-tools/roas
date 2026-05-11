@@ -13,7 +13,7 @@
 use lazy_regex::regex;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::common::helpers::{Context, PushError};
+use crate::common::helpers::{Context, PushError, validate_unique_by};
 use crate::common::reference::ResolveReference;
 use crate::v2::operation::Operation;
 use crate::v2::parameter::{InFormData, InHeader, InPath, InQuery, Parameter};
@@ -243,6 +243,10 @@ pub fn validate_security_requirements(
     let defs = ctx.spec.security_definitions.as_ref();
     for (i, req) in requirements.iter().enumerate() {
         for (name, scopes) in req {
+            // OAS 2.0 schema: each scope array is `uniqueItems: true`.
+            validate_unique_by(scopes, ctx, format!("{path}: [{i}].`{name}`"), |s| {
+                s.clone()
+            });
             let Some(defs) = defs else {
                 ctx.error(
                     path.to_owned(),
@@ -925,6 +929,36 @@ mod tests {
             ctx.errors
                 .iter()
                 .any(|e| e.contains("path template variable `{id}`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn security_requirement_scope_array_is_unique() {
+        // OAS 2.0: each scope array is `uniqueItems: true`.
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "o".to_owned(),
+            SecurityScheme::OAuth2(OAuth2SecurityScheme {
+                flow: SecuritySchemeOAuth2Flow::Implicit,
+                authorization_url: Some("https://x.example.com/a".into()),
+                token_url: None,
+                scopes: Scopes::from([("read".to_owned(), "Read".to_owned())]),
+                description: None,
+                extensions: None,
+            }),
+        );
+        let spec = spec_with_security_definitions(defs);
+        let spec: &'static Spec = Box::leak(Box::new(spec));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req = BTreeMap::new();
+        req.insert("o".to_owned(), vec!["read".to_owned(), "read".to_owned()]);
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e == "#.security: [0].`o`[1]: duplicate value"),
             "errors: {:?}",
             ctx.errors
         );

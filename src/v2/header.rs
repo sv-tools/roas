@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
 use crate::v2::items::Items;
 use crate::v2::spec::Spec;
 
@@ -274,6 +274,16 @@ impl ValidateWithContext<Spec> for BooleanHeader {
 
 impl ValidateWithContext<Spec> for ArrayHeader {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Headers always use the `collectionFormat` enum (csv/ssv/tsv/pipes).
+        // The `multi` variant is reserved for `query` / `formData` parameters.
+        if let Some(fmt) = &self.collection_format
+            && fmt.is_multi()
+        {
+            ctx.error(
+                format!("{path}.collectionFormat"),
+                "`multi` is only allowed on `query` and `formData` parameters",
+            );
+        }
         self.items
             .validate_with_context(ctx, format!("{path}.items"));
     }
@@ -578,6 +588,31 @@ mod tests {
                 "x-extra": "extension",
             }),
             "serialize array",
+        );
+    }
+
+    #[test]
+    fn array_header_rejects_multi_collection_format() {
+        // Headers may not use `collectionFormat: multi`.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let header = Header::Array(ArrayHeader {
+            description: None,
+            items: Items::String(Box::default()),
+            default: None,
+            collection_format: Some(CollectionFormat::Multi),
+            max_items: None,
+            min_items: None,
+            unique_items: None,
+            extensions: None,
+        });
+        header.validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`multi` is only allowed")),
+            "errors: {:?}",
+            ctx.errors
         );
     }
 }

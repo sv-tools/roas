@@ -2,7 +2,7 @@
 
 use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
-    validate_not_visited, validate_optional_string_matches,
+    validate_not_visited, validate_optional_string_matches, validate_unique_by,
 };
 use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
@@ -315,7 +315,7 @@ impl Validate for Version {
 }
 
 /// The possible values of the transfer protocol of the API
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Default)]
 pub enum Scheme {
     /// `http` protocol
     #[serde(rename = "http")]
@@ -512,6 +512,24 @@ impl Validate for Spec {
                 "#.basePath".to_owned(),
                 format_args!("must start with `/`, found `{base_path}`"),
             );
+        }
+
+        // OAS 2.0 schema marks `schemes`, `consumes`, `produces`, `tags`, and
+        // `security` as `uniqueItems: true`.
+        if let Some(schemes) = &self.schemes {
+            validate_unique_by(schemes, &mut ctx, "#.schemes".to_owned(), |s| s.clone());
+        }
+        if let Some(consumes) = &self.consumes {
+            validate_unique_by(consumes, &mut ctx, "#.consumes".to_owned(), |s| s.clone());
+        }
+        if let Some(produces) = &self.produces {
+            validate_unique_by(produces, &mut ctx, "#.produces".to_owned(), |s| s.clone());
+        }
+        if let Some(tags) = &self.tags {
+            validate_unique_by(tags, &mut ctx, "#.tags".to_owned(), |t| t.name.clone());
+        }
+        if let Some(security) = &self.security {
+            validate_unique_by(security, &mut ctx, "#.security".to_owned(), |r| r.clone());
         }
 
         // Validate paths operations and the new path-template / parameter rules.
@@ -1425,6 +1443,45 @@ mod tests {
             "#/tags/missing",
         );
         assert!(t.is_none());
+    }
+
+    #[test]
+    fn unique_items_enforced_on_top_level_lists() {
+        // schemes, consumes, produces, tags (by name), and security must all
+        // be free of duplicates per the OAS 2.0 schema.
+        let mut spec = spec_with_info();
+        spec.schemes = Some(vec![Scheme::HTTPS, Scheme::HTTPS]);
+        spec.consumes = Some(vec!["application/json".into(), "application/json".into()]);
+        spec.produces = Some(vec!["text/plain".into(), "text/plain".into()]);
+        spec.tags = Some(vec![
+            crate::v2::tag::Tag {
+                name: "pet".into(),
+                ..Default::default()
+            },
+            crate::v2::tag::Tag {
+                name: "pet".into(),
+                ..Default::default()
+            },
+        ]);
+        let mut req = BTreeMap::new();
+        req.insert("none".to_owned(), vec![]);
+        spec.security = Some(vec![req.clone(), req]);
+        let err = spec.validate(Options::new()).unwrap_err();
+        for (field, idx) in [
+            ("#.schemes[1]", "schemes"),
+            ("#.consumes[1]", "consumes"),
+            ("#.produces[1]", "produces"),
+            ("#.tags[1]", "tags"),
+            ("#.security[1]", "security"),
+        ] {
+            assert!(
+                err.errors
+                    .iter()
+                    .any(|e| e.contains(field) && e.contains("duplicate value")),
+                "missing dup error for {idx}: {:?}",
+                err.errors
+            );
+        }
     }
 
     #[test]
