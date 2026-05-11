@@ -1,10 +1,9 @@
 //! XML Object
 
-use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, has_uri_unsafe_bytes, validate_optional_uri,
-};
+use crate::common::helpers::{has_uri_unsafe_bytes, validate_optional_uri};
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

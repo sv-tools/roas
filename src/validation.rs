@@ -1,5 +1,8 @@
 use enumset::{EnumSet, EnumSetType, enum_set};
-use std::fmt::Display;
+use lazy_regex::regex;
+use std::collections::HashSet;
+use std::fmt::{self, Display};
+use thiserror::Error as ThisError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Error {
@@ -148,4 +151,121 @@ impl Options {
 /// Validates the OpenAPI specification.
 pub trait Validate {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error>;
+}
+
+/// Allowed character set for OpenAPI component / definition map keys.
+/// Mirrors the pattern enforced by `v3_0::Components` / `v3_1::Components`
+/// validators. Used by `Spec::define_*` helpers to surface invalid keys
+/// at insertion time rather than during a later `validate()` pass.
+pub const COMPONENT_NAME_PATTERN: &str = r"^[a-zA-Z0-9.\-_]+$";
+
+/// Returned by `Spec::define_*` helpers when a component name does not
+/// match [`COMPONENT_NAME_PATTERN`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ThisError)]
+#[error("component name {name:?} must match pattern `{COMPONENT_NAME_PATTERN}`")]
+pub struct InvalidComponentName {
+    pub name: String,
+}
+
+/// Returns `Ok(())` if `name` matches [`COMPONENT_NAME_PATTERN`],
+/// otherwise an [`InvalidComponentName`] error.
+pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
+    if regex!(r"^[a-zA-Z0-9.\-_]+$").is_match(name) {
+        Ok(())
+    } else {
+        Err(InvalidComponentName {
+            name: name.to_owned(),
+        })
+    }
+}
+
+/// Trait for validating an object with a [`Context`].
+///
+/// Implemented by every component type that participates in spec
+/// validation. Implementors push errors into the context via
+/// [`PushError::error`] and recurse into sub-objects by calling each
+/// child's `validate_with_context`.
+pub trait ValidateWithContext<T> {
+    fn validate_with_context(&self, ctx: &mut Context<T>, path: String);
+}
+
+/// Validation context — carries the spec being validated, accumulated
+/// errors, the per-call options, and a `visited` set used for unused
+/// detection and cycle handling.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Context<'a, T> {
+    pub spec: &'a T,
+    pub visited: HashSet<String>,
+    pub errors: Vec<String>,
+    pub options: EnumSet<Options>,
+}
+
+/// Generic "push an error message into a [`Context`]" trait. The blanket
+/// impls accept `&str`, `String`, and `fmt::Arguments`, so callers can
+/// `ctx.error(path, "literal")`, `ctx.error(path, format!(...))`, or
+/// `ctx.error(path, format_args!(...))` interchangeably.
+pub trait PushError<T> {
+    fn error(&mut self, path: String, args: T);
+}
+
+impl<T> PushError<&str> for Context<'_, T> {
+    fn error(&mut self, path: String, msg: &str) {
+        if msg.starts_with('.') {
+            self.errors.push(format!("{path}{msg}"));
+        } else {
+            self.errors.push(format!("{path}: {msg}"));
+        }
+    }
+}
+
+impl<T> PushError<String> for Context<'_, T> {
+    fn error(&mut self, path: String, msg: String) {
+        self.error(path, msg.as_str());
+    }
+}
+
+impl<T> PushError<fmt::Arguments<'_>> for Context<'_, T> {
+    fn error(&mut self, path: String, args: fmt::Arguments<'_>) {
+        self.error(path, args.to_string().as_str());
+    }
+}
+
+impl<T> Context<'_, T> {
+    pub fn reset(&mut self) {
+        self.visited.clear();
+        self.errors.clear();
+    }
+
+    pub fn visit(&mut self, path: String) -> bool {
+        self.visited.insert(path)
+    }
+
+    pub fn is_visited(&self, path: &str) -> bool {
+        self.visited.contains(path)
+    }
+
+    pub fn is_option(&self, option: Options) -> bool {
+        self.options.contains(option)
+    }
+}
+
+impl Context<'_, ()> {
+    pub fn new<T>(spec: &T, options: EnumSet<Options>) -> Context<'_, T> {
+        Context {
+            spec,
+            visited: HashSet::new(),
+            errors: Vec::new(),
+            options,
+        }
+    }
+}
+
+impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
+    fn from(val: Context<'a, T>) -> Self {
+        if val.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error { errors: val.errors })
+        }
+    }
 }

@@ -1,9 +1,10 @@
 //! Provides metadata about the API.
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_email, validate_optional_uri,
-    validate_optional_url, validate_required_string, validate_required_url,
+    validate_email, validate_optional_uri, validate_optional_url, validate_required_string,
+    validate_required_url,
 };
+use crate::validation::{Context, PushError, ValidateWithContext};
 
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;

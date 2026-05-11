@@ -7,9 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::{ResolveError, ResolveReference};
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 
 /// v2 Reference Object — exactly `{ "$ref": "..." }`.
 ///
@@ -168,9 +168,9 @@ mod tests {
         );
     }
 
-    use crate::common::helpers::Context;
     use crate::v2::schema::{Schema, StringSchema};
     use crate::v2::spec::Spec;
+    use crate::validation::Context;
     use crate::validation::Options;
 
     #[test]

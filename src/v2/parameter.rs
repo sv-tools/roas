@@ -1,13 +1,12 @@
 //! Parameter Object
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_pattern, validate_required_string,
-};
+use crate::common::helpers::{validate_pattern, validate_required_string};
 use crate::v2::items::Items;
 use crate::v2::reference::RefOr;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -706,9 +705,9 @@ fn must_not_use_multi_collection_format(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::v2::items::{ArrayItem, Items, StringItem};
     use crate::v2::schema::{Schema, StringSchema};
+    use crate::validation::Context;
     use crate::validation::Options;
     use serde_json::json;
 

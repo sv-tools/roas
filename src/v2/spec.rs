@@ -1,7 +1,6 @@
 //! The root document object of the OpenAPI v2.0 specification.
 
 use crate::common::helpers::{
-    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
     validate_not_visited, validate_optional_string_matches, validate_unique_by,
 };
 use crate::common::reference::ResolveReference;
@@ -14,6 +13,9 @@ use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
 use crate::v2::tag::Tag;
+use crate::validation::{
+    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
+};
 use crate::validation::{Error, Options, Validate};
 use enumset::EnumSet;
 use lazy_regex::regex;

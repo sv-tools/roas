@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 
 /// ResolveReference is a trait for resolving references.
 pub trait ResolveReference<D> {

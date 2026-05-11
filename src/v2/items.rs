@@ -1,8 +1,9 @@
 //! Item Object
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
+use crate::common::helpers::validate_pattern;
 use crate::v2::spec::Spec;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

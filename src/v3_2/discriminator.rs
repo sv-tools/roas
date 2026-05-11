@@ -1,9 +1,10 @@
 //! Discriminator Object
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_required_string};
+use crate::common::helpers::validate_required_string;
 use crate::common::reference::RefOr;
 use crate::v3_2::schema::Schema;
 use crate::v3_2::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -65,8 +66,8 @@ impl ValidateWithContext<Spec> for Discriminator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::v3_2::schema::{ObjectSchema, SingleSchema};
+    use crate::validation::Context;
     use crate::validation::Options;
 
     #[test]

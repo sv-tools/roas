@@ -2,10 +2,7 @@
 //!
 //! https://spec.openapis.org/oas/v3.2.0
 
-use crate::common::helpers::{
-    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
-    validate_not_visited,
-};
+use crate::common::helpers::validate_not_visited;
 use crate::common::reference::{RefOr, ResolveReference, resolve_in_map};
 use crate::v3_2::callback::Callback;
 use crate::v3_2::components::Components;
@@ -26,6 +23,9 @@ use crate::v3_2::tag::Tag;
 use crate::v3_2::validation::{
     validate_path_item, validate_path_template_uniqueness, validate_security_requirements,
     validate_tag_uniqueness,
+};
+use crate::validation::{
+    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
 };
 use crate::validation::{Error, Options, Validate};
 use enumset::EnumSet;

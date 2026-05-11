@@ -1,12 +1,12 @@
 //! Path Items
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_1::operation::Operation;
 use crate::v3_1::parameter::Parameter;
 use crate::v3_1::server::Server;
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

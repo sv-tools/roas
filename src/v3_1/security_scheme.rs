@@ -1,10 +1,10 @@
 //! Security Scheme Object
 
 use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_optional_uri, validate_required_string,
-    validate_required_uri,
+    validate_optional_uri, validate_required_string, validate_required_uri,
 };
 use crate::v3_1::spec::Spec;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};

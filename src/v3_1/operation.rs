@@ -1,6 +1,6 @@
 //! Operation Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
+use crate::common::helpers::validate_required_string;
 use crate::common::reference::RefOr;
 use crate::v3_1::callback::Callback;
 use crate::v3_1::external_documentation::ExternalDocumentation;
@@ -11,6 +11,7 @@ use crate::v3_1::server::Server;
 use crate::v3_1::spec::Spec;
 use crate::v3_1::tag::Tag;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -226,9 +227,9 @@ impl ValidateWithContext<Spec> for CodeSample {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::v3_1::response::{Response, Responses};
     use crate::v3_1::tag::Tag;
+    use crate::validation::Context;
 
     fn ok_responses() -> Responses {
         Responses {

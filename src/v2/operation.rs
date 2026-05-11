@@ -1,8 +1,6 @@
 //! Operation Object
 
-use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_required_string, validate_unique_by,
-};
+use crate::common::helpers::{validate_required_string, validate_unique_by};
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;
 use crate::v2::reference::RefOr;
@@ -10,6 +8,7 @@ use crate::v2::response::Responses;
 use crate::v2::spec::{Scheme, Spec};
 use crate::v2::tag::Tag;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

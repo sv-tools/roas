@@ -1,6 +1,6 @@
-use crate::common::helpers::{Context, ValidateWithContext};
 use crate::v3_0::path_item::PathItem;
 use crate::v3_0::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -141,7 +141,7 @@ impl ValidateWithContext<Spec> for Callback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
+    use crate::validation::Context;
     use crate::validation::Options;
     use serde_json::json;
 

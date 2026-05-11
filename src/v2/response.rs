@@ -1,11 +1,12 @@
 //! Response Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
+use crate::common::helpers::validate_required_string;
 use crate::v2::header::Header;
 use crate::v2::reference::RefOr;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -213,9 +214,9 @@ impl ValidateWithContext<Spec> for Responses {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::v2::header::{IntegerHeader, StringHeader};
     use crate::v2::reference::RefOr;
+    use crate::validation::Context;
     use crate::validation::Options;
     use std::collections::BTreeMap;
 
