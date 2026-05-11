@@ -82,7 +82,11 @@ fn migrate_x_display_name(tag: &mut Map<String, Value>) {
 /// `tags[*]` are added as leaf tags so the parent reference resolves.
 fn apply_tag_groups(spec: &mut Map<String, Value>, groups: Vec<Value>) {
     // Pull existing tags into a name-indexed map for in-place
-    // mutation while keeping a stable insertion order.
+    // mutation while keeping a stable insertion order. Track whether
+    // the source had a `tags` field at all so an explicit empty list
+    // (`"tags": []`) round-trips even when the group list adds
+    // nothing.
+    let had_tags = spec.contains_key("tags");
     let mut tags: Vec<Value> = match spec.remove("tags") {
         Some(Value::Array(a)) => a,
         _ => Vec::new(),
@@ -131,7 +135,7 @@ fn apply_tag_groups(spec: &mut Map<String, Value>, groups: Vec<Value>) {
         }
     }
 
-    if !tags.is_empty() {
+    if !tags.is_empty() || had_tags {
         spec.insert("tags".into(), Value::Array(tags));
     }
 }
@@ -264,6 +268,19 @@ mod tests {
             .collect();
         assert_eq!(by_name["pets"]["parent"], "Core");
         assert_eq!(by_name["Core"]["kind"], "nav");
+    }
+
+    #[test]
+    fn empty_tags_array_is_preserved_when_x_tag_groups_is_empty() {
+        // If the source had `tags: []` and `x-tagGroups: []` (no
+        // groups to expand), we must keep the explicit empty array
+        // rather than dropping the field entirely.
+        let mut spec = serde_json::json!({
+            "tags": []
+        });
+        let groups: Vec<Value> = Vec::new();
+        super::apply_tag_groups(spec.as_object_mut().unwrap(), groups);
+        assert_eq!(spec["tags"], serde_json::json!([]));
     }
 
     #[test]
