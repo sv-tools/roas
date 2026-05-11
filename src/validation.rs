@@ -282,3 +282,98 @@ impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display_formats_with_count_and_bulleted_messages() {
+        let err = Error {
+            errors: vec!["first".into(), "second".into()],
+        };
+        assert_eq!(format!("{err}"), "2 errors found:\n- first\n- second\n");
+    }
+
+    #[test]
+    fn error_display_zero_errors_still_renders_header() {
+        let err = Error { errors: vec![] };
+        assert_eq!(format!("{err}"), "0 errors found:\n");
+    }
+
+    #[test]
+    fn check_component_name_accepts_pattern_and_rejects_others() {
+        assert!(check_component_name("Foo.Bar-1_2").is_ok());
+        let err = check_component_name("has space").unwrap_err();
+        assert_eq!(err.name, "has space");
+        assert!(err.to_string().contains("has space"));
+        // The Display includes the literal pattern so callers can fix
+        // their input without consulting the source.
+        assert!(err.to_string().contains("a-zA-Z0-9.\\-_"));
+    }
+
+    #[test]
+    fn context_reset_clears_visited_and_errors_but_not_options() {
+        let mut ctx = Context::new(&(), Options::IgnoreUnusedTags.only());
+        ctx.visit("path".into());
+        ctx.errors.push("boom".into());
+        assert!(ctx.is_visited("path"));
+        assert_eq!(ctx.errors.len(), 1);
+
+        ctx.reset();
+        assert!(!ctx.is_visited("path"));
+        assert!(ctx.errors.is_empty());
+        assert!(
+            ctx.is_option(Options::IgnoreUnusedTags),
+            "reset must not touch options"
+        );
+    }
+
+    #[test]
+    fn context_with_loader_attaches_loader() {
+        let mut loader = Loader::new();
+        let ctx = Context::new(&(), Options::new()).with_loader(&mut loader);
+        assert!(ctx.loader.is_some());
+    }
+
+    #[test]
+    fn context_from_returns_ok_when_empty_err_when_not() {
+        let ctx: Context<()> = Context::new(&(), Options::new());
+        let r: Result<(), Error> = ctx.into();
+        assert!(r.is_ok());
+
+        let mut ctx: Context<()> = Context::new(&(), Options::new());
+        ctx.errors.push("kaboom".into());
+        let r: Result<(), Error> = ctx.into();
+        let err = r.unwrap_err();
+        assert_eq!(err.errors, vec!["kaboom".to_string()]);
+    }
+
+    #[test]
+    fn push_error_routes_dot_prefixed_messages_without_separator() {
+        let mut ctx: Context<()> = Context::new(&(), Options::new());
+        ctx.error("#.foo".into(), ".bar: must not be empty");
+        ctx.error("#.baz".into(), "must match pattern");
+        assert_eq!(
+            ctx.errors,
+            vec![
+                "#.foo.bar: must not be empty".to_string(),
+                "#.baz: must match pattern".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn push_error_accepts_string_and_format_args() {
+        let mut ctx: Context<()> = Context::new(&(), Options::new());
+        ctx.error("#.a".into(), String::from("from string"));
+        ctx.error("#.b".into(), format_args!("from {} args", "format"));
+        assert_eq!(
+            ctx.errors,
+            vec![
+                "#.a: from string".to_string(),
+                "#.b: from format args".to_string(),
+            ]
+        );
+    }
+}

@@ -725,4 +725,172 @@ mod tests {
             "typed cache must be invalidated when the underlying document is re-preloaded"
         );
     }
+
+    #[test]
+    fn json_file_fetcher_rejects_non_file_scheme() {
+        let url = Url::parse("https://example.test/foo.json").unwrap();
+        let err = JsonFileFetcher
+            .fetch(&url)
+            .expect_err("non-file must error");
+        assert!(matches!(err, LoaderError::UnsupportedFetcherUri(u) if u.contains("https")));
+    }
+
+    #[test]
+    fn json_file_fetcher_surfaces_missing_file_as_read_error() {
+        let url = Url::parse("file:///does/not/exist/roas-loader-test.json").unwrap();
+        let err = JsonFileFetcher
+            .fetch(&url)
+            .expect_err("missing file must error");
+        assert!(
+            matches!(err, LoaderError::ReadFile { path, .. } if path.to_string_lossy().contains("does/not/exist"))
+        );
+    }
+
+    #[test]
+    fn json_file_fetcher_surfaces_invalid_json_as_parse_error() {
+        let file = std::env::temp_dir().join(format!(
+            "roas-loader-test-{}-invalid.json",
+            std::process::id()
+        ));
+        fs::write(&file, b"not valid json").unwrap();
+        let url = Url::from_file_path(&file).unwrap();
+        let err = JsonFileFetcher
+            .fetch(&url)
+            .expect_err("invalid JSON must error");
+        assert!(matches!(err, LoaderError::Parse { .. }));
+        fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn resolve_reference_propagates_pointer_not_found() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "Pet": { "name": "x" } }))
+            .unwrap();
+        let err = loader
+            .resolve_reference("doc.json#/Missing")
+            .expect_err("nonexistent pointer must error");
+        assert!(matches!(err, LoaderError::PointerNotFound { .. }));
+    }
+
+    #[test]
+    fn resolve_reference_with_invalid_fragment_errors() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "ok": true }))
+            .unwrap();
+        let err = loader
+            .resolve_reference("doc.json#%ZZ")
+            .expect_err("invalid percent-encoding in fragment must error");
+        assert!(matches!(err, LoaderError::InvalidFragment(_)));
+    }
+
+    #[test]
+    fn resolve_reference_with_empty_fragment_returns_full_document() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "ok": true }))
+            .unwrap();
+        let value = loader.resolve_reference("doc.json").unwrap();
+        assert_eq!(value, &serde_json::json!({ "ok": true }));
+    }
+
+    #[test]
+    fn resolve_reference_as_uses_typed_cache_on_repeat_calls() {
+        #[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+        struct Pet {
+            name: String,
+        }
+
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "Pet": { "name": "rex" } }))
+            .unwrap();
+
+        let first: Pet = loader.resolve_reference_as("doc.json#/Pet").unwrap();
+        // Mutate the underlying Value cache directly — the typed cache
+        // entry from the first call must still win.
+        let mut url = Url::parse("relative:doc.json").unwrap();
+        url.set_fragment(None);
+        loader
+            .cache
+            .insert(url, serde_json::json!({ "Pet": { "name": "different" } }));
+
+        let second: Pet = loader.resolve_reference_as("doc.json#/Pet").unwrap();
+        assert_eq!(first, second, "typed cache must keep the parsed value");
+    }
+
+    fn block_on_simple<F: Future>(future: F) -> F::Output {
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[test]
+    fn load_resource_async_returns_preloaded_value_without_fetcher() {
+        // Async resolution can reuse the preloaded sync cache; the
+        // async-fetcher registry is only consulted on cache miss.
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "ok": true }))
+            .unwrap();
+        let value = block_on_simple(loader.load_resource_async("doc.json")).unwrap();
+        assert_eq!(value, &serde_json::json!({ "ok": true }));
+    }
+
+    #[test]
+    fn resolve_reference_async_pointer_into_preloaded_document() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "Pet": { "name": "rex" } }))
+            .unwrap();
+        let value = block_on_simple(loader.resolve_reference_async("doc.json#/Pet/name")).unwrap();
+        assert_eq!(value, &serde_json::json!("rex"));
+    }
+
+    #[test]
+    fn resolve_reference_async_rejects_internal_only_refs() {
+        let mut loader = Loader::new();
+        let err = block_on_simple(loader.resolve_reference_async("#/components/schemas/Pet"))
+            .expect_err("internal refs are not loader resolvable");
+        assert!(matches!(err, LoaderError::MissingBaseUri(_)));
+    }
+
+    #[test]
+    fn resolve_reference_as_async_uses_shared_typed_cache() {
+        #[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+        struct Pet {
+            name: String,
+        }
+
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "Pet": { "name": "rex" } }))
+            .unwrap();
+
+        let sync_first: Pet = loader.resolve_reference_as("doc.json#/Pet").unwrap();
+        // Async call after a sync call should hit the typed cache and
+        // return the same value, even if the underlying Value is then
+        // mutated.
+        let mut url = Url::parse("relative:doc.json").unwrap();
+        url.set_fragment(None);
+        loader
+            .cache
+            .insert(url, serde_json::json!({ "Pet": { "name": "different" } }));
+
+        let async_second: Pet =
+            block_on_simple(loader.resolve_reference_as_async("doc.json#/Pet")).unwrap();
+        assert_eq!(
+            sync_first, async_second,
+            "sync and async share the typed cache"
+        );
+    }
 }

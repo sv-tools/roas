@@ -534,4 +534,154 @@ mod tests {
             Cow::Owned(_) => panic!("expected borrowed value from spec"),
         }
     }
+
+    #[test]
+    fn get_item_with_loader_inline_item_returns_borrowed() {
+        let mut loader = Loader::new();
+        let inline = Foo {
+            foo: "inline".into(),
+        };
+        let r = RefOr::<Foo>::new_item(inline);
+        let spec = PetSpec;
+        let resolved = r.get_item_with_loader(&spec, &mut loader).unwrap();
+        match resolved {
+            Cow::Borrowed(foo) => assert_eq!(foo.foo, "inline"),
+            Cow::Owned(_) => panic!("inline item must come back borrowed"),
+        }
+    }
+
+    #[test]
+    fn get_item_with_loader_internal_ref_missing_in_spec_is_not_found() {
+        let mut loader = Loader::new();
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Missing");
+        let spec = PetSpec; // always returns None
+        let err = r.get_item_with_loader(&spec, &mut loader).unwrap_err();
+        assert!(matches!(err, ResolveError::NotFound(_)));
+    }
+
+    #[derive(Default)]
+    struct FooSpec {
+        foo: Option<Foo>,
+    }
+
+    impl ResolveReference<Foo> for FooSpec {
+        fn resolve_reference(&self, reference: &str) -> Option<&Foo> {
+            if reference == "#/components/schemas/Foo" {
+                self.foo.as_ref()
+            } else {
+                None
+            }
+        }
+    }
+
+    impl ValidateWithContext<FooSpec> for Foo {
+        fn validate_with_context(&self, ctx: &mut Context<FooSpec>, path: String) {
+            if self.foo.is_empty() {
+                ctx.error(path, "foo must not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn validate_with_context_loaderless_external_ref_emits_not_supported_error() {
+        let spec = FooSpec::default();
+        let r = RefOr::<Foo>::new_ref("https://example.test/foo.json#/Foo");
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not supported")
+                && e.contains("https://example.test/foo.json")),
+            "expected `not supported` error, got: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_loaderless_external_ref_is_silenced_under_ignore() {
+        let spec = FooSpec::default();
+        let r = RefOr::<Foo>::new_ref("https://example.test/foo.json#/Foo");
+        let mut ctx = Context::new(&spec, Options::IgnoreExternalReferences.only());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "IgnoreExternalReferences must silence loader-less external errors: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_internal_not_found_emits_error() {
+        let spec = FooSpec::default(); // no Foo defined
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Foo");
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not found")),
+            "expected `not found` error, got: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_internal_hit_recurses_into_resolved_value() {
+        // Resolved Foo has an empty `foo` field, so the inner validator
+        // should produce a "must not be empty" error against the
+        // reference path.
+        let spec = FooSpec {
+            foo: Some(Foo { foo: String::new() }),
+        };
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Foo");
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            "expected recursive `must not be empty` error, got: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_inline_item_recurses() {
+        let spec = FooSpec::default();
+        let r = RefOr::<Foo>::new_item(Foo { foo: String::new() });
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            "inline item validation must propagate, got: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_visited_ref_is_not_revisited() {
+        let spec = FooSpec {
+            foo: Some(Foo { foo: String::new() }),
+        };
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Foo");
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        let first = ctx.errors.len();
+        // Second visit must be skipped — the visited set has already
+        // recorded the reference.
+        r.validate_with_context(&mut ctx, "#.y".into());
+        assert_eq!(
+            ctx.errors.len(),
+            first,
+            "second walk of the same ref must not add new errors"
+        );
+    }
+
+    #[test]
+    fn ref_validate_with_context_emits_must_not_be_empty_for_empty_ref() {
+        let spec = FooSpec::default();
+        let r = Ref::new("");
+        let mut ctx = Context::new(&spec, Options::new());
+        Ref::validate_with_context::<FooSpec, Foo>(&r, &mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            "empty `$ref` must error: {:?}",
+            ctx.errors,
+        );
+    }
 }
