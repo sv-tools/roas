@@ -594,6 +594,7 @@ impl ValidateWithContext<Spec> for InPath {
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
             }
             InPath::Array(p) => {
+                p.validate_with_context(ctx, path.clone());
                 must_be_required(&p.required, ctx, path.clone(), p.name.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
                 must_not_use_multi_collection_format(&p.collection_format, ctx, path.clone());
@@ -654,6 +655,8 @@ impl ValidateWithContext<Spec> for BooleanParameter {
 impl ValidateWithContext<Spec> for ArrayParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
+        self.items
+            .validate_with_context(ctx, format!("{path}.items"));
     }
 }
 
@@ -704,7 +707,7 @@ fn must_not_use_multi_collection_format(
 mod tests {
     use super::*;
     use crate::common::helpers::Context;
-    use crate::v2::items::Items;
+    use crate::v2::items::{ArrayItem, Items, StringItem};
     use crate::v2::schema::{Schema, StringSchema};
     use crate::validation::Options;
     use serde_json::json;
@@ -1141,5 +1144,53 @@ mod tests {
                 c.errors
             );
         }
+    }
+
+    #[test]
+    fn array_parameter_validates_items() {
+        let p = Parameter::Query(Box::new(InQuery::Array(ArrayParameter {
+            name: "q".into(),
+            items: Items::String(Box::new(StringItem {
+                pattern: Some("[".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })));
+
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(
+            c.errors.iter().any(|e| e.contains("p.items.pattern")),
+            "errors: {:?}",
+            c.errors
+        );
+    }
+
+    #[test]
+    fn path_array_parameter_validates_items() {
+        let p = Parameter::Path(Box::new(InPath::Array(ArrayParameter {
+            name: "id".into(),
+            required: Some(true),
+            items: Items::Array(Box::new(ArrayItem {
+                items: Items::String(Box::default()),
+                default: None,
+                collection_format: Some(CollectionFormat::Multi),
+                max_items: None,
+                min_items: None,
+                unique_items: None,
+                extensions: None,
+            })),
+            ..Default::default()
+        })));
+
+        let mut c = ctx();
+        p.validate_with_context(&mut c, "p".into());
+        assert!(
+            c.errors
+                .iter()
+                .any(|e| e.contains("p.items.collectionFormat")),
+            "errors: {:?}",
+            c.errors
+        );
     }
 }
