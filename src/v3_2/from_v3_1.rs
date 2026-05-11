@@ -120,9 +120,17 @@ fn apply_tag_groups(spec: &mut Map<String, Value>, groups: Vec<Value>) {
             .collect();
 
         // Synthesise (or update) the group tag itself with `kind: nav`.
+        // Any leftover keys on the group object (typically `x-*`
+        // Specification Extensions; v3.1's `TagGroup` flattens them
+        // via serde) migrate onto the group tag so vendor metadata
+        // round-trips through `v3_2::Tag.extensions`. Existing keys
+        // on the target tag win.
         let group_idx = ensure_tag(&mut tags, &mut by_name, &group_name);
         if let Value::Object(t) = &mut tags[group_idx] {
             t.entry("kind").or_insert(Value::String("nav".to_owned()));
+            for (k, v) in g {
+                t.entry(k).or_insert(v);
+            }
         }
 
         // Add `parent: <group_name>` to each member, synthesising the
@@ -277,6 +285,58 @@ mod tests {
             .collect();
         assert_eq!(by_name["pets"]["parent"], "Core");
         assert_eq!(by_name["Core"]["kind"], "nav");
+    }
+
+    #[test]
+    fn x_tag_groups_extension_fields_migrate_onto_group_tag() {
+        // v3.1's `TagGroup` flattens `x-*` extensions; when we
+        // collapse the group into a native v3.2 tag those vendor
+        // fields must survive — copy them onto the synthesised
+        // group tag.
+        let raw = r##"{
+            "openapi": "3.1.2",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "x-tagGroups": [
+                {
+                    "name": "Products",
+                    "tags": ["books"],
+                    "x-icon": "shopping-bag",
+                    "x-order": 1
+                }
+            ]
+        }"##;
+        let value = convert(raw);
+        let tags = value["tags"].as_array().unwrap();
+        let by_name: BTreeMap<&str, &Value> = tags
+            .iter()
+            .map(|t| (t["name"].as_str().unwrap(), t))
+            .collect();
+        let products = by_name["Products"];
+        assert_eq!(products["kind"], "nav");
+        assert_eq!(products["x-icon"], "shopping-bag");
+        assert_eq!(products["x-order"], 1);
+    }
+
+    #[test]
+    fn group_extension_does_not_clobber_existing_tag_extension() {
+        // If the source already declared the group tag with the same
+        // `x-*` key, that one wins — first-declared semantics carry
+        // over to extension migration too.
+        let mut spec = serde_json::json!({
+            "tags": [
+                {"name": "Products", "x-icon": "first"}
+            ]
+        });
+        let groups = vec![serde_json::json!({
+            "name": "Products",
+            "tags": ["books"],
+            "x-icon": "second"
+        })];
+        super::apply_tag_groups(spec.as_object_mut().unwrap(), groups);
+        let tags = spec["tags"].as_array().unwrap();
+        let products = tags.iter().find(|t| t["name"] == "Products").unwrap();
+        assert_eq!(products["x-icon"], "first");
     }
 
     #[test]
