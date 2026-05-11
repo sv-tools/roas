@@ -273,6 +273,30 @@ impl<'a, T> Context<'a, T> {
     }
 }
 
+// Manual `Debug` impl: `&mut Loader` itself isn't `Debug` (it holds
+// boxed `dyn` fetcher trait objects), so the derive doesn't apply.
+// Print the loader as a marker only — the field is rarely useful in
+// log/test output and the visited/errors/options state is what callers
+// actually want to inspect.
+impl<T: fmt::Debug> fmt::Debug for Context<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Context")
+            .field("spec", &self.spec)
+            .field(
+                "loader",
+                &if self.loader.is_some() {
+                    "Some(<loader>)"
+                } else {
+                    "None"
+                },
+            )
+            .field("visited", &self.visited)
+            .field("errors", &self.errors)
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
 impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
     fn from(val: Context<'a, T>) -> Self {
         if val.errors.is_empty() {
@@ -334,6 +358,25 @@ mod tests {
         let mut loader = Loader::new();
         let ctx = Context::new(&(), Options::new()).with_loader(&mut loader);
         assert!(ctx.loader.is_some());
+    }
+
+    #[test]
+    fn context_debug_marks_loader_presence_without_printing_it() {
+        let ctx: Context<()> = Context::new(&(), Options::new());
+        let s = format!("{ctx:?}");
+        assert!(s.contains("Context"), "debug includes type name: {s}");
+        assert!(
+            s.contains("None"),
+            "no-loader Context debug must say `None`: {s}"
+        );
+
+        let mut loader = Loader::new();
+        let ctx = Context::new(&(), Options::new()).with_loader(&mut loader);
+        let s = format!("{ctx:?}");
+        assert!(
+            s.contains("Some(<loader>)"),
+            "attached-loader Context debug must mark presence: {s}"
+        );
     }
 
     #[test]

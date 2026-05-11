@@ -506,20 +506,21 @@ mod tests {
 
         let reference = format!("file://{}#/components/schemas/Pet", file.display());
         assert!(loader.resolve_reference(&reference).is_ok());
-        assert!(loader.resolve_reference(&reference).is_ok());
 
-        fs::remove_file(file).unwrap();
+        // Delete the file. The second resolve must still succeed —
+        // proving the resource came out of the cache rather than the
+        // fetcher, since the fetcher would now fail on a `ReadFile`
+        // error.
+        fs::remove_file(&file).unwrap();
+        assert!(
+            loader.resolve_reference(&reference).is_ok(),
+            "second resolve should hit the cache, not re-fetch the deleted file"
+        );
     }
 
     #[test]
     fn relative_reference_uses_preloaded_document() {
-        let dir = std::env::temp_dir().join(format!("roas-loader-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let root = dir.join("openapi.json");
-        fs::write(&root, br#"{"openapi":"3.2.0"}"#).unwrap();
-
         let mut loader = Loader::new();
-        loader.register_fetcher("file://", JsonFileFetcher);
         loader
             .preload_resource(
                 "common.json",
@@ -532,9 +533,6 @@ mod tests {
             .unwrap();
         let value = loader.resolve_reference("common.json#/Pet/type").unwrap();
         assert_eq!(value, "object");
-
-        fs::remove_file(dir.join("openapi.json")).unwrap();
-        fs::remove_dir(dir).unwrap();
     }
 
     #[test]
