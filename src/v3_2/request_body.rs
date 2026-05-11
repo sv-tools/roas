@@ -1,9 +1,9 @@
 //! Request Body Object
 
-use crate::common::helpers::{Context, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_2::media_type::MediaType;
 use crate::v3_2::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

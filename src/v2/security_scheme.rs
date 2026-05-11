@@ -1,9 +1,8 @@
 //! Security Scheme Object
 
-use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_required_string, validate_required_url,
-};
+use crate::common::helpers::{validate_required_string, validate_required_url};
 use crate::v2::spec::Spec;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -577,7 +576,7 @@ mod tests {
 
     #[test]
     fn oauth2_validate_empty_scopes_and_url_branches() {
-        use crate::common::helpers::Context;
+        use crate::validation::Context;
         use crate::validation::Options;
         let spec = Spec::default();
 
@@ -787,7 +786,7 @@ mod tests {
 
     #[test]
     fn apikey_validate_required_name() {
-        use crate::common::helpers::Context;
+        use crate::validation::Context;
         use crate::validation::Options;
         let spec = Spec::default();
         let s = ApiKeySecurityScheme {

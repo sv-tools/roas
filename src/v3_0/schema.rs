@@ -8,12 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
+use crate::common::helpers::validate_pattern;
 use crate::v3_0::discriminator::Discriminator;
 use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::reference::RefOr;
 use crate::v3_0::spec::Spec;
 use crate::v3_0::xml::XML;
+use crate::validation::{Context, PushError, ValidateWithContext};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]

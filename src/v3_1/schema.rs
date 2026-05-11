@@ -2,14 +2,13 @@
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{
-    Context, PushError, ValidateWithContext, validate_pattern, validate_required_string,
-};
+use crate::common::helpers::{validate_pattern, validate_required_string};
 use crate::common::reference::RefOr;
 use crate::v3_1::discriminator::Discriminator;
 use crate::v3_1::external_documentation::ExternalDocumentation;
 use crate::v3_1::spec::Spec;
 use crate::v3_1::xml::XML;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use monostate::MustBe;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -2146,8 +2145,7 @@ mod tests {
 
         // Validate is a no-op on Bool.
         let spec = crate::v3_1::spec::Spec::default();
-        let mut ctx =
-            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
         Schema::Bool(true).validate_with_context(&mut ctx, "s".into());
         assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
     }
@@ -2244,8 +2242,7 @@ mod tests {
                 ..Default::default()
             })),
         ] {
-            let mut ctx =
-                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
             s.validate_with_context(&mut ctx, "s".into());
             assert!(
                 ctx.errors
@@ -2278,8 +2275,7 @@ mod tests {
                 ..Default::default()
             }))),
         ] {
-            let mut ctx =
-                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
             s.validate_with_context(&mut ctx, "s".into());
             assert!(
                 ctx.errors.iter().any(|e| e.contains("externalDocs.url")),
@@ -2339,8 +2335,7 @@ mod tests {
             ),
         ];
         for (label, schema, needle) in cases {
-            let mut ctx =
-                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
             schema.validate_with_context(&mut ctx, "s".into());
             assert!(
                 ctx.errors.iter().any(|e| e.contains(needle)),
@@ -2362,8 +2357,7 @@ mod tests {
         });
         let s: Schema = serde_json::from_value(json).unwrap();
         let spec = crate::v3_1::spec::Spec::default();
-        let mut ctx =
-            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
         s.validate_with_context(&mut ctx, "s".into());
         assert!(
             ctx.errors
@@ -2383,8 +2377,7 @@ mod tests {
             (serde_json::json!({"oneOf": []}), "oneOf"),
         ] {
             let s: Schema = serde_json::from_value(json).unwrap();
-            let mut ctx =
-                crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+            let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
             s.validate_with_context(&mut ctx, "s".into());
             assert!(
                 ctx.errors
@@ -2401,8 +2394,7 @@ mod tests {
         // Build via the struct: `serde_json::from_value` on `{"type": []}`
         // would not route to `MultiSchema`.
         let spec = crate::v3_1::spec::Spec::default();
-        let mut ctx =
-            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
         let m = MultiSchema {
             schema_types: vec![],
             ..Default::default()
@@ -2429,8 +2421,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&schema).unwrap(), enum_json);
 
         let spec = crate::v3_1::spec::Spec::default();
-        let mut ctx =
-            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
         schema.validate_with_context(&mut ctx, "s".into());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
@@ -2442,8 +2433,7 @@ mod tests {
         let schema: Schema = serde_json::from_value(object_json.clone()).unwrap();
         assert_eq!(serde_json::to_value(&schema).unwrap(), object_json);
 
-        let mut ctx =
-            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
         schema.validate_with_context(&mut ctx, "s".into());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
 
@@ -2452,8 +2442,7 @@ mod tests {
             x_enum_descriptions: Some(vec!["Open state".to_owned()]),
             ..Default::default()
         })));
-        let mut ctx =
-            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
         schema.validate_with_context(&mut ctx, "s".into());
         assert!(
             ctx.errors
@@ -2605,8 +2594,7 @@ mod tests {
     fn empty_schema_validates_clean() {
         let schema = Schema::Empty(EmptySchema);
         let spec = crate::v3_1::spec::Spec::default();
-        let mut ctx =
-            crate::common::helpers::Context::new(&spec, crate::validation::Options::new());
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
         schema.validate_with_context(&mut ctx, "s".into());
         assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
     }

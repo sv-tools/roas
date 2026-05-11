@@ -13,7 +13,7 @@
 use lazy_regex::regex;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::common::helpers::{Context, PushError, validate_unique_by};
+use crate::common::helpers::validate_unique_by;
 use crate::common::reference::ResolveReference;
 use crate::v2::operation::Operation;
 use crate::v2::parameter::{InFormData, InHeader, InPath, InQuery, Parameter};
@@ -22,6 +22,7 @@ use crate::v2::reference::RefOr;
 use crate::v2::security_scheme::{SecurityScheme, SecuritySchemeOAuth2Flow};
 use crate::v2::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, PushError};
 
 /// Resolve a `RefOr<Parameter>` against the spec's `#/parameters/...` pool.
 fn resolve_parameter<'a>(spec: &'a Spec, p: &'a RefOr<Parameter>) -> Option<&'a Parameter> {
@@ -356,7 +357,7 @@ pub fn validate_security_definitions(ctx: &mut Context<Spec>) {
         else {
             continue;
         };
-        crate::common::helpers::ValidateWithContext::validate_with_context(&scheme, ctx, p.clone());
+        crate::validation::ValidateWithContext::validate_with_context(&scheme, ctx, p.clone());
         if !ctx.is_visited(&p) && !ctx.is_option(Options::IgnoreUnusedSecuritySchemes) {
             ctx.error(p, "unused");
         }
@@ -391,7 +392,6 @@ fn validate_operation_security(ctx: &mut Context<Spec>, op_path: &str, op: &Oper
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::v2::parameter::{InBody, InFormData, InPath, InQuery, Parameter, StringParameter};
     use crate::v2::path_item::PathItem;
     use crate::v2::reference::RefOr;
@@ -402,6 +402,7 @@ mod tests {
         SecuritySchemeApiKeyLocation, SecuritySchemeOAuth2Flow,
     };
     use crate::v2::spec::Spec;
+    use crate::validation::Context;
     use crate::validation::Options;
 
     fn body_param(name: &str) -> RefOr<Parameter> {

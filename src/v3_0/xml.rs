@@ -1,7 +1,8 @@
 //! XML Object
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_optional_url};
+use crate::common::helpers::validate_optional_url;
 use crate::v3_0::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

@@ -1,12 +1,12 @@
 //! Response Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_2::header::Header;
 use crate::v3_2::link::Link;
 use crate::v3_2::media_type::MediaType;
 use crate::v3_2::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use lazy_regex::regex;
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;

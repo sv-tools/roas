@@ -1,11 +1,12 @@
 //! Describes a single operation parameter.
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
+use crate::common::helpers::validate_required_string;
 use crate::common::reference::RefOr;
 use crate::v3_1::example::Example;
 use crate::v3_1::media_type::MediaType;
 use crate::v3_1::schema::Schema;
 use crate::v3_1::spec::Spec;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -527,7 +528,7 @@ fn either_schema_or_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
+    use crate::validation::Context;
     use crate::validation::Options;
 
     #[test]

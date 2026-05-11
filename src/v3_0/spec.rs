@@ -1,9 +1,6 @@
 //! The root document object of the OpenAPI v3.0.X specification.
 
-use crate::common::helpers::{
-    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
-    validate_not_visited, validate_required_string,
-};
+use crate::common::helpers::{validate_not_visited, validate_required_string};
 use crate::common::reference::ResolveReference;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
@@ -24,6 +21,9 @@ use crate::v3_0::tag::Tag;
 use crate::v3_0::validation::{
     validate_path_item, validate_path_template_uniqueness, validate_security_requirements,
     validate_tag_uniqueness,
+};
+use crate::validation::{
+    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
 };
 use crate::validation::{Error, Options, Validate};
 use enumset::EnumSet;
@@ -1325,8 +1325,8 @@ mod tests {
 
     #[test]
     fn component_reference_alias_cycle_does_not_recurse_forever() {
-        use crate::common::helpers::Context;
         use crate::v3_0::components::Components;
+        use crate::validation::Context;
 
         let mut schemas = BTreeMap::new();
         schemas.insert(

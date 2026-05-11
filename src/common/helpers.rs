@@ -1,118 +1,14 @@
-use enumset::EnumSet;
-use lazy_regex::regex;
+//! Internal validation utility functions shared across the per-version
+//! validators. The user-facing types (`Context`, `ValidateWithContext`,
+//! `PushError`, `InvalidComponentName`, `check_component_name`) live in
+//! [`crate::validation`]; this module is `pub(crate)` and holds only
+//! crate-internal helpers.
+
 use regex::Regex;
+#[cfg(feature = "v2")]
 use std::collections::HashSet;
-use std::fmt;
-use thiserror::Error;
 
-use crate::validation::{Error, Options};
-
-/// Allowed character set for OpenAPI component / definition map keys.
-/// Mirrors the pattern enforced by `v3_0::Components` / `v3_1::Components`
-/// validators. Used by `Spec::define_*` helpers to surface invalid keys
-/// at insertion time rather than during a later `validate()` pass.
-pub const COMPONENT_NAME_PATTERN: &str = r"^[a-zA-Z0-9.\-_]+$";
-
-/// Returned by `Spec::define_*` helpers when a component name does not
-/// match [`COMPONENT_NAME_PATTERN`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
-#[error("component name {name:?} must match pattern `{COMPONENT_NAME_PATTERN}`")]
-pub struct InvalidComponentName {
-    pub name: String,
-}
-
-/// Returns `Ok(())` if `name` matches [`COMPONENT_NAME_PATTERN`],
-/// otherwise an [`InvalidComponentName`] error.
-pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
-    if regex!(r"^[a-zA-Z0-9.\-_]+$").is_match(name) {
-        Ok(())
-    } else {
-        Err(InvalidComponentName {
-            name: name.to_owned(),
-        })
-    }
-}
-
-/// ValidateWithContext is a trait for validating an object with a context.
-/// It allows the object to be validated with additional context information,
-/// such as the specification and validation options.
-pub trait ValidateWithContext<T> {
-    fn validate_with_context(&self, ctx: &mut Context<T>, path: String);
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Context<'a, T> {
-    pub spec: &'a T,
-    pub visited: HashSet<String>,
-    pub errors: Vec<String>,
-    pub options: EnumSet<Options>,
-}
-
-pub trait PushError<T> {
-    fn error(&mut self, path: String, args: T);
-}
-
-impl<T> PushError<&str> for Context<'_, T> {
-    fn error(&mut self, path: String, msg: &str) {
-        if msg.starts_with('.') {
-            self.errors.push(format!("{path}{msg}"));
-        } else {
-            self.errors.push(format!("{path}: {msg}"));
-        }
-    }
-}
-
-impl<T> PushError<String> for Context<'_, T> {
-    fn error(&mut self, path: String, msg: String) {
-        self.error(path, msg.as_str());
-    }
-}
-
-impl<T> PushError<fmt::Arguments<'_>> for Context<'_, T> {
-    fn error(&mut self, path: String, args: fmt::Arguments<'_>) {
-        self.error(path, args.to_string().as_str());
-    }
-}
-
-impl<T> Context<'_, T> {
-    pub fn reset(&mut self) {
-        self.visited.clear();
-        self.errors.clear();
-    }
-
-    pub fn visit(&mut self, path: String) -> bool {
-        self.visited.insert(path)
-    }
-
-    pub fn is_visited(&self, path: &str) -> bool {
-        self.visited.contains(path)
-    }
-
-    pub fn is_option(&self, option: Options) -> bool {
-        self.options.contains(option)
-    }
-}
-
-impl Context<'_, ()> {
-    pub fn new<T>(spec: &T, options: EnumSet<Options>) -> Context<'_, T> {
-        Context {
-            spec,
-            visited: HashSet::new(),
-            errors: Vec::new(),
-            options,
-        }
-    }
-}
-
-impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
-    fn from(val: Context<'a, T>) -> Self {
-        if val.errors.is_empty() {
-            Ok(())
-        } else {
-            Err(Error { errors: val.errors })
-        }
-    }
-}
+use crate::validation::{Context, Options, PushError, ValidateWithContext};
 
 /// Validates that the given optional email string contains an '@' character.
 /// If the email is present and invalid, records an error in the context.
@@ -127,12 +23,15 @@ pub fn validate_email<T>(email: &Option<String>, ctx: &mut Context<T>, path: Str
     }
 }
 
+#[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 const HTTP: &str = "http://";
+#[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 const HTTPS: &str = "https://";
 
 /// Validates an optional URL string.
 /// If the URL is present, it checks if it is valid using `validate_required_url`.
 /// Records an error in the context if the URL is invalid.
+#[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path: String) {
     if let Some(url) = url {
         validate_required_url(url, ctx, path);
@@ -192,6 +91,7 @@ pub fn validate_required_uri<T>(uri: &String, ctx: &mut Context<T>, path: String
 
 /// Validates that the given URL string starts with "http://" or "https://".
 /// If the URL is invalid, records an error in the context.
+#[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
 pub fn validate_required_url<T>(url: &String, ctx: &mut Context<T>, path: String) {
     if !ctx.is_option(Options::IgnoreEmptyExternalDocumentationUrl) {
         validate_required_string(url, ctx, path.clone());
@@ -227,6 +127,7 @@ pub fn validate_string_matches<T>(s: &str, pattern: &Regex, ctx: &mut Context<T>
 }
 
 // Validates an optional string against a regex pattern if present.
+#[cfg(feature = "v2")]
 pub fn validate_optional_string_matches<T>(
     s: &Option<String>,
     pattern: &Regex,
@@ -253,6 +154,7 @@ pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
 ///
 /// Used to enforce `uniqueItems: true` on lists where the schema requires it
 /// (schemes, MIME type lists, tags by name, scope arrays, etc.).
+#[cfg(feature = "v2")]
 pub fn validate_unique_by<T, K, S, F>(items: &[T], ctx: &mut Context<S>, path: String, key: F)
 where
     K: Eq + std::hash::Hash,
@@ -290,6 +192,7 @@ pub fn validate_not_visited<T, D>(
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
     #[test]
     fn test_validate_url() {
         let mut ctx = Context::new(&(), Options::new());

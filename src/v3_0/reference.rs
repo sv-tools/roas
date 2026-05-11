@@ -7,9 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::{ResolveError, ResolveReference};
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use std::collections::BTreeSet;
 
 /// v3.0 Reference Object — exactly `{ "$ref": "..." }`.

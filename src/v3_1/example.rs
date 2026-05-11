@@ -1,7 +1,8 @@
 //! Example object.
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_optional_uri};
+use crate::common::helpers::validate_optional_uri;
 use crate::v3_1::spec::Spec;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -56,7 +57,7 @@ impl ValidateWithContext<Spec> for Example {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
+    use crate::validation::Context;
     use crate::validation::Options;
     use serde_json::json;
 
