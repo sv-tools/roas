@@ -94,7 +94,10 @@ fn apply_tag_groups(spec: &mut Map<String, Value>, groups: Vec<Value>) {
     let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
     for (i, tag) in tags.iter().enumerate() {
         if let Some(name) = tag.get("name").and_then(|v| v.as_str()) {
-            by_name.insert(name.to_owned(), i);
+            // First-declared wins for duplicate names so the
+            // migration's "preserve existing X" guarantees are
+            // stable.
+            by_name.entry(name.to_owned()).or_insert(i);
         }
     }
 
@@ -123,8 +126,14 @@ fn apply_tag_groups(spec: &mut Map<String, Value>, groups: Vec<Value>) {
         }
 
         // Add `parent: <group_name>` to each member, synthesising the
-        // member tag if it wasn't declared.
+        // member tag if it wasn't declared. Skip self-references —
+        // a group whose `tags` list contains its own name would
+        // otherwise produce a self-parent that fails v3.2 tag-hierarchy
+        // validation.
         for member_name in members {
+            if member_name == group_name {
+                continue;
+            }
             let idx = ensure_tag(&mut tags, &mut by_name, &member_name);
             if let Value::Object(t) = &mut tags[idx] {
                 // Don't overwrite an existing parent — first declared
@@ -268,6 +277,55 @@ mod tests {
             .collect();
         assert_eq!(by_name["pets"]["parent"], "Core");
         assert_eq!(by_name["Core"]["kind"], "nav");
+    }
+
+    #[test]
+    fn group_member_matching_group_name_is_skipped() {
+        // `{name: "Products", tags: ["Products"]}` would otherwise
+        // turn the group tag into its own parent, failing v3.2's
+        // tag-hierarchy validation.
+        let mut spec = serde_json::json!({});
+        let groups = vec![serde_json::json!({
+            "name": "Products",
+            "tags": ["Products", "books"]
+        })];
+        super::apply_tag_groups(spec.as_object_mut().unwrap(), groups);
+        let tags = spec["tags"].as_array().unwrap();
+        let by_name: BTreeMap<&str, &Value> = tags
+            .iter()
+            .map(|t| (t["name"].as_str().unwrap(), t))
+            .collect();
+        // Products tag is `kind: nav` and has NO `parent` (no
+        // self-reference).
+        assert_eq!(by_name["Products"]["kind"], "nav");
+        assert!(by_name["Products"].get("parent").is_none());
+        // The legitimate member still gets parented.
+        assert_eq!(by_name["books"]["parent"], "Products");
+    }
+
+    #[test]
+    fn duplicate_tag_names_resolve_to_first_declared() {
+        // The migration's "preserve existing X" guarantees should
+        // target the first-declared tag, not the last. This matters
+        // for any tag-hierarchy decision the conversion makes for
+        // ambiguous source data.
+        let mut spec = serde_json::json!({
+            "tags": [
+                {"name": "Products", "kind": "audience"},
+                {"name": "Products", "kind": "badge"}
+            ]
+        });
+        let groups = vec![serde_json::json!({
+            "name": "Products",
+            "tags": []
+        })];
+        super::apply_tag_groups(spec.as_object_mut().unwrap(), groups);
+        let tags = spec["tags"].as_array().unwrap();
+        // The first-declared tag keeps its `kind: audience` (the
+        // migration doesn't clobber). The second-declared tag is
+        // unchanged because the index lookup pointed at the first.
+        assert_eq!(tags[0]["kind"], "audience");
+        assert_eq!(tags[1]["kind"], "badge");
     }
 
     #[test]
