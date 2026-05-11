@@ -14,11 +14,11 @@ use lazy_regex::regex;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::common::helpers::{Context, PushError, validate_unique_by};
+use crate::common::reference::RefOr;
 use crate::common::reference::ResolveReference;
 use crate::v2::operation::Operation;
 use crate::v2::parameter::{InFormData, InHeader, InPath, InQuery, Parameter};
 use crate::v2::path_item::PathItem;
-use crate::v2::reference::RefOr;
 use crate::v2::security_scheme::{SecurityScheme, SecuritySchemeOAuth2Flow};
 use crate::v2::spec::Spec;
 use crate::validation::Options;
@@ -392,9 +392,9 @@ fn validate_operation_security(ctx: &mut Context<Spec>, op_path: &str, op: &Oper
 mod tests {
     use super::*;
     use crate::common::helpers::Context;
+    use crate::common::reference::RefOr;
     use crate::v2::parameter::{InBody, InFormData, InPath, InQuery, Parameter, StringParameter};
     use crate::v2::path_item::PathItem;
-    use crate::v2::reference::RefOr;
     use crate::v2::response::{Response, Responses};
     use crate::v2::schema::{Schema, StringSchema};
     use crate::v2::security_scheme::{

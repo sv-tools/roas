@@ -325,9 +325,9 @@ mod tests {
     fn spec_with_pets_get() -> Spec {
         // Build a spec containing GET /pets so internal operationRef tests
         // have a valid target.
+        use crate::common::reference::RefOr;
         use crate::v3_0::operation::Operation;
         use crate::v3_0::path_item::{PathItem, Paths};
-        use crate::v3_0::reference::RefOr;
         use crate::v3_0::response::{Response, Responses};
 
         let op = Operation {
@@ -498,9 +498,9 @@ mod tests {
         // `/pets` is a PathItem `$ref` pointing at `/canonical-pets`, which
         // declares `get`. The Link's operationRef `#/paths/~1pets/get` must
         // resolve via the indirection.
+        use crate::common::reference::RefOr;
         use crate::v3_0::operation::Operation;
         use crate::v3_0::path_item::{PathItem, Paths};
-        use crate::v3_0::reference::RefOr;
         use crate::v3_0::response::{Response, Responses};
 
         let op = Operation {
@@ -563,9 +563,9 @@ mod tests {
 
     #[test]
     fn operation_ref_follows_multi_hop_internal_path_item_ref() {
+        use crate::common::reference::RefOr;
         use crate::v3_0::operation::Operation;
         use crate::v3_0::path_item::{PathItem, Paths};
-        use crate::v3_0::reference::RefOr;
         use crate::v3_0::response::{Response, Responses};
 
         let op = Operation {
@@ -753,9 +753,9 @@ mod tests {
     fn operation_ref_tilde0_decodes_to_tilde() {
         // RFC 6901: `~01` round-trips to `~1`. Here we register a path that
         // contains a literal `~` and verify the decoder finds it.
+        use crate::common::reference::RefOr;
         use crate::v3_0::operation::Operation;
         use crate::v3_0::path_item::{PathItem, Paths};
-        use crate::v3_0::reference::RefOr;
         use crate::v3_0::response::{Response, Responses};
         let op = Operation {
             responses: Responses {

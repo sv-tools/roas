@@ -1977,9 +1977,9 @@ mod tests {
     fn test_one_of_serialize_deserialize() {
         let spec = Schema::OneOf(Box::new(OneOfSchema {
             one_of: vec![
-                RefOr::new_ref("#/components/schemas/Cat".into()),
-                RefOr::new_ref("#/components/schemas/Dog".into()),
-                RefOr::new_ref("#/components/schemas/Lizard".into()),
+                RefOr::new_ref("#/components/schemas/Cat"),
+                RefOr::new_ref("#/components/schemas/Dog"),
+                RefOr::new_ref("#/components/schemas/Lizard"),
             ],
             discriminator: Some(Discriminator {
                 property_name: "petType".into(),
@@ -2005,9 +2005,9 @@ mod tests {
     fn test_any_of_serialize_deserialize() {
         let spec = Schema::AnyOf(Box::new(AnyOfSchema {
             any_of: vec![
-                RefOr::new_ref("#/components/schemas/Cat".into()),
-                RefOr::new_ref("#/components/schemas/Dog".into()),
-                RefOr::new_ref("#/components/schemas/Lizard".into()),
+                RefOr::new_ref("#/components/schemas/Cat"),
+                RefOr::new_ref("#/components/schemas/Dog"),
+                RefOr::new_ref("#/components/schemas/Lizard"),
             ],
             discriminator: Some(Discriminator {
                 property_name: "petType".into(),
@@ -2033,9 +2033,9 @@ mod tests {
     fn test_all_of_serialize_deserialize() {
         let spec = Schema::AllOf(Box::new(AllOfSchema {
             all_of: vec![
-                RefOr::new_ref("#/components/schemas/Cat".into()),
-                RefOr::new_ref("#/components/schemas/Dog".into()),
-                RefOr::new_ref("#/components/schemas/Lizard".into()),
+                RefOr::new_ref("#/components/schemas/Cat"),
+                RefOr::new_ref("#/components/schemas/Dog"),
+                RefOr::new_ref("#/components/schemas/Lizard"),
             ],
             discriminator: Some(Discriminator {
                 property_name: "petType".into(),

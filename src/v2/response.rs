@@ -1,8 +1,8 @@
 //! Response Object
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
+use crate::common::reference::RefOr;
 use crate::v2::header::Header;
-use crate::v2::reference::RefOr;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
 use crate::validation::Options;
@@ -214,8 +214,8 @@ impl ValidateWithContext<Spec> for Responses {
 mod tests {
     use super::*;
     use crate::common::helpers::Context;
+    use crate::common::reference::RefOr;
     use crate::v2::header::{IntegerHeader, StringHeader};
-    use crate::v2::reference::RefOr;
     use crate::validation::Options;
     use std::collections::BTreeMap;
 

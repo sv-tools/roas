@@ -1,12 +1,12 @@
 //! Holds a set of reusable objects for different aspects of the OAS.
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_string_matches};
+use crate::common::reference::RefOr;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::example::Example;
 use crate::v3_0::header::Header;
 use crate::v3_0::link::Link;
 use crate::v3_0::parameter::Parameter;
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::request_body::RequestBody;
 use crate::v3_0::response::Response;
 use crate::v3_0::schema::Schema;

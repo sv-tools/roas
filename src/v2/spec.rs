@@ -4,12 +4,12 @@ use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
     validate_not_visited, validate_optional_string_matches, validate_unique_by,
 };
+use crate::common::reference::RefOr;
 use crate::common::reference::ResolveReference;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::info::Info;
 use crate::v2::parameter::Parameter;
 use crate::v2::path_item::Paths;
-use crate::v2::reference::RefOr;
 use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;

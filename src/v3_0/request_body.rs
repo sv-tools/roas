@@ -105,7 +105,7 @@ mod tests {
                 example: Some(json!(1)),
                 examples: Some(BTreeMap::from([(
                     "a".into(),
-                    crate::v3_0::reference::RefOr::new_item(
+                    crate::common::reference::RefOr::new_item(
                         crate::v3_0::example::Example::default(),
                     ),
                 )])),

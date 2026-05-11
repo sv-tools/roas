@@ -197,7 +197,7 @@ mod tests {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         Header {
-            schema: Some(RefOr::new_ref("".into())),
+            schema: Some(RefOr::new_ref("")),
             ..Default::default()
         }
         .validate_with_context(&mut ctx, "h".into());

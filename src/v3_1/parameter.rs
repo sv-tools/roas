@@ -633,12 +633,9 @@ mod tests {
             style: None,
             explode: None,
             allow_reserved: None,
-            schema: Some(RefOr::new_ref("".into())),
+            schema: Some(RefOr::new_ref("")),
             example: None,
-            examples: Some(BTreeMap::from([(
-                "ex".to_owned(),
-                RefOr::new_ref("".into()),
-            )])),
+            examples: Some(BTreeMap::from([("ex".to_owned(), RefOr::new_ref(""))])),
             content: None,
             extensions: None,
         });

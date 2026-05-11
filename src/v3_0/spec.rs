@@ -5,6 +5,7 @@ use crate::common::helpers::{
     validate_not_visited, validate_required_string,
 };
 use crate::common::reference::ResolveReference;
+use crate::common::reference::{RefOr, resolve_in_map};
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
 use crate::v3_0::example::Example;
@@ -14,7 +15,6 @@ use crate::v3_0::info::Info;
 use crate::v3_0::link::Link;
 use crate::v3_0::parameter::Parameter;
 use crate::v3_0::path_item::Paths;
-use crate::v3_0::reference::{RefOr, resolve_in_map};
 use crate::v3_0::request_body::RequestBody;
 use crate::v3_0::response::Response;
 use crate::v3_0::schema::Schema;
