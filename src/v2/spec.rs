@@ -633,6 +633,62 @@ impl ValidateWithContext<Spec> for TagGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::IGNORE_UNUSED;
+
+    #[test]
+    fn validate_with_loader_resolves_external_schema_ref() {
+        // v2 has no `components.schemas`; nest the external `$ref` under
+        // a definition's property so it goes through `RefOr<Schema>`.
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "test", "version": "1.0" },
+            "paths": {},
+            "definitions": {
+                "Wrapper": {
+                    "type": "object",
+                    "properties": {
+                        "pet": { "$ref": "external.json#/Pet" }
+                    }
+                }
+            }
+        }))
+        .expect("spec must parse");
+
+        let err = spec
+            .validate(IGNORE_UNUSED)
+            .expect_err("external ref must error when no loader is attached");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("external.json#/Pet") && e.contains("not supported")),
+            "expected `not supported` error, got: {:?}",
+            err.errors,
+        );
+
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({
+                    "Pet": { "type": "object", "properties": {} }
+                }),
+            )
+            .expect("preload must succeed");
+        spec.validate_with_loader(IGNORE_UNUSED, &mut loader)
+            .expect("validation must succeed when external ref is preloaded");
+
+        let mut empty_loader = Loader::new();
+        let err = spec
+            .validate_with_loader(IGNORE_UNUSED, &mut empty_loader)
+            .expect_err("missing fetcher must surface as a validation error");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("external.json#/Pet") && e.contains("failed to resolve")),
+            "expected `failed to resolve` error, got: {:?}",
+            err.errors,
+        );
+    }
 
     #[test]
     fn test_swagger_version_deserialize() {
