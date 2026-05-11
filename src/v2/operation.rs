@@ -1,6 +1,8 @@
 //! Operation Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
+use crate::common::helpers::{
+    Context, PushError, ValidateWithContext, validate_required_string, validate_unique_by,
+};
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::parameter::Parameter;
 use crate::v2::reference::RefOr;
@@ -132,6 +134,23 @@ impl ValidateWithContext<Spec> for Operation {
                 path.clone(),
                 format_args!("operationId `{operation_id}` already exists"),
             );
+        }
+        // OAS 2.0 schema marks `tags`, `consumes`, `produces`, `schemes`, and
+        // `security` as `uniqueItems: true`.
+        if let Some(tags) = &self.tags {
+            validate_unique_by(tags, ctx, format!("{path}.tags"), |t| t.clone());
+        }
+        if let Some(consumes) = &self.consumes {
+            validate_unique_by(consumes, ctx, format!("{path}.consumes"), |s| s.clone());
+        }
+        if let Some(produces) = &self.produces {
+            validate_unique_by(produces, ctx, format!("{path}.produces"), |s| s.clone());
+        }
+        if let Some(schemes) = &self.schemes {
+            validate_unique_by(schemes, ctx, format!("{path}.schemes"), |s| s.clone());
+        }
+        if let Some(security) = &self.security {
+            validate_unique_by(security, ctx, format!("{path}.security"), |r| r.clone());
         }
         if let Some(tags) = &self.tags {
             for (i, tag) in tags.iter().enumerate() {
@@ -473,5 +492,44 @@ mod tests {
         let mut ctx = Context::new(&spec, Default::default());
         operation.validate_with_context(&mut ctx, "operation".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn unique_items_enforced_on_operation_lists() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Default::default());
+        let mut req = BTreeMap::new();
+        req.insert("none".to_owned(), vec![]);
+        let op = Operation {
+            tags: Some(vec!["pet".into(), "pet".into()]),
+            consumes: Some(vec!["application/json".into(), "application/json".into()]),
+            produces: Some(vec!["text/plain".into(), "text/plain".into()]),
+            schemes: Some(vec![Scheme::HTTPS, Scheme::HTTPS]),
+            responses: Responses {
+                default: Some(RefOr::new_item(crate::v2::response::Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            security: Some(vec![req.clone(), req]),
+            ..Default::default()
+        };
+        op.validate_with_context(&mut ctx, "op".to_owned());
+        for field in [
+            "op.tags[1]",
+            "op.consumes[1]",
+            "op.produces[1]",
+            "op.schemes[1]",
+            "op.security[1]",
+        ] {
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains(field) && e.contains("duplicate value")),
+                "missing dup error for {field}: {:?}",
+                ctx.errors
+            );
+        }
     }
 }

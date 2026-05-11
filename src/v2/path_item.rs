@@ -215,6 +215,17 @@ impl ValidateWithContext<Spec> for PathItem {
                 ctx,
                 format!("{path}.$ref"),
             );
+            // OAS 2.0: a Path Item with `$ref` replaces this object; mixing
+            // it with inline operations or parameters has undefined behavior.
+            let has_ops = self.operations.as_ref().is_some_and(|m| !m.is_empty());
+            let has_params = self.parameters.as_ref().is_some_and(|p| !p.is_empty());
+            if has_ops || has_params {
+                crate::common::helpers::PushError::error(
+                    ctx,
+                    format!("{path}.$ref"),
+                    "MUST NOT coexist with inline operations or parameters",
+                );
+            }
         }
 
         if let Some(other) = &self.operations {
@@ -795,6 +806,40 @@ mod tests {
         assert!(item.operations.is_none());
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v, raw);
+    }
+
+    #[test]
+    fn path_item_ref_must_not_coexist_with_operations_or_parameters() {
+        let mut ops = BTreeMap::new();
+        ops.insert(
+            "get".to_owned(),
+            crate::v2::operation::Operation {
+                responses: Responses {
+                    default: Some(RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let item = PathItem {
+            reference: Some("#/x".to_owned()),
+            operations: Some(ops),
+            parameters: None,
+            extensions: None,
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("$ref") && e.contains("MUST NOT coexist")),
+            "errors: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]

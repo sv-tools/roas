@@ -2,7 +2,7 @@
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
 use crate::common::helpers::{
-    Context, ValidateWithContext, validate_pattern, validate_required_string,
+    Context, PushError, ValidateWithContext, validate_pattern, validate_required_string,
 };
 use crate::v2::items::Items;
 use crate::v2::reference::RefOr;
@@ -546,6 +546,7 @@ impl ValidateWithContext<Spec> for InHeader {
             InHeader::Array(p) => {
                 p.validate_with_context(ctx, path.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
+                must_not_use_multi_collection_format(&p.collection_format, ctx, path.clone());
             }
         }
     }
@@ -595,6 +596,7 @@ impl ValidateWithContext<Spec> for InPath {
             InPath::Array(p) => {
                 must_be_required(&p.required, ctx, path.clone(), p.name.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
+                must_not_use_multi_collection_format(&p.collection_format, ctx, path.clone());
             }
         }
     }
@@ -676,6 +678,25 @@ fn must_not_allow_empty_value(
     if p.is_some_and(|x| x) {
         ctx.errors
             .push(format!("{path}.{name}: must not allow empty value"));
+    }
+}
+
+/// Per the OAS 2.0 schema, `collectionFormat: "multi"` is allowed only on
+/// `query` and `formData` parameters. `header` and `path` parameters must
+/// use the `collectionFormat` enum (csv/ssv/tsv/pipes) — `multi` here is
+/// a spec violation.
+fn must_not_use_multi_collection_format(
+    format: &Option<CollectionFormat>,
+    ctx: &mut Context<Spec>,
+    path: String,
+) {
+    if let Some(fmt) = format
+        && fmt.is_multi()
+    {
+        ctx.error(
+            format!("{path}.collectionFormat"),
+            "`multi` is only allowed on `query` and `formData` parameters",
+        );
     }
 }
 
@@ -1065,5 +1086,60 @@ mod tests {
             _ => panic!("expected query parameter"),
         }
         assert_eq!(serde_json::to_value(&p).unwrap(), query);
+    }
+
+    #[test]
+    fn header_and_path_array_params_reject_multi_collection_format() {
+        // `multi` is allowed only for query/formData; header and path
+        // parameters must use the `collectionFormat` enum without `multi`.
+        for inner in [
+            Parameter::Header(Box::new(InHeader::Array(ArrayParameter {
+                name: "h".into(),
+                items: Items::String(Box::default()),
+                collection_format: Some(CollectionFormat::Multi),
+                ..Default::default()
+            }))),
+            Parameter::Path(Box::new(InPath::Array(ArrayParameter {
+                name: "id".into(),
+                required: Some(true),
+                items: Items::String(Box::default()),
+                collection_format: Some(CollectionFormat::Multi),
+                ..Default::default()
+            }))),
+        ] {
+            let mut c = ctx();
+            inner.validate_with_context(&mut c, "p".into());
+            assert!(
+                c.errors
+                    .iter()
+                    .any(|e| e.contains("`multi` is only allowed")),
+                "errors: {:?}",
+                c.errors
+            );
+        }
+
+        // Query and formData accept `multi`.
+        for inner in [
+            Parameter::Query(Box::new(InQuery::Array(ArrayParameter {
+                name: "q".into(),
+                items: Items::String(Box::default()),
+                collection_format: Some(CollectionFormat::Multi),
+                ..Default::default()
+            }))),
+            Parameter::FormData(Box::new(InFormData::Array(ArrayParameter {
+                name: "f".into(),
+                items: Items::String(Box::default()),
+                collection_format: Some(CollectionFormat::Multi),
+                ..Default::default()
+            }))),
+        ] {
+            let mut c = ctx();
+            inner.validate_with_context(&mut c, "p".into());
+            assert!(
+                c.errors.iter().all(|e| !e.contains("`multi`")),
+                "errors: {:?}",
+                c.errors
+            );
+        }
     }
 }

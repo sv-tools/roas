@@ -797,8 +797,10 @@ impl ValidateWithContext<Spec> for ArraySchema {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
 
-        if let Some(items) = &self.items {
-            items.validate_with_context(ctx, format!("{path}.items"));
+        // Per OAS 2.0: when `type: array`, `items` MUST be present.
+        match &self.items {
+            Some(items) => items.validate_with_context(ctx, format!("{path}.items")),
+            None => ctx.error(path, ".items: is required for `type: array`"),
         }
     }
 }
@@ -831,6 +833,62 @@ impl ValidateWithContext<Spec> for ObjectSchema {
                 schema.validate_with_context(ctx, format!("{path}.allOf[{i}]"));
             }
         }
+
+        // OAS 2.0: when `discriminator` is set, it MUST name a property
+        // defined on this schema, and that property MUST appear in `required`.
+        if let Some(disc) = &self.discriminator {
+            let in_props = self
+                .properties
+                .as_ref()
+                .is_some_and(|p| p.contains_key(disc));
+            if !in_props {
+                ctx.error(
+                    format!("{path}.discriminator"),
+                    format_args!("`{disc}` must be a property defined on this schema"),
+                );
+            }
+            let in_required = self
+                .required
+                .as_ref()
+                .is_some_and(|r| r.iter().any(|n| n == disc));
+            if !in_required {
+                ctx.error(
+                    format!("{path}.discriminator"),
+                    format_args!("`{disc}` must be listed in `required`"),
+                );
+            }
+        }
+
+        // OAS 2.0 prose: properties marked `readOnly: true` SHOULD NOT appear
+        // in `required`. Flag the combination as a warning-level error.
+        if let (Some(props), Some(required)) = (&self.properties, &self.required) {
+            for name in required {
+                if let Some(RefOr::Item(schema)) = props.get(name)
+                    && is_schema_read_only(schema)
+                {
+                    ctx.error(
+                        format!("{path}.required"),
+                        format_args!("`{name}` is marked `readOnly` and SHOULD NOT be required"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Returns `true` if the schema's `readOnly` flag is set. Used by
+/// `ObjectSchema::validate_with_context` to surface the SHOULD-NOT rule
+/// that read-only properties not appear in `required`.
+fn is_schema_read_only(schema: &Schema) -> bool {
+    match schema {
+        Schema::String(s) => s.read_only == Some(true),
+        Schema::Integer(s) => s.read_only == Some(true),
+        Schema::Number(s) => s.read_only == Some(true),
+        Schema::Boolean(s) => s.read_only == Some(true),
+        Schema::Array(s) => s.read_only == Some(true),
+        Schema::Object(s) => s.read_only == Some(true),
+        Schema::Null(s) => s.read_only == Some(true),
+        Schema::AllOf(_) => false,
     }
 }
 
@@ -1235,6 +1293,139 @@ mod tests {
                     },
                 ],
             }),
+        );
+    }
+
+    #[test]
+    fn array_schema_requires_items() {
+        // Per OAS 2.0: `type: array` MUST be accompanied by `items`.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Array(Box::new(ArraySchema {
+            items: None,
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".items: is required for `type: array`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // With items: valid.
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Array(Box::new(ArraySchema {
+            items: Some(RefOr::new_item(Schema::from(StringSchema::default()))),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn discriminator_must_be_property_and_required() {
+        let spec = Spec::default();
+
+        // discriminator names a non-existent property.
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            discriminator: Some("kind".into()),
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "name".into(),
+                    RefOr::new_item(Schema::from(StringSchema::default())),
+                );
+                m
+            }),
+            required: Some(vec!["name".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must be a property defined on this schema")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // discriminator names a property that exists but isn't required.
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            discriminator: Some("kind".into()),
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "kind".into(),
+                    RefOr::new_item(Schema::from(StringSchema::default())),
+                );
+                m
+            }),
+            required: None,
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must be listed in `required`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // discriminator names a property that is both defined and required: ok.
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            discriminator: Some("kind".into()),
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "kind".into(),
+                    RefOr::new_item(Schema::from(StringSchema::default())),
+                );
+                m
+            }),
+            required: Some(vec!["kind".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("discriminator")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn read_only_property_in_required_warns() {
+        // OAS 2.0 prose: properties marked `readOnly` SHOULD NOT appear in `required`.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "id".into(),
+                    RefOr::new_item(Schema::from(StringSchema {
+                        read_only: Some(true),
+                        ..Default::default()
+                    })),
+                );
+                m
+            }),
+            required: Some(vec!["id".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`id`") && e.contains("readOnly") && e.contains("SHOULD NOT")),
+            "errors: {:?}",
+            ctx.errors
         );
     }
 

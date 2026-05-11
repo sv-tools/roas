@@ -1,7 +1,7 @@
 //! Item Object
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, ValidateWithContext, validate_pattern};
+use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
 use crate::v2::spec::Spec;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -288,6 +288,17 @@ impl ValidateWithContext<Spec> for BooleanItem {
 
 impl ValidateWithContext<Spec> for ArrayItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        // Per the OAS 2.0 schema, nested `items` use the `collectionFormat`
+        // enum (csv/ssv/tsv/pipes) — `multi` is reserved for top-level
+        // `query` / `formData` array parameters.
+        if let Some(fmt) = &self.collection_format
+            && fmt.is_multi()
+        {
+            ctx.error(
+                format!("{path}.collectionFormat"),
+                "`multi` is only allowed on `query` and `formData` parameters",
+            );
+        }
         self.items
             .validate_with_context(ctx, format!("{path}.items"));
     }
@@ -613,5 +624,44 @@ mod tests {
             }),
             "serialize",
         );
+    }
+
+    #[test]
+    fn array_item_rejects_multi_collection_format() {
+        // `multi` is reserved for top-level query/formData parameters; nested
+        // items must use csv/ssv/tsv/pipes only.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let item = ArrayItem {
+            items: Items::String(Box::default()),
+            default: None,
+            collection_format: Some(CollectionFormat::Multi),
+            max_items: None,
+            min_items: None,
+            unique_items: None,
+            extensions: None,
+        };
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`multi` is only allowed")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // csv stays valid.
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let item = ArrayItem {
+            items: Items::String(Box::default()),
+            default: None,
+            collection_format: Some(CollectionFormat::CSV),
+            max_items: None,
+            min_items: None,
+            unique_items: None,
+            extensions: None,
+        };
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
     }
 }

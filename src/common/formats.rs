@@ -111,6 +111,14 @@ impl Display for CollectionFormat {
     }
 }
 
+impl CollectionFormat {
+    /// Returns `true` if this collection format is `multi`, which the OAS 2.0
+    /// schema allows only on `query` and `formData` parameters.
+    pub fn is_multi(&self) -> bool {
+        matches!(self, CollectionFormat::Multi)
+    }
+}
+
 impl Serialize for StringFormat {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.to_string().as_str())

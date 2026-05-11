@@ -247,6 +247,25 @@ pub fn validate_pattern<T>(pattern: &str, ctx: &mut Context<T>, path: String) {
     }
 }
 
+/// Validates that the items in `items` are unique by the key produced by `key`.
+/// Records an error for every duplicate (the *later* occurrence) with the index
+/// in the source slice. The first occurrence is not flagged.
+///
+/// Used to enforce `uniqueItems: true` on lists where the schema requires it
+/// (schemes, MIME type lists, tags by name, scope arrays, etc.).
+pub fn validate_unique_by<T, K, S, F>(items: &[T], ctx: &mut Context<S>, path: String, key: F)
+where
+    K: Eq + std::hash::Hash,
+    F: Fn(&T) -> K,
+{
+    let mut seen: HashSet<K> = HashSet::new();
+    for (i, item) in items.iter().enumerate() {
+        if !seen.insert(key(item)) {
+            ctx.error(format!("{path}[{i}]"), "duplicate value");
+        }
+    }
+}
+
 /// Validates that the given object has not been visited before,
 /// optionally ignoring the check based on the provided option.
 /// If the object has already been visited and the ignore option is not set, an error is recorded.
