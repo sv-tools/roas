@@ -29,6 +29,15 @@ pub struct Header {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<bool>,
 
+    /// Sets the ability to pass empty-valued parameters.
+    /// Default value is `false`.
+    /// Per the spec this property has no effect on header parameters; it is
+    /// kept here only so legal OpenAPI 3.0 documents round-trip without data
+    /// loss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "allowEmptyValue")]
+    pub allow_empty_value: Option<bool>,
+
     /// Describes how the parameter value will be serialized depending on the type of
     /// the parameter value.
     /// Default values is `simple`
@@ -42,6 +51,15 @@ pub struct Header {
     /// For all other styles, the default value is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explode: Option<bool>,
+
+    /// Determines whether the parameter value SHOULD allow reserved characters
+    /// to be included without percent-encoding. Default value is `false`.
+    /// Per the spec this property has no effect on header parameters; it is
+    /// kept here only so legal OpenAPI 3.0 documents round-trip without data
+    /// loss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "allowReserved")]
+    pub allow_reserved: Option<bool>,
 
     /// The schema defining the type used for the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -251,5 +269,17 @@ mod tests {
             }),
             "serialize string",
         );
+    }
+
+    #[test]
+    fn round_trip_allow_empty_value_and_allow_reserved() {
+        let json = serde_json::json!({
+            "allowEmptyValue": true,
+            "allowReserved": true,
+        });
+        let h: Header = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(h.allow_empty_value, Some(true));
+        assert_eq!(h.allow_reserved, Some(true));
+        assert_eq!(serde_json::to_value(&h).unwrap(), json);
     }
 }
