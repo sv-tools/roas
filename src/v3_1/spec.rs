@@ -437,16 +437,10 @@ impl TryFrom<String> for Version {
     }
 }
 
-impl Validate for Version {
-    fn validate(&self, _options: EnumSet<Options>) -> Result<(), Error> {
-        // Constructors and parsers all enforce the pattern, but
-        // re-checking here keeps `Validate` a self-contained contract.
-        if matches_oas_3_1_version(&self.0) {
-            Ok(())
-        } else {
-            Err(Error {
-                errors: vec![format!("#.openapi: must be {VERSION_SCHEMA_DESCRIPTION}")],
-            })
+impl ValidateWithContext<Spec> for Version {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if !matches_oas_3_1_version(&self.0) {
+            ctx.error(path, format_args!("must be {VERSION_SCHEMA_DESCRIPTION}"));
         }
     }
 }
@@ -796,12 +790,8 @@ impl Validate for Spec {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
         let mut ctx = Context::new(self, options);
 
-        // Surface any `openapi` schema-pattern violations alongside the
-        // rest of the spec's errors instead of bailing out early.
-        if let Err(e) = self.openapi.validate(options) {
-            ctx.errors.extend(e.errors);
-        }
-
+        self.openapi
+            .validate_with_context(&mut ctx, "#.openapi".to_owned());
         self.info
             .validate_with_context(&mut ctx, "#.info".to_owned());
 
@@ -1066,27 +1056,28 @@ mod tests {
 
     #[test]
     fn test_version_validate() {
-        assert!(Version::default().validate(Options::new()).is_ok());
-        assert!(Version::V3_1_0().validate(Options::new()).is_ok());
-        assert!(Version::V3_1_2().validate(Options::new()).is_ok());
-        assert!(
-            "3.1.99"
-                .parse::<Version>()
-                .unwrap()
-                .validate(Options::new())
-                .is_ok()
-        );
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Version::default().validate_with_context(&mut ctx, "#.openapi".to_owned());
+        Version::V3_1_0().validate_with_context(&mut ctx, "#.openapi".to_owned());
+        Version::V3_1_2().validate_with_context(&mut ctx, "#.openapi".to_owned());
+        "3.1.99"
+            .parse::<Version>()
+            .unwrap()
+            .validate_with_context(&mut ctx, "#.openapi".to_owned());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
     }
 
     #[test]
     fn test_version_validate_rejects_invalid() {
-        let invalid = Version("garbage".to_owned());
-        let err = invalid.validate(Options::new()).unwrap_err();
-        assert_eq!(err.errors.len(), 1);
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Version("garbage".to_owned()).validate_with_context(&mut ctx, "#.openapi".to_owned());
+        assert_eq!(ctx.errors.len(), 1);
         assert!(
-            err.errors[0].contains("#.openapi") && err.errors[0].contains("3\\.1\\.\\d+(-.+)?$"),
-            "validate error names the field and the schema regex: {:?}",
-            err.errors
+            ctx.errors[0].contains("#.openapi") && ctx.errors[0].contains("3\\.1\\.\\d+(-.+)?$"),
+            "errors: {:?}",
+            ctx.errors
         );
     }
 
