@@ -145,6 +145,11 @@ pub struct Ref {
 impl<D> RefOr<D> {
     /// Validate this `RefOr<D>` in the surrounding context.
     ///
+    /// Crate-internal: callers drive validation through
+    /// [`Validate::validate`](crate::validation::Validate::validate) or
+    /// `Spec::validate_with_loader` rather than invoking this method
+    /// directly.
+    ///
     /// The extra `D: 'static + Clone + DeserializeOwned` bounds are
     /// required even when validating an inline `Item` or an internal
     /// `#/...` ref with no loader attached, because the same body must
@@ -155,7 +160,7 @@ impl<D> RefOr<D> {
     /// already; the constraint only bites downstream code that
     /// parameterises `RefOr<D>` over a custom `D` lacking `Clone` or
     /// `DeserializeOwned`.
-    pub fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
+    pub(crate) fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
         D: ValidateWithContext<T> + 'static + Clone + DeserializeOwned,
@@ -283,7 +288,7 @@ impl<D> RefOr<D> {
 }
 
 impl Ref {
-    pub fn validate_with_context<T, D>(&self, ctx: &mut Context<T>, path: String)
+    pub(crate) fn validate_with_context<T, D>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
         D: ValidateWithContext<T>,

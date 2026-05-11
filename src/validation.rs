@@ -178,18 +178,23 @@ pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
 
 /// Trait for validating an object with a [`Context`].
 ///
-/// Implemented by every component type that participates in spec
-/// validation. Implementors push errors into the context via
+/// Crate-internal: implemented by every component type that participates
+/// in spec validation. Implementors push errors into the context via
 /// [`PushError::error`] and recurse into sub-objects by calling each
-/// child's `validate_with_context`.
-pub trait ValidateWithContext<T> {
+/// child's `validate_with_context`. External users drive validation
+/// through [`Validate::validate`] / `Spec::validate_with_loader` rather
+/// than touching this trait directly.
+pub(crate) trait ValidateWithContext<T> {
     fn validate_with_context(&self, ctx: &mut Context<T>, path: String);
 }
 
 /// Validation context — carries the spec being validated, accumulated
 /// errors, the per-call options, and a `visited` set used for unused
 /// detection and cycle handling.
-pub struct Context<'a, T> {
+///
+/// Crate-internal: constructed and consumed by [`Validate::validate`] /
+/// `Spec::validate_with_loader`. Not part of the public API.
+pub(crate) struct Context<'a, T> {
     pub spec: &'a T,
     /// Optional external-reference loader. When set,
     /// [`RefOr::validate_with_context`](crate::common::reference::RefOr::validate_with_context)
@@ -207,7 +212,9 @@ pub struct Context<'a, T> {
 /// impls accept `&str`, `String`, and `fmt::Arguments`, so callers can
 /// `ctx.error(path, "literal")`, `ctx.error(path, format!(...))`, or
 /// `ctx.error(path, format_args!(...))` interchangeably.
-pub trait PushError<T> {
+///
+/// Crate-internal — paired with [`Context`].
+pub(crate) trait PushError<T> {
     fn error(&mut self, path: String, args: T);
 }
 
@@ -234,11 +241,6 @@ impl<T> PushError<fmt::Arguments<'_>> for Context<'_, T> {
 }
 
 impl<T> Context<'_, T> {
-    pub fn reset(&mut self) {
-        self.visited.clear();
-        self.errors.clear();
-    }
-
     pub fn visit(&mut self, path: String) -> bool {
         self.visited.insert(path)
     }
@@ -334,23 +336,6 @@ mod tests {
         // The Display includes the literal pattern so callers can fix
         // their input without consulting the source.
         assert!(err.to_string().contains("a-zA-Z0-9.\\-_"));
-    }
-
-    #[test]
-    fn context_reset_clears_visited_and_errors_but_not_options() {
-        let mut ctx = Context::new(&(), Options::IgnoreUnusedTags.only());
-        ctx.visit("path".into());
-        ctx.errors.push("boom".into());
-        assert!(ctx.is_visited("path"));
-        assert_eq!(ctx.errors.len(), 1);
-
-        ctx.reset();
-        assert!(!ctx.is_visited("path"));
-        assert!(ctx.errors.is_empty());
-        assert!(
-            ctx.is_option(Options::IgnoreUnusedTags),
-            "reset must not touch options"
-        );
     }
 
     #[test]

@@ -802,10 +802,10 @@ impl Spec {
         options: EnumSet<Options>,
         loader: Option<&'a mut Loader>,
     ) -> Result<(), Error> {
-        let mut ctx = Context::new(self, options);
-        if let Some(l) = loader {
-            ctx.loader = Some(l);
-        }
+        let mut ctx = match loader {
+            Some(l) => Context::new(self, options).with_loader(l),
+            None => Context::new(self, options),
+        };
 
         self.openapi
             .validate_with_context(&mut ctx, "#.openapi".to_owned());
