@@ -20,7 +20,6 @@
 use lazy_regex::regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::common::helpers::{Context, PushError};
 use crate::common::reference::{RefOr, ResolveReference};
 use crate::v3_2::parameter::{InCookie, InHeader, InPath, InQuery, Parameter};
 use crate::v3_2::path_item::PathItem;
@@ -28,6 +27,7 @@ use crate::v3_2::security_scheme::SecurityScheme;
 use crate::v3_2::spec::Spec;
 use crate::v3_2::tag::Tag;
 use crate::validation::Options;
+use crate::validation::{Context, PushError};
 
 /// Result of attempting to resolve a `RefOr<Parameter>` for cross-cutting
 /// validation. The internal/external distinction matters: when
@@ -498,7 +498,6 @@ fn find_path_item_by_ref<'a>(spec: &'a Spec, reference: &str) -> Option<&'a Path
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::v3_2::components::Components;
     use crate::v3_2::parameter::{InCookie, InHeader, InPath, InQuery};
     use crate::v3_2::security_scheme::{
@@ -506,6 +505,7 @@ mod tests {
         OpenIdConnectSecurityScheme, SecurityScheme,
     };
     use crate::v3_2::spec::Spec;
+    use crate::validation::Context;
 
     fn path_param(name: &str) -> RefOr<Parameter> {
         RefOr::new_item(Parameter::Path(InPath {

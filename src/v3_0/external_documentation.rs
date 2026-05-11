@@ -1,7 +1,8 @@
 //! References an external resource for extended documentation.
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_required_url};
+use crate::common::helpers::validate_required_url;
 use crate::v3_0::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

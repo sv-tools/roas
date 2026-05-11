@@ -15,7 +15,6 @@
 use lazy_regex::regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::common::helpers::{Context, PushError};
 use crate::common::reference::RefOr;
 use crate::common::reference::ResolveReference;
 use crate::v3_0::parameter::{InCookie, InHeader, InPath, InQuery, Parameter};
@@ -24,6 +23,7 @@ use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::spec::Spec;
 use crate::v3_0::tag::Tag;
 use crate::validation::Options;
+use crate::validation::{Context, PushError};
 
 /// Result of attempting to resolve a `RefOr<Parameter>` for cross-cutting
 /// validation purposes. The distinction between an unresolved *internal* ref
@@ -402,7 +402,6 @@ pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::common::reference::RefOr;
     use crate::v3_0::components::Components;
     use crate::v3_0::parameter::{InCookie, InHeader, InPath, InQuery};
@@ -411,6 +410,7 @@ mod tests {
         OAuth2Flows, OAuth2SecurityScheme, OpenIdConnectSecurityScheme, SecurityScheme,
     };
     use crate::v3_0::spec::Spec;
+    use crate::validation::Context;
     use crate::validation::Options;
 
     fn path_param(name: &str) -> RefOr<Parameter> {

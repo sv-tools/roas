@@ -1,6 +1,6 @@
-use crate::common::helpers::{Context, ValidateWithContext};
 use crate::v3_1::path_item::PathItem;
 use crate::v3_1::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

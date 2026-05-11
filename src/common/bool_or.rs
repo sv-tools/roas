@@ -1,5 +1,5 @@
-use crate::common::helpers::{Context, ValidateWithContext};
 use crate::common::reference::{RefOr, ResolveReference};
+use crate::validation::{Context, ValidateWithContext};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 

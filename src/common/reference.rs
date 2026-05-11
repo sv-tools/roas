@@ -14,9 +14,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::loader::{Loader, LoaderError};
-use crate::validation::Options;
+use crate::validation::{Context, Options, PushError, ValidateWithContext};
 
 /// ResolveReference is a trait for resolving references.
 pub trait ResolveReference<D> {

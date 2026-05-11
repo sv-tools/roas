@@ -1,9 +1,9 @@
 //! Represents a possible design-time link for a response
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::v3_1::server::Server;
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -532,11 +532,11 @@ impl ValidateWithContext<Spec> for Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::common::reference::RefOr;
     use crate::v3_1::operation::Operation;
     use crate::v3_1::path_item::{PathItem, Paths};
     use crate::v3_1::response::{Response, Responses};
+    use crate::validation::Context;
     use serde_json::json;
 
     fn spec_with_pets_get() -> Spec {

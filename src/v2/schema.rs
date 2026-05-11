@@ -2,11 +2,12 @@
 
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_pattern};
+use crate::common::helpers::validate_pattern;
 use crate::common::reference::RefOr;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::spec::Spec;
 use crate::v2::xml::XML;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use monostate::MustBe;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

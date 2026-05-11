@@ -1,8 +1,9 @@
 //! Representing a Server.
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_required_string};
+use crate::common::helpers::validate_required_string;
 use crate::v3_2::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use lazy_regex::regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};

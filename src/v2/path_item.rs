@@ -1,10 +1,10 @@
 //! Path Items
 
-use crate::common::helpers::{Context, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v2::operation::Operation;
 use crate::v2::parameter::Parameter;
 use crate::v2::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -220,7 +220,7 @@ impl ValidateWithContext<Spec> for PathItem {
             let has_ops = self.operations.as_ref().is_some_and(|m| !m.is_empty());
             let has_params = self.parameters.as_ref().is_some_and(|p| !p.is_empty());
             if has_ops || has_params {
-                crate::common::helpers::PushError::error(
+                crate::validation::PushError::error(
                     ctx,
                     format!("{path}.$ref"),
                     "MUST NOT coexist with inline operations or parameters",
@@ -882,10 +882,10 @@ mod tests {
 
     #[test]
     fn path_item_validate_runs_operations_and_parameters() {
-        use crate::common::helpers::Context;
         use crate::v2::operation::Operation;
         use crate::v2::response::Responses;
         use crate::v2::spec::Spec;
+        use crate::validation::Context;
         use crate::validation::Options;
         let spec = Spec::default();
 

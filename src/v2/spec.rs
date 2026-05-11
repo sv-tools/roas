@@ -1,7 +1,6 @@
 //! The root document object of the OpenAPI v2.0 specification.
 
 use crate::common::helpers::{
-    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
     validate_not_visited, validate_optional_string_matches, validate_unique_by,
 };
 use crate::common::reference::RefOr;
@@ -15,6 +14,9 @@ use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
 use crate::v2::tag::Tag;
+use crate::validation::{
+    Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
+};
 use crate::validation::{Error, Options, Validate};
 use enumset::EnumSet;
 use lazy_regex::regex;
@@ -301,16 +303,10 @@ impl TryFrom<String> for Version {
     }
 }
 
-impl Validate for Version {
-    fn validate(&self, _options: EnumSet<Options>) -> Result<(), Error> {
-        // Constructors and parsers all enforce the literal, but
-        // re-checking here keeps `Validate` a self-contained contract.
-        if self.0 == SWAGGER_VERSION_LITERAL {
-            Ok(())
-        } else {
-            Err(Error {
-                errors: vec![format!("#.swagger: must be {SWAGGER_VERSION_DESCRIPTION}")],
-            })
+impl ValidateWithContext<Spec> for Version {
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if self.0 != SWAGGER_VERSION_LITERAL {
+            ctx.error(path, format_args!("must be {SWAGGER_VERSION_DESCRIPTION}"));
         }
     }
 }
@@ -506,12 +502,8 @@ impl Spec {
             ctx.loader = Some(l);
         }
 
-        // Surface any `swagger` literal violations alongside the rest
-        // of the spec's errors instead of bailing out early.
-        if let Err(e) = self.swagger.validate(options) {
-            ctx.errors.extend(e.errors);
-        }
-
+        self.swagger
+            .validate_with_context(&mut ctx, "#.swagger".to_owned());
         self.info
             .validate_with_context(&mut ctx, "#.info".to_owned());
 
@@ -790,28 +782,29 @@ mod tests {
 
     #[test]
     fn test_swagger_version_validate() {
-        assert!(Version::default().validate(Options::new()).is_ok());
-        assert!(Version::V2_0().validate(Options::new()).is_ok());
-        assert!(
-            "2.0"
-                .parse::<Version>()
-                .unwrap()
-                .validate(Options::new())
-                .is_ok()
-        );
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Version::default().validate_with_context(&mut ctx, "#.swagger".to_owned());
+        Version::V2_0().validate_with_context(&mut ctx, "#.swagger".to_owned());
+        "2.0"
+            .parse::<Version>()
+            .unwrap()
+            .validate_with_context(&mut ctx, "#.swagger".to_owned());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
     }
 
     #[test]
     fn test_swagger_version_validate_rejects_invalid() {
         // Inner `String` is private to outside callers, so the only
         // way to reach the rejection branch is from inside the module.
-        let invalid = Version("3.0".to_owned());
-        let err = invalid.validate(Options::new()).unwrap_err();
-        assert_eq!(err.errors.len(), 1);
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Version("3.0".to_owned()).validate_with_context(&mut ctx, "#.swagger".to_owned());
+        assert_eq!(ctx.errors.len(), 1);
         assert!(
-            err.errors[0].contains("#.swagger") && err.errors[0].contains("`2.0`"),
-            "validate error names the field and the literal: {:?}",
-            err.errors
+            ctx.errors[0].contains("#.swagger") && ctx.errors[0].contains("`2.0`"),
+            "errors: {:?}",
+            ctx.errors
         );
     }
 

@@ -4,13 +4,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_2::example::Example;
 use crate::v3_2::header::Header;
 use crate::v3_2::parameter::InQueryStyle;
 use crate::v3_2::schema::Schema;
 use crate::v3_2::spec::Spec;
+use crate::validation::{Context, PushError, ValidateWithContext};
 
 /// Each Media Type Object provides schema and examples for the media type identified by its key.
 ///
@@ -302,7 +302,7 @@ impl ValidateWithContext<Spec> for Encoding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
+    use crate::validation::Context;
     use crate::validation::Options;
 
     #[test]

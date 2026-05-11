@@ -1,12 +1,12 @@
 //! Header Object
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext};
 use crate::common::reference::RefOr;
 use crate::v3_2::example::Example;
 use crate::v3_2::media_type::MediaType;
 use crate::v3_2::parameter::InHeaderStyle;
 use crate::v3_2::schema::Schema;
 use crate::v3_2::spec::Spec;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

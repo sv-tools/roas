@@ -1,6 +1,6 @@
 //! Holds a set of reusable objects for different aspects of the OAS.
 
-use crate::common::helpers::{Context, PushError, ValidateWithContext, validate_string_matches};
+use crate::common::helpers::validate_string_matches;
 use crate::common::reference::RefOr;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::example::Example;
@@ -13,6 +13,7 @@ use crate::v3_0::schema::Schema;
 use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, PushError, ValidateWithContext};
 use lazy_regex::regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -201,7 +202,6 @@ impl ValidateWithContext<Spec> for Components {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
     use crate::v3_0::callback::Callback;
     use crate::v3_0::example::Example;
     use crate::v3_0::header::Header;
@@ -214,6 +214,7 @@ mod tests {
         AuthorizationCodeOAuth2Flow, ClientCredentialsOAuth2Flow, ImplicitOAuth2Flow, OAuth2Flows,
         OAuth2SecurityScheme, PasswordOAuth2Flow, SecurityScheme,
     };
+    use crate::validation::Context;
     use serde_json::json;
 
     fn map_with<T>(name: &str, t: T) -> BTreeMap<String, RefOr<T>> {

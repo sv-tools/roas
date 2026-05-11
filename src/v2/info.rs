@@ -1,10 +1,9 @@
 //! Metadata about the API.
 
-use crate::common::helpers::{
-    Context, ValidateWithContext, validate_email, validate_optional_url, validate_required_string,
-};
+use crate::common::helpers::{validate_email, validate_optional_url, validate_required_string};
 use crate::v2::spec::Spec;
 use crate::validation::Options;
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

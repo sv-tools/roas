@@ -1,8 +1,9 @@
 //! Tag Object
 
-use crate::common::helpers::{Context, ValidateWithContext, validate_required_string};
+use crate::common::helpers::validate_required_string;
 use crate::v3_1::external_documentation::ExternalDocumentation;
 use crate::v3_1::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

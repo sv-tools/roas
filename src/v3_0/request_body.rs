@@ -1,8 +1,8 @@
 //! Request Body Object
 
-use crate::common::helpers::{Context, ValidateWithContext};
 use crate::v3_0::media_type::MediaType;
 use crate::v3_0::spec::Spec;
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -76,7 +76,7 @@ impl ValidateWithContext<Spec> for RequestBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::helpers::Context;
+    use crate::validation::Context;
     use crate::validation::Options;
     use serde_json::json;
 
