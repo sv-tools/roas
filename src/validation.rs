@@ -1,8 +1,7 @@
 use enumset::{EnumSet, EnumSetType, enum_set};
-use regex::Regex;
+use lazy_regex::{Lazy, Regex};
 use std::collections::HashSet;
 use std::fmt::{self, Display};
-use std::sync::LazyLock;
 use thiserror::Error as ThisError;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,7 +170,7 @@ pub struct InvalidComponentName {
 /// Compiled form of [`COMPONENT_NAME_PATTERN`]. Single source of truth
 /// for both [`check_component_name`] and the error display on
 /// [`InvalidComponentName`].
-static COMPONENT_NAME_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+static COMPONENT_NAME_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(COMPONENT_NAME_PATTERN).expect("COMPONENT_NAME_PATTERN must be a valid regex")
 });
 
