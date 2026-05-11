@@ -860,10 +860,20 @@ impl ValidateWithContext<Spec> for ObjectSchema {
         }
 
         // OAS 2.0 prose: properties marked `readOnly: true` SHOULD NOT appear
-        // in `required`. Flag the combination as a warning-level error.
+        // in `required`. Surfaced as a validation error (this crate's framework
+        // has no separate warning channel) so SHOULD-violations show up in the
+        // same `errors` Vec. Follow `$ref`s so a referenced schema's
+        // `readOnly` is still caught.
         if let (Some(props), Some(required)) = (&self.properties, &self.required) {
             for name in required {
-                if let Some(RefOr::Item(schema)) = props.get(name)
+                let Some(prop) = props.get(name) else {
+                    continue;
+                };
+                let resolved: Option<&Schema> = match prop {
+                    RefOr::Item(s) => Some(s),
+                    RefOr::Ref(_) => prop.get_item(ctx.spec).ok(),
+                };
+                if let Some(schema) = resolved
                     && is_schema_read_only(schema)
                 {
                     ctx.error(
@@ -1424,6 +1434,63 @@ mod tests {
             ctx.errors
                 .iter()
                 .any(|e| e.contains("`id`") && e.contains("readOnly") && e.contains("SHOULD NOT")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn read_only_property_via_ref_still_flagged() {
+        // The readOnly check follows `$ref` properties through the spec's
+        // `#/definitions/...` pool, so a referenced read-only schema in
+        // `required` is caught the same as an inline one.
+        let mut spec = Spec::default();
+        spec.define_schema(
+            "Id",
+            Schema::from(StringSchema {
+                read_only: Some(true),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert("id".into(), RefOr::new_ref("#/definitions/Id".to_owned()));
+                m
+            }),
+            required: Some(vec!["id".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`id`") && e.contains("readOnly") && e.contains("SHOULD NOT")),
+            "errors: {:?}",
+            ctx.errors
+        );
+
+        // Unresolvable refs are silently skipped here — the bad `$ref` is
+        // flagged by the regular reference walker, not by this rule.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "id".into(),
+                    RefOr::new_ref("#/definitions/Missing".to_owned()),
+                );
+                m
+            }),
+            required: Some(vec!["id".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().all(|e| !e.contains("SHOULD NOT")),
             "errors: {:?}",
             ctx.errors
         );
