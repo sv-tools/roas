@@ -1,5 +1,5 @@
 use enumset::{EnumSet, EnumSetType, enum_set};
-use lazy_regex::{Lazy, Regex};
+use lazy_regex::regex;
 use std::collections::HashSet;
 use std::fmt::{self, Display};
 use thiserror::Error as ThisError;
@@ -153,31 +153,19 @@ pub trait Validate {
     fn validate(&self, options: EnumSet<Options>) -> Result<(), Error>;
 }
 
-/// Allowed character set for OpenAPI component / definition map keys.
-/// Mirrors the pattern enforced by `v3_0::Components` / `v3_1::Components`
-/// validators. Used by `Spec::define_*` helpers to surface invalid keys
-/// at insertion time rather than during a later `validate()` pass.
-pub const COMPONENT_NAME_PATTERN: &str = r"^[a-zA-Z0-9.\-_]+$";
-
 /// Returned by `Spec::define_*` helpers when a component name does not
-/// match [`COMPONENT_NAME_PATTERN`].
+/// match `^[a-zA-Z0-9.\-_]+$`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ThisError)]
-#[error("component name {name:?} must match pattern `{COMPONENT_NAME_PATTERN}`")]
+#[error("component name {name:?} must match pattern `^[a-zA-Z0-9.\\-_]+$`")]
 pub struct InvalidComponentName {
     pub name: String,
 }
 
-/// Compiled form of [`COMPONENT_NAME_PATTERN`]. Single source of truth
-/// for both [`check_component_name`] and the error display on
-/// [`InvalidComponentName`].
-static COMPONENT_NAME_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(COMPONENT_NAME_PATTERN).expect("COMPONENT_NAME_PATTERN must be a valid regex")
-});
-
-/// Returns `Ok(())` if `name` matches [`COMPONENT_NAME_PATTERN`],
-/// otherwise an [`InvalidComponentName`] error.
+/// Returns `Ok(())` if `name` matches `^[a-zA-Z0-9.\-_]+$`, otherwise
+/// an [`InvalidComponentName`] error.
 pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
-    if COMPONENT_NAME_REGEX.is_match(name) {
+    let r = regex!(r"^[a-zA-Z0-9.\-_]+$");
+    if r.is_match(name) {
         Ok(())
     } else {
         Err(InvalidComponentName {
