@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::common::helpers::{Context, PushError, ValidateWithContext};
-use crate::common::loader::{Loader, LoaderError};
+use crate::loader::{Loader, LoaderError};
 use crate::validation::Options;
 
 /// ResolveReference is a trait for resolving references.
@@ -343,7 +343,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::loader::{JsonFileFetcher, ResourceFetcher};
+    use crate::loader::{JsonFileFetcher, ResourceFetcher};
     use serde_json::Value;
     use std::cell::Cell;
     use std::fs;

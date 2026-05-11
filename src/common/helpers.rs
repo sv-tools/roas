@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fmt;
 use thiserror::Error;
 
-use crate::common::loader::Loader;
+use crate::loader::Loader;
 use crate::validation::{Error, Options};
 
 /// Allowed character set for OpenAPI component / definition map keys.

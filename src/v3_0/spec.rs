@@ -4,9 +4,9 @@ use crate::common::helpers::{
     Context, InvalidComponentName, PushError, ValidateWithContext, check_component_name,
     validate_not_visited, validate_required_string,
 };
-use crate::common::loader::Loader;
 use crate::common::reference::ResolveReference;
 use crate::common::reference::{RefOr, resolve_in_map};
+use crate::loader::Loader;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::components::Components;
 use crate::v3_0::example::Example;
