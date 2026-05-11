@@ -70,7 +70,9 @@ pub enum LoaderError {
     #[error("invalid file URI `{0}`")]
     InvalidFileUri(String),
 
-    #[error("external reference `{0}` needs a base resource")]
+    #[error(
+        "reference `{0}` has no base resource — loader cannot resolve internal-only `#/...` references"
+    )]
     MissingBaseUri(String),
 
     #[error("invalid URI `{uri}`")]
@@ -141,8 +143,11 @@ impl Loader {
 
     /// Register an async fetcher for a URI prefix.
     ///
-    /// Async loading uses the longest matching prefix across both async and
-    /// sync fetchers. Sync loading only uses sync fetchers.
+    /// Async loading uses the longest matching prefix among **async**
+    /// fetchers only — sync fetchers are not consulted on async cache
+    /// misses (see [`Self::load_resource_async`] and
+    /// [`Self::resolve_reference_async`]). Sync loading symmetrically
+    /// uses only sync fetchers.
     pub fn register_async_fetcher(
         &mut self,
         prefix: impl Into<String>,
@@ -155,13 +160,26 @@ impl Loader {
     ///
     /// The cache key is the resource part of `uri`, without any fragment. For
     /// example, `content.json#/Pet` is stored under `content.json`.
+    ///
+    /// If a document was already cached for the same resource, the typed
+    /// cache is wiped so subsequent `resolve_reference_as` calls re-run
+    /// `serde_json::from_value` against the new document. Partial-key
+    /// invalidation (clearing only entries that targeted this resource)
+    /// would require parsing every cached `(reference, TypeId)` key, so
+    /// we clear the typed cache wholesale on overwrite — the tradeoff
+    /// is acceptable because re-preloading is a configuration-time
+    /// operation, not a hot path.
     pub fn preload_resource(
         &mut self,
         uri: impl AsRef<str>,
         document: Value,
     ) -> Result<Option<Value>, LoaderError> {
         let (key, _) = parse_reference(uri.as_ref())?;
-        Ok(self.cache.insert(key, document))
+        let previous = self.cache.insert(key, document);
+        if previous.is_some() {
+            self.typed_cache.clear();
+        }
+        Ok(previous)
     }
 
     /// Load a resource, returning the cached parsed document.
@@ -676,5 +694,35 @@ mod tests {
             .resolve_reference("#/components/schemas/Pet")
             .expect_err("loader only resolves external references");
         assert!(matches!(err, LoaderError::MissingBaseUri(_)));
+    }
+
+    #[test]
+    fn preload_overwrite_invalidates_typed_cache() {
+        #[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+        struct Pet {
+            name: String,
+        }
+
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("pets.json", serde_json::json!({ "Pet": { "name": "rex" } }))
+            .unwrap();
+
+        let first: Pet = loader.resolve_reference_as("pets.json#/Pet").unwrap();
+        assert_eq!(first.name, "rex");
+
+        // Overwrite the document with a different Pet under the same key.
+        loader
+            .preload_resource(
+                "pets.json",
+                serde_json::json!({ "Pet": { "name": "buddy" } }),
+            )
+            .unwrap();
+
+        let second: Pet = loader.resolve_reference_as("pets.json#/Pet").unwrap();
+        assert_eq!(
+            second.name, "buddy",
+            "typed cache must be invalidated when the underlying document is re-preloaded"
+        );
     }
 }

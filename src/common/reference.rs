@@ -143,6 +143,18 @@ pub struct Ref {
 }
 
 impl<D> RefOr<D> {
+    /// Validate this `RefOr<D>` in the surrounding context.
+    ///
+    /// The extra `D: 'static + Clone + DeserializeOwned` bounds are
+    /// required even when validating an inline `Item` or an internal
+    /// `#/...` ref with no loader attached, because the same body must
+    /// be statically callable for the loader-driven external path that
+    /// invokes `Loader::resolve_reference_as::<D>` under the hood. In
+    /// practice every concrete component type in this crate (`Schema`,
+    /// `Parameter`, `Header`, `Response`, etc.) satisfies these bounds
+    /// already; the constraint only bites downstream code that
+    /// parameterises `RefOr<D>` over a custom `D` lacking `Clone` or
+    /// `DeserializeOwned`.
     pub fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
@@ -344,9 +356,7 @@ mod tests {
     use super::*;
     use crate::loader::{JsonFileFetcher, ResourceFetcher};
     use serde_json::Value;
-    use std::cell::Cell;
     use std::fs;
-    use std::rc::Rc;
     use url::Url;
 
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
@@ -523,7 +533,5 @@ mod tests {
             Cow::Borrowed(foo) => assert_eq!(foo.foo, "from-spec"),
             Cow::Owned(_) => panic!("expected borrowed value from spec"),
         }
-        // Untouched loader — no fetchers needed for internal refs.
-        let _ = Rc::new(Cell::new(0));
     }
 }
