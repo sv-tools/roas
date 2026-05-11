@@ -4,16 +4,18 @@
 //! [`crate::v3_2::spec::Spec`] by reshaping the document on-the-fly
 //! via `serde_json::Value`. The two versions are deeply compatible:
 //! every 3.1 document is structurally valid 3.2, so the only required
-//! migration is the `openapi` version bump. This module additionally
-//! folds two Redoc-flavoured extensions into the native 3.2 fields
-//! that supersede them, per the official upgrade guide
+//! migration is the `openapi` version bump
+//! (`openapi: "3.1.x"` → `openapi: "3.2.0"`).
+//!
+//! On top of that, this module folds two Redoc-flavoured extensions
+//! into the native 3.2 fields that supersede them, per the official
+//! upgrade guide
 //! (<https://learn.openapis.org/upgrading/v3.1-to-v3.2.html>):
 //!
-//! 1. `openapi: "3.1.x"` → `openapi: "3.2.0"`.
-//! 2. On each `tags[*]`: `x-displayName: "<label>"` →
+//! 1. On each `tags[*]`: `x-displayName: "<label>"` →
 //!    `summary: "<label>"` (3.2 introduced a native `summary` field
 //!    on tags).
-//! 3. Top-level `x-tagGroups: [{name, tags: […]}]` →
+//! 2. Top-level `x-tagGroups: [{name, tags: […]}]` →
 //!    distribute as `parent: "<group>"` on each member tag, and add
 //!    a synthesised tag `{name: "<group>", kind: "nav"}` for the
 //!    group itself. `x-tagGroups` is then dropped. Membership rules:
