@@ -114,3 +114,54 @@ fn validate_with_ignore_external_references_short_circuits_loader() {
     )
     .expect("IgnoreExternalReferences must short-circuit before the loader is consulted");
 }
+
+#[test]
+fn validate_resolves_internal_refs_inside_loaded_document() {
+    // `pets.json` defines `Pet` with `owner: { $ref: "#/Owner" }` —
+    // a `#/...` reference into its own structure. Per JSON Reference
+    // semantics that should resolve to `pets.json#/Owner`, not to a
+    // root-spec `#/Owner` (which doesn't exist).
+    //
+    // The loader's load-time rewrite turns every `$ref` inside a
+    // fetched document into an absolute URL anchored at the
+    // document's base, so `#/Owner` becomes
+    // `file:///.../pets.json#/Owner` before the validator sees it.
+    // Validation then resolves it uniformly through the loader.
+    const SPEC_PATH: &str = "tests/loader_data/petstore-cross-ref.json";
+    const EXTERNAL_PETS_PATH: &str = "tests/loader_data/pets.json";
+    const PETS_PLACEHOLDER: &str = "__EXTERNAL_PETS_URL__";
+
+    let raw = fs::read_to_string(SPEC_PATH).unwrap();
+    let pets_abs = fs::canonicalize(EXTERNAL_PETS_PATH).unwrap();
+    let pets_url = Url::from_file_path(&pets_abs).unwrap();
+    let patched = raw.replace(PETS_PLACEHOLDER, pets_url.as_str());
+    let spec: Spec = serde_json::from_str(&patched).expect("spec must parse");
+
+    let mut loader = Loader::new();
+    loader.register_fetcher("file://", JsonFileFetcher);
+
+    spec.validate(Options::IgnoreMissingTags.only(), Some(&mut loader))
+        .expect("internal `#/Owner` ref inside loaded pets.json must resolve to that file's Owner");
+
+    // Direct-evidence assertion that the rewrite happened: after the
+    // validation pass loaded `pets.json`, ask the loader for the
+    // `owner` property of `Pet` and confirm its `$ref` is the
+    // absolute `file:///.../pets.json#/Owner` URL rather than the
+    // raw `#/Owner` it had on disk. This guards against a future
+    // regression that "validates clean" by some other accident
+    // (e.g. silently dropping the inner walk) rather than because
+    // the rewrite is doing its job.
+    let pet_owner_url = format!("{pets_url}#/Pet/properties/owner");
+    let owner_ref_value = loader
+        .resolve_reference(&pet_owner_url)
+        .expect("pet.owner must be cached after validation walked it");
+    let rewritten = owner_ref_value
+        .get("$ref")
+        .and_then(|v| v.as_str())
+        .expect("pet.owner must carry a $ref string");
+    let expected = format!("{pets_url}#/Owner");
+    assert_eq!(
+        rewritten, expected,
+        "loader must rewrite `#/Owner` to the absolute file URL on load"
+    );
+}

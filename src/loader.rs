@@ -175,6 +175,8 @@ impl Loader {
         document: Value,
     ) -> Result<Option<Value>, LoaderError> {
         let (key, _) = parse_reference(uri.as_ref())?;
+        let mut document = document;
+        rewrite_refs_against(&mut document, &key);
         let previous = self.cache.insert(key, document);
         if previous.is_some() {
             self.typed_cache.clear();
@@ -197,11 +199,12 @@ impl Loader {
                     uri: key.as_str().to_string(),
                 }
             })?;
-            let parsed = self
+            let mut parsed = self
                 .fetchers
                 .get_mut(&fetcher_key)
                 .expect("fetcher key came from the registry")
                 .fetch(&key)?;
+            rewrite_refs_against(&mut parsed, &key);
 
             self.cache.insert(key.clone(), parsed);
         }
@@ -229,12 +232,13 @@ impl Loader {
                         uri: key.as_str().to_string(),
                     }
                 })?;
-            let parsed = self
+            let mut parsed = self
                 .async_fetchers
                 .get_mut(&fetcher_key)
                 .expect("async fetcher key came from the registry")
                 .fetch(&key)
                 .await?;
+            rewrite_refs_against(&mut parsed, &key);
 
             self.cache.insert(key.clone(), parsed);
         }
@@ -357,6 +361,41 @@ fn best_fetcher_key<T: ?Sized>(fetchers: &BTreeMap<String, Box<T>>, uri: &str) -
         .filter(|prefix| uri.starts_with(prefix.as_str()))
         .max_by_key(|prefix| prefix.len())
         .cloned()
+}
+
+/// Walk `value` and rewrite every `"$ref"` string so it's resolved
+/// against `base`. Internal `#/...` refs become `<base>#/...`,
+/// document-relative refs like `sibling.json#/X` become
+/// `<base_dir>/sibling.json#/X` per RFC 3986 — both flow through the
+/// same `Url::join` and end up as fully-qualified URLs that the loader
+/// can resolve uniformly later.
+///
+/// `$ref` strings that already parse as absolute URLs are left
+/// unchanged: `Url::join("file:///a.json", "https://x/b.json")`
+/// returns the absolute URL untouched.
+///
+/// Strings that don't successfully `Url::join` (e.g. exotic malformed
+/// inputs) are left as-is rather than silently corrupted — validation
+/// downstream will catch them.
+fn rewrite_refs_against(value: &mut Value, base: &Url) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(s)) = map.get_mut("$ref")
+                && let Ok(joined) = base.join(s)
+            {
+                *s = joined.to_string();
+            }
+            for v in map.values_mut() {
+                rewrite_refs_against(v, base);
+            }
+        }
+        Value::Array(items) => {
+            for v in items.iter_mut() {
+                rewrite_refs_against(v, base);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn parse_reference(reference: &str) -> Result<(Url, String), LoaderError> {
