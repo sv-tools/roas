@@ -794,22 +794,6 @@ fn walk_op<'a>(
 }
 
 impl Spec {
-    /// Validate the spec, resolving external `$ref`s through the given loader.
-    ///
-    /// Equivalent to [`Validate::validate`] when no loader is needed, but
-    /// when an external `$ref` is encountered, the loader is asked to
-    /// fetch and deserialize the target so the resolved value is
-    /// validated like any internal ref. External resolution failures
-    /// surface as validation errors unless
-    /// [`Options::IgnoreExternalReferences`] is set.
-    pub fn validate_with_loader(
-        &self,
-        options: EnumSet<Options>,
-        loader: &mut Loader,
-    ) -> Result<(), Error> {
-        self.validate_inner(options, Some(loader))
-    }
-
     fn validate_inner<'a>(
         &'a self,
         options: EnumSet<Options>,
@@ -985,8 +969,12 @@ impl Spec {
 }
 
 impl Validate for Spec {
-    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
-        self.validate_inner(options, None)
+    fn validate(
+        &self,
+        options: EnumSet<Options>,
+        loader: Option<&mut Loader>,
+    ) -> Result<(), Error> {
+        self.validate_inner(options, loader)
     }
 }
 
@@ -1011,7 +999,7 @@ mod tests {
 
         // No loader: the external `$ref` becomes a validation error.
         let err = spec
-            .validate(IGNORE_UNUSED)
+            .validate(IGNORE_UNUSED, None)
             .expect_err("external ref must error when no loader is attached");
         assert!(
             err.errors
@@ -1032,14 +1020,14 @@ mod tests {
                 }),
             )
             .expect("preload must succeed");
-        spec.validate_with_loader(IGNORE_UNUSED, &mut loader)
+        spec.validate(IGNORE_UNUSED, Some(&mut loader))
             .expect("validation must succeed when external ref is preloaded");
 
         // With a loader that has no fetcher and no preload: the loader
         // failure surfaces as a `failed to resolve` error.
         let mut empty_loader = Loader::new();
         let err = spec
-            .validate_with_loader(IGNORE_UNUSED, &mut empty_loader)
+            .validate(IGNORE_UNUSED, Some(&mut empty_loader))
             .expect_err("missing fetcher must surface as a validation error");
         assert!(
             err.errors
@@ -1055,7 +1043,7 @@ mod tests {
         // Two separate `$ref`s to the same external pointer should
         // deserialize the target only once thanks to the typed cache.
         // We can't observe serde counts directly, but we can verify the
-        // pre-warmed cache survives a `validate_with_loader` pass.
+        // pre-warmed cache survives a `validate(..., Some(loader))` pass.
         let spec: Spec = serde_json::from_value(serde_json::json!({
             "openapi": "3.2.0",
             "info": { "title": "test", "version": "1.0" },
@@ -1079,7 +1067,7 @@ mod tests {
             )
             .unwrap();
 
-        spec.validate_with_loader(IGNORE_UNUSED, &mut loader)
+        spec.validate(IGNORE_UNUSED, Some(&mut loader))
             .expect("two refs to the same external pointer must validate");
 
         // Calling `resolve_reference_as` twice after validation must hit
@@ -1220,7 +1208,7 @@ mod tests {
         };
         spec.info.title = "test".to_owned();
         spec.info.version = "1".to_owned();
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1313,7 +1301,7 @@ mod tests {
             paths: Some(paths),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1368,7 +1356,7 @@ mod tests {
             webhooks: Some(webhooks),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1430,7 +1418,7 @@ mod tests {
             webhooks: Some(webhooks),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1733,7 +1721,7 @@ mod tests {
             paths: Some(Default::default()),
             ..Default::default()
         };
-        assert!(spec.validate(Options::new()).is_ok());
+        assert!(spec.validate(Options::new(), None).is_ok());
 
         // Whitespace in the value rejects.
         let spec = Spec {
@@ -1746,7 +1734,7 @@ mod tests {
             paths: Some(Default::default()),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1767,7 +1755,7 @@ mod tests {
             paths: Some(Default::default()),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1804,7 +1792,7 @@ mod tests {
             paths: Some(Default::default()),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1873,7 +1861,7 @@ mod tests {
             components: Some(comp),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1972,7 +1960,7 @@ mod tests {
         };
         // Allow IgnoreUnusedSchemas etc; we only care that the link doesn't
         // report missing.
-        let res = spec.validate(Options::new());
+        let res = spec.validate(Options::new(), None);
         if let Err(err) = &res {
             assert!(
                 err.errors
@@ -2001,7 +1989,7 @@ mod tests {
             paths: Some(Default::default()),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -2047,7 +2035,7 @@ mod tests {
             paths: Some(Default::default()),
             ..Default::default()
         };
-        let res = spec.validate(Options::new());
+        let res = spec.validate(Options::new(), None);
         match res {
             Ok(_) => {}
             Err(e) => {
@@ -2092,7 +2080,7 @@ mod tests {
             webhooks: Some(webhooks),
             ..Default::default()
         };
-        let res = spec.validate(Options::new());
+        let res = spec.validate(Options::new(), None);
         if let Err(e) = res {
             assert!(
                 e.errors.iter().all(|s| !s.contains("collapse to the same")),
@@ -2160,7 +2148,7 @@ mod tests {
             paths: Some(paths),
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -2249,7 +2237,7 @@ mod tests {
             paths: Some(paths),
             ..Default::default()
         };
-        let res = spec.validate(Options::new());
+        let res = spec.validate(Options::new(), None);
         if let Err(e) = res {
             assert!(
                 e.errors.iter().all(|s| !s.contains("inCallback")),

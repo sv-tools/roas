@@ -335,7 +335,8 @@ mod tests {
             ..Default::default()
         };
         use crate::validation::Validate;
-        spec.validate(crate::validation::Options::new()).unwrap();
+        spec.validate(crate::validation::Options::new(), None)
+            .unwrap();
     }
 
     fn ok_responses() -> Responses {

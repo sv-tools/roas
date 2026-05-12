@@ -152,7 +152,8 @@ impl Options {
 
 /// Validates the OpenAPI specification.
 pub trait Validate {
-    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error>;
+    fn validate(&self, options: EnumSet<Options>, loader: Option<&mut Loader>)
+    -> Result<(), Error>;
 }
 
 /// Returned by `Spec::define_*` helpers when a component name does not
@@ -182,8 +183,8 @@ pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
 /// in spec validation. Implementors push errors into the context via
 /// [`PushError::error`] and recurse into sub-objects by calling each
 /// child's `validate_with_context`. External users drive validation
-/// through [`Validate::validate`] / `Spec::validate_with_loader` rather
-/// than touching this trait directly.
+/// through [`Validate::validate`] rather than touching this trait
+/// directly.
 pub(crate) trait ValidateWithContext<T> {
     fn validate_with_context(&self, ctx: &mut Context<T>, path: String);
 }
@@ -192,8 +193,8 @@ pub(crate) trait ValidateWithContext<T> {
 /// errors, the per-call options, and a `visited` set used for unused
 /// detection and cycle handling.
 ///
-/// Crate-internal: constructed and consumed by [`Validate::validate`] /
-/// `Spec::validate_with_loader`. Not part of the public API.
+/// Crate-internal: constructed and consumed by [`Validate::validate`].
+/// Not part of the public API.
 pub(crate) struct Context<'a, T> {
     pub spec: &'a T,
     /// Optional external-reference loader. When set,

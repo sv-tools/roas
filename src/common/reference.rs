@@ -146,9 +146,8 @@ impl<D> RefOr<D> {
     /// Validate this `RefOr<D>` in the surrounding context.
     ///
     /// Crate-internal: callers drive validation through
-    /// [`Validate::validate`](crate::validation::Validate::validate) or
-    /// `Spec::validate_with_loader` rather than invoking this method
-    /// directly.
+    /// [`Validate::validate`](crate::validation::Validate::validate)
+    /// rather than invoking this method directly.
     ///
     /// The extra `D: 'static + Clone + DeserializeOwned` bounds are
     /// required even when validating an inline `Item` or an internal

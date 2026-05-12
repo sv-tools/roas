@@ -483,15 +483,6 @@ impl ResolveReference<Tag> for Spec {
 }
 
 impl Spec {
-    /// Validate the spec, resolving external `$ref`s through the given loader.
-    pub fn validate_with_loader(
-        &self,
-        options: EnumSet<Options>,
-        loader: &mut Loader,
-    ) -> Result<(), Error> {
-        self.validate_inner(options, Some(loader))
-    }
-
     fn validate_inner<'a>(
         &'a self,
         options: EnumSet<Options>,
@@ -610,8 +601,12 @@ impl Spec {
 }
 
 impl Validate for Spec {
-    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
-        self.validate_inner(options, None)
+    fn validate(
+        &self,
+        options: EnumSet<Options>,
+        loader: Option<&mut Loader>,
+    ) -> Result<(), Error> {
+        self.validate_inner(options, loader)
     }
 }
 
@@ -655,7 +650,7 @@ mod tests {
         .expect("spec must parse");
 
         let err = spec
-            .validate(IGNORE_UNUSED)
+            .validate(IGNORE_UNUSED, None)
             .expect_err("external ref must error when no loader is attached");
         assert!(
             err.errors
@@ -674,12 +669,12 @@ mod tests {
                 }),
             )
             .expect("preload must succeed");
-        spec.validate_with_loader(IGNORE_UNUSED, &mut loader)
+        spec.validate(IGNORE_UNUSED, Some(&mut loader))
             .expect("validation must succeed when external ref is preloaded");
 
         let mut empty_loader = Loader::new();
         let err = spec
-            .validate_with_loader(IGNORE_UNUSED, &mut empty_loader)
+            .validate(IGNORE_UNUSED, Some(&mut empty_loader))
             .expect_err("missing fetcher must surface as a validation error");
         assert!(
             err.errors
@@ -790,7 +785,7 @@ mod tests {
             }])
         );
         assert_eq!(serde_json::to_value(&spec).unwrap(), value);
-        assert!(spec.validate(Default::default()).is_ok());
+        assert!(spec.validate(Default::default(), None).is_ok());
     }
 
     #[test]
@@ -877,7 +872,7 @@ mod tests {
         };
         // Cargo `..Default::default()` already sets paths/etc. to defaults.
         let _ = &mut spec;
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1101,7 +1096,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let res = spec.validate(Options::new());
+        let res = spec.validate(Options::new(), None);
         assert!(res.is_ok(), "errors: {:?}", res);
     }
 
@@ -1124,7 +1119,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors.iter().any(|e| e.contains("must start with `/`")),
             "errors: {:?}",
@@ -1136,7 +1131,7 @@ mod tests {
     fn validate_base_path_must_start_with_slash() {
         let mut spec = spec_with_info();
         spec.base_path = Some("api".into());
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1160,7 +1155,7 @@ mod tests {
             security: Some(vec![req]),
             ..spec_with_info()
         };
-        let res = spec.validate(Options::new());
+        let res = spec.validate(Options::new(), None);
         assert!(res.is_ok(), "errors: {:?}", res);
     }
 
@@ -1172,7 +1167,7 @@ mod tests {
             security: Some(vec![req]),
             ..spec_with_info()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1216,7 +1211,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1258,7 +1253,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors.iter().any(|e| e.contains("duplicate parameter")),
             "errors: {:?}",
@@ -1283,7 +1278,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1316,7 +1311,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1538,7 +1533,7 @@ mod tests {
         let mut req = BTreeMap::new();
         req.insert("none".to_owned(), vec![]);
         spec.security = Some(vec![req.clone(), req]);
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         for (field, idx) in [
             ("#.schemes[1]", "schemes"),
             ("#.consumes[1]", "consumes"),
@@ -1574,7 +1569,7 @@ mod tests {
             security_definitions: Some(defs),
             ..spec_with_info()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         // Per-scheme validate fires on missing URLs / empty scopes.
         assert!(
             err.errors

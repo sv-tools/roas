@@ -12,8 +12,11 @@ mod v2_tests {
             println!("validating: {path_buf:?}");
             let json_spec = fs::read_to_string(&path_buf).unwrap();
             let spec = serde_json::from_str::<Spec>(&json_spec).unwrap();
-            spec.validate(Options::IgnoreMissingTags | Options::IgnoreExternalReferences)
-                .unwrap();
+            spec.validate(
+                Options::IgnoreMissingTags | Options::IgnoreExternalReferences,
+                None,
+            )
+            .unwrap();
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&json_spec).unwrap(),
                 serde_json::to_value(spec).unwrap(),

@@ -17,7 +17,7 @@ mod v3_2_tests {
             println!("validating: {path_buf:?}");
             let json_spec = fs::read_to_string(&path_buf).unwrap();
             let spec = serde_json::from_str::<Spec>(&json_spec).unwrap();
-            match spec.validate(Options::IgnoreMissingTags.only()) {
+            match spec.validate(Options::IgnoreMissingTags.only(), None) {
                 Ok(_) => {}
                 Err(err) => {
                     panic!("validation failed: {err}");

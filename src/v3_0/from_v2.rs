@@ -1178,7 +1178,7 @@ mod tests {
             let opts = crate::validation::Options::new()
                 | crate::validation::Options::IgnoreMissingTags
                 | crate::validation::IGNORE_UNUSED;
-            if let Err(e) = v3.validate(opts) {
+            if let Err(e) = v3.validate(opts, None) {
                 panic!("{name}: converted spec did not validate cleanly:\n{e}");
             }
         }
@@ -1207,7 +1207,7 @@ mod tests {
         let _ = v3.paths.iter().next().expect("at least one path");
         // The result is structurally valid v3.0.
         assert!(
-            v3.validate(Default::default()).is_ok(),
+            v3.validate(Default::default(), None).is_ok(),
             "converted spec must validate clean"
         );
     }

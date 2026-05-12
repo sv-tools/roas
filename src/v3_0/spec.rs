@@ -692,15 +692,6 @@ impl ResolveReference<Tag> for Spec {
 }
 
 impl Spec {
-    /// Validate the spec, resolving external `$ref`s through the given loader.
-    pub fn validate_with_loader(
-        &self,
-        options: EnumSet<Options>,
-        loader: &mut Loader,
-    ) -> Result<(), Error> {
-        self.validate_inner(options, Some(loader))
-    }
-
     fn validate_inner<'a>(
         &'a self,
         options: EnumSet<Options>,
@@ -789,8 +780,12 @@ impl Spec {
 }
 
 impl Validate for Spec {
-    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
-        self.validate_inner(options, None)
+    fn validate(
+        &self,
+        options: EnumSet<Options>,
+        loader: Option<&mut Loader>,
+    ) -> Result<(), Error> {
+        self.validate_inner(options, loader)
     }
 }
 
@@ -823,7 +818,7 @@ mod tests {
         .expect("spec must parse");
 
         let err = spec
-            .validate(IGNORE_UNUSED)
+            .validate(IGNORE_UNUSED, None)
             .expect_err("external ref must error when no loader is attached");
         assert!(
             err.errors
@@ -842,12 +837,12 @@ mod tests {
                 }),
             )
             .expect("preload must succeed");
-        spec.validate_with_loader(IGNORE_UNUSED, &mut loader)
+        spec.validate(IGNORE_UNUSED, Some(&mut loader))
             .expect("validation must succeed when external ref is preloaded");
 
         let mut empty_loader = Loader::new();
         let err = spec
-            .validate_with_loader(IGNORE_UNUSED, &mut empty_loader)
+            .validate(IGNORE_UNUSED, Some(&mut empty_loader))
             .expect_err("missing fetcher must surface as a validation error");
         assert!(
             err.errors
@@ -998,7 +993,7 @@ mod tests {
         // openapi-pattern violation we're forcing.
         spec.info.title = "test".to_owned();
         spec.info.version = "1".to_owned();
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1489,7 +1484,7 @@ mod tests {
             paths,
             ..Default::default()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
