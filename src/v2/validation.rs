@@ -392,7 +392,6 @@ fn validate_operation_security(ctx: &mut Context<Spec>, op_path: &str, op: &Oper
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::reference::RefOr;
     use crate::v2::parameter::{InBody, InFormData, InPath, InQuery, Parameter, StringParameter};
     use crate::v2::path_item::PathItem;
     use crate::v2::response::{Response, Responses};

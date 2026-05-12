@@ -214,7 +214,6 @@ impl ValidateWithContext<Spec> for Responses {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::reference::RefOr;
     use crate::v2::header::{IntegerHeader, StringHeader};
     use crate::validation::Context;
     use crate::validation::Options;

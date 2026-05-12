@@ -402,7 +402,6 @@ pub fn validate_path_item(ctx: &mut Context<Spec>, template: &str, path: &str, i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::reference::RefOr;
     use crate::v3_0::components::Components;
     use crate::v3_0::parameter::{InCookie, InHeader, InPath, InQuery};
     use crate::v3_0::security_scheme::{
