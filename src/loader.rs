@@ -504,7 +504,11 @@ mod tests {
         let mut loader = Loader::new();
         loader.register_fetcher("file://", JsonFileFetcher);
 
-        let reference = format!("file://{}#/components/schemas/Pet", file.display());
+        // Build the `file://` URL via `Url::from_file_path` so paths
+        // with spaces / non-ASCII / Windows separators stay valid.
+        let mut url = Url::from_file_path(&file).unwrap();
+        url.set_fragment(Some("/components/schemas/Pet"));
+        let reference = url.to_string();
         assert!(loader.resolve_reference(&reference).is_ok());
 
         // Delete the file. The second resolve must still succeed —

@@ -475,7 +475,12 @@ mod tests {
         let mut loader = Loader::new();
         loader.register_fetcher("file://", JsonFileFetcher);
 
-        let r = RefOr::<Foo>::new_ref(format!("file://{}#/components/schemas/Pet", file.display()));
+        // Construct the `file://` URL via `Url::from_file_path` so the
+        // reference is well-formed on any platform (Windows backslashes,
+        // spaces, non-ASCII) instead of relying on `Path::display`.
+        let mut url = Url::from_file_path(&file).unwrap();
+        url.set_fragment(Some("/components/schemas/Pet"));
+        let r = RefOr::<Foo>::new_ref(url.to_string());
         let spec = PetSpec;
         let resolved = r.get_item_with_loader(&spec, &mut loader).unwrap();
         match resolved {
