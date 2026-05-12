@@ -29,8 +29,7 @@ const PLACEHOLDER: &str = "__EXTERNAL_ERROR_URL__";
 
 /// Read the on-disk spec, substitute the `__EXTERNAL_ERROR_URL__`
 /// placeholder with a real `file://` URL pointing at the sibling
-/// `error.json`, and parse the result. Returns the parsed spec plus the
-/// patched JSON text (the latter is useful in failure messages).
+/// `error.json`, and return the parsed spec.
 fn load_spec_with_external_error_url() -> Spec {
     let raw = fs::read_to_string(PETSTORE_SPEC_PATH)
         .unwrap_or_else(|e| panic!("read {PETSTORE_SPEC_PATH}: {e}"));
@@ -89,4 +88,29 @@ fn validate_with_empty_loader_surfaces_no_fetcher_error() {
         "expected `failed to resolve` + `no fetcher registered` error, got: {:?}",
         err.errors,
     );
+}
+
+#[test]
+fn validate_with_ignore_external_references_short_circuits_loader() {
+    // `IgnoreExternalReferences` must skip external `$ref`s entirely —
+    // the loader should not even be consulted, and the resolved
+    // external value should not be validated. This guards the option's
+    // pre-loader-integration semantics: attaching a loader to a spec
+    // with broken externals must not start surfacing those breaks when
+    // the user explicitly asked to ignore externals.
+    //
+    // We use an unreachable external URL: if the option weren't
+    // respected the loader would surface a `failed to resolve` error.
+    let raw = fs::read_to_string(PETSTORE_SPEC_PATH).unwrap();
+    let patched = raw.replace(PLACEHOLDER, "file:///does/not/exist/never");
+    let spec: Spec = serde_json::from_str(&patched).expect("spec must parse");
+
+    let mut loader = Loader::new();
+    loader.register_fetcher("file://", JsonFileFetcher);
+
+    spec.validate(
+        Options::IgnoreMissingTags | Options::IgnoreExternalReferences,
+        Some(&mut loader),
+    )
+    .expect("IgnoreExternalReferences must short-circuit before the loader is consulted");
 }

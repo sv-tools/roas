@@ -191,39 +191,45 @@ impl<D> RefOr<D> {
                     }
                     return;
                 }
-                // External reference: route through the loader if one is
-                // attached to the context. `as_deref_mut` keeps the
-                // mutable borrow on `ctx.loader` scoped to this expression
-                // so the resolved owned `D` (or `LoaderError`) outlives
-                // the borrow and lets us re-use `ctx` to validate it.
+                // External reference. `IgnoreExternalReferences` means
+                // "don't recurse into external documents during
+                // validation" — both before and after the loader
+                // integration. Short-circuit here so the option's
+                // behaviour stays the same regardless of whether a
+                // loader is attached: with the option set, we never
+                // ask the loader to fetch and we never validate the
+                // resolved value, even when it would have succeeded.
+                if ctx.is_option(Options::IgnoreExternalReferences) {
+                    return;
+                }
+                // Route through the loader if one is attached to the
+                // context. `as_deref_mut` keeps the mutable borrow on
+                // `ctx.loader` scoped to this expression so the
+                // resolved owned `D` (or `LoaderError`) outlives the
+                // borrow and lets us re-use `ctx` to validate it.
                 let resolved = ctx
                     .loader
                     .as_deref_mut()
                     .map(|l| l.resolve_reference_as::<D>(&r.reference));
+                // `IgnoreExternalReferences` was already handled
+                // above; if we got here it isn't set, so any failure
+                // surfaces unconditionally.
                 match resolved {
                     Some(Ok(d)) => d.validate_with_context(ctx, r.reference.clone()),
-                    Some(Err(source)) => {
-                        if !ctx.is_option(Options::IgnoreExternalReferences) {
-                            ctx.error(
-                                path,
-                                format_args!(
-                                    ".$ref: failed to resolve external reference `{}`: {source}",
-                                    r.reference,
-                                ),
-                            );
-                        }
-                    }
-                    None => {
-                        if !ctx.is_option(Options::IgnoreExternalReferences) {
-                            ctx.error(
-                                path,
-                                format_args!(
-                                    ".$ref: resolving of an external reference `{}` is not supported",
-                                    r.reference,
-                                ),
-                            );
-                        }
-                    }
+                    Some(Err(source)) => ctx.error(
+                        path,
+                        format_args!(
+                            ".$ref: failed to resolve external reference `{}`: {source}",
+                            r.reference,
+                        ),
+                    ),
+                    None => ctx.error(
+                        path,
+                        format_args!(
+                            ".$ref: resolving of an external reference `{}` is not supported",
+                            r.reference,
+                        ),
+                    ),
                 }
             }
             RefOr::Item(d) => {
