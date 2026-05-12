@@ -159,6 +159,20 @@ impl<D> RefOr<D> {
     /// already; the constraint only bites downstream code that
     /// parameterises `RefOr<D>` over a custom `D` lacking `Clone` or
     /// `DeserializeOwned`.
+    ///
+    /// **Known limitation — base URI of externally-loaded values.**
+    /// After the loader resolves an external `$ref`, the resulting
+    /// owned `D` is validated against `ctx.spec` (the root spec), not
+    /// against the external document's own component map. Any nested
+    /// `$ref: "#/..."` inside the external value is therefore looked
+    /// up in the root spec — per JSON Reference semantics it should be
+    /// resolved relative to the external document's base URI. This is
+    /// fine for the common case (external documents are flat
+    /// definition bundles with no internal cross-refs) but will
+    /// mis-resolve or surface "not found" if the external document
+    /// uses `#/`-style refs into its own structure. Tracked as a
+    /// follow-up: introduce a base-URI stack on `Context` and route
+    /// `#/...` lookups through the loader against the current base.
     pub(crate) fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
