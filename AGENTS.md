@@ -50,6 +50,9 @@ targeted unit tests for the gap.
 
 ## Commit & Pull Request Guidelines
 
+**Never commit to `main` directly.** Always create a branch, push it, and open a pull request — even for small
+docs / chore changes. `main` is updated only by merging PRs.
+
 **Branch names** mirror the commit-prefix vocabulary: `feat/<slug>`, `refactor/<slug>`, `fix/<slug>`, `docs/<slug>`,
 `test/<slug>`, `chore/<slug>`. Pick the prefix that matches the dominant change in the branch.
 
