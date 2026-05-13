@@ -445,7 +445,15 @@ fn decode_fragment(fragment: &str) -> Result<String, ()> {
             i += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| ())
+    let decoded = String::from_utf8(out).map_err(|_| ())?;
+    // Per RFC 6901 a JSON Pointer is either the empty string or
+    // starts with `/`. Reject anything else so `doc.json#foo` is
+    // surfaced as an invalid fragment instead of a misleading
+    // `PointerNotFound`.
+    if !decoded.starts_with('/') {
+        return Err(());
+    }
+    Ok(decoded)
 }
 
 fn hex(byte: u8) -> Result<u8, ()> {
@@ -823,6 +831,22 @@ mod tests {
         let err = loader
             .resolve_reference("doc.json#%ZZ")
             .expect_err("invalid percent-encoding in fragment must error");
+        assert!(matches!(err, LoaderError::InvalidFragment(_)));
+    }
+
+    #[test]
+    fn resolve_reference_with_non_pointer_fragment_errors() {
+        // RFC 6901: a JSON Pointer is either empty or starts with `/`.
+        // `doc.json#foo` is not a valid JSON Pointer and must be
+        // surfaced as `InvalidFragment`, not a confusing
+        // `PointerNotFound`.
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "foo": true }))
+            .unwrap();
+        let err = loader
+            .resolve_reference("doc.json#foo")
+            .expect_err("fragment without leading `/` is not a JSON Pointer");
         assert!(matches!(err, LoaderError::InvalidFragment(_)));
     }
 
