@@ -42,14 +42,20 @@ impl ValidationError {
         Self { path, message }
     }
 
-    /// Returns `true` if `needle` appears anywhere in the rendered
-    /// `Display` form, including across the path/message boundary.
+    /// Substring search across the rendered `Display` form, including
+    /// across the path/message boundary. Returns `true` if `needle`
+    /// appears anywhere in the rendered string.
+    ///
     /// The rendered form is normally `"<path>: <message>"`, or
     /// `"<path><message>"` if `message` starts with `.` (see the
-    /// type-level docs for that fallback). Convenience for tests
-    /// that previously did `errors.contains(...)` against the old
-    /// `Vec<String>` shape and want to keep working without splitting
-    /// search terms.
+    /// type-level docs for that fallback).
+    ///
+    /// This mirrors the old `String::contains` semantics used by
+    /// in-crate test patterns like
+    /// `errors.iter().any(|e| e.contains("..."))` against the
+    /// pre-refactor `Vec<String>` shape. It is **not** analogous to
+    /// `Vec::contains`, which is an exact element match — for exact
+    /// matching against the rendered string see [`ValidationErrorsExt::has_exact`].
     pub fn contains(&self, needle: &str) -> bool {
         // Fast path: the needle lives entirely inside one field.
         if self.path.contains(needle) || self.message.contains(needle) {
