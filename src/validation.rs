@@ -19,13 +19,13 @@ use crate::loader::Loader;
 /// opaque human-readable locator, not a parser input for a JSON
 /// Pointer library.
 ///
-/// Constructed internally by the recursive validators via
-/// [`PushError::error`]; emitted to callers as the elements of
-/// [`Error::errors`]. The [`Display`] impl renders as
-/// `"<path>: <message>"`, except messages beginning with `.` are
-/// concatenated directly onto the path (so callers can use a leading
-/// dot to keep the path-extension form like `"#.info.title"` from a
-/// child message of `".title: must not be empty"`).
+/// Constructed internally by the recursive validators; emitted to
+/// callers as the elements of [`Error::errors`] after
+/// [`Validate::validate`] returns. The [`Display`] impl renders as
+/// `"<path>: <message>"`. As a defensive fallback, messages that
+/// still begin with `.` (rare — the internal pusher splits leading
+/// path extensions into `path` at push time) are concatenated
+/// directly onto the path so the rendered form remains correct.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ValidationError {
     pub path: String,
@@ -37,12 +37,19 @@ impl ValidationError {
         Self { path, message }
     }
 
-    /// Returns `true` if `needle` appears in either the path or the
-    /// message. Convenience for tests that previously did
-    /// `errors.contains(...)` against the old
-    /// `Vec<String>` shape.
+    /// Returns `true` if `needle` appears anywhere in the rendered
+    /// `Display` form (`"<path>: <message>"`), including across the
+    /// path/message boundary. Convenience for tests that previously
+    /// did `errors.contains(...)` against the old `Vec<String>` shape
+    /// and want to keep working without splitting search terms.
     pub fn contains(&self, needle: &str) -> bool {
-        self.path.contains(needle) || self.message.contains(needle)
+        // Fast path: the needle lives entirely inside one field.
+        if self.path.contains(needle) || self.message.contains(needle) {
+            return true;
+        }
+        // Slow path: needle crosses the path/message boundary — fall
+        // back to the rendered form.
+        self.to_string().contains(needle)
     }
 }
 
@@ -381,21 +388,60 @@ pub(crate) trait PushError<T> {
 
 impl<T> PushError<&str> for Context<'_, T> {
     fn error(&mut self, path: String, msg: &str) {
-        self.errors.push(ValidationError::new(path, msg.to_owned()));
+        let (path, message) = split_leading_dot(path, msg);
+        self.errors.push(ValidationError::new(path, message));
     }
 }
 
 impl<T> PushError<String> for Context<'_, T> {
     fn error(&mut self, path: String, msg: String) {
-        self.errors.push(ValidationError::new(path, msg));
+        // The `&str` overload is doing the path-extension split, so go
+        // through it to keep the normalization in one place.
+        <Self as PushError<&str>>::error(self, path, msg.as_str());
     }
 }
 
 impl<T> PushError<fmt::Arguments<'_>> for Context<'_, T> {
     fn error(&mut self, path: String, args: fmt::Arguments<'_>) {
-        self.errors
-            .push(ValidationError::new(path, args.to_string()));
+        <Self as PushError<&str>>::error(self, path, args.to_string().as_str());
     }
+}
+
+/// Normalises the recursive validators' leading-dot convention into
+/// the structured `ValidationError` shape.
+///
+/// Many call sites push a message of the form `".<segment>: <text>"`,
+/// where the `.<segment>` is intended as a *path extension* relative
+/// to the parent's path and `<text>` is the actual diagnostic. With
+/// the pre-refactor `Vec<String>` shape that was rendered correctly
+/// by concatenation; with the structured shape it would leak the
+/// path-extension marker into `message`, breaking
+/// programmatic callers that filter by `.path` or render `.message`
+/// alone.
+///
+/// This splitter recognises that convention:
+///
+/// * If `msg` starts with `.` AND contains `": "`, the segment up to
+///   `": "` is appended to `path` and the text after `": "` becomes
+///   the message — so `path = "#.x"`, `msg = ".allOf: must not be
+///   empty"` becomes `path = "#.x.allOf"`, `message = "must not be
+///   empty"`.
+/// * Otherwise the inputs are stored verbatim.
+///
+/// Either way the [`ValidationError::Display`] output is identical to
+/// the pre-refactor rendering.
+fn split_leading_dot(mut path: String, msg: &str) -> (String, String) {
+    if let Some(rest) = msg.strip_prefix('.')
+        && let Some(sep_at) = rest.find(": ")
+    {
+        let (segment, after) = rest.split_at(sep_at);
+        // `after` still has the leading `": "`; skip it.
+        let message = &after[2..];
+        path.push('.');
+        path.push_str(segment);
+        return (path, message.to_owned());
+    }
+    (path, msg.to_owned())
 }
 
 impl<T> Context<'_, T> {
@@ -470,6 +516,41 @@ impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_error_splits_leading_dot_message_into_path_extension() {
+        let mut ctx: Context<()> = Context::new(&(), Options::new());
+        ctx.error("#.x".into(), ".allOf: must not be empty");
+        assert_eq!(ctx.errors.len(), 1);
+        let e = &ctx.errors[0];
+        // The leading-dot segment is appended to `path`; `message`
+        // holds only the diagnostic text. Display still renders the
+        // original `"#.x.allOf: must not be empty"` form.
+        assert_eq!(e.path, "#.x.allOf");
+        assert_eq!(e.message, "must not be empty");
+        assert_eq!(e.to_string(), "#.x.allOf: must not be empty");
+    }
+
+    #[test]
+    fn push_error_keeps_message_verbatim_without_leading_dot() {
+        let mut ctx: Context<()> = Context::new(&(), Options::new());
+        ctx.error("#.x".into(), "must not be empty");
+        let e = &ctx.errors[0];
+        assert_eq!(e.path, "#.x");
+        assert_eq!(e.message, "must not be empty");
+    }
+
+    #[test]
+    fn validation_error_contains_matches_across_boundary() {
+        // `contains` should match a substring that crosses the
+        // path/message boundary in the rendered form, even though the
+        // underlying fields hold them separately.
+        let e = ValidationError::new("#.x.items".into(), "is required".into());
+        assert!(e.contains("items: is required"));
+        assert!(e.contains("#.x"));
+        assert!(e.contains("is required"));
+        assert!(!e.contains("not in either"));
+    }
 
     #[test]
     fn validation_error_partial_eq_against_str_string_and_ref_str_terminates() {
