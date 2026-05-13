@@ -20,7 +20,7 @@ use std::fs;
 
 use roas::loader::{JsonFileFetcher, Loader};
 use roas::v3_2::spec::Spec;
-use roas::validation::{Options, Validate};
+use roas::validation::{Options, Validate, ValidationErrorsExt};
 use url::Url;
 
 const PETSTORE_SPEC_PATH: &str = "tests/loader_data/petstore.json";
@@ -80,11 +80,11 @@ fn validate_with_empty_loader_surfaces_no_fetcher_error() {
         .validate(Options::IgnoreMissingTags.only(), Some(&mut loader))
         .expect_err("missing fetcher must surface as a validation error");
     assert!(
-        err.errors.iter().any(|e| {
-            e.contains("error.json#/Error")
-                && e.contains("failed to resolve")
-                && e.contains("no fetcher registered")
-        }),
+        err.errors.mentions_all(&[
+            "error.json#/Error",
+            "failed to resolve",
+            "no fetcher registered",
+        ]),
         "expected `failed to resolve` + `no fetcher registered` error, got: {:?}",
         err.errors,
     );

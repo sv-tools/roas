@@ -641,7 +641,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "valid ref should not error: {:?}",
             ctx.errors
         );
@@ -741,7 +741,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("external reference")),
+            !ctx.errors.mentions("external reference"),
             "with option: {:?}",
             ctx.errors
         );
@@ -813,7 +813,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "components.pathItems target should resolve: {:?}",
             ctx.errors
         );
@@ -836,7 +836,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "webhook target should resolve: {:?}",
             ctx.errors
         );
@@ -871,7 +871,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "cross-container chain should resolve: {:?}",
             ctx.errors
         );
@@ -966,7 +966,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "callback target should resolve: {:?}",
             ctx.errors
         );
@@ -1059,7 +1059,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "deep callback target should resolve: {:?}",
             ctx.errors
         );
@@ -1162,7 +1162,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "callback with `/` in name should resolve via `~1`: {:?}",
             ctx.errors
         );
@@ -1206,7 +1206,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "chain through components.callbacks must resolve: {:?}",
             ctx.errors
         );
@@ -1307,12 +1307,12 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("cyclic")),
+            !ctx.errors.mentions("cyclic"),
             "cross-container same-key must not be flagged as cycle: {:?}",
             ctx.errors
         );
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "operationRef should resolve: {:?}",
             ctx.errors
         );

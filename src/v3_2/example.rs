@@ -237,7 +237,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+            !ctx.errors.mentions("mutually exclusive"),
             "dataValue + serializedValue should be permitted: {:?}",
             ctx.errors
         );
@@ -251,7 +251,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+            !ctx.errors.mentions("mutually exclusive"),
             "dataValue + externalValue should be permitted: {:?}",
             ctx.errors
         );

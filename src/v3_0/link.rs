@@ -385,7 +385,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "valid ref should not error: {:?}",
             ctx.errors
         );
@@ -488,7 +488,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("external reference")),
+            !ctx.errors.mentions("external reference"),
             "with option, no external error: {:?}",
             ctx.errors
         );
@@ -541,7 +541,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "ref-of-ref should resolve: {:?}",
             ctx.errors
         );
@@ -613,7 +613,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "multi-hop PathItem ref should resolve: {:?}",
             ctx.errors
         );
@@ -723,7 +723,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "with option, no .operationRef error: {:?}",
             ctx.errors
         );
@@ -787,7 +787,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "tilde-encoded ref should resolve: {:?}",
             ctx.errors
         );

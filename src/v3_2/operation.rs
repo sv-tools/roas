@@ -204,7 +204,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         Operation::default().validate_with_context(&mut ctx, "op".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".responses")),
+            !ctx.errors.mentions(".responses"),
             "no responses errors expected: {:?}",
             ctx.errors
         );
@@ -266,7 +266,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::IgnoreMissingTags.only());
         op.validate_with_context(&mut ctx, "op".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("not found in spec")),
+            !ctx.errors.mentions("not found in spec"),
             "missing-tags should be silenced: {:?}",
             ctx.errors
         );

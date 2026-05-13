@@ -558,8 +558,8 @@ mod tests {
         let params = vec![path_param("id")];
         validate_operation_parameters(&mut ctx, "op", "/no-vars", None, Some(&params));
         assert!(
-            ctx.errors.iter().any(|e| e
-                .contains("path parameter `id` does not match any `{name}` in the path template")),
+            ctx.errors
+                .mentions("path parameter `id` does not match any `{name}` in the path template"),
             "errors: {:?}",
             ctx.errors
         );
@@ -872,11 +872,7 @@ mod tests {
         let spec: &'static Spec = Box::leak(Box::new(spec));
         let mut ctx = Context::new(spec, Options::IgnoreUnusedSecuritySchemes.only());
         validate_security_definitions(&mut ctx);
-        assert!(
-            ctx.errors.iter().all(|e| !e.contains("unused")),
-            "errors: {:?}",
-            ctx.errors
-        );
+        assert!(!ctx.errors.mentions("unused"), "errors: {:?}", ctx.errors);
     }
 
     #[test]
@@ -893,11 +889,7 @@ mod tests {
         // would do when processing `Spec.security` or operation-level security.
         ctx.visit("#/securityDefinitions/used".to_owned());
         validate_security_definitions(&mut ctx);
-        assert!(
-            ctx.errors.iter().all(|e| !e.contains("unused")),
-            "errors: {:?}",
-            ctx.errors
-        );
+        assert!(!ctx.errors.mentions("unused"), "errors: {:?}", ctx.errors);
     }
 
     #[test]

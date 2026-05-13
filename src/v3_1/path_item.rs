@@ -558,7 +558,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::IgnoreExternalReferences.only());
         pi.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("external reference")),
+            !ctx.errors.mentions("external reference"),
             "errors: {:?}",
             ctx.errors
         );
@@ -650,7 +650,7 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         pi.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("not declared")),
+            !ctx.errors.mentions("not declared"),
             "callback path-item target should resolve: {:?}",
             ctx.errors
         );
@@ -703,7 +703,7 @@ mod tests {
             let mut ctx = Context::new(&spec, crate::validation::Options::new());
             pi.validate_with_context(&mut ctx, "p".into());
             assert!(
-                ctx.errors.iter().all(|e| !e.contains("not declared")),
+                !ctx.errors.mentions("not declared"),
                 "{r} should resolve: {:?}",
                 ctx.errors
             );

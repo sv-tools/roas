@@ -1427,7 +1427,7 @@ mod tests {
             let mut ctx = Context::new(&spec, crate::validation::Options::new());
             s.validate_with_context(&mut ctx, "s".into());
             assert!(
-                ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+                !ctx.errors.mentions("mutually exclusive"),
                 "single flag should not error: {:?}",
                 ctx.errors
             );

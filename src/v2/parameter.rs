@@ -1133,11 +1133,7 @@ mod tests {
         ] {
             let mut c = ctx();
             inner.validate_with_context(&mut c, "p".into());
-            assert!(
-                c.errors.iter().all(|e| !e.contains("`multi`")),
-                "errors: {:?}",
-                c.errors
-            );
+            assert!(!c.errors.mentions("`multi`"), "errors: {:?}", c.errors);
         }
     }
 

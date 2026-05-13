@@ -553,7 +553,7 @@ mod tests {
         let mut ctx = Context::new(&spec, opts);
         comp.validate_with_context(&mut ctx, "#.components".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("unused")),
+            !ctx.errors.mentions("unused"),
             "no unused errors when ignored: {:?}",
             ctx.errors
         );

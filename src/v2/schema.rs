@@ -1401,7 +1401,7 @@ mod tests {
         }))
         .validate_with_context(&mut ctx, "s".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("discriminator")),
+            !ctx.errors.mentions("discriminator"),
             "errors: {:?}",
             ctx.errors
         );
@@ -1488,7 +1488,7 @@ mod tests {
         }))
         .validate_with_context(&mut ctx, "s".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("SHOULD NOT")),
+            !ctx.errors.mentions("SHOULD NOT"),
             "errors: {:?}",
             ctx.errors
         );
