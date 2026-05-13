@@ -13,10 +13,12 @@ Integration tests are in `tests/*_test.rs`. JSON fixtures are grouped by version
 
 ## Build, Test, and Development Commands
 
+- `cargo install-tools`: installs the CI toolchain from `.cargo/config.toml` (`cargo-deny`, `cargo-llvm-cov`,
+  `cargo-machete`, `cargo-nextest`, `cargo-action-fmt`).
 - `cargo build` builds the crate with the default `v3_2` feature.
 - `cargo nextest run --all-features` checks all OpenAPI version modules together.
-- `cargo fmt` applies standard Rust formatting.
-- `cargo clippy --all-features --all-targets` runs lint checks across library and tests.
+- `cargo fmt --all` applies standard Rust formatting across the whole workspace.
+- `cargo clippy --all-features --all-targets -- -D warnings`: runs lints with warnings treated as errors.
 - `cargo deny check` audits licenses, advisories, bans, and sources using `deny.toml`.
 - `cargo machete` checks for unused dependencies before dependency cleanup.
 
@@ -26,7 +28,8 @@ Use Rust 2024 idioms and standard `rustfmt` formatting. Keep modules aligned wit
 types belong in `src/v3_2/`, shared behavior belongs in `src/common/`, and cross-version conversion code should follow
 names like `from_v3_1.rs`.
 
-Prefer descriptive snake_case for modules, functions, and tests. Public structs and enums use `UpperCamelCase`. Keep
+Prefer descriptive snake_case for modules, functions, and tests. Prefer direct sibling modules such as `host_impl.rs`
+over `mod.rs`. Public structs and enums use `UpperCamelCase`. Keep
 serde-facing field names consistent with OpenAPI JSON names via existing serde patterns.
 
 Public API lives at the crate root. Everything else is `pub(crate)`. Prefer `pub(crate)` for new items
@@ -43,12 +46,15 @@ When adding feature-specific behavior, run the relevant feature set explicitly, 
 
 Aim for ~95% line coverage on changed code; treat ~90% as the floor. Codecov reports `codecov/patch`
 and `codecov/project/*` checks on each PR — those are informational. A PR is releasable when the
-build × feature matrix, `cargo nextest`, `cargo clippy --all-features --all-targets`, and `cargo fmt`
-are all green; a marginal codecov dip below the patch threshold can still land if the missed lines
+build × feature matrix, `cargo nextest run --all-features`, `cargo clippy --all-features --all-targets -- -D warnings`,
+and `cargo fmt --all` are all green; a marginal codecov dip below the patch threshold can still land if the missed lines
 are genuinely unreachable from the test surface (e.g. cross-feature dead arms). Otherwise add
 targeted unit tests for the gap.
 
 ## Commit & Pull Request Guidelines
+
+**Never commit to `main` directly.** Always create a branch, push it, and open a pull request — even for small
+docs / chore changes. `main` is updated only by merging PRs.
 
 **Branch names** mirror the commit-prefix vocabulary: `feat/<slug>`, `refactor/<slug>`, `fix/<slug>`, `docs/<slug>`,
 `test/<slug>`, `chore/<slug>`. Pick the prefix that matches the dominant change in the branch.
