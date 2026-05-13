@@ -667,7 +667,7 @@ impl ValidateWithContext<Spec> for FileParameter {
 
 fn must_be_required(p: &Option<bool>, ctx: &mut Context<Spec>, path: String, name: String) {
     if !p.is_some_and(|x| x) {
-        ctx.errors.push(format!("{path}.{name}: must be required"));
+        ctx.error(format!("{path}.{name}"), "must be required");
     }
 }
 
@@ -678,8 +678,7 @@ fn must_not_allow_empty_value(
     name: String,
 ) {
     if p.is_some_and(|x| x) {
-        ctx.errors
-            .push(format!("{path}.{name}: must not allow empty value"));
+        ctx.error(format!("{path}.{name}"), "must not allow empty value");
     }
 }
 
@@ -709,6 +708,7 @@ mod tests {
     use crate::v2::schema::{Schema, StringSchema};
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     fn ctx() -> Context<'static, Spec> {
@@ -756,7 +756,7 @@ mod tests {
         let mut c = ctx();
         bad.validate_with_context(&mut c, "p".into());
         assert!(
-            c.errors.iter().any(|e| e.contains("must not be empty")),
+            c.errors.mentions("must not be empty"),
             "errors: {:?}",
             c.errors
         );
@@ -830,11 +830,7 @@ mod tests {
         })));
         let mut c = ctx();
         p.validate_with_context(&mut c, "p".into());
-        assert!(
-            c.errors.iter().any(|e| e.contains("pattern")),
-            "errors: {:?}",
-            c.errors
-        );
+        assert!(c.errors.mentions("pattern"), "errors: {:?}", c.errors);
 
         // Each non-string variant — exercise allow-empty-value on each.
         for variant in [
@@ -903,7 +899,7 @@ mod tests {
             let mut c = ctx();
             p.validate_with_context(&mut c, "p".into());
             assert!(
-                c.errors.iter().any(|e| e.contains("must not be empty")),
+                c.errors.mentions("must not be empty"),
                 "errors: {:?}",
                 c.errors
             );
@@ -959,7 +955,7 @@ mod tests {
         let mut c = ctx();
         p.validate_with_context(&mut c, "p".into());
         assert!(
-            c.errors.iter().any(|e| e.contains("must be required")),
+            c.errors.mentions("must be required"),
             "errors: {:?}",
             c.errors
         );
@@ -995,7 +991,7 @@ mod tests {
             let mut c = ctx();
             p.validate_with_context(&mut c, "p".into());
             assert!(
-                c.errors.iter().any(|e| e.contains("must be required")),
+                c.errors.mentions("must be required"),
                 "errors: {:?}",
                 c.errors
             );
@@ -1035,7 +1031,7 @@ mod tests {
             let mut c = ctx();
             p.validate_with_context(&mut c, "p".into());
             assert!(
-                c.errors.iter().any(|e| e.contains("must not be empty")),
+                c.errors.mentions("must not be empty"),
                 "errors: {:?}",
                 c.errors
             );
@@ -1159,7 +1155,7 @@ mod tests {
         let mut c = ctx();
         p.validate_with_context(&mut c, "p".into());
         assert!(
-            c.errors.iter().any(|e| e.contains("p.items.pattern")),
+            c.errors.mentions("p.items.pattern"),
             "errors: {:?}",
             c.errors
         );

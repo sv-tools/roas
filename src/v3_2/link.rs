@@ -537,6 +537,7 @@ mod tests {
     use crate::v3_2::path_item::{PathItem, Paths};
     use crate::v3_2::response::{Response, Responses};
     use crate::validation::Context;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     fn spec_with_pets_get() -> Spec {
@@ -592,7 +593,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("mutually exclusive")),
+            ctx.errors.mentions("mutually exclusive"),
             "errors: {:?}",
             ctx.errors
         );
@@ -674,7 +675,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("method `post`")),
+            ctx.errors.mentions("method `post`"),
             "errors: {:?}",
             ctx.errors
         );
@@ -904,7 +905,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("cyclic `$ref` chain")),
+            ctx.errors.mentions("cyclic `$ref` chain"),
             "expected cycle error: {:?}",
             ctx.errors
         );
@@ -1331,7 +1332,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("server.url")),
+            ctx.errors.mentions("server.url"),
             "expected server.url error: {:?}",
             ctx.errors
         );

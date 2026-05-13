@@ -629,6 +629,7 @@ impl ValidateWithContext<Spec> for TagGroup {
 mod tests {
     use super::*;
     use crate::validation::IGNORE_UNUSED;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn validate_with_loader_resolves_external_schema_ref() {
@@ -1121,7 +1122,7 @@ mod tests {
         };
         let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
-            err.errors.iter().any(|e| e.contains("must start with `/`")),
+            err.errors.mentions("must start with `/`"),
             "errors: {:?}",
             err.errors
         );
@@ -1255,7 +1256,7 @@ mod tests {
         };
         let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
-            err.errors.iter().any(|e| e.contains("duplicate parameter")),
+            err.errors.mentions("duplicate parameter"),
             "errors: {:?}",
             err.errors
         );

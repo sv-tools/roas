@@ -403,6 +403,7 @@ mod tests {
     use crate::v2::spec::Spec;
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     fn body_param(name: &str) -> RefOr<Parameter> {
         RefOr::new_item(Parameter::Body(Box::new(InBody {
@@ -824,7 +825,7 @@ mod tests {
         validate_security_definitions(&mut ctx);
         // Empty scopes + missing authorizationUrl produce errors from per-scheme validate.
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            ctx.errors.mentions("must not be empty"),
             "errors: {:?}",
             ctx.errors
         );

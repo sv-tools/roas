@@ -470,6 +470,7 @@ mod tests {
     };
     use crate::v3_1::spec::Spec;
     use crate::validation::Context;
+    use crate::validation::ValidationErrorsExt;
 
     fn path_param(name: &str) -> RefOr<Parameter> {
         RefOr::new_item(Parameter::Path(InPath {
@@ -759,7 +760,7 @@ mod tests {
         req.insert("missing".to_owned(), vec![]);
         validate_security_requirements(&mut ctx, "#.security", &[req]);
         assert!(
-            ctx.errors.iter().any(|e| e.contains("not declared")),
+            ctx.errors.mentions("not declared"),
             "errors: {:?}",
             ctx.errors
         );

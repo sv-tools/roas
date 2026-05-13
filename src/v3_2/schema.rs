@@ -1476,6 +1476,7 @@ mod extensions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn test_single_deserialize() {
@@ -2204,7 +2205,7 @@ mod tests {
             let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
             s.validate_with_context(&mut ctx, "s".into());
             assert!(
-                ctx.errors.iter().any(|e| e.contains("externalDocs.url")),
+                ctx.errors.mentions("externalDocs.url"),
                 "expected externalDocs walk: {:?}",
                 ctx.errors
             );
@@ -2264,7 +2265,7 @@ mod tests {
             let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
             schema.validate_with_context(&mut ctx, "s".into());
             assert!(
-                ctx.errors.iter().any(|e| e.contains(needle)),
+                ctx.errors.mentions(needle),
                 "case `{label}`: expected `{needle}` error: {:?}",
                 ctx.errors
             );

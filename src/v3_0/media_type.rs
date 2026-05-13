@@ -211,6 +211,7 @@ mod tests {
     use crate::v3_0::schema::{ObjectSchema, Schema, SingleSchema};
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     #[test]
@@ -251,7 +252,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "mt".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("mutually exclusive")),
+            ctx.errors.mentions("mutually exclusive"),
             "errors: {:?}",
             ctx.errors
         );
@@ -305,7 +306,7 @@ mod tests {
         mt.validate_with_context(&mut ctx, "mt".into());
         // Should pick up nested example XOR + header example XOR.
         assert!(
-            ctx.errors.iter().any(|e| e.contains("examples[ex1]")),
+            ctx.errors.mentions("examples[ex1]"),
             "expected nested example error: {:?}",
             ctx.errors
         );

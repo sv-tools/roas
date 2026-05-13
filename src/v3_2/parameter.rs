@@ -611,6 +611,7 @@ mod tests {
     use super::*;
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn validate_path_param_must_be_required() {
@@ -635,8 +636,10 @@ mod tests {
         });
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("p.required")
-                && e.contains("must be `true` for `in: path` parameters")),
+            ctx.errors.mentions("p.required")
+                && ctx
+                    .errors
+                    .mentions("must be `true` for `in: path` parameters"),
             "errors: {:?}",
             ctx.errors
         );
@@ -730,12 +733,12 @@ mod tests {
         });
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("p.schema")),
+            ctx.errors.mentions("p.schema"),
             "expected p.schema error: {:?}",
             ctx.errors
         );
         assert!(
-            ctx.errors.iter().any(|e| e.contains("p.examples[ex]")),
+            ctx.errors.mentions("p.examples[ex]"),
             "expected p.examples[ex] error: {:?}",
             ctx.errors
         );

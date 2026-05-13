@@ -360,6 +360,7 @@ mod tests {
     use crate::v2::items::{Items, StringItem};
     use crate::v2::parameter::{ArrayParameter, InPath};
     use crate::v2::response::{Response, Responses};
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn test_path_item_deserialize() {
@@ -853,7 +854,7 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         item.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            ctx.errors.mentions("must not be empty"),
             "errors: {:?}",
             ctx.errors
         );
@@ -921,7 +922,7 @@ mod tests {
             ctx.errors
         );
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be required")),
+            ctx.errors.mentions("must be required"),
             "errors: {:?}",
             ctx.errors
         );

@@ -217,6 +217,7 @@ mod tests {
     use crate::v2::header::{IntegerHeader, StringHeader};
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
     use std::collections::BTreeMap;
 
     #[test]
@@ -759,7 +760,7 @@ mod tests {
         Response::default().validate_with_context(&mut ctx, "response".to_owned());
         assert!(
             ctx.errors
-                .contains(&"response.description: must not be empty".to_string()),
+                .has_exact("response.description: must not be empty"),
             "expected error: {:?}",
             ctx.errors
         );

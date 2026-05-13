@@ -229,6 +229,7 @@ mod tests {
         OAuth2SecurityScheme, PasswordOAuth2Flow,
     };
     use crate::validation::Context;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     fn map_with<T>(name: &str, t: T) -> BTreeMap<String, RefOr<T>> {
@@ -491,7 +492,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::IgnoreUnusedSchemas.only());
         comp.validate_with_context(&mut ctx, "#.components".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must match pattern")),
+            ctx.errors.mentions("must match pattern"),
             "expected pattern error: {:?}",
             ctx.errors
         );

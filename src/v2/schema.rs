@@ -917,6 +917,7 @@ impl ValidateWithContext<Spec> for NullSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn test_single_deserialize() {
@@ -1106,11 +1107,7 @@ mod tests {
         }));
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         s.validate_with_context(&mut ctx, "p".into());
-        assert!(
-            ctx.errors.iter().any(|e| e.contains("pattern")),
-            "errors: {:?}",
-            ctx.errors
-        );
+        assert!(ctx.errors.mentions("pattern"), "errors: {:?}", ctx.errors);
 
         // External docs validation paths
         let ed = crate::v2::external_documentation::ExternalDocumentation {
@@ -1124,7 +1121,7 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         s.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            ctx.errors.mentions("must be a valid URL"),
             "errors: {:?}",
             ctx.errors
         );
@@ -1152,7 +1149,7 @@ mod tests {
             let mut ctx = Context::new(&spec, crate::validation::Options::new());
             s.validate_with_context(&mut ctx, "p".into());
             assert!(
-                ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+                ctx.errors.mentions("must be a valid URL"),
                 "errors: {:?}",
                 ctx.errors
             );
@@ -1235,7 +1232,7 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         s.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            ctx.errors.mentions("must be a valid URL"),
             "errors: {:?}",
             ctx.errors
         );

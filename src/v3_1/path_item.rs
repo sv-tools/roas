@@ -477,6 +477,7 @@ impl<'de> Deserialize<'de> for Paths {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     #[test]
@@ -550,7 +551,7 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         pi.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("external reference")),
+            ctx.errors.mentions("external reference"),
             "errors: {:?}",
             ctx.errors
         );

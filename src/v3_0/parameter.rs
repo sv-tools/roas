@@ -505,6 +505,7 @@ mod tests {
     use crate::v3_0::schema::{ObjectSchema, Schema, SingleSchema};
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     fn ok_schema() -> RefOr<Schema> {
@@ -554,7 +555,7 @@ mod tests {
         });
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be required")),
+            ctx.errors.mentions("must be required"),
             "errors: {:?}",
             ctx.errors
         );

@@ -230,6 +230,7 @@ mod tests {
     use crate::v3_1::response::{Response, Responses};
     use crate::v3_1::tag::Tag;
     use crate::validation::Context;
+    use crate::validation::ValidationErrorsExt;
 
     fn ok_responses() -> Responses {
         Responses {
@@ -300,12 +301,12 @@ mod tests {
             ctx.errors
         );
         assert!(
-            ctx.errors.iter().any(|e| e.contains("op.servers[0].url")),
+            ctx.errors.mentions("op.servers[0].url"),
             "server.url: {:?}",
             ctx.errors
         );
         assert!(
-            ctx.errors.iter().any(|e| e.contains("op.externalDocs.url")),
+            ctx.errors.mentions("op.externalDocs.url"),
             "externalDocs.url: {:?}",
             ctx.errors
         );

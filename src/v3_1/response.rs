@@ -273,6 +273,7 @@ mod tests {
     use super::*;
     use crate::v3_1::parameter::InHeaderStyle;
     use crate::v3_1::schema::{ObjectSchema, Schema, SingleSchema};
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn test_response_deserialize() {
@@ -730,7 +731,7 @@ mod tests {
         Response::default().validate_with_context(&mut ctx, "response".to_owned());
         assert!(
             ctx.errors
-                .contains(&"response.description: must not be empty".to_string()),
+                .has_exact("response.description: must not be empty"),
             "expected error: {:?}",
             ctx.errors
         );
