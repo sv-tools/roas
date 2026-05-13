@@ -21,11 +21,16 @@ use crate::loader::Loader;
 ///
 /// Constructed internally by the recursive validators; emitted to
 /// callers as the elements of [`Error::errors`] after
-/// [`Validate::validate`] returns. The [`Display`] impl renders as
-/// `"<path>: <message>"`. As a defensive fallback, messages that
-/// still begin with `.` (rare — the internal pusher splits leading
-/// path extensions into `path` at push time) are concatenated
-/// directly onto the path so the rendered form remains correct.
+/// [`Validate::validate`] returns.
+///
+/// The [`Display`] impl normally renders as `"<path>: <message>"`.
+/// As a defensive fallback, if `message` starts with `.` (rare —
+/// the internal pusher splits leading-dot path extensions into
+/// `path` at push time, so this only happens for directly-constructed
+/// values that bypass the pusher), the rendering instead concatenates
+/// the message directly onto the path with no separator, producing
+/// `"<path><message>"` (e.g. `path = "#.x"`, `message = ".foo"` →
+/// `"#.x.foo"`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ValidationError {
     pub path: String,
@@ -38,10 +43,13 @@ impl ValidationError {
     }
 
     /// Returns `true` if `needle` appears anywhere in the rendered
-    /// `Display` form (`"<path>: <message>"`), including across the
-    /// path/message boundary. Convenience for tests that previously
-    /// did `errors.contains(...)` against the old `Vec<String>` shape
-    /// and want to keep working without splitting search terms.
+    /// `Display` form, including across the path/message boundary.
+    /// The rendered form is normally `"<path>: <message>"`, or
+    /// `"<path><message>"` if `message` starts with `.` (see the
+    /// type-level docs for that fallback). Convenience for tests
+    /// that previously did `errors.contains(...)` against the old
+    /// `Vec<String>` shape and want to keep working without splitting
+    /// search terms.
     pub fn contains(&self, needle: &str) -> bool {
         // Fast path: the needle lives entirely inside one field.
         if self.path.contains(needle) || self.message.contains(needle) {
