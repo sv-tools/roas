@@ -13,6 +13,7 @@ Integration tests are in `tests/*_test.rs`. JSON fixtures are grouped by version
 
 ## Build, Test, and Development Commands
 
+- `cargo install-tools`: installs the CI toolchain from `.cargo/config.toml` (`cargo-nextest`, `cargo-llvm-cov`, `cargo-deny`, `wasm-tools`, and related tools).
 - `cargo build` builds the crate with the default `v3_2` feature.
 - `cargo nextest run --all-features` checks all OpenAPI version modules together.
 - `cargo fmt` applies standard Rust formatting.
