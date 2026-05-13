@@ -150,7 +150,34 @@ impl Options {
     }
 }
 
-/// Validates the OpenAPI specification.
+/// Validates an OpenAPI specification.
+///
+/// # Parameters
+///
+/// - `options`: per-call validation toggles (see [`Options`] and the
+///   [`IGNORE_UNUSED`] / [`IGNORE_EMPTY_REQUIRED_FIELDS`] presets).
+/// - `loader`: optional external-reference loader. Controls how
+///   non-`#/` `$ref`s are handled:
+///   - `None` — external refs surface as a "not supported"
+///     validation error unless [`Options::IgnoreExternalReferences`]
+///     is set, in which case they're skipped silently.
+///   - `Some(&mut Loader)` — each external `$ref` is fetched via the
+///     loader (with whichever fetchers the caller registered, e.g.
+///     [`JsonFileFetcher`](crate::loader::JsonFileFetcher) for the
+///     `file://` scheme), deserialized into the appropriate component
+///     type, and walked recursively as if it were inline. Fetch /
+///     parse / pointer failures become validation errors with the
+///     underlying `LoaderError` as the source. The loader caches
+///     resources by URI, so the same external document is fetched
+///     once per validation pass even when many `$ref`s target it.
+///   - [`Options::IgnoreExternalReferences`] short-circuits before
+///     the loader is consulted, so attaching a loader to a spec with
+///     broken externals never surfaces those breaks when the option
+///     is set.
+///
+/// Returns `Ok(())` if no errors were collected, or `Err(Error)`
+/// with the accumulated messages otherwise. The pass batches errors
+/// rather than failing fast.
 pub trait Validate {
     fn validate(&self, options: EnumSet<Options>, loader: Option<&mut Loader>)
     -> Result<(), Error>;
