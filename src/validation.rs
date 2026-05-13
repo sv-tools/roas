@@ -133,6 +133,15 @@ pub trait ValidationErrorsExt {
     /// `message` (via [`ValidationError::contains`]).
     fn mentions(&self, needle: &str) -> bool;
 
+    /// Returns `true` if a *single* error mentions every needle in
+    /// `needles`. Use this when several substrings must coexist in
+    /// the same diagnostic — chaining two [`mentions`] calls with
+    /// `&&` does not, because the two matches could come from
+    /// different entries in the list.
+    ///
+    /// [`mentions`]: ValidationErrorsExt::mentions
+    fn mentions_all(&self, needles: &[&str]) -> bool;
+
     /// Returns `true` if any error renders to exactly `expected`
     /// (matching the `Display` form, e.g.
     /// `"#.info.title: must not be empty"`).
@@ -144,6 +153,10 @@ impl ValidationErrorsExt for [ValidationError] {
         self.iter().any(|e| e.contains(needle))
     }
 
+    fn mentions_all(&self, needles: &[&str]) -> bool {
+        self.iter().any(|e| needles.iter().all(|n| e.contains(n)))
+    }
+
     fn has_exact(&self, expected: &str) -> bool {
         self.iter().any(|e| *e == expected)
     }
@@ -152,6 +165,10 @@ impl ValidationErrorsExt for [ValidationError] {
 impl ValidationErrorsExt for Error {
     fn mentions(&self, needle: &str) -> bool {
         self.errors.mentions(needle)
+    }
+
+    fn mentions_all(&self, needles: &[&str]) -> bool {
+        self.errors.mentions_all(needles)
     }
 
     fn has_exact(&self, expected: &str) -> bool {
@@ -396,38 +413,42 @@ pub(crate) trait PushError<T> {
 
 impl<T> PushError<&str> for Context<'_, T> {
     fn error(&mut self, path: String, msg: &str) {
-        let (path, message) = split_leading_dot(path, msg);
-        self.errors.push(ValidationError::new(path, message));
+        // `&str` is the only overload that has to materialise an
+        // owned `String` for the message; the other two already own
+        // theirs and call into `push_owned` directly.
+        self.errors
+            .push(make_validation_error(path, msg.to_owned()));
     }
 }
 
 impl<T> PushError<String> for Context<'_, T> {
     fn error(&mut self, path: String, msg: String) {
-        // The `&str` overload is doing the path-extension split, so go
-        // through it to keep the normalization in one place.
-        <Self as PushError<&str>>::error(self, path, msg.as_str());
+        self.errors.push(make_validation_error(path, msg));
     }
 }
 
 impl<T> PushError<fmt::Arguments<'_>> for Context<'_, T> {
     fn error(&mut self, path: String, args: fmt::Arguments<'_>) {
-        <Self as PushError<&str>>::error(self, path, args.to_string().as_str());
+        // `Arguments::to_string` materialises the formatted message
+        // once; we then move it into `ValidationError` (via the
+        // splitter) without copying again.
+        self.errors
+            .push(make_validation_error(path, args.to_string()));
     }
 }
 
-/// Normalises the recursive validators' leading-dot convention into
-/// the structured `ValidationError` shape.
+/// Build a `ValidationError`, normalising the recursive validators'
+/// leading-dot convention into the structured shape.
 ///
 /// Many call sites push a message of the form `".<segment>: <text>"`,
 /// where the `.<segment>` is intended as a *path extension* relative
 /// to the parent's path and `<text>` is the actual diagnostic. With
 /// the pre-refactor `Vec<String>` shape that was rendered correctly
 /// by concatenation; with the structured shape it would leak the
-/// path-extension marker into `message`, breaking
-/// programmatic callers that filter by `.path` or render `.message`
-/// alone.
+/// path-extension marker into `message`, breaking programmatic
+/// callers that filter by `.path` or render `.message` alone.
 ///
-/// This splitter recognises that convention:
+/// This builder recognises that convention:
 ///
 /// * If `msg` starts with `.` AND contains `": "`, the segment up to
 ///   `": "` is appended to `path` and the text after `": "` becomes
@@ -438,18 +459,34 @@ impl<T> PushError<fmt::Arguments<'_>> for Context<'_, T> {
 ///
 /// Either way the [`ValidationError::Display`] output is identical to
 /// the pre-refactor rendering.
-fn split_leading_dot(mut path: String, msg: &str) -> (String, String) {
-    if let Some(rest) = msg.strip_prefix('.')
-        && let Some(sep_at) = rest.find(": ")
+///
+/// Both arguments are taken by value: the `path` and the `message`
+/// each move into the final `ValidationError` without any extra
+/// allocation in the normal path. The leading-dot fast path does
+/// allocate a small `String` for the trimmed tail, since the message
+/// has to drop a prefix and we can't shrink an owned `String` in
+/// place without an unsafe split — that's the rare branch and not on
+/// any hot path.
+fn make_validation_error(mut path: String, msg: String) -> ValidationError {
+    if msg.starts_with('.')
+        && let Some(sep_at) = msg[1..].find(": ")
     {
-        let (segment, after) = rest.split_at(sep_at);
-        // `after` still has the leading `": "`; skip it.
-        let message = &after[2..];
-        path.push('.');
-        path.push_str(segment);
-        return (path, message.to_owned());
+        // `sep_at` is measured from index 1 (after the leading `.`).
+        // Segment runs `1..1+sep_at`; separator is at `1+sep_at..1+sep_at+2`;
+        // tail starts at `1+sep_at+2`.
+        let segment_end = 1 + sep_at;
+        let tail_start = segment_end + 2;
+        // Append `.<segment>` to `path`. `&msg[..segment_end]` is
+        // `".<segment>"`, which already starts with the dot we need.
+        path.push_str(&msg[..segment_end]);
+        // Move the tail into a fresh String. (We can't shrink `msg`
+        // from the front cheaply; the cost is one allocation in this
+        // rare path.)
+        let message = msg[tail_start..].to_owned();
+        return ValidationError::new(path, message);
     }
-    (path, msg.to_owned())
+    // Common path: no leading dot, no split — move both arguments in.
+    ValidationError::new(path, msg)
 }
 
 impl<T> Context<'_, T> {

@@ -613,8 +613,8 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         r.validate_with_context(&mut ctx, "#.x".into());
         assert!(
-            ctx.errors.mentions("not supported")
-                && ctx.errors.mentions("https://example.test/foo.json"),
+            ctx.errors
+                .mentions_all(&["not supported", "https://example.test/foo.json"]),
             "expected `not supported` error, got: {:?}",
             ctx.errors,
         );

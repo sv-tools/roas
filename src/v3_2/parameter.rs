@@ -636,10 +636,8 @@ mod tests {
         });
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.mentions("p.required")
-                && ctx
-                    .errors
-                    .mentions("must be `true` for `in: path` parameters"),
+            ctx.errors
+                .mentions_all(&["p.required", "must be `true` for `in: path` parameters",]),
             "errors: {:?}",
             ctx.errors
         );
