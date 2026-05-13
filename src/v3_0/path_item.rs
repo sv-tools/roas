@@ -1,8 +1,8 @@
 //! Path Items
 
+use crate::common::reference::RefOr;
 use crate::v3_0::operation::Operation;
 use crate::v3_0::parameter::Parameter;
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::server::Server;
 use crate::v3_0::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
@@ -77,7 +77,7 @@ pub struct PathItem {
     /// These parameters can be overridden at the operation level, but cannot be removed there.
     /// The list MUST NOT include duplicated parameters.
     /// A unique parameter is defined by a combination of a name and location.
-    /// The list can use the [Reference Object](crate::v3_0::reference::Ref) to link to parameters
+    /// The list can use the [Reference Object](crate::common::reference::Ref) to link to parameters
     /// that are defined at the [Swagger Object's](crate::v3_0::spec::Spec::parameters) parameters.
     pub parameters: Option<Vec<RefOr<Parameter>>>,
 

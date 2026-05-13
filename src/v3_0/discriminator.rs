@@ -1,7 +1,7 @@
 //! Discriminator Object
 
 use crate::common::helpers::validate_required_string;
-use crate::v3_0::reference::RefOr;
+use crate::common::reference::RefOr;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::spec::Spec;
 use crate::validation::{Context, ValidateWithContext};

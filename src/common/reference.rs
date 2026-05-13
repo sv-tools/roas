@@ -1,11 +1,21 @@
-//! Reference Object
+//! Reference Object — shared across v2, v3.0, v3.1, and v3.2.
+//!
+//! The OpenAPI Reference Object differs only by which sibling fields are
+//! permitted: v2 and v3.0 spell it as `{ "$ref": "..." }`, while v3.1+
+//! adds optional `summary` and `description` overrides. This module
+//! carries the union: `summary` and `description` are `Option`-typed and
+//! always declared on the struct. Per-version validators may still flag
+//! their presence if a build wants v2 / v3.0 strictness at the
+//! validation layer.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
-use crate::validation::Options;
-use crate::validation::{Context, PushError, ValidateWithContext};
+use crate::loader::{Loader, LoaderError};
+use crate::validation::{Context, Options, PushError, ValidateWithContext};
 
 /// ResolveReference is a trait for resolving references.
 pub trait ResolveReference<D> {
@@ -19,12 +29,33 @@ pub enum ResolveError {
     #[error("reference `{0}` not found")]
     NotFound(String),
 
-    /// External is returned when the resolving of an external reference failed.
+    /// ExternalUnsupported is returned by the loader-less `get_item` path
+    /// when the reference targets a resource outside the current document.
+    /// Callers that want the loader to fetch and parse the resource should
+    /// use `get_item_with_loader`.
     #[error("resolving of an external reference `{0}` is not supported")]
     ExternalUnsupported(String),
+
+    /// External is returned by `get_item_with_loader` when the loader was
+    /// invoked but failed — no fetcher registered, fetch error, parse
+    /// error, or missing JSON Pointer target. The underlying `LoaderError`
+    /// is exposed as the error source.
+    #[error("failed to resolve external reference `{reference}`")]
+    External {
+        reference: String,
+        #[source]
+        source: LoaderError,
+    },
 }
 
 /// RefOr is a simple object to allow storing a reference to another component or a component itself.
+///
+/// Deserialization routes by **presence of `$ref` in the input** rather than
+/// by serde's untagged fallthrough. Inputs containing `$ref` MUST validate as
+/// a `Ref` (which rejects unknown siblings via `deny_unknown_fields`); they
+/// will not be silently re-interpreted as an inline `T` if the `Ref` form
+/// fails. This prevents `{"$ref": "...", "typo": "..."}` from being parsed
+/// as an inline `T` with the `$ref` dropped.
 ///
 /// Example:
 ///
@@ -42,7 +73,7 @@ pub enum ResolveError {
 ///     pub foo: Option<RefOr<Foo>>,
 /// }
 /// ```
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum RefOr<T> {
     /// A reference to another component.
@@ -50,6 +81,32 @@ pub enum RefOr<T> {
 
     /// The component itself.
     Item(T),
+}
+
+impl<'de, T> Deserialize<'de> for RefOr<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Materialise the input as JSON Value so we can peek for `$ref`
+        // and then route to the appropriate variant. The single
+        // allocation is acceptable for the deserialization path (and
+        // matches what other OAS parsers do internally).
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let has_ref = matches!(&value, serde_json::Value::Object(m) if m.contains_key("$ref"));
+        if has_ref {
+            Ref::deserialize(value)
+                .map(RefOr::Ref)
+                .map_err(serde::de::Error::custom)
+        } else {
+            T::deserialize(value)
+                .map(RefOr::Item)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 /// Ref is a simple object to allow referencing other components in the OpenAPI document,
@@ -64,6 +121,7 @@ pub enum RefOr<T> {
 /// $ref: '#/components/schemas/Pet'
 /// ```
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Ref {
     /// **Required** The reference identifier.
     /// This MUST be in the form of a URI.
@@ -72,41 +130,100 @@ pub struct Ref {
 
     /// A short summary which by default SHOULD override that of the referenced component.
     /// If the referenced object-type does not allow a summary field, then this field has no effect.
+    /// Added in OpenAPI 3.1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 
     /// A description which by default SHOULD override that of the referenced component.
     /// CommonMark syntax MAY be used for rich text representation.
     /// If the referenced object-type does not allow a description field, then this field has no effect.
+    /// Added in OpenAPI 3.1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
 impl<D> RefOr<D> {
-    pub fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
+    /// Validate this `RefOr<D>` in the surrounding context.
+    ///
+    /// Crate-internal: callers drive validation through
+    /// [`Validate::validate`](crate::validation::Validate::validate)
+    /// rather than invoking this method directly.
+    ///
+    /// The extra `D: 'static + Clone + DeserializeOwned` bounds are
+    /// required even when validating an inline `Item` or an internal
+    /// `#/...` ref with no loader attached, because the same body must
+    /// be statically callable for the loader-driven external path that
+    /// invokes `Loader::resolve_reference_as::<D>` under the hood. In
+    /// practice every concrete component type in this crate (`Schema`,
+    /// `Parameter`, `Header`, `Response`, etc.) satisfies these bounds
+    /// already; the constraint only bites downstream code that
+    /// parameterises `RefOr<D>` over a custom `D` lacking `Clone` or
+    /// `DeserializeOwned`.
+    ///
+    /// Nested `$ref: "#/..."` inside an externally-loaded document
+    /// resolves correctly against that document's own structure, not
+    /// the root spec: the loader rewrites every `$ref` against the
+    /// document's base URL at load time (see
+    /// [`Loader::resolve_reference`](crate::loader::Loader::resolve_reference)),
+    /// so the validator sees fully-qualified URLs and routes them
+    /// through the loader uniformly.
+    pub(crate) fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
-        D: ValidateWithContext<T>,
+        D: ValidateWithContext<T> + 'static + Clone + DeserializeOwned,
     {
         match self {
             RefOr::Ref(r) => {
-                r.validate_with_context(ctx, path.clone());
-                if ctx.visit(r.reference.clone()) {
-                    match self.get_item(ctx.spec) {
-                        Ok(d) => {
-                            d.validate_with_context(ctx, r.reference.clone());
-                        }
-                        Err(e) => match e {
-                            ResolveError::NotFound(r) => {
-                                ctx.error(path, format_args!(".$ref: `{r}` not found"));
-                            }
-                            ResolveError::ExternalUnsupported(_) => {
-                                if !ctx.is_option(Options::IgnoreExternalReferences) {
-                                    ctx.error(path, format_args!(".$ref: {e}"));
-                                }
-                            }
-                        },
+                r.validate_with_context::<T, D>(ctx, path.clone());
+                if !ctx.visit(r.reference.clone()) {
+                    return;
+                }
+                if r.reference.starts_with("#/") {
+                    match ctx.spec.resolve_reference(&r.reference) {
+                        Some(d) => d.validate_with_context(ctx, r.reference.clone()),
+                        None => ctx.error(path, format_args!(".$ref: `{}` not found", r.reference)),
                     }
+                    return;
+                }
+                // External reference. `IgnoreExternalReferences` means
+                // "don't recurse into external documents during
+                // validation" — both before and after the loader
+                // integration. Short-circuit here so the option's
+                // behaviour stays the same regardless of whether a
+                // loader is attached: with the option set, we never
+                // ask the loader to fetch and we never validate the
+                // resolved value, even when it would have succeeded.
+                if ctx.is_option(Options::IgnoreExternalReferences) {
+                    return;
+                }
+                // Route through the loader if one is attached to the
+                // context. `as_deref_mut` keeps the mutable borrow on
+                // `ctx.loader` scoped to this expression so the
+                // resolved owned `D` (or `LoaderError`) outlives the
+                // borrow and lets us re-use `ctx` to validate it.
+                let resolved = ctx
+                    .loader
+                    .as_deref_mut()
+                    .map(|l| l.resolve_reference_as::<D>(&r.reference));
+                // `IgnoreExternalReferences` was already handled
+                // above; if we got here it isn't set, so any failure
+                // surfaces unconditionally.
+                match resolved {
+                    Some(Ok(d)) => d.validate_with_context(ctx, r.reference.clone()),
+                    Some(Err(source)) => ctx.error(
+                        path,
+                        format_args!(
+                            ".$ref: failed to resolve external reference `{}`: {source}",
+                            r.reference,
+                        ),
+                    ),
+                    None => ctx.error(
+                        path,
+                        format_args!(
+                            ".$ref: resolving of an external reference `{}` is not supported",
+                            r.reference,
+                        ),
+                    ),
                 }
             }
             RefOr::Item(d) => {
@@ -116,7 +233,7 @@ impl<D> RefOr<D> {
     }
 
     /// Create a new RefOr with a reference.
-    pub fn new_ref(reference: String) -> Self {
+    pub fn new_ref(reference: impl Into<String>) -> Self {
         RefOr::Ref(Ref::new(reference))
     }
 
@@ -139,8 +256,44 @@ impl<D> RefOr<D> {
                         None => Err(ResolveError::NotFound(r.reference.clone())),
                     }
                 } else {
-                    // TODO: resolve external reference
                     Err(ResolveError::ExternalUnsupported(r.reference.clone()))
+                }
+            }
+        }
+    }
+
+    /// Resolve the reference using the spec for internal `#/` pointers and
+    /// the provided `Loader` for external ones.
+    ///
+    /// Internal refs are returned as `Cow::Borrowed` from the spec. External
+    /// refs are deserialized through `Loader::resolve_reference_as` and
+    /// returned as `Cow::Owned`. Loader failures (no fetcher registered,
+    /// fetch / parse error, missing JSON Pointer target) surface as
+    /// `ResolveError::External` with the underlying `LoaderError` as source.
+    pub fn get_item_with_loader<'a, T>(
+        &'a self,
+        spec: &'a T,
+        loader: &mut Loader,
+    ) -> Result<Cow<'a, D>, ResolveError>
+    where
+        T: ResolveReference<D>,
+        D: 'static + Clone + DeserializeOwned,
+    {
+        match self {
+            RefOr::Item(d) => Ok(Cow::Borrowed(d)),
+            RefOr::Ref(r) => {
+                if r.reference.starts_with("#/") {
+                    spec.resolve_reference(&r.reference)
+                        .map(Cow::Borrowed)
+                        .ok_or_else(|| ResolveError::NotFound(r.reference.clone()))
+                } else {
+                    loader
+                        .resolve_reference_as::<D>(&r.reference)
+                        .map(Cow::Owned)
+                        .map_err(|source| ResolveError::External {
+                            reference: r.reference.clone(),
+                            source,
+                        })
                 }
             }
         }
@@ -148,7 +301,7 @@ impl<D> RefOr<D> {
 }
 
 impl Ref {
-    pub fn validate_with_context<T, D>(&self, ctx: &mut Context<T>, path: String)
+    pub(crate) fn validate_with_context<T, D>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
         D: ValidateWithContext<T>,
@@ -158,9 +311,9 @@ impl Ref {
         }
     }
 
-    pub fn new(reference: String) -> Self {
+    pub fn new(reference: impl Into<String>) -> Self {
         Ref {
-            reference,
+            reference: reference.into(),
             ..Default::default()
         }
     }
@@ -219,10 +372,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loader::{JsonFileFetcher, ResourceFetcher};
+    use serde_json::Value;
+    use std::fs;
+    use url::Url;
 
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
     struct Foo {
         pub foo: String,
+    }
+
+    struct PetSpec;
+
+    impl ResolveReference<Foo> for PetSpec {
+        fn resolve_reference(&self, _reference: &str) -> Option<&Foo> {
+            None
+        }
     }
 
     #[test]
@@ -273,6 +438,273 @@ mod tests {
                 ..Default::default()
             }),
             "deserialize ref",
+        );
+    }
+
+    #[test]
+    fn ref_with_unknown_sibling_is_rejected() {
+        let r = serde_json::from_value::<RefOr<Foo>>(serde_json::json!({
+            "$ref": "#/components/schemas/Foo",
+            "typo": "unexpected sibling",
+        }));
+        assert!(
+            r.is_err(),
+            "$ref form must fail strictly when unknown siblings are present"
+        );
+    }
+
+    #[test]
+    fn ref_with_summary_and_description_is_accepted() {
+        let r: RefOr<Foo> = serde_json::from_value(serde_json::json!({
+            "$ref": "#/components/schemas/Foo",
+            "summary": "s",
+            "description": "d",
+        }))
+        .unwrap();
+        match r {
+            RefOr::Ref(rr) => {
+                assert_eq!(rr.reference, "#/components/schemas/Foo");
+                assert_eq!(rr.summary.as_deref(), Some("s"));
+                assert_eq!(rr.description.as_deref(), Some("d"));
+            }
+            RefOr::Item(_) => panic!("expected Ref variant"),
+        }
+    }
+
+    #[test]
+    fn get_item_with_loader_external_resolves_via_loader() {
+        let dir = std::env::temp_dir().join(format!(
+            "roas-refor-loader-{}-{}",
+            std::process::id(),
+            "external"
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pets.json");
+        fs::write(
+            &file,
+            br#"{"components":{"schemas":{"Pet":{"foo":"bar"}}}}"#,
+        )
+        .unwrap();
+
+        let mut loader = Loader::new();
+        loader.register_fetcher("file://", JsonFileFetcher);
+
+        // Construct the `file://` URL via `Url::from_file_path` so the
+        // reference is well-formed on any platform (Windows backslashes,
+        // spaces, non-ASCII) instead of relying on `Path::display`.
+        let mut url = Url::from_file_path(&file).unwrap();
+        url.set_fragment(Some("/components/schemas/Pet"));
+        let r = RefOr::<Foo>::new_ref(url.to_string());
+        let spec = PetSpec;
+        let resolved = r.get_item_with_loader(&spec, &mut loader).unwrap();
+        match resolved {
+            Cow::Owned(foo) => assert_eq!(foo.foo, "bar"),
+            Cow::Borrowed(_) => panic!("expected owned value from loader"),
+        }
+
+        fs::remove_file(file).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[derive(Clone, Default)]
+    struct FailingFetcher;
+
+    impl ResourceFetcher for FailingFetcher {
+        fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
+            Err(LoaderError::Parse {
+                uri: uri.as_str().to_string(),
+                source: serde_json::from_str::<Value>("not json").unwrap_err(),
+            })
+        }
+    }
+
+    #[test]
+    fn get_item_with_loader_propagates_loader_error() {
+        let mut loader = Loader::new();
+        loader.register_fetcher("https://", FailingFetcher);
+        let r = RefOr::<Foo>::new_ref("https://example.test/pets.json#/Foo");
+        let spec = PetSpec;
+        let err = r.get_item_with_loader(&spec, &mut loader).unwrap_err();
+        match err {
+            ResolveError::External { reference, source } => {
+                assert_eq!(reference, "https://example.test/pets.json#/Foo");
+                assert!(matches!(source, LoaderError::Parse { .. }));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_item_with_loader_internal_uses_spec() {
+        struct InlineSpec(Foo);
+        impl ResolveReference<Foo> for InlineSpec {
+            fn resolve_reference(&self, reference: &str) -> Option<&Foo> {
+                if reference == "#/components/schemas/Foo" {
+                    Some(&self.0)
+                } else {
+                    None
+                }
+            }
+        }
+        let mut loader = Loader::new();
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Foo");
+        let spec = InlineSpec(Foo {
+            foo: "from-spec".into(),
+        });
+        let resolved = r.get_item_with_loader(&spec, &mut loader).unwrap();
+        match resolved {
+            Cow::Borrowed(foo) => assert_eq!(foo.foo, "from-spec"),
+            Cow::Owned(_) => panic!("expected borrowed value from spec"),
+        }
+    }
+
+    #[test]
+    fn get_item_with_loader_inline_item_returns_borrowed() {
+        let mut loader = Loader::new();
+        let inline = Foo {
+            foo: "inline".into(),
+        };
+        let r = RefOr::<Foo>::new_item(inline);
+        let spec = PetSpec;
+        let resolved = r.get_item_with_loader(&spec, &mut loader).unwrap();
+        match resolved {
+            Cow::Borrowed(foo) => assert_eq!(foo.foo, "inline"),
+            Cow::Owned(_) => panic!("inline item must come back borrowed"),
+        }
+    }
+
+    #[test]
+    fn get_item_with_loader_internal_ref_missing_in_spec_is_not_found() {
+        let mut loader = Loader::new();
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Missing");
+        let spec = PetSpec; // always returns None
+        let err = r.get_item_with_loader(&spec, &mut loader).unwrap_err();
+        assert!(matches!(err, ResolveError::NotFound(_)));
+    }
+
+    #[derive(Default)]
+    struct FooSpec {
+        foo: Option<Foo>,
+    }
+
+    impl ResolveReference<Foo> for FooSpec {
+        fn resolve_reference(&self, reference: &str) -> Option<&Foo> {
+            if reference == "#/components/schemas/Foo" {
+                self.foo.as_ref()
+            } else {
+                None
+            }
+        }
+    }
+
+    impl ValidateWithContext<FooSpec> for Foo {
+        fn validate_with_context(&self, ctx: &mut Context<FooSpec>, path: String) {
+            if self.foo.is_empty() {
+                ctx.error(path, "foo must not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn validate_with_context_loaderless_external_ref_emits_not_supported_error() {
+        let spec = FooSpec::default();
+        let r = RefOr::<Foo>::new_ref("https://example.test/foo.json#/Foo");
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not supported")
+                && e.contains("https://example.test/foo.json")),
+            "expected `not supported` error, got: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_loaderless_external_ref_is_silenced_under_ignore() {
+        let spec = FooSpec::default();
+        let r = RefOr::<Foo>::new_ref("https://example.test/foo.json#/Foo");
+        let mut ctx = Context::new(&spec, Options::IgnoreExternalReferences.only());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "IgnoreExternalReferences must silence loader-less external errors: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_internal_not_found_emits_error() {
+        let spec = FooSpec::default(); // no Foo defined
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Foo");
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not found")),
+            "expected `not found` error, got: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_internal_hit_recurses_into_resolved_value() {
+        // Resolved Foo has an empty `foo` field, so the inner validator
+        // should produce a "must not be empty" error against the
+        // reference path.
+        let spec = FooSpec {
+            foo: Some(Foo { foo: String::new() }),
+        };
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Foo");
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            "expected recursive `must not be empty` error, got: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_inline_item_recurses() {
+        let spec = FooSpec::default();
+        let r = RefOr::<Foo>::new_item(Foo { foo: String::new() });
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            "inline item validation must propagate, got: {:?}",
+            ctx.errors,
+        );
+    }
+
+    #[test]
+    fn validate_with_context_visited_ref_is_not_revisited() {
+        let spec = FooSpec {
+            foo: Some(Foo { foo: String::new() }),
+        };
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Foo");
+        let mut ctx = Context::new(&spec, Options::new());
+        r.validate_with_context(&mut ctx, "#.x".into());
+        let first = ctx.errors.len();
+        // Second visit must be skipped — the visited set has already
+        // recorded the reference.
+        r.validate_with_context(&mut ctx, "#.y".into());
+        assert_eq!(
+            ctx.errors.len(),
+            first,
+            "second walk of the same ref must not add new errors"
+        );
+    }
+
+    #[test]
+    fn ref_validate_with_context_emits_must_not_be_empty_for_empty_ref() {
+        let spec = FooSpec::default();
+        let r = Ref::new("");
+        let mut ctx = Context::new(&spec, Options::new());
+        Ref::validate_with_context::<FooSpec, Foo>(&r, &mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            "empty `$ref` must error: {:?}",
+            ctx.errors,
         );
     }
 }

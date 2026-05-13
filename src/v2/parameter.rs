@@ -2,8 +2,8 @@
 
 use crate::common::formats::{CollectionFormat, IntegerFormat, NumberFormat, StringFormat};
 use crate::common::helpers::{validate_pattern, validate_required_string};
+use crate::common::reference::RefOr;
 use crate::v2::items::Items;
-use crate::v2::reference::RefOr;
 use crate::v2::schema::Schema;
 use crate::v2::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};

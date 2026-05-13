@@ -1,8 +1,8 @@
 //! Path Items
 
+use crate::common::reference::RefOr;
 use crate::v2::operation::Operation;
 use crate::v2::parameter::Parameter;
-use crate::v2::reference::RefOr;
 use crate::v2::spec::Spec;
 use crate::validation::{Context, ValidateWithContext};
 use serde::de::{Error, MapAccess, Visitor};
@@ -208,7 +208,7 @@ impl<'de> Deserialize<'de> for PathItem {
 impl ValidateWithContext<Spec> for PathItem {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         // `$ref` (when present) MUST be a non-empty URI per the spec; the same
-        // shape `v2::reference::Ref::validate_with_context` enforces.
+        // shape `common::reference::Ref::validate_with_context` enforces.
         if let Some(reference) = &self.reference {
             crate::common::helpers::validate_required_string(
                 reference,

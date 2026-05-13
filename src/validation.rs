@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::fmt::{self, Display};
 use thiserror::Error as ThisError;
 
+use crate::loader::Loader;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Error {
     pub errors: Vec<String>,
@@ -148,9 +150,37 @@ impl Options {
     }
 }
 
-/// Validates the OpenAPI specification.
+/// Validates an OpenAPI specification.
+///
+/// # Parameters
+///
+/// - `options`: per-call validation toggles (see [`Options`] and the
+///   [`IGNORE_UNUSED`] / [`IGNORE_EMPTY_REQUIRED_FIELDS`] presets).
+/// - `loader`: optional external-reference loader. Controls how
+///   non-`#/` `$ref`s are handled:
+///   - `None` — external refs surface as a "not supported"
+///     validation error unless [`Options::IgnoreExternalReferences`]
+///     is set, in which case they're skipped silently.
+///   - `Some(&mut Loader)` — each external `$ref` is fetched via the
+///     loader (with whichever fetchers the caller registered, e.g.
+///     [`JsonFileFetcher`](crate::loader::JsonFileFetcher) for the
+///     `file://` scheme), deserialized into the appropriate component
+///     type, and walked recursively as if it were inline. Fetch /
+///     parse / pointer failures become validation errors with the
+///     underlying `LoaderError` as the source. The loader caches
+///     resources by URI, so the same external document is fetched
+///     once per validation pass even when many `$ref`s target it.
+///   - [`Options::IgnoreExternalReferences`] short-circuits before
+///     the loader is consulted, so attaching a loader to a spec with
+///     broken externals never surfaces those breaks when the option
+///     is set.
+///
+/// Returns `Ok(())` if no errors were collected, or `Err(Error)`
+/// with the accumulated messages otherwise. The pass batches errors
+/// rather than failing fast.
 pub trait Validate {
-    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error>;
+    fn validate(&self, options: EnumSet<Options>, loader: Option<&mut Loader>)
+    -> Result<(), Error>;
 }
 
 /// Returned by `Spec::define_*` helpers when a component name does not
@@ -176,20 +206,31 @@ pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
 
 /// Trait for validating an object with a [`Context`].
 ///
-/// Implemented by every component type that participates in spec
-/// validation. Implementors push errors into the context via
+/// Crate-internal: implemented by every component type that participates
+/// in spec validation. Implementors push errors into the context via
 /// [`PushError::error`] and recurse into sub-objects by calling each
-/// child's `validate_with_context`.
-pub trait ValidateWithContext<T> {
+/// child's `validate_with_context`. External users drive validation
+/// through [`Validate::validate`] rather than touching this trait
+/// directly.
+pub(crate) trait ValidateWithContext<T> {
     fn validate_with_context(&self, ctx: &mut Context<T>, path: String);
 }
 
 /// Validation context — carries the spec being validated, accumulated
 /// errors, the per-call options, and a `visited` set used for unused
 /// detection and cycle handling.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Context<'a, T> {
+///
+/// Crate-internal: constructed and consumed by [`Validate::validate`].
+/// Not part of the public API.
+pub(crate) struct Context<'a, T> {
     pub spec: &'a T,
+    /// Optional external-reference loader. When set,
+    /// [`RefOr::validate_with_context`](crate::common::reference::RefOr::validate_with_context)
+    /// resolves non-`#/` `$ref`s through the loader and validates the
+    /// fetched value recursively. Defaults to `None`, in which case
+    /// external refs surface as `ExternalUnsupported` errors (suppressed
+    /// by [`Options::IgnoreExternalReferences`]).
+    pub loader: Option<&'a mut Loader>,
     pub visited: HashSet<String>,
     pub errors: Vec<String>,
     pub options: EnumSet<Options>,
@@ -199,7 +240,9 @@ pub struct Context<'a, T> {
 /// impls accept `&str`, `String`, and `fmt::Arguments`, so callers can
 /// `ctx.error(path, "literal")`, `ctx.error(path, format!(...))`, or
 /// `ctx.error(path, format_args!(...))` interchangeably.
-pub trait PushError<T> {
+///
+/// Crate-internal — paired with [`Context`].
+pub(crate) trait PushError<T> {
     fn error(&mut self, path: String, args: T);
 }
 
@@ -226,11 +269,6 @@ impl<T> PushError<fmt::Arguments<'_>> for Context<'_, T> {
 }
 
 impl<T> Context<'_, T> {
-    pub fn reset(&mut self) {
-        self.visited.clear();
-        self.errors.clear();
-    }
-
     pub fn visit(&mut self, path: String) -> bool {
         self.visited.insert(path)
     }
@@ -248,10 +286,44 @@ impl Context<'_, ()> {
     pub fn new<'a, T>(spec: &'a T, options: EnumSet<Options>) -> Context<'a, T> {
         Context {
             spec,
+            loader: None,
             visited: HashSet::new(),
             errors: Vec::new(),
             options,
         }
+    }
+}
+
+impl<'a, T> Context<'a, T> {
+    /// Attach an external-reference loader to the context. The loader's
+    /// lifetime must outlive the validation pass.
+    pub fn with_loader(mut self, loader: &'a mut Loader) -> Self {
+        self.loader = Some(loader);
+        self
+    }
+}
+
+// Manual `Debug` impl: `&mut Loader` itself isn't `Debug` (it holds
+// boxed `dyn` fetcher trait objects), so the derive doesn't apply.
+// Print the loader as a marker only — the field is rarely useful in
+// log/test output and the visited/errors/options state is what callers
+// actually want to inspect.
+impl<T: fmt::Debug> fmt::Debug for Context<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Context")
+            .field("spec", &self.spec)
+            .field(
+                "loader",
+                &if self.loader.is_some() {
+                    "Some(<loader>)"
+                } else {
+                    "None"
+                },
+            )
+            .field("visited", &self.visited)
+            .field("errors", &self.errors)
+            .field("options", &self.options)
+            .finish()
     }
 }
 
@@ -262,5 +334,102 @@ impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
         } else {
             Err(Error { errors: val.errors })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display_formats_with_count_and_bulleted_messages() {
+        let err = Error {
+            errors: vec!["first".into(), "second".into()],
+        };
+        assert_eq!(format!("{err}"), "2 errors found:\n- first\n- second\n");
+    }
+
+    #[test]
+    fn error_display_zero_errors_still_renders_header() {
+        let err = Error { errors: vec![] };
+        assert_eq!(format!("{err}"), "0 errors found:\n");
+    }
+
+    #[test]
+    fn check_component_name_accepts_pattern_and_rejects_others() {
+        assert!(check_component_name("Foo.Bar-1_2").is_ok());
+        let err = check_component_name("has space").unwrap_err();
+        assert_eq!(err.name, "has space");
+        assert!(err.to_string().contains("has space"));
+        // The Display includes the literal pattern so callers can fix
+        // their input without consulting the source.
+        assert!(err.to_string().contains("a-zA-Z0-9.\\-_"));
+    }
+
+    #[test]
+    fn context_with_loader_attaches_loader() {
+        let mut loader = Loader::new();
+        let ctx = Context::new(&(), Options::new()).with_loader(&mut loader);
+        assert!(ctx.loader.is_some());
+    }
+
+    #[test]
+    fn context_debug_marks_loader_presence_without_printing_it() {
+        let ctx: Context<()> = Context::new(&(), Options::new());
+        let s = format!("{ctx:?}");
+        assert!(s.contains("Context"), "debug includes type name: {s}");
+        assert!(
+            s.contains("None"),
+            "no-loader Context debug must say `None`: {s}"
+        );
+
+        let mut loader = Loader::new();
+        let ctx = Context::new(&(), Options::new()).with_loader(&mut loader);
+        let s = format!("{ctx:?}");
+        assert!(
+            s.contains("Some(<loader>)"),
+            "attached-loader Context debug must mark presence: {s}"
+        );
+    }
+
+    #[test]
+    fn context_from_returns_ok_when_empty_err_when_not() {
+        let ctx: Context<()> = Context::new(&(), Options::new());
+        let r: Result<(), Error> = ctx.into();
+        assert!(r.is_ok());
+
+        let mut ctx: Context<()> = Context::new(&(), Options::new());
+        ctx.errors.push("kaboom".into());
+        let r: Result<(), Error> = ctx.into();
+        let err = r.unwrap_err();
+        assert_eq!(err.errors, vec!["kaboom".to_string()]);
+    }
+
+    #[test]
+    fn push_error_routes_dot_prefixed_messages_without_separator() {
+        let mut ctx: Context<()> = Context::new(&(), Options::new());
+        ctx.error("#.foo".into(), ".bar: must not be empty");
+        ctx.error("#.baz".into(), "must match pattern");
+        assert_eq!(
+            ctx.errors,
+            vec![
+                "#.foo.bar: must not be empty".to_string(),
+                "#.baz: must match pattern".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn push_error_accepts_string_and_format_args() {
+        let mut ctx: Context<()> = Context::new(&(), Options::new());
+        ctx.error("#.a".into(), String::from("from string"));
+        ctx.error("#.b".into(), format_args!("from {} args", "format"));
+        assert_eq!(
+            ctx.errors,
+            vec![
+                "#.a: from string".to_string(),
+                "#.b: from format args".to_string(),
+            ]
+        );
     }
 }

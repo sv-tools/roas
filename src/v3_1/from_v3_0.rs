@@ -1556,7 +1556,7 @@ mod tests {
                 serde_json::from_str(raw).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
             let v31: V31Spec = v30.into();
             assert_eq!(v31.openapi.as_str(), "3.1.2", "{name} openapi version");
-            if let Err(e) = v31.validate(opts) {
+            if let Err(e) = v31.validate(opts, None) {
                 panic!("{name}: converted spec did not validate cleanly:\n{e}");
             }
         }

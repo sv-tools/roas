@@ -3,12 +3,13 @@
 use crate::common::helpers::{
     validate_not_visited, validate_optional_string_matches, validate_unique_by,
 };
+use crate::common::reference::RefOr;
 use crate::common::reference::ResolveReference;
+use crate::loader::Loader;
 use crate::v2::external_documentation::ExternalDocumentation;
 use crate::v2::info::Info;
 use crate::v2::parameter::Parameter;
 use crate::v2::path_item::Paths;
-use crate::v2::reference::RefOr;
 use crate::v2::response::Response;
 use crate::v2::schema::{ObjectSchema, Schema};
 use crate::v2::security_scheme::SecurityScheme;
@@ -481,9 +482,16 @@ impl ResolveReference<Tag> for Spec {
     }
 }
 
-impl Validate for Spec {
-    fn validate(&self, options: EnumSet<Options>) -> Result<(), Error> {
-        let mut ctx = Context::new(self, options);
+impl Spec {
+    fn validate_inner<'a>(
+        &'a self,
+        options: EnumSet<Options>,
+        loader: Option<&'a mut Loader>,
+    ) -> Result<(), Error> {
+        let mut ctx = match loader {
+            Some(l) => Context::new(self, options).with_loader(l),
+            None => Context::new(self, options),
+        };
 
         self.swagger
             .validate_with_context(&mut ctx, "#.swagger".to_owned());
@@ -592,6 +600,16 @@ impl Validate for Spec {
     }
 }
 
+impl Validate for Spec {
+    fn validate(
+        &self,
+        options: EnumSet<Options>,
+        loader: Option<&mut Loader>,
+    ) -> Result<(), Error> {
+        self.validate_inner(options, loader)
+    }
+}
+
 impl ValidateWithContext<Spec> for Server {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         crate::common::helpers::validate_required_string(&self.url, ctx, format!("{path}.url"));
@@ -610,6 +628,62 @@ impl ValidateWithContext<Spec> for TagGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::IGNORE_UNUSED;
+
+    #[test]
+    fn validate_with_loader_resolves_external_schema_ref() {
+        // v2 has no `components.schemas`; nest the external `$ref` under
+        // a definition's property so it goes through `RefOr<Schema>`.
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "test", "version": "1.0" },
+            "paths": {},
+            "definitions": {
+                "Wrapper": {
+                    "type": "object",
+                    "properties": {
+                        "pet": { "$ref": "external.json#/Pet" }
+                    }
+                }
+            }
+        }))
+        .expect("spec must parse");
+
+        let err = spec
+            .validate(IGNORE_UNUSED, None)
+            .expect_err("external ref must error when no loader is attached");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("external.json#/Pet") && e.contains("not supported")),
+            "expected `not supported` error, got: {:?}",
+            err.errors,
+        );
+
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({
+                    "Pet": { "type": "object", "properties": {} }
+                }),
+            )
+            .expect("preload must succeed");
+        spec.validate(IGNORE_UNUSED, Some(&mut loader))
+            .expect("validation must succeed when external ref is preloaded");
+
+        let mut empty_loader = Loader::new();
+        let err = spec
+            .validate(IGNORE_UNUSED, Some(&mut empty_loader))
+            .expect_err("missing fetcher must surface as a validation error");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("external.json#/Pet") && e.contains("failed to resolve")),
+            "expected `failed to resolve` error, got: {:?}",
+            err.errors,
+        );
+    }
 
     #[test]
     fn test_swagger_version_deserialize() {
@@ -711,7 +785,7 @@ mod tests {
             }])
         );
         assert_eq!(serde_json::to_value(&spec).unwrap(), value);
-        assert!(spec.validate(Default::default()).is_ok());
+        assert!(spec.validate(Default::default(), None).is_ok());
     }
 
     #[test]
@@ -798,7 +872,7 @@ mod tests {
         };
         // Cargo `..Default::default()` already sets paths/etc. to defaults.
         let _ = &mut spec;
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1022,7 +1096,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let res = spec.validate(Options::new());
+        let res = spec.validate(Options::new(), None);
         assert!(res.is_ok(), "errors: {:?}", res);
     }
 
@@ -1045,7 +1119,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors.iter().any(|e| e.contains("must start with `/`")),
             "errors: {:?}",
@@ -1057,7 +1131,7 @@ mod tests {
     fn validate_base_path_must_start_with_slash() {
         let mut spec = spec_with_info();
         spec.base_path = Some("api".into());
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1081,7 +1155,7 @@ mod tests {
             security: Some(vec![req]),
             ..spec_with_info()
         };
-        let res = spec.validate(Options::new());
+        let res = spec.validate(Options::new(), None);
         assert!(res.is_ok(), "errors: {:?}", res);
     }
 
@@ -1093,7 +1167,7 @@ mod tests {
             security: Some(vec![req]),
             ..spec_with_info()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1137,7 +1211,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1179,7 +1253,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors.iter().any(|e| e.contains("duplicate parameter")),
             "errors: {:?}",
@@ -1204,7 +1278,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1237,7 +1311,7 @@ mod tests {
             paths,
             extensions: None,
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         assert!(
             err.errors
                 .iter()
@@ -1459,7 +1533,7 @@ mod tests {
         let mut req = BTreeMap::new();
         req.insert("none".to_owned(), vec![]);
         spec.security = Some(vec![req.clone(), req]);
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         for (field, idx) in [
             ("#.schemes[1]", "schemes"),
             ("#.consumes[1]", "consumes"),
@@ -1495,7 +1569,7 @@ mod tests {
             security_definitions: Some(defs),
             ..spec_with_info()
         };
-        let err = spec.validate(Options::new()).unwrap_err();
+        let err = spec.validate(Options::new(), None).unwrap_err();
         // Per-scheme validate fires on missing URLs / empty scopes.
         assert!(
             err.errors

@@ -25,7 +25,6 @@ pub mod media_type;
 pub mod operation;
 pub mod parameter;
 pub mod path_item;
-pub mod reference;
 pub mod request_body;
 pub mod response;
 pub mod schema;

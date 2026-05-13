@@ -141,7 +141,12 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
                 };
                 let cb = match cb_ref.get_item(spec) {
                     Ok(cb) => cb,
-                    Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
+                    Err(
+                        crate::common::reference::ResolveError::ExternalUnsupported(target)
+                        | crate::common::reference::ResolveError::External {
+                            reference: target, ..
+                        },
+                    ) => {
                         return OperationRefResolution::ExternalPathItemRef(target);
                     }
                     Err(crate::common::reference::ResolveError::NotFound(t)) => {
@@ -208,7 +213,12 @@ fn resolve_internal_operation_ref(spec: &Spec, reference: &str) -> OperationRefR
         }
         let cb = match cb_ref.get_item(spec) {
             Ok(cb) => cb,
-            Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
+            Err(
+                crate::common::reference::ResolveError::ExternalUnsupported(target)
+                | crate::common::reference::ResolveError::External {
+                    reference: target, ..
+                },
+            ) => {
                 return OperationRefResolution::ExternalPathItemRef(target);
             }
             Err(crate::common::reference::ResolveError::NotFound(t)) => {
@@ -362,7 +372,12 @@ fn resolve_path_item_ref_chain<'a>(
         };
         let cb = match cb_ref.get_item(spec) {
             Ok(cb) => cb,
-            Err(crate::common::reference::ResolveError::ExternalUnsupported(target)) => {
+            Err(
+                crate::common::reference::ResolveError::ExternalUnsupported(target)
+                | crate::common::reference::ResolveError::External {
+                    reference: target, ..
+                },
+            ) => {
                 return Err(OperationRefResolution::ExternalPathItemRef(target));
             }
             Err(crate::common::reference::ResolveError::NotFound(t)) => {

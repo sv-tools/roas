@@ -24,7 +24,6 @@ pub mod items;
 pub mod operation;
 pub mod parameter;
 pub mod path_item;
-pub mod reference;
 pub mod response;
 pub mod schema;
 pub mod security_scheme;

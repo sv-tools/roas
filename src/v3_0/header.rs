@@ -1,9 +1,9 @@
 //! Header Object
 
+use crate::common::reference::RefOr;
 use crate::v3_0::example::Example;
 use crate::v3_0::media_type::MediaType;
 use crate::v3_0::parameter::InHeaderStyle;
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::schema::Schema;
 use crate::v3_0::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};

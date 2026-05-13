@@ -1,5 +1,6 @@
 use crate::common::reference::{RefOr, ResolveReference};
 use crate::validation::{Context, ValidateWithContext};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -10,10 +11,10 @@ pub enum BoolOr<T> {
 }
 
 impl<D> BoolOr<RefOr<D>> {
-    pub fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
+    pub(crate) fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
     where
         T: ResolveReference<D>,
-        D: ValidateWithContext<T>,
+        D: ValidateWithContext<T> + 'static + Clone + DeserializeOwned,
     {
         match self {
             BoolOr::Bool(_) => {}

@@ -15,10 +15,10 @@
 use lazy_regex::regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::common::reference::RefOr;
 use crate::common::reference::ResolveReference;
 use crate::v3_0::parameter::{InCookie, InHeader, InPath, InQuery, Parameter};
 use crate::v3_0::path_item::PathItem;
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::security_scheme::SecurityScheme;
 use crate::v3_0::spec::Spec;
 use crate::v3_0::tag::Tag;
@@ -404,7 +404,6 @@ mod tests {
     use super::*;
     use crate::v3_0::components::Components;
     use crate::v3_0::parameter::{InCookie, InHeader, InPath, InQuery};
-    use crate::v3_0::reference::RefOr;
     use crate::v3_0::security_scheme::{
         ApiKeyLocation, ApiKeySecurityScheme, HttpScheme, HttpSecurityScheme, ImplicitOAuth2Flow,
         OAuth2Flows, OAuth2SecurityScheme, OpenIdConnectSecurityScheme, SecurityScheme,

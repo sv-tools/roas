@@ -1,10 +1,10 @@
 //! Operation Object
 
 use crate::common::helpers::validate_required_string;
+use crate::common::reference::RefOr;
 use crate::v3_0::callback::Callback;
 use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::parameter::Parameter;
-use crate::v3_0::reference::RefOr;
 use crate::v3_0::request_body::RequestBody;
 use crate::v3_0::response::Responses;
 use crate::v3_0::server::Server;
@@ -281,7 +281,7 @@ mod tests {
                 extensions: None,
             }),
             responses: crate::v3_0::response::Responses {
-                default: Some(crate::v3_0::reference::RefOr::new_item(
+                default: Some(crate::common::reference::RefOr::new_item(
                     crate::v3_0::response::Response {
                         description: "ok".into(),
                         ..Default::default()

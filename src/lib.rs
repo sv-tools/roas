@@ -1,6 +1,7 @@
 //! OpenAPI Specification
 
 pub mod common;
+pub mod loader;
 pub mod validation;
 
 #[cfg(feature = "v2")]
