@@ -17,7 +17,7 @@ Integration tests are in `tests/*_test.rs`. JSON fixtures are grouped by version
   `cargo-deny`, `wasm-tools`, and related tools).
 - `cargo build` builds the crate with the default `v3_2` feature.
 - `cargo nextest run --all-features` checks all OpenAPI version modules together.
-- `cargo fmt -all` applies standard Rust formatting.
+- `cargo fmt --all` applies standard Rust formatting across the whole workspace.
 - `cargo clippy --all-features --all-targets -- -D warnings`: runs lints with warnings treated as errors.
 - `cargo deny check` audits licenses, advisories, bans, and sources using `deny.toml`.
 - `cargo machete` checks for unused dependencies before dependency cleanup.
@@ -46,8 +46,8 @@ When adding feature-specific behavior, run the relevant feature set explicitly, 
 
 Aim for ~95% line coverage on changed code; treat ~90% as the floor. Codecov reports `codecov/patch`
 and `codecov/project/*` checks on each PR — those are informational. A PR is releasable when the
-build × feature matrix, `cargo nextest`, `cargo clippy --all-features --all-targets`, and `cargo fmt`
-are all green; a marginal codecov dip below the patch threshold can still land if the missed lines
+build × feature matrix, `cargo nextest run --all-features`, `cargo clippy --all-features --all-targets -- -D warnings`,
+and `cargo fmt --all` are all green; a marginal codecov dip below the patch threshold can still land if the missed lines
 are genuinely unreachable from the test surface (e.g. cross-feature dead arms). Otherwise add
 targeted unit tests for the gap.
 
