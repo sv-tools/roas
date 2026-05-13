@@ -6,8 +6,18 @@ use thiserror::Error as ThisError;
 
 use crate::loader::Loader;
 
-/// A single validation finding. Carries the JSON-Pointer-style path
-/// of the failing element and a human-readable message.
+/// A single validation finding. Carries the dotted path of the
+/// failing element and a human-readable message.
+///
+/// The `path` is built by this crate's recursive validators using a
+/// JSONPath-flavored syntax — `#` for the document root, `.` for
+/// field descent, and `[…]` for keyed map / array index segments
+/// (e.g. `#.paths[/pets].get.responses.default.content[application/json].schema`).
+/// It is **not** RFC 6901 JSON Pointer; there is no `~0` / `~1`
+/// escaping and `/` is a literal character that often appears inside
+/// `[…]` segments. Downstream consumers should treat `path` as an
+/// opaque human-readable locator, not a parser input for a JSON
+/// Pointer library.
 ///
 /// Constructed internally by the recursive validators via
 /// [`PushError::error`]; emitted to callers as the elements of
@@ -40,33 +50,40 @@ impl ValidationError {
 // that compare a `ValidationError` against a literal like
 // `"#.info.title: must not be empty"` keep working without rewriting
 // every assertion. The comparison is byte-wise across the joined form
-// `<path><sep><message>` (sep = `""` when the message starts with `.`,
-// otherwise `": "`), avoiding an allocation per call.
+// `<path><sep><tail>`:
+//
+// * if `message` starts with `.`, the separator is `"."` and `tail`
+//   is the rest of the message (the `Display` form is therefore
+//   `<path>.<tail>` — e.g. path `#.x` + message `.foo` → `#.x.foo`);
+// * otherwise the separator is `": "` and `tail` is the full message.
+//
+// Walking the joined form directly avoids the per-call allocation that
+// `self.to_string() == other` would do.
 impl PartialEq<str> for ValidationError {
     fn eq(&self, other: &str) -> bool {
-        let (sep, rest) = if let Some(rest) = self.message.strip_prefix('.') {
+        let (sep, tail) = if let Some(rest) = self.message.strip_prefix('.') {
             (".", rest)
         } else {
             (": ", self.message.as_str())
         };
         let plen = self.path.len();
         let slen = sep.len();
-        other.len() == plen + slen + rest.len()
+        other.len() == plen + slen + tail.len()
             && other.starts_with(&self.path)
             && other[plen..].starts_with(sep)
-            && other[plen + slen..] == *rest
+            && other[plen + slen..] == *tail
     }
 }
 
 impl PartialEq<&str> for ValidationError {
     fn eq(&self, other: &&str) -> bool {
-        self == *other
+        <ValidationError as PartialEq<str>>::eq(self, other)
     }
 }
 
 impl PartialEq<String> for ValidationError {
     fn eq(&self, other: &String) -> bool {
-        self == other.as_str()
+        <ValidationError as PartialEq<str>>::eq(self, other.as_str())
     }
 }
 
@@ -453,6 +470,25 @@ impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_error_partial_eq_against_str_string_and_ref_str_terminates() {
+        // Regression for an earlier `PartialEq<&str>` impl that
+        // delegated `self == *other` and recursed through itself
+        // forever (stack overflow). All three RHS shapes must agree
+        // with the `Display` form and return promptly.
+        let e = ValidationError::new("#.info.title".into(), "must not be empty".into());
+        let literal: &str = "#.info.title: must not be empty";
+        let owned: String = literal.to_owned();
+        assert!(e == *literal);
+        assert!(e == literal);
+        assert!(e == owned);
+        assert!(e != "different");
+
+        // `.`-prefixed message variant.
+        let e = ValidationError::new("#.x".into(), ".foo: bad".into());
+        assert!(e == "#.x.foo: bad");
+    }
 
     #[test]
     fn error_display_formats_with_count_and_bulleted_messages() {
