@@ -119,9 +119,14 @@ pub struct Error {
 
 /// Convenience predicates over a collection of [`ValidationError`]s.
 ///
-/// Implemented for both [`Error`] (which owns the full report after
-/// [`Validate::validate`] returns) and `Vec<ValidationError>` (which
-/// the in-progress recursive validators accumulate as `ctx.errors`).
+/// Implemented for [`Error`] (the full report after
+/// [`Validate::validate`] returns), `Vec<ValidationError>` (which the
+/// in-progress recursive validators accumulate as `ctx.errors`), and
+/// `[ValidationError]` slices. Method calls on `Vec` work via the
+/// slice impl through auto-deref; the explicit `Vec` impl is also
+/// provided so the type satisfies `T: ValidationErrorsExt` bounds in
+/// generic downstream code.
+///
 /// Lets callers and tests query a report with a single method call
 /// instead of repeating `iter().any(|e| ...)`.
 ///
@@ -159,6 +164,24 @@ impl ValidationErrorsExt for [ValidationError] {
 
     fn has_exact(&self, expected: &str) -> bool {
         self.iter().any(|e| *e == expected)
+    }
+}
+
+// Explicit `Vec` impl so `Vec<ValidationError>` satisfies
+// `T: ValidationErrorsExt` bounds (the slice impl is reached via
+// auto-deref for direct method calls, but trait-bound resolution
+// needs the impl on the nominal type).
+impl ValidationErrorsExt for Vec<ValidationError> {
+    fn mentions(&self, needle: &str) -> bool {
+        self.as_slice().mentions(needle)
+    }
+
+    fn mentions_all(&self, needles: &[&str]) -> bool {
+        self.as_slice().mentions_all(needles)
+    }
+
+    fn has_exact(&self, expected: &str) -> bool {
+        self.as_slice().has_exact(expected)
     }
 }
 
