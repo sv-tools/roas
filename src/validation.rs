@@ -163,7 +163,12 @@ impl ValidationErrorsExt for [ValidationError] {
     }
 
     fn has_exact(&self, expected: &str) -> bool {
-        self.iter().any(|e| *e == expected)
+        // UFCS to make it explicit we're calling the `PartialEq<str>`
+        // impl on a `&ValidationError`, not auto-deref'ing through
+        // `*e` (which compiles via auto-ref but reads as if we were
+        // moving the element out of the slice).
+        self.iter()
+            .any(|e| <ValidationError as PartialEq<str>>::eq(e, expected))
     }
 }
 
