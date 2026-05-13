@@ -373,6 +373,7 @@ where
 mod tests {
     use super::*;
     use crate::loader::{JsonFileFetcher, ResourceFetcher};
+    use crate::validation::ValidationErrorsExt;
     use serde_json::Value;
     use std::fs;
     use url::Url;
@@ -612,8 +613,8 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         r.validate_with_context(&mut ctx, "#.x".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("not supported")
-                && e.contains("https://example.test/foo.json")),
+            ctx.errors
+                .mentions_all(&["not supported", "https://example.test/foo.json"]),
             "expected `not supported` error, got: {:?}",
             ctx.errors,
         );
@@ -639,7 +640,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         r.validate_with_context(&mut ctx, "#.x".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("not found")),
+            ctx.errors.mentions("not found"),
             "expected `not found` error, got: {:?}",
             ctx.errors,
         );
@@ -657,7 +658,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         r.validate_with_context(&mut ctx, "#.x".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            ctx.errors.mentions("must not be empty"),
             "expected recursive `must not be empty` error, got: {:?}",
             ctx.errors,
         );
@@ -670,7 +671,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         r.validate_with_context(&mut ctx, "#.x".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            ctx.errors.mentions("must not be empty"),
             "inline item validation must propagate, got: {:?}",
             ctx.errors,
         );
@@ -702,7 +703,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         Ref::validate_with_context::<FooSpec, Foo>(&r, &mut ctx, "#.x".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            ctx.errors.mentions("must not be empty"),
             "empty `$ref` must error: {:?}",
             ctx.errors,
         );

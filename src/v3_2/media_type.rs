@@ -304,6 +304,7 @@ mod tests {
     use super::*;
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn media_type_round_trip_full() {
@@ -387,7 +388,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         mt.validate_with_context(&mut ctx, "mt".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("examples[ex1]")),
+            ctx.errors.mentions("examples[ex1]"),
             "expected nested example error: {:?}",
             ctx.errors
         );

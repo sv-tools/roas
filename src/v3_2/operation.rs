@@ -181,6 +181,7 @@ mod tests {
     use crate::v3_2::response::{Response, Responses};
     use crate::v3_2::tag::Tag;
     use crate::validation::Context;
+    use crate::validation::ValidationErrorsExt;
 
     fn ok_responses() -> Responses {
         Responses {
@@ -203,7 +204,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         Operation::default().validate_with_context(&mut ctx, "op".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".responses")),
+            !ctx.errors.mentions(".responses"),
             "no responses errors expected: {:?}",
             ctx.errors
         );
@@ -251,12 +252,12 @@ mod tests {
             ctx.errors
         );
         assert!(
-            ctx.errors.iter().any(|e| e.contains("op.servers[0].url")),
+            ctx.errors.mentions("op.servers[0].url"),
             "server.url: {:?}",
             ctx.errors
         );
         assert!(
-            ctx.errors.iter().any(|e| e.contains("op.externalDocs.url")),
+            ctx.errors.mentions("op.externalDocs.url"),
             "externalDocs.url: {:?}",
             ctx.errors
         );
@@ -265,7 +266,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::IgnoreMissingTags.only());
         op.validate_with_context(&mut ctx, "op".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("not found in spec")),
+            !ctx.errors.mentions("not found in spec"),
             "missing-tags should be silenced: {:?}",
             ctx.errors
         );

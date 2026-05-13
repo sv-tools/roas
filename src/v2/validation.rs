@@ -403,6 +403,7 @@ mod tests {
     use crate::v2::spec::Spec;
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     fn body_param(name: &str) -> RefOr<Parameter> {
         RefOr::new_item(Parameter::Body(Box::new(InBody {
@@ -557,8 +558,8 @@ mod tests {
         let params = vec![path_param("id")];
         validate_operation_parameters(&mut ctx, "op", "/no-vars", None, Some(&params));
         assert!(
-            ctx.errors.iter().any(|e| e
-                .contains("path parameter `id` does not match any `{name}` in the path template")),
+            ctx.errors
+                .mentions("path parameter `id` does not match any `{name}` in the path template"),
             "errors: {:?}",
             ctx.errors
         );
@@ -824,7 +825,7 @@ mod tests {
         validate_security_definitions(&mut ctx);
         // Empty scopes + missing authorizationUrl produce errors from per-scheme validate.
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            ctx.errors.mentions("must not be empty"),
             "errors: {:?}",
             ctx.errors
         );
@@ -871,11 +872,7 @@ mod tests {
         let spec: &'static Spec = Box::leak(Box::new(spec));
         let mut ctx = Context::new(spec, Options::IgnoreUnusedSecuritySchemes.only());
         validate_security_definitions(&mut ctx);
-        assert!(
-            ctx.errors.iter().all(|e| !e.contains("unused")),
-            "errors: {:?}",
-            ctx.errors
-        );
+        assert!(!ctx.errors.mentions("unused"), "errors: {:?}", ctx.errors);
     }
 
     #[test]
@@ -892,11 +889,7 @@ mod tests {
         // would do when processing `Spec.security` or operation-level security.
         ctx.visit("#/securityDefinitions/used".to_owned());
         validate_security_definitions(&mut ctx);
-        assert!(
-            ctx.errors.iter().all(|e| !e.contains("unused")),
-            "errors: {:?}",
-            ctx.errors
-        );
+        assert!(!ctx.errors.mentions("unused"), "errors: {:?}", ctx.errors);
     }
 
     #[test]

@@ -352,6 +352,7 @@ impl ValidateWithContext<Spec> for OAuth2SecurityScheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     #[test]
@@ -656,7 +657,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         s.validate_with_context(&mut ctx, "p".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URL")),
+            ctx.errors.mentions("must be a valid URL"),
             "errors: {:?}",
             ctx.errors
         );
@@ -796,7 +797,7 @@ mod tests {
         };
         let mut ctx = Context::new(&spec, Options::new());
         s.validate_with_context(&mut ctx, "p".into());
-        assert!(ctx.errors.iter().any(|e| e.contains("must not be empty")));
+        assert!(ctx.errors.mentions("must not be empty"));
     }
 
     #[test]

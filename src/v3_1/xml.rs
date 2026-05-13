@@ -150,6 +150,7 @@ impl ValidateWithContext<Spec> for XML {
 mod tests {
     use super::*;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn serialize() {
@@ -260,7 +261,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "xml".to_owned());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
+            ctx.errors.mentions("must be a valid URI"),
             "invalid URI: {:?}",
             ctx.errors
         );

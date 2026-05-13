@@ -43,6 +43,7 @@ impl ValidateWithContext<Spec> for ExternalDocumentation {
 mod tests {
     use super::*;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn test_external_documentation_deserialize() {
@@ -101,8 +102,7 @@ mod tests {
         };
         ed.validate_with_context(&mut ctx, String::from("externalDocs"));
         assert!(
-            ctx.errors
-                .contains(&"externalDocs.url: must not be empty".to_string()),
+            ctx.errors.has_exact("externalDocs.url: must not be empty"),
             "Validation should fail: {:?}",
             ctx.errors
         );
@@ -115,9 +115,8 @@ mod tests {
         };
         ed.validate_with_context(&mut ctx, String::from("externalDocs"));
         assert!(
-            ctx.errors.contains(
-                &"externalDocs.url: must be a valid URL, found `invalid-url`".to_string()
-            ),
+            ctx.errors
+                .has_exact("externalDocs.url: must be a valid URL, found `invalid-url`"),
             "Validation should fail: {:?}",
             ctx.errors
         );

@@ -1092,6 +1092,7 @@ impl ValidateWithContext<Spec> for NullSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn test_single_deserialize() {
@@ -1426,7 +1427,7 @@ mod tests {
             let mut ctx = Context::new(&spec, crate::validation::Options::new());
             s.validate_with_context(&mut ctx, "s".into());
             assert!(
-                ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+                !ctx.errors.mentions("mutually exclusive"),
                 "single flag should not error: {:?}",
                 ctx.errors
             );
@@ -1505,7 +1506,7 @@ mod tests {
             let mut ctx = Context::new(&spec, crate::validation::Options::new());
             schema.validate_with_context(&mut ctx, format!("c[{i}]"));
             assert!(
-                ctx.errors.iter().any(|e| e.contains("namespace")),
+                ctx.errors.mentions("namespace"),
                 "case {i}: errors: {:?}",
                 ctx.errors
             );
@@ -1555,7 +1556,7 @@ mod tests {
             let mut ctx = Context::new(&spec, crate::validation::Options::new());
             schema.validate_with_context(&mut ctx, format!("c[{i}]"));
             assert!(
-                ctx.errors.iter().any(|e| e.contains("externalDocs")),
+                ctx.errors.mentions("externalDocs"),
                 "case {i}: errors: {:?}",
                 ctx.errors
             );
@@ -1575,7 +1576,7 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         s.validate_with_context(&mut ctx, "obj".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("obj.properties.bad")),
+            ctx.errors.mentions("obj.properties.bad"),
             "errors: {:?}",
             ctx.errors
         );
@@ -1634,12 +1635,12 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         composition.validate_with_context(&mut ctx, "s".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("pattern")),
+            ctx.errors.mentions("pattern"),
             "expected nested string pattern error: {:?}",
             ctx.errors
         );
         assert!(
-            ctx.errors.iter().any(|e| e.contains("propertyName")),
+            ctx.errors.mentions("propertyName"),
             "expected discriminator empty propertyName: {:?}",
             ctx.errors
         );
@@ -1697,7 +1698,7 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         parsed.validate_with_context(&mut ctx, "arr".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("arr.items.pattern")),
+            ctx.errors.mentions("arr.items.pattern"),
             "errors: {:?}",
             ctx.errors
         );

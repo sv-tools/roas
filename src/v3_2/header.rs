@@ -119,6 +119,7 @@ impl ValidateWithContext<Spec> for Header {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn test_header_deserialize() {
@@ -202,7 +203,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "h".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("h.schema")),
+            ctx.errors.mentions("h.schema"),
             "expected h.schema error: {:?}",
             ctx.errors
         );

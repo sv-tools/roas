@@ -411,6 +411,7 @@ mod tests {
     use crate::v3_0::spec::Spec;
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     fn path_param(name: &str) -> RefOr<Parameter> {
         RefOr::new_item(Parameter::Path(InPath {
@@ -549,8 +550,8 @@ mod tests {
         let params = vec![path_param("id")];
         validate_operation_parameters(&mut ctx, "op", "/no-vars", None, Some(&params));
         assert!(
-            ctx.errors.iter().any(|e| e
-                .contains("path parameter `id` does not match any `{name}` in the path template")),
+            ctx.errors
+                .mentions("path parameter `id` does not match any `{name}` in the path template"),
             "errors: {:?}",
             ctx.errors
         );
@@ -583,7 +584,7 @@ mod tests {
         let mut ctx = Context::new(spec, Options::IgnoreExternalReferences.only());
         validate_operation_parameters(&mut ctx, "op", "/users/{id}", None, Some(&params));
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("template variable")),
+            !ctx.errors.mentions("template variable"),
             "errors: {:?}",
             ctx.errors
         );
@@ -793,7 +794,7 @@ mod tests {
         req.insert("missing".to_owned(), vec![]);
         validate_security_requirements(&mut ctx, "#.security", &[req]);
         assert!(
-            ctx.errors.iter().any(|e| e.contains("not declared")),
+            ctx.errors.mentions("not declared"),
             "errors: {:?}",
             ctx.errors
         );

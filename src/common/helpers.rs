@@ -191,6 +191,7 @@ pub fn validate_not_visited<T, D>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationErrorsExt;
 
     #[cfg(any(feature = "v2", feature = "v3_0", feature = "v3_1"))]
     #[test]
@@ -215,7 +216,7 @@ mod tests {
         validate_required_url(&String::from("foo-bar"), &mut ctx, String::from("test_url"));
         assert!(
             ctx.errors
-                .contains(&"test_url: must be a valid URL, found `foo-bar`".to_string()),
+                .has_exact("test_url: must be a valid URL, found `foo-bar`"),
             "expected error: {:?}",
             ctx.errors
         );
@@ -252,7 +253,7 @@ mod tests {
         );
         assert!(
             ctx.errors
-                .contains(&"test_url: must be a valid URL, found `foo-bar`".to_string()),
+                .has_exact("test_url: must be a valid URL, found `foo-bar`"),
             "expected error: {:?}",
             ctx.errors
         );
@@ -273,7 +274,7 @@ mod tests {
             let mut ctx = Context::new(&(), Options::new());
             validate_optional_uri(&Some(s.to_owned()), &mut ctx, "u".to_owned());
             assert!(
-                ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
+                ctx.errors.mentions("must be a valid URI"),
                 "expected error for `{s:?}`: {:?}",
                 ctx.errors
             );

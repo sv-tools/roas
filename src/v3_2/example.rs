@@ -109,6 +109,7 @@ mod tests {
     use super::*;
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     #[test]
@@ -122,7 +123,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("mutually exclusive")),
+            ctx.errors.mentions("mutually exclusive"),
             "errors: {:?}",
             ctx.errors
         );
@@ -158,7 +159,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("must be a valid URI")),
+            ctx.errors.mentions("must be a valid URI"),
             "errors: {:?}",
             ctx.errors
         );
@@ -236,7 +237,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+            !ctx.errors.mentions("mutually exclusive"),
             "dataValue + serializedValue should be permitted: {:?}",
             ctx.errors
         );
@@ -250,7 +251,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "ex".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("mutually exclusive")),
+            !ctx.errors.mentions("mutually exclusive"),
             "dataValue + externalValue should be permitted: {:?}",
             ctx.errors
         );

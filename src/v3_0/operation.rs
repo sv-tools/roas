@@ -255,6 +255,7 @@ mod tests {
     use super::*;
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn validate_walks_tags_servers_external_docs() {
@@ -312,13 +313,13 @@ mod tests {
         );
         // Server URL empty surfaces the per-server validator.
         assert!(
-            ctx.errors.iter().any(|e| e.contains("op.servers[0].url")),
+            ctx.errors.mentions("op.servers[0].url"),
             "errors: {:?}",
             ctx.errors
         );
         // ExternalDocs URL empty surfaces.
         assert!(
-            ctx.errors.iter().any(|e| e.contains("op.externalDocs.url")),
+            ctx.errors.mentions("op.externalDocs.url"),
             "errors: {:?}",
             ctx.errors
         );
@@ -327,7 +328,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::IgnoreMissingTags.only());
         op.validate_with_context(&mut ctx, "op".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("not found in spec")),
+            !ctx.errors.mentions("not found in spec"),
             "missing-tags should be silenced: {:?}",
             ctx.errors
         );

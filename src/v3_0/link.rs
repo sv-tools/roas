@@ -257,6 +257,7 @@ mod tests {
     use super::*;
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     #[test]
@@ -284,7 +285,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("mutually exclusive")),
+            ctx.errors.mentions("mutually exclusive"),
             "errors: {:?}",
             ctx.errors
         );
@@ -368,7 +369,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("server.url")),
+            ctx.errors.mentions("server.url"),
             "expected server.url error: {:?}",
             ctx.errors
         );
@@ -384,7 +385,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "valid ref should not error: {:?}",
             ctx.errors
         );
@@ -487,7 +488,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains("external reference")),
+            !ctx.errors.mentions("external reference"),
             "with option, no external error: {:?}",
             ctx.errors
         );
@@ -540,7 +541,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "ref-of-ref should resolve: {:?}",
             ctx.errors
         );
@@ -555,7 +556,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("method `post`")),
+            ctx.errors.mentions("method `post`"),
             "expected unknown method on resolved target: {:?}",
             ctx.errors
         );
@@ -612,7 +613,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "multi-hop PathItem ref should resolve: {:?}",
             ctx.errors
         );
@@ -710,7 +711,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("external document")),
+            ctx.errors.mentions("external document"),
             "expected external-PathItem-ref error: {:?}",
             ctx.errors
         );
@@ -722,7 +723,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "with option, no .operationRef error: {:?}",
             ctx.errors
         );
@@ -786,7 +787,7 @@ mod tests {
         }
         .validate_with_context(&mut ctx, "l".into());
         assert!(
-            ctx.errors.iter().all(|e| !e.contains(".operationRef")),
+            !ctx.errors.mentions(".operationRef"),
             "tilde-encoded ref should resolve: {:?}",
             ctx.errors
         );

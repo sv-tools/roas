@@ -802,6 +802,7 @@ impl ValidateWithContext<Spec> for TagGroup {
 mod tests {
     use super::*;
     use crate::validation::IGNORE_UNUSED;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn validate_with_loader_resolves_external_schema_ref() {
@@ -1426,7 +1427,7 @@ mod tests {
         RefOr::<Schema>::new_ref("#/components/schemas/AliasA")
             .validate_with_context(&mut ctx, "#.schema".to_owned());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("not found")),
+            ctx.errors.mentions("not found"),
             "cycle should be reported as an unresolved ref, not recurse: {:?}",
             ctx.errors
         );
@@ -1526,7 +1527,7 @@ mod tests {
         TagGroup::default().validate_with_context(&mut ctx, "#.x-tagGroups[0]".to_owned());
         assert!(
             ctx.errors
-                .contains(&"#.x-tagGroups[0].name: must not be empty".to_owned()),
+                .has_exact("#.x-tagGroups[0].name: must not be empty"),
             "expected name error: {:?}",
             ctx.errors
         );

@@ -69,6 +69,7 @@ mod tests {
     use crate::v3_2::schema::{ObjectSchema, SingleSchema};
     use crate::validation::Context;
     use crate::validation::Options;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn round_trip_with_mapping() {
@@ -115,7 +116,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         d.validate_with_context(&mut ctx, "d".to_owned());
         assert!(
-            ctx.errors.iter().any(|e| e.contains("Missing")),
+            ctx.errors.mentions("Missing"),
             "expected missing schema error: {:?}",
             ctx.errors
         );

@@ -205,6 +205,7 @@ impl ValidateWithContext<Spec> for Logo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
     #[test]
@@ -640,8 +641,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         Logo::default().validate_with_context(&mut ctx, "logo".to_owned());
         assert!(
-            ctx.errors
-                .contains(&"logo.url: must not be empty".to_owned()),
+            ctx.errors.has_exact("logo.url: must not be empty"),
             "expected empty URL error: {:?}",
             ctx.errors
         );
