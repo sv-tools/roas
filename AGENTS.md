@@ -28,15 +28,15 @@ Integration tests live with the lib in `crates/roas/tests/*_test.rs`. JSON fixtu
 - `cargo build -p roas-cli` builds just the CLI binary.
 - `cargo nextest run --workspace --all-features` checks all OpenAPI version modules together.
 - `cargo fmt --all` applies standard Rust formatting across the whole workspace.
-- `cargo clippy --all-features --all-targets -- -D warnings`: runs lints with warnings treated as errors.
+- `cargo clippy --workspace --all-features --all-targets -- -D warnings`: runs lints with warnings treated as errors.
 - `cargo deny check` audits licenses, advisories, bans, and sources using `deny.toml`.
 - `cargo machete` checks for unused dependencies before dependency cleanup.
 
 ## Coding Style & Naming Conventions
 
 Use Rust 2024 idioms and standard `rustfmt` formatting. Keep modules aligned with existing versioned structure: new v3.2
-types belong in `src/v3_2/`, shared behavior belongs in `src/common/`, and cross-version conversion code should follow
-names like `from_v3_1.rs`.
+types belong in `crates/roas/src/v3_2/`, shared behavior belongs in `crates/roas/src/common/`, and cross-version
+conversion code should follow names like `from_v3_1.rs`.
 
 Prefer descriptive snake_case for modules, functions, and tests. Prefer direct sibling modules such as `host_impl.rs`
 over `mod.rs`. Public structs and enums use `UpperCamelCase`. Keep
@@ -51,15 +51,17 @@ Add integration coverage in the matching `tests/*_test.rs` file and place reusab
 directory. Tests commonly deserialize fixture JSON into the versioned `Spec`, call `Validate::validate`, and assert
 round-trip JSON equality.
 
-When adding feature-specific behavior, run the relevant feature set explicitly, for example
-`cargo nextest run --features v3_0` or `cargo nextest run --all-features`.
+When adding feature-specific behavior on `roas` (the library), run the relevant feature set explicitly, for example
+`cargo nextest run -p roas --no-default-features --features v3_0` or `cargo nextest run --workspace --all-features`.
+The version feature flags live on `roas`; the other workspace crates (`roas-cli`, `roas-http-fetcher`) compile
+unconditionally.
 
 Aim for ~95% line coverage on changed code; treat ~90% as the floor. Codecov reports `codecov/patch`
 and `codecov/project/*` checks on each PR — those are informational. A PR is releasable when the
-build × feature matrix, `cargo nextest run --all-features`, `cargo clippy --all-features --all-targets -- -D warnings`,
-and `cargo fmt --all` are all green; a marginal codecov dip below the patch threshold can still land if the missed lines
-are genuinely unreachable from the test surface (e.g. cross-feature dead arms). Otherwise add
-targeted unit tests for the gap.
+build × feature matrix, `cargo nextest run --workspace --all-features`,
+`cargo clippy --workspace --all-features --all-targets -- -D warnings`, and `cargo fmt --all` are all green; a marginal
+codecov dip below the patch threshold can still land if the missed lines are genuinely unreachable from the test
+surface (e.g. cross-feature dead arms). Otherwise add targeted unit tests for the gap.
 
 ## Commit & Pull Request Guidelines
 
