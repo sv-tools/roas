@@ -47,10 +47,11 @@ struct ValidateArgs {
     #[arg(long, value_enum)]
     from: Option<SpecVersion>,
 
-    /// Enable external-reference loading. Pass `file` to allow
-    /// `file://` refs, `http` to allow `http://` and `https://`, or
-    /// both (e.g. `--load file --load http`).
-    #[arg(long, value_enum, num_args = 0..)]
+    /// Enable external-reference loading. Pass `--load file` to
+    /// allow `file://` refs, `--load http` to allow `http://` and
+    /// `https://`. Repeat the flag to combine
+    /// (e.g. `--load file --load http`).
+    #[arg(long, value_enum)]
     load: Vec<LoaderKind>,
 
     /// Treat unused / missing tags as warnings rather than errors.
@@ -118,12 +119,19 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
     let result = detected.validate(options, loader.as_mut());
     match result {
         Ok(()) => {
-            println!("{}: valid {}", args.file.display(), detected.label());
+            // Success line goes to stderr too: stdout stays empty on
+            // `validate`, so it can be safely composed in shell
+            // pipelines that only want the validation status.
+            eprintln!("{}: valid {}", args.file.display(), detected.label());
             Ok(())
         }
         Err(err) => {
+            // All diagnostics go to stderr so stdout stays clean —
+            // especially for `convert`, which emits machine-readable
+            // JSON on stdout, and for any future caller that pipes the
+            // CLI's output.
             for e in &err.errors {
-                println!("- {e}");
+                eprintln!("- {e}");
             }
             Err(anyhow!(
                 "{}: validation failed ({} error{})",

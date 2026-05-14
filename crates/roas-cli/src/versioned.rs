@@ -153,22 +153,45 @@ fn detect(raw: &str) -> Result<SpecVersion> {
         .ok_or_else(|| anyhow!("spec must be a JSON object at the top level"))?;
 
     if let Some(swagger) = obj.get("swagger").and_then(|v| v.as_str()) {
-        if swagger.starts_with("2.") {
+        let (major, _) = parse_version(swagger)
+            .ok_or_else(|| anyhow!("unsupported swagger version: {swagger}"))?;
+        if major == 2 {
             return Ok(SpecVersion::V2);
         }
         bail!("unsupported swagger version: {swagger}");
     }
 
     if let Some(openapi) = obj.get("openapi").and_then(|v| v.as_str()) {
-        return match openapi {
-            v if v.starts_with("3.0") => Ok(SpecVersion::V3_0),
-            v if v.starts_with("3.1") => Ok(SpecVersion::V3_1),
-            v if v.starts_with("3.2") => Ok(SpecVersion::V3_2),
-            v => Err(anyhow!("unsupported openapi version: {v}")),
+        let (major, minor) = parse_version(openapi)
+            .ok_or_else(|| anyhow!("unsupported openapi version: {openapi}"))?;
+        return match (major, minor) {
+            (3, 0) => Ok(SpecVersion::V3_0),
+            (3, 1) => Ok(SpecVersion::V3_1),
+            (3, 2) => Ok(SpecVersion::V3_2),
+            _ => Err(anyhow!("unsupported openapi version: {openapi}")),
         };
     }
 
     bail!("could not detect spec version: no `openapi` or `swagger` field at top level")
+}
+
+/// Parse the leading `<major>.<minor>` of a version string like
+/// `"3.2.0"` / `"3.10.0-beta.1"` into `(3, 2)` / `(3, 10)`. Returns
+/// `None` if the input doesn't start with a `<int>.<int>` pair.
+///
+/// Distinguishes `"3.10"` from `"3.1"` (the old `starts_with("3.1")`
+/// check would have lumped them together).
+fn parse_version(s: &str) -> Option<(u32, u32)> {
+    let mut parts = s.splitn(3, '.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor_raw = parts.next()?;
+    // Strip anything after the minor segment that isn't a digit
+    // (handles `3.2.0-rc1` and `3.10` alike).
+    let minor_end = minor_raw
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(minor_raw.len());
+    let minor = minor_raw.get(..minor_end)?.parse::<u32>().ok()?;
+    Some((major, minor))
 }
 
 fn parse_as(version: SpecVersion, raw: &str) -> Result<DetectedSpec> {
@@ -186,4 +209,39 @@ fn parse_as(version: SpecVersion, raw: &str) -> Result<DetectedSpec> {
             DetectedSpec::V3_2(serde_json::from_str(raw).context("parsing as OpenAPI 3.2")?)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_version_extracts_major_minor() {
+        assert_eq!(parse_version("3.2.0"), Some((3, 2)));
+        assert_eq!(parse_version("3.10"), Some((3, 10)));
+        assert_eq!(parse_version("3.10.0-rc1"), Some((3, 10)));
+        assert_eq!(parse_version("2.0"), Some((2, 0)));
+        assert_eq!(parse_version("12.345.6"), Some((12, 345)));
+    }
+
+    #[test]
+    fn parse_version_rejects_malformed() {
+        assert_eq!(parse_version(""), None);
+        assert_eq!(parse_version("3"), None);
+        assert_eq!(parse_version("v3.2"), None);
+        assert_eq!(parse_version("3.x"), None);
+    }
+
+    #[test]
+    fn detect_distinguishes_3_1_from_3_10() {
+        // The old `starts_with("3.1")` check would have lumped these
+        // together. `3.10.0` is not currently a supported OAS version,
+        // so it must surface as `unsupported`, not silently fall into
+        // the 3.1 bucket.
+        let raw_3_1 = r#"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{}}"#;
+        let raw_3_10 = r#"{"openapi":"3.10.0","info":{"title":"x","version":"1"},"paths":{}}"#;
+        assert!(matches!(detect(raw_3_1).unwrap(), SpecVersion::V3_1));
+        let err = detect(raw_3_10).unwrap_err().to_string();
+        assert!(err.contains("unsupported openapi version"), "got: {err}");
+    }
 }

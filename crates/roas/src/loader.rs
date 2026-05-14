@@ -89,6 +89,19 @@ pub enum LoaderError {
         source: std::io::Error,
     },
 
+    /// Fetcher-side transport failure: anything the fetcher couldn't
+    /// turn into a parseable response body (network error, non-2xx
+    /// HTTP response, connection refused, etc.). The exact underlying
+    /// error type is up to the fetcher; it's boxed here so the
+    /// loader's API doesn't have to depend on any specific transport
+    /// crate.
+    #[error("failed to fetch `{uri}`")]
+    Fetch {
+        uri: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("failed to parse `{uri}`")]
     Parse {
         uri: String,

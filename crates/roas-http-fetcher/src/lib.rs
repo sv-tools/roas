@@ -57,36 +57,74 @@ impl Default for HttpFetcher {
     }
 }
 
+/// Error returned to [`LoaderError::Fetch`] from this fetcher.
+/// Carries the HTTP status (if a response was actually received) and
+/// the originating `reqwest` error chain.
+#[derive(Debug, thiserror::Error)]
+pub enum HttpFetchError {
+    /// Transport-level failure (DNS, TCP, TLS, redirect loop, etc.) —
+    /// the request never produced a response.
+    #[error("HTTP request to `{uri}` failed: {source}")]
+    Request {
+        uri: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    /// Non-2xx HTTP response.
+    #[error("HTTP {status} from `{uri}`")]
+    Status {
+        uri: String,
+        status: reqwest::StatusCode,
+    },
+    /// 2xx response but the body couldn't be read end-to-end.
+    #[error("reading HTTP body from `{uri}` failed: {source}")]
+    Body {
+        uri: String,
+        #[source]
+        source: reqwest::Error,
+    },
+}
+
 impl ResourceFetcher for HttpFetcher {
     fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
         let scheme = uri.scheme();
         if scheme != "http" && scheme != "https" {
             return Err(LoaderError::UnsupportedFetcherUri(uri.as_str().to_owned()));
         }
-        let response = self.client.get(uri.clone()).send().map_err(|source| {
-            // The loader has no `Http`/`Network` variant on `LoaderError`,
-            // so wrap the transport failure as a `Parse` error with the
-            // network error rendered into the source. This keeps the
-            // crate boundary clean without forcing a `LoaderError`
-            // change upstream.
-            LoaderError::Parse {
-                uri: uri.as_str().to_owned(),
-                source: serde_json::Error::io(std::io::Error::other(source.to_string())),
-            }
-        })?;
+        let uri_str = uri.as_str().to_owned();
+        // Transport failure (DNS / TCP / TLS / redirect cycle / etc.).
+        let response =
+            self.client
+                .get(uri.clone())
+                .send()
+                .map_err(|source| LoaderError::Fetch {
+                    uri: uri_str.clone(),
+                    source: Box::new(HttpFetchError::Request {
+                        uri: uri_str.clone(),
+                        source,
+                    }),
+                })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(LoaderError::Parse {
-                uri: uri.as_str().to_owned(),
-                source: serde_json::Error::io(std::io::Error::other(format!("HTTP {status}"))),
+            return Err(LoaderError::Fetch {
+                uri: uri_str.clone(),
+                source: Box::new(HttpFetchError::Status {
+                    uri: uri_str,
+                    status,
+                }),
             });
         }
-        let body = response.bytes().map_err(|source| LoaderError::Parse {
-            uri: uri.as_str().to_owned(),
-            source: serde_json::Error::io(std::io::Error::other(source.to_string())),
+        let body = response.bytes().map_err(|source| LoaderError::Fetch {
+            uri: uri_str.clone(),
+            source: Box::new(HttpFetchError::Body {
+                uri: uri_str.clone(),
+                source,
+            }),
         })?;
+        // Parse failures stay on `Parse` — they're genuinely about the
+        // body's content, not the transport.
         serde_json::from_slice::<Value>(&body).map_err(|source| LoaderError::Parse {
-            uri: uri.as_str().to_owned(),
+            uri: uri_str,
             source,
         })
     }
@@ -95,6 +133,7 @@ impl ResourceFetcher for HttpFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn fetcher_rejects_non_http_scheme() {
@@ -104,5 +143,34 @@ mod tests {
             .fetch(&url)
             .expect_err("non-http scheme must be rejected");
         assert!(matches!(err, LoaderError::UnsupportedFetcherUri(_)));
+    }
+
+    #[test]
+    fn transport_failure_surfaces_as_loader_fetch_error() {
+        // Point at a port that won't accept connections; the request
+        // path should never get past the transport layer. Use a short
+        // timeout so the test doesn't hang in CI.
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let mut fetcher = HttpFetcher::with_client(client);
+        // 127.0.0.1:1 is a privileged port that's not listening; the
+        // OS rejects the connect immediately.
+        let url = Url::parse("http://127.0.0.1:1/openapi.json").unwrap();
+        let err = fetcher
+            .fetch(&url)
+            .expect_err("transport failure must be surfaced");
+        match err {
+            LoaderError::Fetch { uri, source } => {
+                assert_eq!(uri, "http://127.0.0.1:1/openapi.json");
+                let detail = source.to_string();
+                assert!(
+                    detail.contains("HTTP request") || detail.contains("127.0.0.1:1"),
+                    "expected request-failure detail, got: {detail}"
+                );
+            }
+            other => panic!("expected LoaderError::Fetch, got {other:?}"),
+        }
     }
 }
