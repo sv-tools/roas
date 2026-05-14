@@ -2,21 +2,31 @@
 
 ## Project Structure & Module Organization
 
-This crate implements OpenAPI parsing, generation, loading, and validation in Rust. Public entry points live in
-`src/lib.rs`. Version-specific modules are split by OpenAPI version: `src/v2/`, `src/v3_0/`, `src/v3_1/`, and
-`src/v3_2/`, with matching top-level feature gates in `src/v2.rs`, `src/v3_0.rs`, `src/v3_1.rs`, and `src/v3_2.rs`.
-Shared types and helpers live under `src/common/`, while loader and validation logic are in `src/loader.rs` and
-`src/validation.rs`.
+This repository is a Cargo workspace with three published crates under `crates/`:
 
-Integration tests are in `tests/*_test.rs`. JSON fixtures are grouped by version in `tests/v2_data/`,
-`tests/v3_0_data/`, `tests/v3_1_data/`, `tests/v3_2_data/`, and loader fixtures in `tests/loader_data/`.
+- `crates/roas/` — the library. Implements OpenAPI parsing, loading, and validation. Public entry points live in
+  `crates/roas/src/lib.rs`. Version-specific modules are split by OpenAPI version: `v2/`, `v3_0/`, `v3_1/`, `v3_2/`,
+  with matching top-level feature gates. Shared types live under `common/`; loader and validation logic are in
+  `loader.rs` and `validation.rs`.
+- `crates/roas-cli/` — the `roas` binary. Provides `validate` and `convert` subcommands. Depends on `roas` with all
+  version features enabled and on `roas-http-fetcher` for `--load http`.
+- `crates/roas-http-fetcher/` — sync `HttpFetcher` (via `reqwest::blocking`) that implements the loader's
+  `ResourceFetcher` trait, for resolving `http://` / `https://` external `$ref`s.
+
+The workspace root `Cargo.toml` carries shared package metadata (`[workspace.package]`) and shared dependency versions
+(`[workspace.dependencies]`) so the three crates stay in lockstep.
+
+Integration tests live with the lib in `crates/roas/tests/*_test.rs`. JSON fixtures are grouped by version in
+`crates/roas/tests/v2_data/`, `crates/roas/tests/v3_0_data/`, `crates/roas/tests/v3_1_data/`,
+`crates/roas/tests/v3_2_data/`, and loader fixtures in `crates/roas/tests/loader_data/`.
 
 ## Build, Test, and Development Commands
 
 - `cargo install-tools`: installs the CI toolchain from `.cargo/config.toml` (`cargo-deny`, `cargo-llvm-cov`,
   `cargo-machete`, `cargo-nextest`, `cargo-action-fmt`).
-- `cargo build` builds the crate with the default `v3_2` feature.
-- `cargo nextest run --all-features` checks all OpenAPI version modules together.
+- `cargo build` builds the workspace (lib with default `v3_2`, CLI, HTTP fetcher).
+- `cargo build -p roas-cli` builds just the CLI binary.
+- `cargo nextest run --workspace --all-features` checks all OpenAPI version modules together.
 - `cargo fmt --all` applies standard Rust formatting across the whole workspace.
 - `cargo clippy --all-features --all-targets -- -D warnings`: runs lints with warnings treated as errors.
 - `cargo deny check` audits licenses, advisories, bans, and sources using `deny.toml`.

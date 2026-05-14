@@ -1,39 +1,20 @@
-[package]
-name = "roas"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.11.0"
 edition = "2024"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
-description = "Rust OpenAPI Specification"
-readme = "README.md"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/sv-tools/roas"
 repository = "https://github.com/sv-tools/roas"
 keywords = ["openapi", "swagger"]
-categories = ["web-programming", "parser-implementations"]
-include = [
-    "src",
-    "Cargo.toml",
-    "README.md",
-    "LICENSE-APACHE",
-    "LICENSE-MIT",
-]
-publish=true
 
-[features]
-default = ["v3_2"]
-# Support for OpenAPI v2
-v2 = []
+[workspace.dependencies]
+roas = { version = "0.11.0", path = "crates/roas" }
+roas-http-fetcher = { version = "0.11.0", path = "crates/roas-http-fetcher" }
 
-# Support for OpenAPI v3.0.x
-v3_0 = []
-
-# Support for OpenAPI v3.1.x
-v3_1 = []
-
-# Support for OpenAPI v3.2.x
-v3_2 = []
-
-[dependencies]
 enumset = "1.1.10"
 lazy-regex = "3.6.0"
 monostate = "1.0.0"
@@ -42,3 +23,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
 thiserror = "2.0.16"
 url = "2.5.8"
+
+anyhow = "1.0.99"
+clap = { version = "4.5.50", features = ["derive"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }

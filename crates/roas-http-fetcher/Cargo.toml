@@ -1,0 +1,19 @@
+[package]
+name = "roas-http-fetcher"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+description = "HTTP / HTTPS resource fetcher for roas's external-reference loader"
+categories = ["web-programming"]
+publish = true
+
+[dependencies]
+roas.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
