@@ -122,14 +122,34 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-      - name: Dry run publish
-        run: cargo publish --all-features --package ${{ matrix.package }} --dry-run --verbose
-      - name: Create package
-        run: cargo package --all-features --package ${{ matrix.package }} --verbose
+      # `cargo publish --dry-run --no-verify` packages the crate and
+      # checks that its declared dependencies resolve against
+      # crates.io. For a freshly-published workspace this can fail on
+      # crates whose path-only workspace deps haven't reached
+      # crates.io yet (the chicken-and-egg "first release" case). We
+      # treat that specific failure as a soft skip — the rest of the
+      # workflow still validates the package via build / test /
+      # clippy, and the actual publish happens bottom-up in the
+      # publish workflow.
+      - name: Test publish
+        run: |
+          set -o pipefail
+          LOG=$(mktemp)
+          if cargo publish --dry-run --no-verify --all-features \
+              --package "${{ matrix.package }}" --verbose 2>&1 | tee "$LOG"; then
+            exit 0
+          fi
+          if grep -q "no matching package named" "$LOG"; then
+            echo "::warning::${{ matrix.package }} has a workspace-internal dependency that isn't on crates.io yet — skipping the test-publish step for this crate. It will be exercised by the publish workflow once dependencies are released bottom-up."
+            exit 0
+          fi
+          exit 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: hashFiles(format('target/package/{0}-*.crate', matrix.package)) != ''
         with:
           name: ${{ matrix.package }}-crate
           path: target/package/${{ matrix.package }}-*.crate
+          if-no-files-found: ignore
   Publish:
     name: Wait for publishing jobs to finish
     needs:
