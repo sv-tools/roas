@@ -3,13 +3,13 @@
 Rust OpenAPI Specification (v2.0, v3.0.X, v3.1.X, v3.2.X) parser, validator, and loader, plus a command-line
 front-end.
 
-This repository is a Cargo workspace with three published crates:
+This repository is a Cargo workspace with multiple published crates:
 
-| Crate | Description | crates.io |
-| --- | --- | --- |
-| [`roas`](crates/roas) | Library. Parses, validates, and loads OpenAPI specs. Version-gated via `v2` / `v3_0` / `v3_1` / `v3_2` features. | [![crates.io](https://img.shields.io/crates/v/roas.svg)](https://crates.io/crates/roas) |
-| [`roas-cli`](crates/roas-cli) | Command-line front-end. Installs the `roas` binary. Provides `validate` and `convert` subcommands. | [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli) |
-| [`roas-http-fetcher`](crates/roas-http-fetcher) | `http://` / `https://` fetcher for the loader. Wraps `reqwest::blocking`. | [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher) |
+| Crate                                           | Description                                                                                                      | crates.io                                                                                                         |
+|-------------------------------------------------|------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| [`roas`](crates/roas)                           | Library. Parses, validates, and loads OpenAPI specs. Version-gated via `v2` / `v3_0` / `v3_1` / `v3_2` features. | [![crates.io](https://img.shields.io/crates/v/roas.svg)](https://crates.io/crates/roas)                           |
+| [`roas-cli`](crates/roas-cli)                   | Command-line front-end. Installs the `roas` binary. Provides `validate` and `convert` subcommands.               | [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)                   |
+| [`roas-http-fetcher`](crates/roas-http-fetcher) | `http://` / `https://` fetcher for the loader. Wraps `reqwest::blocking`.                                        | [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher) |
 
 Supported specifications:
 

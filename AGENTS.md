@@ -2,31 +2,21 @@
 
 ## Project Structure & Module Organization
 
-This repository is a Cargo workspace with three published crates under `crates/`:
+This repository is a Cargo workspace with multiple published crates under `crates/`. Each crate carries its own
+`README.md` describing its purpose, public surface, and usage; the root [`README.md`](README.md) links to all of them.
+When adding a new crate, drop it under `crates/<name>/` and include a `README.md` so it shows up correctly on
+crates.io and docs.rs.
 
-- `crates/roas/` — the library. Implements OpenAPI parsing, loading, and validation. Public entry points live in
-  `crates/roas/src/lib.rs`. Version-specific modules are split by OpenAPI version: `v2/`, `v3_0/`, `v3_1/`, `v3_2/`,
-  with matching top-level feature gates. Shared types live under `common/`; loader and validation logic are in
-  `loader.rs` and `validation.rs`.
-- `crates/roas-cli/` — the `roas` binary. Provides `validate` and `convert` subcommands. Depends on `roas` with all
-  version features enabled and on `roas-http-fetcher` for `--load http`.
-- `crates/roas-http-fetcher/` — sync `HttpFetcher` (via `reqwest::blocking`) that implements the loader's
-  `ResourceFetcher` trait, for resolving `http://` / `https://` external `$ref`s.
-
-The workspace root `Cargo.toml` carries shared package metadata (`[workspace.package]`) and shared dependency versions
-(`[workspace.dependencies]`) so the three crates stay in lockstep.
-
-Integration tests live with the lib in `crates/roas/tests/*_test.rs`. JSON fixtures are grouped by version in
-`crates/roas/tests/v2_data/`, `crates/roas/tests/v3_0_data/`, `crates/roas/tests/v3_1_data/`,
-`crates/roas/tests/v3_2_data/`, and loader fixtures in `crates/roas/tests/loader_data/`.
+The workspace root `Cargo.toml` carries shared package metadata (`[workspace.package]`) and shared dependency
+versions (`[workspace.dependencies]`), so per-crate manifests inherit `version` / `edition` / `authors` / `license` /
+`homepage` / `repository` / `keywords` and pull common deps via `<dep>.workspace = true`.
 
 ## Build, Test, and Development Commands
 
 - `cargo install-tools`: installs the CI toolchain from `.cargo/config.toml` (`cargo-deny`, `cargo-llvm-cov`,
   `cargo-machete`, `cargo-nextest`, `cargo-action-fmt`).
-- `cargo build` builds the workspace (lib with default `v3_2`, CLI, HTTP fetcher).
-- `cargo build -p roas-cli` builds just the CLI binary.
-- `cargo nextest run --workspace --all-features` checks all OpenAPI version modules together.
+- `cargo build` builds the whole workspace; `cargo build -p <crate>` narrows to a single package.
+- `cargo nextest run --workspace --all-features` runs the full workspace test suite.
 - `cargo fmt --all` applies standard Rust formatting across the whole workspace.
 - `cargo clippy --workspace --all-features --all-targets -- -D warnings`: runs lints with warnings treated as errors.
 - `cargo deny check` audits licenses, advisories, bans, and sources using `deny.toml`.
@@ -34,34 +24,28 @@ Integration tests live with the lib in `crates/roas/tests/*_test.rs`. JSON fixtu
 
 ## Coding Style & Naming Conventions
 
-Use Rust 2024 idioms and standard `rustfmt` formatting. Keep modules aligned with existing versioned structure: new v3.2
-types belong in `crates/roas/src/v3_2/`, shared behavior belongs in `crates/roas/src/common/`, and cross-version
-conversion code should follow names like `from_v3_1.rs`.
+Use Rust 2024 idioms and standard `rustfmt` formatting. Prefer descriptive snake_case for modules, functions, and
+tests; `UpperCamelCase` for public structs and enums. Prefer direct sibling modules (e.g. `host_impl.rs`) over
+`mod.rs`. Keep serde-facing field names consistent with the wire format being modelled.
 
-Prefer descriptive snake_case for modules, functions, and tests. Prefer direct sibling modules such as `host_impl.rs`
-over `mod.rs`. Public structs and enums use `UpperCamelCase`. Keep
-serde-facing field names consistent with OpenAPI JSON names via existing serde patterns.
-
-Public API lives at the crate root. Everything else is `pub(crate)`. Prefer `pub(crate)` for new items
-unless external callers need them.
+Public API lives at the crate root. Everything else is `pub(crate)`. Prefer `pub(crate)` for new items unless
+external callers need them.
 
 ## Testing Guidelines
 
-Add integration coverage in the matching `tests/*_test.rs` file and place reusable specs in the corresponding fixture
-directory. Tests commonly deserialize fixture JSON into the versioned `Spec`, call `Validate::validate`, and assert
-round-trip JSON equality.
+Place integration tests under `crates/<name>/tests/`. If the test needs fixtures, store them in a sibling
+`tests/<topic>_data/` directory keyed by relative path from the crate root.
 
-When adding feature-specific behavior on `roas` (the library), run the relevant feature set explicitly, for example
-`cargo nextest run -p roas --no-default-features --features v3_0` or `cargo nextest run --workspace --all-features`.
-The version feature flags live on `roas`; the other workspace crates (`roas-cli`, `roas-http-fetcher`) compile
-unconditionally.
+If a crate gates behaviour behind feature flags, exercise each relevant subset explicitly — e.g.
+`cargo nextest run -p <crate> --no-default-features --features <feature>` — in addition to the workspace-wide
+`cargo nextest run --workspace --all-features` pass.
 
-Aim for ~95% line coverage on changed code; treat ~90% as the floor. Codecov reports `codecov/patch`
-and `codecov/project/*` checks on each PR — those are informational. A PR is releasable when the
-build × feature matrix, `cargo nextest run --workspace --all-features`,
-`cargo clippy --workspace --all-features --all-targets -- -D warnings`, and `cargo fmt --all` are all green; a marginal
-codecov dip below the patch threshold can still land if the missed lines are genuinely unreachable from the test
-surface (e.g. cross-feature dead arms). Otherwise add targeted unit tests for the gap.
+Aim for ~95% line coverage on changed code; treat ~90% as the floor. Codecov reports `codecov/patch` and
+`codecov/project/*` checks on each PR — those are informational. A PR is releasable when the build × feature matrix,
+`cargo nextest run --workspace --all-features`, `cargo clippy --workspace --all-features --all-targets -- -D warnings`,
+and `cargo fmt --all` are all green; a marginal codecov dip below the patch threshold can still land if the missed
+lines are genuinely unreachable from the test surface (e.g. cross-feature dead arms). Otherwise add targeted unit
+tests for the gap.
 
 ## Commit & Pull Request Guidelines
 
@@ -71,18 +55,20 @@ docs / chore changes. `main` is updated only by merging PRs.
 **Branch names** mirror the commit-prefix vocabulary: `feat/<slug>`, `refactor/<slug>`, `fix/<slug>`, `docs/<slug>`,
 `test/<slug>`, `chore/<slug>`. Pick the prefix that matches the dominant change in the branch.
 
-**Commits** use concise, scoped prefixes such as `docs:`, `loader:`, `test:`, `spec:`, `fixups:`. Follow that style
-with an imperative summary, for example `loader: preserve base URL for nested refs`. **Always pass `-s`** so each
-commit carries a `Signed-off-by` trailer. Do not use `Co-authored-by` for agent assistance; use `Assisted-by`
-instead. Do not include `Generated by Agent` in commit messages or pull request descriptions.
+**Commits** use a `<scope>:` prefix followed by an imperative summary — `<scope>` is typically the crate or
+sub-module that owns the dominant change (e.g. `docs:`, `test:`, `fixups:`, or a crate / module name).
+**Always pass `-s`** so each commit carries a `Signed-off-by` trailer. Do not use `Co-authored-by` for agent
+assistance; use `Assisted-by` instead. Do not include `Generated by Agent` in commit messages or pull request
+descriptions.
 
 **Pull request descriptions** should be the main "what changed / why" content only. Cover the behaviour change,
-call out breaking changes for downstream consumers when applicable, and link related issues. Include fixture names
-or minimal JSON examples for parser / validator changes so reviewers can reproduce the case quickly. Do **not**
+call out breaking changes for downstream consumers when applicable, and link related issues. Include relevant
+fixture names or minimal examples for data-format changes so reviewers can reproduce the case quickly. Do **not**
 include `## Test plan`, `## How to test`, or similar verification sections — those belong in the PR's CI checks,
 not in the body. The PR's CI matrix is the source of truth for what passed.
 
 ## Security & Configuration Tips
 
-Do not commit credentials, private API specs, or local machine paths. Keep dependency and license changes intentional,
-and run `cargo deny check` plus `cargo machete` when adding, upgrading, or removing dependencies.
+Do not commit credentials, private third-party documents, or local machine paths. Keep dependency and license
+changes intentional, and run `cargo deny check` plus `cargo machete` when adding, upgrading, or removing
+dependencies.

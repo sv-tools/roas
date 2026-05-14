@@ -10,13 +10,7 @@ keywords.workspace = true
 description = "Rust OpenAPI Specification — parser, validator, and loader for OpenAPI v2.0 / v3.0.x / v3.1.x / v3.2.x"
 readme = "README.md"
 categories = ["web-programming", "parser-implementations"]
-include = [
-    "src",
-    "Cargo.toml",
-    "README.md",
-    "LICENSE-APACHE",
-    "LICENSE-MIT",
-]
+include = ["src", "Cargo.toml", "README.md"]
 publish = true
 
 [features]
