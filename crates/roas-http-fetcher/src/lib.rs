@@ -22,7 +22,16 @@
 use reqwest::blocking::Client;
 use roas::loader::{LoaderError, ResourceFetcher};
 use serde_json::Value;
+use std::time::Duration;
 use url::Url;
+
+/// Default per-request timeout for `HttpFetcher::new()`. Picked
+/// generously enough to clear a slow public schema host on the first
+/// request, but low enough that an unreachable or unresponsive
+/// upstream can't hang a validation pass. Callers wanting different
+/// behaviour can build their own `reqwest::blocking::Client` and pass
+/// it to [`HttpFetcher::with_client`].
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `ResourceFetcher` that fetches JSON documents over HTTP/HTTPS via
 /// `reqwest::blocking`.
@@ -30,16 +39,26 @@ use url::Url;
 /// The fetcher does not follow `$ref` chains itself — that's the
 /// loader's job. Each `fetch` call issues a single GET against the
 /// resource URL and parses the response body as JSON.
+///
+/// `HttpFetcher` is `Clone`; the underlying `reqwest::blocking::Client`
+/// shares its connection pool across clones, so a single
+/// `HttpFetcher::new()` cloned into separate `http://` and `https://`
+/// registrations on a `Loader` reuses one pool for both schemes.
+#[derive(Clone)]
 pub struct HttpFetcher {
     client: Client,
 }
 
 impl HttpFetcher {
     /// Build a fetcher with a default `reqwest::blocking::Client`
-    /// (rustls TLS, no proxy beyond the system defaults).
+    /// (rustls TLS, no proxy beyond the system defaults, 30-second
+    /// per-request timeout).
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(DEFAULT_TIMEOUT)
+                .build()
+                .expect("default reqwest::blocking::Client builder must succeed"),
         }
     }
 

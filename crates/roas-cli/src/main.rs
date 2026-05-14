@@ -103,8 +103,13 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
                     l.register_fetcher("file://", JsonFileFetcher);
                 }
                 LoaderKind::Http => {
-                    l.register_fetcher("http://", HttpFetcher::new());
-                    l.register_fetcher("https://", HttpFetcher::new());
+                    // Construct one `HttpFetcher` (and one
+                    // `reqwest::blocking::Client`) and clone it across
+                    // both prefixes so a single connection pool serves
+                    // `http://` and `https://`.
+                    let fetcher = HttpFetcher::new();
+                    l.register_fetcher("http://", fetcher.clone());
+                    l.register_fetcher("https://", fetcher);
                 }
             }
         }
