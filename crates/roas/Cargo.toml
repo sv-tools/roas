@@ -1,0 +1,38 @@
+[package]
+name = "roas"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+description = "Rust OpenAPI Specification — parser, validator, and loader for OpenAPI v2.0 / v3.0.x / v3.1.x / v3.2.x"
+readme = "README.md"
+categories = ["web-programming", "parser-implementations"]
+include = ["src", "Cargo.toml", "README.md"]
+publish = true
+
+[features]
+default = ["v3_2"]
+# Support for OpenAPI v2
+v2 = []
+
+# Support for OpenAPI v3.0.x
+v3_0 = []
+
+# Support for OpenAPI v3.1.x
+v3_1 = []
+
+# Support for OpenAPI v3.2.x
+v3_2 = []
+
+[dependencies]
+enumset.workspace = true
+lazy-regex.workspace = true
+monostate.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true

@@ -1,39 +1,17 @@
-[package]
-name = "roas"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.12.0"
 edition = "2024"
 authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
-description = "Rust OpenAPI Specification"
-readme = "README.md"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/sv-tools/roas"
 repository = "https://github.com/sv-tools/roas"
 keywords = ["openapi", "swagger"]
-categories = ["web-programming", "parser-implementations"]
-include = [
-    "src",
-    "Cargo.toml",
-    "README.md",
-    "LICENSE-APACHE",
-    "LICENSE-MIT",
-]
-publish=true
 
-[features]
-default = ["v3_2"]
-# Support for OpenAPI v2
-v2 = []
-
-# Support for OpenAPI v3.0.x
-v3_0 = []
-
-# Support for OpenAPI v3.1.x
-v3_1 = []
-
-# Support for OpenAPI v3.2.x
-v3_2 = []
-
-[dependencies]
+[workspace.dependencies]
 enumset = "1.1.10"
 lazy-regex = "3.6.0"
 monostate = "1.0.0"

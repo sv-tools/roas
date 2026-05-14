@@ -1,58 +1,17 @@
-# roas
+# roas workspace
 
-Rust OpenAPI Specification (v2.0, v3.0.X, v3.1.X and v3.2.X) parser and generator.
+This repository is a Cargo workspace for [roas](https://crates.io/crates/roas) — a Rust implementation of the
+OpenAPI Specification (v2.0, v3.0.x, v3.1.x, v3.2.x).
 
-[![crates.io](https://img.shields.io/crates/v/roas.svg)](https://crates.io/crates/roas)
-[![docs.rs](https://docs.rs/roas/badge.svg)](https://docs.rs/roas)
+| Crate                                                | Docs                                                                                  | crates.io                                                                                                  |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| [`roas`](crates/roas)                                | [![docs.rs](https://docs.rs/roas/badge.svg)](https://docs.rs/roas)                    | [![crates.io](https://img.shields.io/crates/v/roas.svg)](https://crates.io/crates/roas)                    |
 
-Parsing and generating OpenAPI Specification:
-
-* [x] OpenAPI Specification [v2.0](https://spec.openapis.org/oas/v2.0.html)
-* [x] OpenAPI Specification [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)
-* [x] OpenAPI Specification [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html)
-* [x] OpenAPI Specification [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html) (**default**)
+See each crate's `README.md` for usage, and `AGENTS.md` at the repository root for contributor guidelines.
 
 > [!CAUTION]
-> The project is in early development stage, so the API may change in the future.
-> Consider any 0.x.x version as unstable and subject to breaking changes.
+> The project is in early development; treat any `0.x.x` version as unstable and subject to breaking changes.
 
-## Usage
+## License
 
-To use `roas`, add it to your `Cargo.toml`:
-
-```shell
-cargo add roas
-```
-
-or manually add the following lines:
-
-```toml
-[dependencies]
-roas = "0.8"
-```
-
-The default feature is `v3_2`. To parse v2.0, v3.0 or v3.1 specs, enable the
-corresponding feature:
-
-```toml
-[dependencies]
-roas = { version = "0.7", default-features = false, features = ["v3_0"] }
-```
-
-## Examples
-
-The default feature is `v3_2`. The example below also uses `serde_json`
-directly, so add both crates:
-
-```shell
-cargo add roas serde_json
-```
-
-```rust
-use roas::v3_2::spec::Spec;
-use roas::validation::{Options, Validate};
-
-let raw_json = r#"{ "openapi": "3.2.0", "info": { "title": "demo", "version": "1" }, "paths": {} }"#;
-let spec: Spec = serde_json::from_str(raw_json).unwrap();
-spec.validate(Options::IgnoreMissingTags | Options::IgnoreExternalReferences).unwrap();
-```
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
