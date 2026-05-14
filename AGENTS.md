@@ -2,54 +2,54 @@
 
 ## Project Structure & Module Organization
 
-This crate implements OpenAPI parsing, generation, loading, and validation in Rust. Public entry points live in
-`src/lib.rs`. Version-specific modules are split by OpenAPI version: `src/v2/`, `src/v3_0/`, `src/v3_1/`, and
-`src/v3_2/`, with matching top-level feature gates in `src/v2.rs`, `src/v3_0.rs`, `src/v3_1.rs`, and `src/v3_2.rs`.
-Shared types and helpers live under `src/common/`, while loader and validation logic are in `src/loader.rs` and
-`src/validation.rs`.
+This repository is a Cargo workspace with one or more published crates under `crates/`. Each crate carries its own
+`README.md`, `Cargo.toml`, and `src/` tree. Shared metadata (`version`, `edition`, `authors`, `license`, `homepage`,
+`repository`, `keywords`) and shared third-party dependencies live in the root `Cargo.toml` under
+`[workspace.package]` and `[workspace.dependencies]`; per-crate manifests inherit via `.workspace = true` and add only
+what is crate-specific (description, features, dependency selection). New crates go in `crates/<name>/` and are
+picked up automatically by the `crates/*` workspace glob.
 
-Integration tests are in `tests/*_test.rs`. JSON fixtures are grouped by version in `tests/v2_data/`,
-`tests/v3_0_data/`, `tests/v3_1_data/`, `tests/v3_2_data/`, and loader fixtures in `tests/loader_data/`.
+LICENSE files live only at the repository root; the SPDX `MIT OR Apache-2.0` expression in each crate's manifest is
+the source of truth for downstream consumers.
+
+Integration tests for a crate live under that crate's `tests/` directory. Fixture data sits next to the tests that
+load it, grouped however makes sense for the crate.
 
 ## Build, Test, and Development Commands
 
 - `cargo install-tools`: installs the CI toolchain from `.cargo/config.toml` (`cargo-deny`, `cargo-llvm-cov`,
   `cargo-machete`, `cargo-nextest`, `cargo-action-fmt`).
-- `cargo build` builds the crate with the default `v3_2` feature.
-- `cargo nextest run --all-features` checks all OpenAPI version modules together.
+- `cargo build --workspace` builds every crate with default features; pass `-p <crate>` to build one.
+- `cargo nextest run --workspace --all-features` runs all tests across the workspace.
 - `cargo fmt --all` applies standard Rust formatting across the whole workspace.
-- `cargo clippy --all-features --all-targets -- -D warnings`: runs lints with warnings treated as errors.
+- `cargo clippy --workspace --all-features --all-targets -- -D warnings`: lints every crate with warnings as errors.
 - `cargo deny check` audits licenses, advisories, bans, and sources using `deny.toml`.
 - `cargo machete` checks for unused dependencies before dependency cleanup.
 
 ## Coding Style & Naming Conventions
 
-Use Rust 2024 idioms and standard `rustfmt` formatting. Keep modules aligned with existing versioned structure: new v3.2
-types belong in `src/v3_2/`, shared behavior belongs in `src/common/`, and cross-version conversion code should follow
-names like `from_v3_1.rs`.
+Use Rust 2024 idioms and standard `rustfmt` formatting. Prefer descriptive snake_case for modules, functions, and
+tests; `UpperCamelCase` for public types. Prefer direct sibling modules (e.g. `host_impl.rs`) over `mod.rs`.
 
-Prefer descriptive snake_case for modules, functions, and tests. Prefer direct sibling modules such as `host_impl.rs`
-over `mod.rs`. Public structs and enums use `UpperCamelCase`. Keep
-serde-facing field names consistent with OpenAPI JSON names via existing serde patterns.
+Keep crate boundaries clean: each crate's public API lives at its crate root. Everything else is `pub(crate)`. Prefer
+`pub(crate)` for new items unless external callers need them. Cross-crate code reuse goes through a published
+dependency, not via path-only links into another crate's internals.
 
-Public API lives at the crate root. Everything else is `pub(crate)`. Prefer `pub(crate)` for new items
-unless external callers need them.
+When adding a new dependency, declare it once in the root `[workspace.dependencies]` and reference it via
+`.workspace = true` in the consuming crate so versions stay in lockstep.
 
 ## Testing Guidelines
 
-Add integration coverage in the matching `tests/*_test.rs` file and place reusable specs in the corresponding fixture
-directory. Tests commonly deserialize fixture JSON into the versioned `Spec`, call `Validate::validate`, and assert
-round-trip JSON equality.
-
-When adding feature-specific behavior, run the relevant feature set explicitly, for example
-`cargo nextest run --features v3_0` or `cargo nextest run --all-features`.
+Place integration tests under `crates/<name>/tests/` and put reusable fixtures alongside them. Tests should be
+runnable with `cargo nextest run -p <name>` for fast iteration, and pass under `cargo nextest run --workspace
+--all-features` before merge.
 
 Aim for ~95% line coverage on changed code; treat ~90% as the floor. Codecov reports `codecov/patch`
 and `codecov/project/*` checks on each PR — those are informational. A PR is releasable when the
-build × feature matrix, `cargo nextest run --all-features`, `cargo clippy --all-features --all-targets -- -D warnings`,
-and `cargo fmt --all` are all green; a marginal codecov dip below the patch threshold can still land if the missed lines
-are genuinely unreachable from the test surface (e.g. cross-feature dead arms). Otherwise add
-targeted unit tests for the gap.
+build × feature matrix, `cargo nextest run --workspace --all-features`,
+`cargo clippy --workspace --all-features --all-targets -- -D warnings`, and `cargo fmt --all` are all green; a
+marginal codecov dip below the patch threshold can still land if the missed lines are genuinely unreachable from the
+test surface (e.g. cross-feature dead arms). Otherwise add targeted unit tests for the gap.
 
 ## Commit & Pull Request Guidelines
 
@@ -59,10 +59,11 @@ docs / chore changes. `main` is updated only by merging PRs.
 **Branch names** mirror the commit-prefix vocabulary: `feat/<slug>`, `refactor/<slug>`, `fix/<slug>`, `docs/<slug>`,
 `test/<slug>`, `chore/<slug>`. Pick the prefix that matches the dominant change in the branch.
 
-**Commits** use concise, scoped prefixes such as `docs:`, `loader:`, `test:`, `spec:`, `fixups:`. Follow that style
-with an imperative summary, for example `loader: preserve base URL for nested refs`. **Always pass `-s`** so each
-commit carries a `Signed-off-by` trailer. Do not use `Co-authored-by` for agent assistance; use `Assisted-by`
-instead. Do not include `Generated by Agent` in commit messages or pull request descriptions.
+**Commits** use concise, scoped prefixes such as `<scope>:` where `<scope>` names the affected area (`docs`,
+`loader`, `test`, `spec`, `fixups`, a crate name, etc.). Follow that with an imperative summary, for example
+`loader: preserve base URL for nested refs`. **Always pass `-s`** so each commit carries a `Signed-off-by` trailer.
+Do not use `Co-authored-by` for agent assistance; use `Assisted-by` instead. Do not include `Generated by Agent` in
+commit messages or pull request descriptions.
 
 **Pull request descriptions** should be the main "what changed / why" content only. Cover the behaviour change,
 call out breaking changes for downstream consumers when applicable, and link related issues. Include fixture names
