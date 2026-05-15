@@ -228,6 +228,25 @@ fn http_fetcher_surfaces_connection_refused_as_loader_error_fetch_request() {
     }
 }
 
+#[test]
+fn http_fetcher_rejects_non_http_scheme_with_unsupported_fetcher_uri() {
+    let mut fetcher = HttpFetcher::new();
+    let err = fetcher
+        .fetch(&Url::parse("file:///tmp/x.json").unwrap())
+        .expect_err("file:// must be rejected");
+    assert!(matches!(err, LoaderError::UnsupportedFetcherUri(_)));
+}
+
+#[tokio::test]
+async fn async_http_fetcher_rejects_non_http_scheme_with_unsupported_fetcher_uri() {
+    let mut fetcher = AsyncHttpFetcher::new();
+    let err = fetcher
+        .fetch(&Url::parse("file:///tmp/x.json").unwrap())
+        .await
+        .expect_err("file:// must be rejected");
+    assert!(matches!(err, LoaderError::UnsupportedFetcherUri(_)));
+}
+
 #[tokio::test]
 async fn async_http_fetcher_returns_parsed_json_on_success() {
     let server = TestServer::start(|_req| TestResponse::ok_json(br#"{"hello":"world"}"#.to_vec()));

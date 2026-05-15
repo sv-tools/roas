@@ -7,12 +7,12 @@ HTTP/HTTPS [`ResourceFetcher`](https://docs.rs/roas/latest/roas/loader/trait.Res
 [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher)
 [![docs.rs](https://docs.rs/roas-http-fetcher/badge.svg)](https://docs.rs/roas-http-fetcher)
 
-Built on `reqwest` with `rustls-tls`. The crate exposes two fetchers:
+Built on `reqwest` with `rustls-tls`. A single generic `Fetcher<C>` underlies two type aliases:
 
-- `HttpFetcher` — `reqwest::blocking::Client`, for `Loader::register_fetcher`.
-- `AsyncHttpFetcher` — `reqwest::Client`, for `Loader::register_async_fetcher`. Requires a tokio runtime when awaited.
+- `HttpFetcher` (= `Fetcher<reqwest::blocking::Client>`) — implements `ResourceFetcher` for `Loader::register_fetcher`.
+- `AsyncHttpFetcher` (= `Fetcher<reqwest::Client>`) — implements `AsyncResourceFetcher` for `Loader::register_async_fetcher`. A tokio runtime must be active when the returned future is awaited.
 
-Both are `Clone` so a single underlying connection pool can be shared across `http://` and `https://` registrations.
+Both forms are `Clone` so a single fetcher can be registered for both `http://` and `https://` prefixes on the same `Loader`, sharing one underlying connection pool. Schemes other than `http` / `https` are rejected with `LoaderError::UnsupportedFetcherUri`. The default constructor builds a client with a 30-second request timeout; `try_new()` is the fallible variant that surfaces TLS / IO environment failures from `reqwest::ClientBuilder`.
 
 ## Features
 

@@ -1,21 +1,22 @@
 //! HTTP/HTTPS [`ResourceFetcher`] / [`AsyncResourceFetcher`] for the [`roas`]
 //! OpenAPI loader.
 //!
-//! Two fetchers are exposed:
-//!   * [`HttpFetcher`] — backed by `reqwest::blocking::Client`, plugs into
-//!     [`Loader::register_fetcher`](roas::loader::Loader::register_fetcher).
-//!   * [`AsyncHttpFetcher`] — backed by `reqwest::Client`, plugs into
-//!     [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher).
-//!     Requires a tokio runtime to be active when the future is awaited.
+//! [`HttpFetcher`] is generic over the underlying `reqwest` client type. The
+//! default selects the blocking client, so `HttpFetcher::new()` returns a
+//! synchronous fetcher suitable for [`Loader::register_fetcher`](roas::loader::Loader::register_fetcher).
+//! The [`AsyncHttpFetcher`] alias selects `reqwest::Client` for use with
+//! [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher);
+//! a tokio runtime must be active when the returned future is awaited.
 //!
-//! Both fetchers are `Clone` so a single underlying connection pool can be
-//! shared across multiple registrations (e.g. one for `http://` and one for
-//! `https://`). Transport failures, non-2xx responses, and unreadable bodies
-//! are surfaced through [`LoaderError::Fetch`] with a [`HttpFetchError`]
-//! source.
+//! Both forms are `Clone` so a single fetcher can be registered for both
+//! `http://` and `https://` prefixes, sharing one underlying connection pool.
+//! Transport failures, non-2xx responses, and unreadable bodies are surfaced
+//! through [`LoaderError::Fetch`] with a [`HttpFetchError`] source. Schemes
+//! other than `http` / `https` are rejected with
+//! [`LoaderError::UnsupportedFetcherUri`].
 //!
-//! With the `yaml` feature enabled, both fetchers parse YAML response bodies
-//! in addition to JSON. Format selection sniffs the response `Content-Type`
+//! With the `yaml` feature enabled, both forms parse YAML response bodies in
+//! addition to JSON. Format selection sniffs the response `Content-Type`
 //! header first and falls back to the URL path extension (`.yaml` / `.yml`).
 
 use reqwest::Client as AsyncClient;
@@ -31,89 +32,78 @@ use url::Url;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// HTTP/HTTPS fetcher backed by `reqwest::blocking::Client`.
+/// HTTP/HTTPS fetcher generic over the underlying `reqwest` client.
 ///
-/// `HttpFetcher` is `Clone` so a single underlying connection pool can be
-/// shared across multiple `Loader` registrations (e.g. one for `http://` and
-/// one for `https://`).
+/// Most callers should reach for one of the two concrete aliases —
+/// [`HttpFetcher`] (blocking) or [`AsyncHttpFetcher`] (async) — rather than
+/// naming `Fetcher<C>` directly. Naming the aliases lets Rust pick the right
+/// inherent `new` / `try_new` impl at the call site without turbofish.
+///
+/// The struct is `Clone` (the underlying `reqwest` client is `Arc`-backed),
+/// so a single fetcher can be registered for both `http://` and `https://`
+/// prefixes on the same `Loader`, sharing one connection pool.
 #[derive(Clone, Debug)]
-pub struct HttpFetcher {
-    client: Client,
+pub struct Fetcher<C> {
+    client: C,
 }
 
-impl HttpFetcher {
-    /// Build an HTTP fetcher with a default `rustls-tls` client and a 30-second
-    /// request timeout.
+/// Blocking HTTP/HTTPS fetcher, suitable for
+/// [`Loader::register_fetcher`](roas::loader::Loader::register_fetcher).
+pub type HttpFetcher = Fetcher<Client>;
+
+/// Async HTTP/HTTPS fetcher, suitable for
+/// [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher).
+/// A tokio runtime must be active when the returned future is awaited.
+pub type AsyncHttpFetcher = Fetcher<AsyncClient>;
+
+impl Fetcher<Client> {
+    /// Build a blocking HTTP fetcher with a default `rustls-tls` client and a
+    /// 30-second request timeout.
+    ///
+    /// Panics if the default `reqwest::blocking::Client` cannot be built.
+    /// See [`try_new`](Self::try_new) for a fallible variant.
     pub fn new() -> Self {
-        Self::with_client(
-            Client::builder()
-                .timeout(DEFAULT_TIMEOUT)
-                .build()
-                .expect("default reqwest::blocking::Client must build"),
-        )
+        Self::try_new().expect("default reqwest::blocking::Client must build")
     }
 
-    /// Build a fetcher from a caller-provided `reqwest::blocking::Client`. Use
-    /// this to override timeouts, redirect policy, TLS config, or proxy
+    /// Fallible variant of [`new`](Self::new) that surfaces TLS / IO
+    /// environment failures from the underlying `ClientBuilder`.
+    pub fn try_new() -> Result<Self, reqwest::Error> {
+        Ok(Self::with_client(
+            Client::builder().timeout(DEFAULT_TIMEOUT).build()?,
+        ))
+    }
+
+    /// Build a fetcher from a caller-provided `reqwest::blocking::Client`.
+    /// Use this to override timeouts, redirect policy, TLS config, or proxy
     /// settings.
     pub fn with_client(client: Client) -> Self {
         Self { client }
     }
 }
 
-impl Default for HttpFetcher {
+impl Default for Fetcher<Client> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ResourceFetcher for HttpFetcher {
-    fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
-        let uri_string = uri.as_str().to_string();
-        let response = self.client.get(uri.clone()).send().map_err(|source| {
-            fetch_error(uri_string.clone(), HttpFetchError::Request { source })
-        })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(fetch_error(uri_string, HttpFetchError::Status { status }));
-        }
-
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        let bytes = response
-            .bytes()
-            .map_err(|source| fetch_error(uri_string.clone(), HttpFetchError::Body { source }))?;
-
-        parse_body(&uri_string, uri, content_type.as_deref(), &bytes)
-    }
-}
-
-/// Async HTTP/HTTPS fetcher backed by `reqwest::Client`.
-///
-/// `AsyncHttpFetcher` mirrors [`HttpFetcher`] for callers that drive the
-/// loader through [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher).
-/// It is `Clone` and shares the underlying connection pool across clones.
-/// A tokio runtime must be active when the returned future is awaited.
-#[derive(Clone, Debug)]
-pub struct AsyncHttpFetcher {
-    client: AsyncClient,
-}
-
-impl AsyncHttpFetcher {
+impl Fetcher<AsyncClient> {
     /// Build an async HTTP fetcher with a default `rustls-tls` client and a
     /// 30-second request timeout.
+    ///
+    /// Panics if the default `reqwest::Client` cannot be built. See
+    /// [`try_new`](Self::try_new) for a fallible variant.
     pub fn new() -> Self {
-        Self::with_client(
-            AsyncClient::builder()
-                .timeout(DEFAULT_TIMEOUT)
-                .build()
-                .expect("default reqwest::Client must build"),
-        )
+        Self::try_new().expect("default reqwest::Client must build")
+    }
+
+    /// Fallible variant of [`new`](Self::new) that surfaces TLS / IO
+    /// environment failures from the underlying `ClientBuilder`.
+    pub fn try_new() -> Result<Self, reqwest::Error> {
+        Ok(Self::with_client(
+            AsyncClient::builder().timeout(DEFAULT_TIMEOUT).build()?,
+        ))
     }
 
     /// Build a fetcher from a caller-provided `reqwest::Client`. Use this to
@@ -123,25 +113,57 @@ impl AsyncHttpFetcher {
     }
 }
 
-impl Default for AsyncHttpFetcher {
+impl Default for Fetcher<AsyncClient> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl AsyncResourceFetcher for AsyncHttpFetcher {
+impl ResourceFetcher for Fetcher<Client> {
+    fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
+        check_scheme(uri)?;
+        let response = self.client.get(uri.as_str()).send().map_err(|source| {
+            fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(fetch_error(
+                uri.as_str().to_string(),
+                HttpFetchError::Status { status },
+            ));
+        }
+
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let bytes = response.bytes().map_err(|source| {
+            fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
+        })?;
+
+        parse_body(uri, content_type.as_deref(), &bytes)
+    }
+}
+
+impl AsyncResourceFetcher for Fetcher<AsyncClient> {
     fn fetch<'a>(&'a mut self, uri: &'a Url) -> FetchFuture<'a> {
         let client = self.client.clone();
         let uri = uri.clone();
         Box::pin(async move {
-            let uri_string = uri.as_str().to_string();
-            let response = client.get(uri.clone()).send().await.map_err(|source| {
-                fetch_error(uri_string.clone(), HttpFetchError::Request { source })
+            check_scheme(&uri)?;
+            let response = client.get(uri.as_str()).send().await.map_err(|source| {
+                fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
             })?;
 
             let status = response.status();
             if !status.is_success() {
-                return Err(fetch_error(uri_string, HttpFetchError::Status { status }));
+                return Err(fetch_error(
+                    uri.as_str().to_string(),
+                    HttpFetchError::Status { status },
+                ));
             }
 
             let content_type = response
@@ -151,25 +173,27 @@ impl AsyncResourceFetcher for AsyncHttpFetcher {
                 .map(|s| s.to_string());
 
             let bytes = response.bytes().await.map_err(|source| {
-                fetch_error(uri_string.clone(), HttpFetchError::Body { source })
+                fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
             })?;
 
-            parse_body(&uri_string, &uri, content_type.as_deref(), &bytes)
+            parse_body(&uri, content_type.as_deref(), &bytes)
         })
     }
 }
 
-fn parse_body(
-    uri_string: &str,
-    uri: &Url,
-    content_type: Option<&str>,
-    bytes: &[u8],
-) -> Result<Value, LoaderError> {
+fn check_scheme(uri: &Url) -> Result<(), LoaderError> {
+    match uri.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err(LoaderError::UnsupportedFetcherUri(uri.as_str().to_string())),
+    }
+}
+
+fn parse_body(uri: &Url, content_type: Option<&str>, bytes: &[u8]) -> Result<Value, LoaderError> {
     if is_yaml(content_type, uri) {
-        parse_yaml(uri_string, bytes)
+        parse_yaml(uri, bytes)
     } else {
         serde_json::from_slice(bytes).map_err(|source| LoaderError::Parse {
-            uri: uri_string.to_string(),
+            uri: uri.as_str().to_string(),
             source,
         })
     }
@@ -210,16 +234,16 @@ fn is_yaml(content_type: Option<&str>, uri: &Url) -> bool {
 }
 
 #[cfg(feature = "yaml")]
-fn parse_yaml(uri_string: &str, bytes: &[u8]) -> Result<Value, LoaderError> {
+fn parse_yaml(uri: &Url, bytes: &[u8]) -> Result<Value, LoaderError> {
     serde_yaml_ng::from_slice(bytes).map_err(|yaml_err| LoaderError::Parse {
-        uri: uri_string.to_string(),
+        uri: uri.as_str().to_string(),
         source: serde_json::Error::custom(yaml_err.to_string()),
     })
 }
 
 #[cfg(not(feature = "yaml"))]
 #[allow(dead_code)]
-fn parse_yaml(_uri_string: &str, _bytes: &[u8]) -> Result<Value, LoaderError> {
+fn parse_yaml(_uri: &Url, _bytes: &[u8]) -> Result<Value, LoaderError> {
     unreachable!("parse_yaml is only reached when the `yaml` feature is enabled")
 }
 
@@ -267,15 +291,24 @@ mod tests {
     fn http_fetcher_default_constructs() {
         let _ = HttpFetcher::default();
         let _ = HttpFetcher::new();
+        let _ = AsyncHttpFetcher::default();
+        let _ = AsyncHttpFetcher::new();
+    }
+
+    #[test]
+    fn http_fetcher_try_new_succeeds_for_default_config() {
+        HttpFetcher::try_new().expect("blocking client must build");
+        AsyncHttpFetcher::try_new().expect("async client must build");
     }
 
     #[test]
     fn http_fetcher_is_clone_and_shares_pool() {
-        // Reqwest's blocking Client is Arc-backed internally, so cloning is
-        // cheap and shares the connection pool. The contract we care about
-        // here is that the wrapper is Clone — exercising it suffices.
+        // Reqwest's clients are Arc-backed internally, so cloning is cheap and
+        // shares the connection pool. Exercising clone covers the contract.
         let fetcher = HttpFetcher::new();
         let _second = fetcher.clone();
+        let async_fetcher = AsyncHttpFetcher::new();
+        let _async_second = async_fetcher.clone();
     }
 
     #[test]
@@ -299,5 +332,18 @@ mod tests {
             }
             other => panic!("expected LoaderError::Fetch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn check_scheme_accepts_http_and_https() {
+        check_scheme(&Url::parse("http://example.test/x.json").unwrap()).unwrap();
+        check_scheme(&Url::parse("https://example.test/x.json").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn check_scheme_rejects_file_uri_with_unsupported_fetcher_uri() {
+        let err = check_scheme(&Url::parse("file:///tmp/x.json").unwrap())
+            .expect_err("file:// must be rejected");
+        assert!(matches!(err, LoaderError::UnsupportedFetcherUri(s) if s.starts_with("file://")));
     }
 }
