@@ -29,6 +29,7 @@ impl TestResponse {
         }
     }
 
+    #[cfg(feature = "yaml")]
     fn with_content_type(mut self, ct: &'static str) -> Self {
         self.content_type = Some(ct);
         self
