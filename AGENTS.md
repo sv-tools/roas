@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 
 This repository is a Cargo workspace with one or more published crates under `crates/`. Each crate carries its own
-`README.md`, `Cargo.toml`, and `src/` tree. Shared metadata (`version`, `edition`, `authors`, `license`, `homepage`,
+`README.md`, `Cargo.toml`, and `src/` tree. Shared metadata (`edition`, `authors`, `license`, `homepage`,
 `repository`, `keywords`) and shared third-party dependencies live in the root `Cargo.toml` under
 `[workspace.package]` and `[workspace.dependencies]`; per-crate manifests inherit via `.workspace = true` and add only
 what is crate-specific (description, features, dependency selection). New crates go in `crates/<name>/` and are
