@@ -317,3 +317,46 @@ async fn async_http_fetcher_parses_yaml_when_content_type_signals_yaml() {
     let value = fetcher.fetch(&server.url("doc")).await.expect("fetch ok");
     assert_eq!(value, serde_json::json!({ "name": "pet", "count": 3 }));
 }
+
+#[cfg(feature = "yaml")]
+#[tokio::test]
+async fn async_http_fetcher_parses_yaml_from_url_extension_when_content_type_missing() {
+    let body = b"items:\n  - a\n  - b\n".to_vec();
+    let server = TestServer::start(move |_req| TestResponse::ok_body(body.clone()));
+    let mut fetcher = AsyncHttpFetcher::new();
+    let value = fetcher
+        .fetch(&server.url("doc.yaml"))
+        .await
+        .expect("fetch ok");
+    assert_eq!(value, serde_json::json!({ "items": ["a", "b"] }));
+}
+
+#[cfg(feature = "yaml")]
+#[tokio::test]
+async fn async_http_fetcher_yaml_parse_error_surfaces_as_loader_error_parse() {
+    let body = b"key:\n\tvalue: oops\n".to_vec();
+    let server = TestServer::start(move |_req| {
+        TestResponse::ok_body(body.clone()).with_content_type("application/yaml")
+    });
+    let mut fetcher = AsyncHttpFetcher::new();
+    let err = fetcher
+        .fetch(&server.url("bad.yaml"))
+        .await
+        .expect_err("malformed YAML must error");
+    assert!(matches!(err, LoaderError::Parse { .. }));
+}
+
+#[cfg(feature = "yaml")]
+#[tokio::test]
+async fn async_http_fetcher_still_parses_json_when_content_type_is_json_despite_yaml_extension() {
+    let body = br#"{"explicit":"json"}"#.to_vec();
+    let server = TestServer::start(move |_req| {
+        TestResponse::ok_body(body.clone()).with_content_type("application/json")
+    });
+    let mut fetcher = AsyncHttpFetcher::new();
+    let value = fetcher
+        .fetch(&server.url("misleading.yaml"))
+        .await
+        .expect("fetch ok");
+    assert_eq!(value, serde_json::json!({ "explicit": "json" }));
+}
