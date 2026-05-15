@@ -1,17 +1,28 @@
-//! HTTP/HTTPS [`ResourceFetcher`] for the [`roas`] OpenAPI loader.
+//! HTTP/HTTPS [`ResourceFetcher`] / [`AsyncResourceFetcher`] for the [`roas`]
+//! OpenAPI loader.
 //!
-//! See the crate-level README for a usage example. Transport failures, non-2xx
-//! responses, and unreadable bodies are surfaced through [`LoaderError::Fetch`]
-//! with a [`HttpFetchError`] source.
+//! Two fetchers are exposed:
+//!   * [`HttpFetcher`] — backed by `reqwest::blocking::Client`, plugs into
+//!     [`Loader::register_fetcher`](roas::loader::Loader::register_fetcher).
+//!   * [`AsyncHttpFetcher`] — backed by `reqwest::Client`, plugs into
+//!     [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher).
+//!     Requires a tokio runtime to be active when the future is awaited.
 //!
-//! With the `yaml` feature enabled, the fetcher parses YAML response bodies in
-//! addition to JSON. Format selection sniffs the response `Content-Type`
+//! Both fetchers are `Clone` so a single underlying connection pool can be
+//! shared across multiple registrations (e.g. one for `http://` and one for
+//! `https://`). Transport failures, non-2xx responses, and unreadable bodies
+//! are surfaced through [`LoaderError::Fetch`] with a [`HttpFetchError`]
+//! source.
+//!
+//! With the `yaml` feature enabled, both fetchers parse YAML response bodies
+//! in addition to JSON. Format selection sniffs the response `Content-Type`
 //! header first and falls back to the URL path extension (`.yaml` / `.yml`).
 
+use reqwest::Client as AsyncClient;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
-use roas::loader::{LoaderError, ResourceFetcher};
+use roas::loader::{AsyncResourceFetcher, FetchFuture, LoaderError, ResourceFetcher};
 #[cfg(feature = "yaml")]
 use serde::de::Error as _;
 use serde_json::Value;
@@ -79,6 +90,72 @@ impl ResourceFetcher for HttpFetcher {
             .map_err(|source| fetch_error(uri_string.clone(), HttpFetchError::Body { source }))?;
 
         parse_body(&uri_string, uri, content_type.as_deref(), &bytes)
+    }
+}
+
+/// Async HTTP/HTTPS fetcher backed by `reqwest::Client`.
+///
+/// `AsyncHttpFetcher` mirrors [`HttpFetcher`] for callers that drive the
+/// loader through [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher).
+/// It is `Clone` and shares the underlying connection pool across clones.
+/// A tokio runtime must be active when the returned future is awaited.
+#[derive(Clone, Debug)]
+pub struct AsyncHttpFetcher {
+    client: AsyncClient,
+}
+
+impl AsyncHttpFetcher {
+    /// Build an async HTTP fetcher with a default `rustls-tls` client and a
+    /// 30-second request timeout.
+    pub fn new() -> Self {
+        Self::with_client(
+            AsyncClient::builder()
+                .timeout(DEFAULT_TIMEOUT)
+                .build()
+                .expect("default reqwest::Client must build"),
+        )
+    }
+
+    /// Build a fetcher from a caller-provided `reqwest::Client`. Use this to
+    /// override timeouts, redirect policy, TLS config, or proxy settings.
+    pub fn with_client(client: AsyncClient) -> Self {
+        Self { client }
+    }
+}
+
+impl Default for AsyncHttpFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AsyncResourceFetcher for AsyncHttpFetcher {
+    fn fetch<'a>(&'a mut self, uri: &'a Url) -> FetchFuture<'a> {
+        let client = self.client.clone();
+        let uri = uri.clone();
+        Box::pin(async move {
+            let uri_string = uri.as_str().to_string();
+            let response = client.get(uri.clone()).send().await.map_err(|source| {
+                fetch_error(uri_string.clone(), HttpFetchError::Request { source })
+            })?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(fetch_error(uri_string, HttpFetchError::Status { status }));
+            }
+
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let bytes = response.bytes().await.map_err(|source| {
+                fetch_error(uri_string.clone(), HttpFetchError::Body { source })
+            })?;
+
+            parse_body(&uri_string, &uri, content_type.as_deref(), &bytes)
+        })
     }
 }
 

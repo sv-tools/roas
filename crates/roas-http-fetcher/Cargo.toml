@@ -28,3 +28,6 @@ serde_json.workspace = true
 serde_yaml_ng = { workspace = true, optional = true }
 thiserror.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net", "time"] }

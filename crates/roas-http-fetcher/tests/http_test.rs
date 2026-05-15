@@ -1,5 +1,5 @@
-use roas::loader::{LoaderError, ResourceFetcher};
-use roas_http_fetcher::{HttpFetchError, HttpFetcher};
+use roas::loader::{AsyncResourceFetcher, LoaderError, ResourceFetcher};
+use roas_http_fetcher::{AsyncHttpFetcher, HttpFetchError, HttpFetcher};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{Sender, channel};
@@ -226,4 +226,75 @@ fn http_fetcher_surfaces_connection_refused_as_loader_error_fetch_request() {
         }
         other => panic!("expected LoaderError::Fetch, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn async_http_fetcher_returns_parsed_json_on_success() {
+    let server = TestServer::start(|_req| TestResponse::ok_json(br#"{"hello":"world"}"#.to_vec()));
+    let mut fetcher = AsyncHttpFetcher::new();
+    let value = fetcher
+        .fetch(&server.url("doc.json"))
+        .await
+        .expect("fetch ok");
+    assert_eq!(value, serde_json::json!({ "hello": "world" }));
+}
+
+#[tokio::test]
+async fn async_http_fetcher_surfaces_non_2xx_as_loader_error_fetch_with_status() {
+    let server = TestServer::start(|_req| TestResponse {
+        status: 404,
+        reason: "Not Found",
+        content_type: None,
+        body: b"missing".to_vec(),
+    });
+    let mut fetcher = AsyncHttpFetcher::new();
+    let err = fetcher
+        .fetch(&server.url("nope.json"))
+        .await
+        .expect_err("non-2xx must error");
+    match err {
+        LoaderError::Fetch { uri, source } => {
+            assert!(uri.ends_with("/nope.json"));
+            let http = source
+                .downcast_ref::<HttpFetchError>()
+                .expect("source must be HttpFetchError");
+            assert!(matches!(
+                http,
+                HttpFetchError::Status { status } if status.as_u16() == 404
+            ));
+        }
+        other => panic!("expected LoaderError::Fetch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn async_http_fetcher_surfaces_connection_refused_as_loader_error_fetch_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    drop(listener);
+    let url = Url::parse(&format!("http://{addr}/missing.json")).expect("url");
+
+    let mut fetcher = AsyncHttpFetcher::new();
+    let err = fetcher.fetch(&url).await.expect_err("no server must error");
+    match err {
+        LoaderError::Fetch { source, .. } => {
+            let http = source
+                .downcast_ref::<HttpFetchError>()
+                .expect("source must be HttpFetchError");
+            assert!(matches!(http, HttpFetchError::Request { .. }));
+        }
+        other => panic!("expected LoaderError::Fetch, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "yaml")]
+#[tokio::test]
+async fn async_http_fetcher_parses_yaml_when_content_type_signals_yaml() {
+    let body = b"name: pet\ncount: 3\n".to_vec();
+    let server = TestServer::start(move |_req| {
+        TestResponse::ok_json(body.clone()).with_content_type("application/yaml")
+    });
+    let mut fetcher = AsyncHttpFetcher::new();
+    let value = fetcher.fetch(&server.url("doc")).await.expect("fetch ok");
+    assert_eq!(value, serde_json::json!({ "name": "pet", "count": 3 }));
 }
