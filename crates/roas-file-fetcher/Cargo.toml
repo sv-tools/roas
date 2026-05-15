@@ -24,8 +24,8 @@ roas = { version = ">=0.13", path = "../roas" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng = { workspace = true, optional = true }
-tokio = { version = "1", default-features = false, features = ["fs", "rt"] }
+tokio = { workspace = true, features = ["fs", "rt"] }
 url.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["macros"] }
+tokio = { workspace = true, features = ["macros"] }
