@@ -1,0 +1,28 @@
+[package]
+name = "roas-file-fetcher"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+description = "Filesystem fetcher for the roas OpenAPI loader, with an async variant and optional YAML support"
+readme = "README.md"
+categories = ["web-programming", "parser-implementations"]
+include = ["src", "Cargo.toml", "README.md"]
+publish = true
+
+[features]
+default = []
+# Parse YAML file bodies in addition to JSON. Selection is by file path
+# extension (`.yaml` / `.yml`).
+yaml = ["dep:serde_yaml_ng"]
+
+[dependencies]
+roas = { version = ">=0.13", path = "../roas" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng = { workspace = true, optional = true }
+tokio = { version = "1", default-features = false, features = ["fs", "macros", "rt"] }
+url.workspace = true
