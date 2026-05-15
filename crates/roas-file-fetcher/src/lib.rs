@@ -1,19 +1,22 @@
-//! Filesystem [`ResourceFetcher`] / [`AsyncResourceFetcher`] for the [`roas`]
-//! OpenAPI loader.
+//! Filesystem [`ResourceFetcher`] for the [`roas`] OpenAPI loader.
 //!
-//! Two zero-sized fetcher types share the same API:
-//!   * [`FileFetcher`] — blocking, backed by [`std::fs::read`].
-//!   * [`AsyncFileFetcher`] — async, backed by [`tokio::fs::read`]; requires
-//!     an active tokio runtime when the returned future is awaited.
+//! [`FileFetcher`] is blocking and backed by [`std::fs::read`]. Non-`file://`
+//! URIs are rejected with [`LoaderError::UnsupportedFetcherUri`]; I/O failures
+//! surface as [`LoaderError::ReadFile`]; body parse failures as
+//! [`LoaderError::Parse`].
 //!
-//! Both reject anything other than `file://` URIs with
-//! [`LoaderError::UnsupportedFetcherUri`]. I/O failures surface as
-//! [`LoaderError::ReadFile`]; body parse failures as [`LoaderError::Parse`].
-//!
-//! With the `yaml` feature enabled, both fetchers parse YAML file bodies in
-//! addition to JSON. Selection is by file path extension (`.yaml` / `.yml`).
+//! Optional features:
+//!   * `async` — also expose [`AsyncFileFetcher`] for
+//!     [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher),
+//!     backed by [`tokio::fs::read`]. Requires an active tokio runtime when
+//!     the returned future is awaited. Off by default; enabling it pulls in
+//!     `tokio` with `fs` + `rt` features.
+//!   * `yaml` — parse YAML file bodies in addition to JSON. Selection is by
+//!     file path extension (`.yaml` / `.yml`). Pulls in `serde_yaml_ng`.
 
-use roas::loader::{AsyncResourceFetcher, FetchFuture, LoaderError, ResourceFetcher};
+#[cfg(feature = "async")]
+use roas::loader::{AsyncResourceFetcher, FetchFuture};
+use roas::loader::{LoaderError, ResourceFetcher};
 #[cfg(feature = "yaml")]
 use serde::de::Error as _;
 use serde_json::Value;
@@ -35,9 +38,13 @@ impl FileFetcher {
 /// Async filesystem fetcher, suitable for
 /// [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher).
 /// A tokio runtime must be active when the returned future is awaited.
+///
+/// Available only with the `async` feature.
+#[cfg(feature = "async")]
 #[derive(Clone, Debug, Default)]
 pub struct AsyncFileFetcher;
 
+#[cfg(feature = "async")]
 impl AsyncFileFetcher {
     /// Construct an async file fetcher.
     pub fn new() -> Self {
@@ -55,6 +62,7 @@ impl ResourceFetcher for FileFetcher {
     }
 }
 
+#[cfg(feature = "async")]
 impl AsyncResourceFetcher for AsyncFileFetcher {
     fn fetch<'a>(&'a mut self, uri: &'a Url) -> FetchFuture<'a> {
         Box::pin(async move {
@@ -141,6 +149,11 @@ mod tests {
     fn file_fetcher_default_constructs() {
         let _: FileFetcher = Default::default();
         let _ = FileFetcher::new();
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn async_file_fetcher_default_constructs() {
         let _: AsyncFileFetcher = Default::default();
         let _ = AsyncFileFetcher::new();
     }

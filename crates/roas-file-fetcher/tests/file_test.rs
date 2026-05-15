@@ -1,5 +1,9 @@
-use roas::loader::{AsyncResourceFetcher, LoaderError, ResourceFetcher};
-use roas_file_fetcher::{AsyncFileFetcher, FileFetcher};
+#[cfg(feature = "async")]
+use roas::loader::AsyncResourceFetcher;
+use roas::loader::{LoaderError, ResourceFetcher};
+#[cfg(feature = "async")]
+use roas_file_fetcher::AsyncFileFetcher;
+use roas_file_fetcher::FileFetcher;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -113,6 +117,7 @@ fn file_fetcher_without_yaml_feature_parses_yaml_path_as_json_and_errors() {
     assert!(matches!(err, LoaderError::Parse { .. }));
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn async_file_fetcher_reads_and_parses_json_body() {
     let file = TempFile::write("async-ok.json", br#"{"hello":"world"}"#);
@@ -121,6 +126,7 @@ async fn async_file_fetcher_reads_and_parses_json_body() {
     assert_eq!(value, serde_json::json!({ "hello": "world" }));
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn async_file_fetcher_rejects_non_file_scheme_with_unsupported_fetcher_uri() {
     let mut fetcher = AsyncFileFetcher::new();
@@ -131,6 +137,7 @@ async fn async_file_fetcher_rejects_non_file_scheme_with_unsupported_fetcher_uri
     assert!(matches!(err, LoaderError::UnsupportedFetcherUri(_)));
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn async_file_fetcher_surfaces_missing_file_as_read_file_error() {
     let url = Url::from_file_path(temp_file("async-missing.json")).unwrap();
@@ -142,6 +149,7 @@ async fn async_file_fetcher_surfaces_missing_file_as_read_file_error() {
     assert!(matches!(err, LoaderError::ReadFile { .. }));
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn async_file_fetcher_surfaces_invalid_json_body_as_parse_error() {
     let file = TempFile::write("async-bad.json", b"not json");
@@ -153,7 +161,7 @@ async fn async_file_fetcher_surfaces_invalid_json_body_as_parse_error() {
     assert!(matches!(err, LoaderError::Parse { .. }));
 }
 
-#[cfg(feature = "yaml")]
+#[cfg(all(feature = "async", feature = "yaml"))]
 #[tokio::test]
 async fn async_file_fetcher_parses_yaml_when_path_extension_is_yaml() {
     let file = TempFile::write("async-ok.yaml", b"name: pet\ncount: 3\n");
@@ -162,7 +170,7 @@ async fn async_file_fetcher_parses_yaml_when_path_extension_is_yaml() {
     assert_eq!(value, serde_json::json!({ "name": "pet", "count": 3 }));
 }
 
-#[cfg(feature = "yaml")]
+#[cfg(all(feature = "async", feature = "yaml"))]
 #[tokio::test]
 async fn async_file_fetcher_yaml_parse_error_surfaces_as_loader_error_parse() {
     let file = TempFile::write("async-bad.yaml", b"key:\n\tvalue: oops\n");
