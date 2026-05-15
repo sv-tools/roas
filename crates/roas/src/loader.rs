@@ -59,7 +59,12 @@ impl ResourceFetcher for JsonFileFetcher {
 }
 
 /// External resource loading errors.
+///
+/// Marked `#[non_exhaustive]` so additional fetcher-shaped failure modes can be
+/// added without a breaking change. Downstream `match` arms must include a
+/// wildcard.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LoaderError {
     #[error("no fetcher registered for `{uri}`")]
     NoFetcherRegistered { uri: String },
@@ -94,6 +99,18 @@ pub enum LoaderError {
         uri: String,
         #[source]
         source: serde_json::Error,
+    },
+
+    /// Fetcher-side transport failure: anything a fetcher could not turn into a
+    /// parseable response body (network error, non-2xx HTTP response,
+    /// connection refused, etc.). The `source` is boxed so each fetcher can
+    /// carry its own native error type (e.g. `reqwest::Error`) without `roas`
+    /// taking on the dependency.
+    #[error("failed to fetch `{uri}`")]
+    Fetch {
+        uri: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[error("reference `{reference}` not found in `{uri}`")]
@@ -808,6 +825,21 @@ mod tests {
             .expect_err("invalid JSON must error");
         assert!(matches!(err, LoaderError::Parse { .. }));
         fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn loader_error_fetch_carries_arbitrary_source_and_displays_uri() {
+        let inner = std::io::Error::other("connection refused");
+        let err = LoaderError::Fetch {
+            uri: "https://example.test/pet.json".into(),
+            source: Box::new(inner),
+        };
+        assert_eq!(
+            err.to_string(),
+            "failed to fetch `https://example.test/pet.json`",
+        );
+        let source = std::error::Error::source(&err).expect("Fetch must expose a source");
+        assert_eq!(source.to_string(), "connection refused");
     }
 
     #[test]
