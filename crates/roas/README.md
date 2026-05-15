@@ -28,7 +28,7 @@ or manually add the following lines:
 
 ```toml
 [dependencies]
-roas = "0.12"
+roas = "0.13"
 ```
 
 The default feature is `v3_2`. To parse v2.0, v3.0 or v3.1 specs, enable the
@@ -36,7 +36,7 @@ corresponding feature:
 
 ```toml
 [dependencies]
-roas = { version = "0.12", default-features = false, features = ["v3_0"] }
+roas = { version = "0.13", default-features = false, features = ["v3_0"] }
 ```
 
 ## Examples
