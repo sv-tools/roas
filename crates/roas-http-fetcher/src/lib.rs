@@ -152,9 +152,8 @@ impl ResourceFetcher for Fetcher<Client> {
 impl AsyncResourceFetcher for Fetcher<AsyncClient> {
     fn fetch<'a>(&'a mut self, uri: &'a Url) -> FetchFuture<'a> {
         let client = self.client.clone();
-        let uri = uri.clone();
         Box::pin(async move {
-            check_scheme(&uri)?;
+            check_scheme(uri)?;
             let response = client.get(uri.as_str()).send().await.map_err(|source| {
                 fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
             })?;
@@ -177,7 +176,7 @@ impl AsyncResourceFetcher for Fetcher<AsyncClient> {
                 fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
             })?;
 
-            parse_body(&uri, content_type.as_deref(), &bytes)
+            parse_body(uri, content_type.as_deref(), &bytes)
         })
     }
 }
