@@ -13,9 +13,18 @@ categories = ["web-programming", "parser-implementations"]
 include = ["src", "Cargo.toml", "README.md"]
 publish = true
 
+[features]
+default = []
+# Parse YAML response bodies in addition to JSON. The fetcher sniffs the
+# response Content-Type and falls back to the URL path extension to decide
+# which parser to use.
+yaml = ["dep:serde_yaml_ng"]
+
 [dependencies]
 roas = { version = "0.13", path = "../roas" }
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng = { workspace = true, optional = true }
 thiserror.workspace = true
 url.workspace = true

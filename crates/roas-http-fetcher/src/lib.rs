@@ -3,10 +3,17 @@
 //! See the crate-level README for a usage example. Transport failures, non-2xx
 //! responses, and unreadable bodies are surfaced through [`LoaderError::Fetch`]
 //! with a [`HttpFetchError`] source.
+//!
+//! With the `yaml` feature enabled, the fetcher parses YAML response bodies in
+//! addition to JSON. Format selection sniffs the response `Content-Type`
+//! header first and falls back to the URL path extension (`.yaml` / `.yml`).
 
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
+use reqwest::header::CONTENT_TYPE;
 use roas::loader::{LoaderError, ResourceFetcher};
+#[cfg(feature = "yaml")]
+use serde::de::Error as _;
 use serde_json::Value;
 use std::time::Duration;
 use url::Url;
@@ -61,15 +68,82 @@ impl ResourceFetcher for HttpFetcher {
             return Err(fetch_error(uri_string, HttpFetchError::Status { status }));
         }
 
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let bytes = response
             .bytes()
             .map_err(|source| fetch_error(uri_string.clone(), HttpFetchError::Body { source }))?;
 
-        serde_json::from_slice(&bytes).map_err(|source| LoaderError::Parse {
-            uri: uri_string,
+        parse_body(&uri_string, uri, content_type.as_deref(), &bytes)
+    }
+}
+
+fn parse_body(
+    uri_string: &str,
+    uri: &Url,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<Value, LoaderError> {
+    if is_yaml(content_type, uri) {
+        parse_yaml(uri_string, bytes)
+    } else {
+        serde_json::from_slice(bytes).map_err(|source| LoaderError::Parse {
+            uri: uri_string.to_string(),
             source,
         })
     }
+}
+
+/// Decide whether to treat the response body as YAML.
+///
+/// With the `yaml` feature off this always returns `false`. With it on, the
+/// decision is `Content-Type`-first, URL-extension-second:
+///   1. `Content-Type` containing `yaml` (covers `application/yaml`,
+///      `application/x-yaml`, `text/yaml`, `text/x-yaml`, etc.).
+///   2. URL path ending in `.yaml` or `.yml`.
+#[allow(unused_variables)]
+fn is_yaml(content_type: Option<&str>, uri: &Url) -> bool {
+    #[cfg(feature = "yaml")]
+    {
+        if let Some(ct) = content_type {
+            let mime = ct
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if mime.contains("yaml") {
+                return true;
+            }
+            if !mime.is_empty() && mime != "application/octet-stream" {
+                return false;
+            }
+        }
+        let path = uri.path().to_ascii_lowercase();
+        path.ends_with(".yaml") || path.ends_with(".yml")
+    }
+    #[cfg(not(feature = "yaml"))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "yaml")]
+fn parse_yaml(uri_string: &str, bytes: &[u8]) -> Result<Value, LoaderError> {
+    serde_yaml_ng::from_slice(bytes).map_err(|yaml_err| LoaderError::Parse {
+        uri: uri_string.to_string(),
+        source: serde_json::Error::custom(yaml_err.to_string()),
+    })
+}
+
+#[cfg(not(feature = "yaml"))]
+#[allow(dead_code)]
+fn parse_yaml(_uri_string: &str, _bytes: &[u8]) -> Result<Value, LoaderError> {
+    unreachable!("parse_yaml is only reached when the `yaml` feature is enabled")
 }
 
 /// Transport-layer failure exposed by [`HttpFetcher`].

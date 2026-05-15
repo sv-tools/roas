@@ -9,6 +9,18 @@ HTTP/HTTPS [`ResourceFetcher`](https://docs.rs/roas/latest/roas/loader/trait.Res
 Built on `reqwest`'s blocking client with `rustls-tls`. The fetcher is `Clone` so a single underlying connection pool
 can be shared across `http://` and `https://` registrations on the same `Loader`.
 
+## Features
+
+- (default) JSON response bodies are parsed with `serde_json`.
+- `yaml` — also accept YAML response bodies. The fetcher sniffs `Content-Type`
+  first (`application/yaml`, `application/x-yaml`, `text/yaml`, etc.) and falls
+  back to the URL path extension (`.yaml` / `.yml`). Pulls in `serde_yaml_ng`.
+
+```toml
+[dependencies]
+roas-http-fetcher = { version = "0.1", features = ["yaml"] }
+```
+
 ## Usage
 
 ```shell
