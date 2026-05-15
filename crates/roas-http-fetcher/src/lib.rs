@@ -1,12 +1,13 @@
 //! HTTP/HTTPS [`ResourceFetcher`] / [`AsyncResourceFetcher`] for the [`roas`]
 //! OpenAPI loader.
 //!
-//! [`HttpFetcher`] is generic over the underlying `reqwest` client type. The
-//! default selects the blocking client, so `HttpFetcher::new()` returns a
-//! synchronous fetcher suitable for [`Loader::register_fetcher`](roas::loader::Loader::register_fetcher).
-//! The [`AsyncHttpFetcher`] alias selects `reqwest::Client` for use with
-//! [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher);
-//! a tokio runtime must be active when the returned future is awaited.
+//! The generic [`Fetcher<C>`](Fetcher) is parameterised over the underlying
+//! `reqwest` client type. Two concrete aliases cover the common cases:
+//!   * [`HttpFetcher`] (= `Fetcher<reqwest::blocking::Client>`) — synchronous;
+//!     use with [`Loader::register_fetcher`](roas::loader::Loader::register_fetcher).
+//!   * [`AsyncHttpFetcher`] (= `Fetcher<reqwest::Client>`) — async; use with
+//!     [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher).
+//!     A tokio runtime must be active when the returned future is awaited.
 //!
 //! Both forms are `Clone` so a single fetcher can be registered for both
 //! `http://` and `https://` prefixes, sharing one underlying connection pool.

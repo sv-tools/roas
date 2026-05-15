@@ -20,7 +20,7 @@ struct TestResponse {
 }
 
 impl TestResponse {
-    fn ok_json(body: Vec<u8>) -> Self {
+    fn ok_body(body: Vec<u8>) -> Self {
         Self {
             status: 200,
             reason: "OK",
@@ -113,7 +113,7 @@ fn write_response(mut stream: TcpStream, resp: TestResponse) {
 
 #[test]
 fn http_fetcher_returns_parsed_json_on_success() {
-    let server = TestServer::start(|_req| TestResponse::ok_json(br#"{"hello":"world"}"#.to_vec()));
+    let server = TestServer::start(|_req| TestResponse::ok_body(br#"{"hello":"world"}"#.to_vec()));
     let mut fetcher = HttpFetcher::new();
     let value = fetcher.fetch(&server.url("doc.json")).expect("fetch ok");
     assert_eq!(value, serde_json::json!({ "hello": "world" }));
@@ -148,7 +148,7 @@ fn http_fetcher_surfaces_non_2xx_as_loader_error_fetch_with_status() {
 
 #[test]
 fn http_fetcher_surfaces_invalid_json_body_as_parse_error() {
-    let server = TestServer::start(|_req| TestResponse::ok_json(b"not json".to_vec()));
+    let server = TestServer::start(|_req| TestResponse::ok_body(b"not json".to_vec()));
     let mut fetcher = HttpFetcher::new();
     let err = fetcher
         .fetch(&server.url("bad.json"))
@@ -161,7 +161,7 @@ fn http_fetcher_surfaces_invalid_json_body_as_parse_error() {
 fn http_fetcher_parses_yaml_when_content_type_signals_yaml() {
     let body = b"name: pet\ncount: 3\n".to_vec();
     let server = TestServer::start(move |_req| {
-        TestResponse::ok_json(body.clone()).with_content_type("application/yaml")
+        TestResponse::ok_body(body.clone()).with_content_type("application/yaml")
     });
     let mut fetcher = HttpFetcher::new();
     let value = fetcher.fetch(&server.url("doc")).expect("fetch ok");
@@ -172,7 +172,7 @@ fn http_fetcher_parses_yaml_when_content_type_signals_yaml() {
 #[test]
 fn http_fetcher_parses_yaml_from_url_extension_when_content_type_missing() {
     let body = b"items:\n  - a\n  - b\n".to_vec();
-    let server = TestServer::start(move |_req| TestResponse::ok_json(body.clone()));
+    let server = TestServer::start(move |_req| TestResponse::ok_body(body.clone()));
     let mut fetcher = HttpFetcher::new();
     let value = fetcher.fetch(&server.url("doc.yaml")).expect("fetch ok");
     assert_eq!(value, serde_json::json!({ "items": ["a", "b"] }));
@@ -185,7 +185,7 @@ fn http_fetcher_yaml_parse_error_surfaces_as_loader_error_parse() {
     // unambiguously-broken document (tab-indented, which YAML 1.2 forbids).
     let body = b"key:\n\tvalue: oops\n".to_vec();
     let server = TestServer::start(move |_req| {
-        TestResponse::ok_json(body.clone()).with_content_type("application/yaml")
+        TestResponse::ok_body(body.clone()).with_content_type("application/yaml")
     });
     let mut fetcher = HttpFetcher::new();
     let err = fetcher
@@ -199,7 +199,7 @@ fn http_fetcher_yaml_parse_error_surfaces_as_loader_error_parse() {
 fn http_fetcher_still_parses_json_when_content_type_is_json_despite_yaml_extension() {
     let body = br#"{"explicit":"json"}"#.to_vec();
     let server = TestServer::start(move |_req| {
-        TestResponse::ok_json(body.clone()).with_content_type("application/json")
+        TestResponse::ok_body(body.clone()).with_content_type("application/json")
     });
     let mut fetcher = HttpFetcher::new();
     let value = fetcher
@@ -249,7 +249,7 @@ async fn async_http_fetcher_rejects_non_http_scheme_with_unsupported_fetcher_uri
 
 #[tokio::test]
 async fn async_http_fetcher_returns_parsed_json_on_success() {
-    let server = TestServer::start(|_req| TestResponse::ok_json(br#"{"hello":"world"}"#.to_vec()));
+    let server = TestServer::start(|_req| TestResponse::ok_body(br#"{"hello":"world"}"#.to_vec()));
     let mut fetcher = AsyncHttpFetcher::new();
     let value = fetcher
         .fetch(&server.url("doc.json"))
@@ -311,7 +311,7 @@ async fn async_http_fetcher_surfaces_connection_refused_as_loader_error_fetch_re
 async fn async_http_fetcher_parses_yaml_when_content_type_signals_yaml() {
     let body = b"name: pet\ncount: 3\n".to_vec();
     let server = TestServer::start(move |_req| {
-        TestResponse::ok_json(body.clone()).with_content_type("application/yaml")
+        TestResponse::ok_body(body.clone()).with_content_type("application/yaml")
     });
     let mut fetcher = AsyncHttpFetcher::new();
     let value = fetcher.fetch(&server.url("doc")).await.expect("fetch ok");
