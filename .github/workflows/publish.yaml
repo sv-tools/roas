@@ -54,22 +54,41 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+          # x86_64 macOS is cross-built on linux via cargo-zigbuild. GitHub's
+          # macos-13 fleet is undersized and the release run was queueing for
+          # hours; zig provides the macOS SDK headers + linker glue and
+          # produces an ad-hoc-signed mach-o binary the matrix can pack and
+          # ship like the rest. arm64 macOS stays native — Apple Silicon is
+          # the dominant target now and the macos-latest runners have
+          # capacity.
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: ubuntu-latest
+            cross: zigbuild
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-latest
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           target: ${{ matrix.target }}
+      - name: Set up Zig (cross-build to macOS)
+        if: matrix.cross == 'zigbuild'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - name: Install cargo-zigbuild
+        if: matrix.cross == 'zigbuild'
+        # `--locked` requires the Cargo.lock from this repo, which is
+        # unrelated to cargo-zigbuild's own dep tree — so omit it here.
+        run: cargo install cargo-zigbuild
       - name: Extract roas-cli version from tag
         id: v
         run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Build release binary
-        run: cargo build --release --package roas-cli --target ${{ matrix.target }} --locked
+        # Picks `cargo zigbuild` on the cross row and `cargo build` everywhere
+        # else; both produce a release binary at `target/${target}/release/roas`,
+        # so the rest of the steps are uniform.
+        run: cargo ${{ matrix.cross == 'zigbuild' && 'zigbuild' || 'build' }} --release --package roas-cli --target ${{ matrix.target }} --locked
       - name: Pack tarball
         id: pack
         run: |
