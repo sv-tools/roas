@@ -54,16 +54,12 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
-          # x86_64 macOS is cross-built on linux via cargo-zigbuild. GitHub's
-          # macos-13 fleet is undersized and the release run was queueing for
-          # hours; zig provides the macOS SDK headers + linker glue and
-          # produces an ad-hoc-signed mach-o binary the matrix can pack and
-          # ship like the rest. arm64 macOS stays native — Apple Silicon is
-          # the dominant target now and the macos-latest runners have
-          # capacity.
-          - target: x86_64-apple-darwin
-            runner: ubuntu-latest
-            cross: zigbuild
+          # macOS is arm64-only. macos-13 (Intel) is being phased out by
+          # GitHub and queues for hours; cross-building x86_64 via
+          # cargo-zigbuild failed at link time because notify / reqwest pull
+          # in CoreServices / CoreFoundation / Security and zig doesn't
+          # bundle those frameworks. Intel macOS users can `cargo install
+          # roas-cli` or use the Docker image.
           - target: aarch64-apple-darwin
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
@@ -72,23 +68,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           target: ${{ matrix.target }}
-      - name: Set up Zig (cross-build to macOS)
-        if: matrix.cross == 'zigbuild'
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-      - name: Install cargo-zigbuild
-        if: matrix.cross == 'zigbuild'
-        # `--locked` requires the Cargo.lock from this repo, which is
-        # unrelated to cargo-zigbuild's own dep tree — so omit it here.
-        run: cargo install cargo-zigbuild
       - name: Extract roas-cli version from tag
         id: v
         run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
         shell: bash
       - name: Build release binary
-        # Picks `cargo zigbuild` on the cross row and `cargo build` everywhere
-        # else; both produce a release binary at `target/${target}/release/roas`,
-        # so the rest of the steps are uniform.
-        run: cargo ${{ matrix.cross == 'zigbuild' && 'zigbuild' || 'build' }} --release --package roas-cli --target ${{ matrix.target }} --locked
+        run: cargo build --release --package roas-cli --target ${{ matrix.target }} --locked
       - name: Pack tarball
         id: pack
         run: |
@@ -202,7 +187,6 @@ jobs:
           }
           {
             echo "darwin_arm64=$(read_sha aarch64-apple-darwin)"
-            echo "darwin_amd64=$(read_sha x86_64-apple-darwin)"
             echo "linux_arm64=$(read_sha aarch64-unknown-linux-gnu)"
             echo "linux_amd64=$(read_sha x86_64-unknown-linux-gnu)"
           } >> "$GITHUB_OUTPUT"
@@ -224,7 +208,6 @@ jobs:
           REPO_URL: https://github.com/${{ github.repository }}
           TAG: roas-cli/v${{ steps.v.outputs.version }}
           DARWIN_ARM64_SHA: ${{ steps.sha.outputs.darwin_arm64 }}
-          DARWIN_AMD64_SHA: ${{ steps.sha.outputs.darwin_amd64 }}
           LINUX_ARM64_SHA: ${{ steps.sha.outputs.linux_arm64 }}
           LINUX_AMD64_SHA: ${{ steps.sha.outputs.linux_amd64 }}
         run: |
@@ -233,6 +216,9 @@ jobs:
           asset_url() {
             echo "${REPO_URL}/releases/download/${TAG}/roas-${VERSION}-$1.tar.gz"
           }
+          # macOS bottle is arm64-only. Intel macOS users hit Homebrew's
+          # "No available formula for this platform" error and should
+          # `cargo install roas-cli` or use the Docker image.
           cat > Formula/roas.rb <<EOF
           # typed: false
           # frozen_string_literal: true
@@ -249,10 +235,6 @@ jobs:
               on_arm do
                 url "$(asset_url aarch64-apple-darwin)"
                 sha256 "${DARWIN_ARM64_SHA}"
-              end
-              on_intel do
-                url "$(asset_url x86_64-apple-darwin)"
-                sha256 "${DARWIN_AMD64_SHA}"
               end
             end
 
