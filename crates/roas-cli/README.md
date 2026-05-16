@@ -65,10 +65,11 @@ Starts a local HTTP server on `127.0.0.1:<random>` that serves the spec, embedde
 ```shell
 roas preview spec.yaml                               # Redoc (default)
 roas preview --renderer swagger-ui spec.yaml         # Swagger UI
+roas preview --convert-to v3_1 spec_v2.json          # upconvert before serving
 roas preview --no-open --from v3_1 spec.json
 ```
 
-Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently.
+`--convert-to <VERSION>` runs the same upconvert chain as `roas convert` before handing the spec to the renderer — useful when a renderer (Redoc / Swagger UI) doesn't natively support the input version. Downconversion is rejected; use `roas convert` separately if you need that direction. Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently.
 
 ## License
 

@@ -41,6 +41,11 @@ pub struct PreviewArgs {
     #[arg(long, value_enum)]
     pub(crate) from: Option<SpecVersion>,
 
+    /// Convert the spec to this OpenAPI version before serving it. Uses the
+    /// same upconvert chain as `roas convert`; downconversion is rejected.
+    #[arg(long, value_enum)]
+    pub(crate) convert_to: Option<SpecVersion>,
+
     /// Don't open the browser; just print the server URL and serve.
     #[arg(long)]
     pub(crate) no_open: bool,
@@ -119,7 +124,18 @@ fn prepare_preview(args: &PreviewArgs) -> Result<PreparedPreview> {
     // `convert_to(<same version>)` is a "serialise back as Value" pass —
     // pluck the version first so we don't move `detected` while borrowing it.
     let version = detected.version();
-    let spec_json = serde_json::to_string(&detected.convert_to(version)?)
+    // Resolve the target version: `--convert-to` if set, else same version
+    // (no-op transform). Downconversion is rejected explicitly, matching
+    // `roas convert`'s guard so users get the same error shape.
+    let target = args.convert_to.unwrap_or(version);
+    if (version as u8) > (target as u8) {
+        bail!(
+            "downconversion is not supported: input is {}, target is {}",
+            version.label(),
+            target.label(),
+        );
+    }
+    let spec_json = serde_json::to_string(&detected.convert_to(target)?)
         .context("serializing spec for the viewer")?;
 
     let server = tiny_http::Server::http("127.0.0.1:0")
@@ -343,6 +359,7 @@ mod tests {
             from: None,
             no_open: true,
             renderer: Renderer::Redoc,
+            convert_to: None,
         };
         let err = run_preview(args).expect_err("missing file must error before server starts");
         assert!(
@@ -374,6 +391,7 @@ mod tests {
             from: None,
             no_open: true,
             renderer: Renderer::Redoc,
+            convert_to: None,
         };
         let prepared = prepare_preview(&args).expect("prepare ok");
 
@@ -411,6 +429,7 @@ mod tests {
             from: None,
             no_open: true,
             renderer: Renderer::SwaggerUi,
+            convert_to: None,
         };
         let prepared = prepare_preview(&args).expect("prepare ok");
 
@@ -432,6 +451,7 @@ mod tests {
             from: None,
             no_open: true,
             renderer: Renderer::Redoc,
+            convert_to: None,
         };
         let prepared = prepare_preview(&args).expect("prepare ok");
         let addr = match prepared.server.server_addr() {
@@ -448,6 +468,7 @@ mod tests {
                 from: None,
                 no_open: true,
                 renderer: Renderer::Redoc,
+                convert_to: None,
             };
             drive_prepared_preview(&thread_args, prepared);
         });
@@ -468,6 +489,60 @@ mod tests {
     }
 
     #[test]
+    fn prepare_preview_with_convert_to_upconverts_before_serving() {
+        // v2.0 input + `--convert-to v3_2` → output advertises 3.2.x.
+        let path = temp_path("v2.json");
+        std::fs::write(
+            &path,
+            br#"{"swagger":"2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .expect("write temp spec");
+
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: None,
+            convert_to: Some(SpecVersion::V3_2),
+            no_open: true,
+            renderer: Renderer::Redoc,
+        };
+        let prepared = prepare_preview(&args).expect("prepare ok");
+        let parsed: serde_json::Value = serde_json::from_str(&prepared.spec_json).unwrap();
+        let openapi = parsed["openapi"].as_str().unwrap_or("");
+        assert!(
+            openapi.starts_with("3.2"),
+            "expected upconvert to 3.2.x, got openapi = {openapi}",
+        );
+
+        drop(prepared);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prepare_preview_rejects_downconvert_target() {
+        // v3.2 input + `--convert-to v2` must hit the explicit guard with a
+        // "downconversion is not supported" diagnostic (same shape as
+        // `roas convert`'s rejection).
+        let path = write_minimal_v3_2_spec();
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: None,
+            convert_to: Some(SpecVersion::V2),
+            no_open: true,
+            renderer: Renderer::Redoc,
+        };
+        let err = prepare_preview(&args)
+            .err()
+            .expect("downconversion must error")
+            .to_string();
+        assert!(
+            err.contains("downconversion is not supported"),
+            "got: {err}",
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn prepare_preview_with_forced_version_round_trips_through_parse_as() {
         // `--from v3_1` on a v3.2-shaped doc force-parses as v3.1; serialised
         // output should advertise `openapi: 3.1.*`.
@@ -483,6 +558,7 @@ mod tests {
             from: Some(SpecVersion::V3_1),
             no_open: true,
             renderer: Renderer::Redoc,
+            convert_to: None,
         };
         let prepared = prepare_preview(&args).expect("prepare ok");
         let parsed: serde_json::Value = serde_json::from_str(&prepared.spec_json).unwrap();
