@@ -54,6 +54,25 @@ pub struct Callback {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+impl Callback {
+    /// Per-expression-key merge: for every `(expr, PathItem)` in `other`,
+    /// if `self` already has that expression key the two `PathItem`s are
+    /// merged in place via [`PathItem::merge`]; otherwise the incoming
+    /// entry is inserted. Specification extensions on the Callback Object
+    /// itself are merged per-key.
+    pub fn merge(&mut self, other: Callback) {
+        for (key, item) in other.paths {
+            match self.paths.entry(key) {
+                std::collections::btree_map::Entry::Occupied(mut e) => e.get_mut().merge(item),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(item);
+                }
+            }
+        }
+        crate::common::merge::merge_optional_map(&mut self.extensions, other.extensions);
+    }
+}
+
 impl Serialize for Callback {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

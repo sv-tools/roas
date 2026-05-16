@@ -67,6 +67,54 @@ pub struct Components {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+impl Components {
+    /// Per-bag, per-key merge: every entry in each of `other`'s component
+    /// bags (`schemas`, `responses`, …) replaces `self`'s entry under the
+    /// same name; new names are inserted. Specification extensions (`^x-`)
+    /// on the Components Object are merged the same way.
+    ///
+    /// `callbacks` get a deeper merge: when both sides define a callback
+    /// under the same name *and* both are inline `RefOr::Item`, the two
+    /// `Callback`s are merged via [`Callback::merge`] (per-expression-key,
+    /// deep). Any case involving `RefOr::Ref` is wholesale-replaced by
+    /// incoming.
+    pub fn merge(&mut self, other: Components) {
+        use crate::common::merge::merge_optional_map;
+        merge_optional_map(&mut self.schemas, other.schemas);
+        merge_optional_map(&mut self.responses, other.responses);
+        merge_optional_map(&mut self.parameters, other.parameters);
+        merge_optional_map(&mut self.examples, other.examples);
+        merge_optional_map(&mut self.request_bodies, other.request_bodies);
+        merge_optional_map(&mut self.headers, other.headers);
+        merge_optional_map(&mut self.security_schemes, other.security_schemes);
+        merge_optional_map(&mut self.links, other.links);
+        merge_callbacks_bag(&mut self.callbacks, other.callbacks);
+        merge_optional_map(&mut self.extensions, other.extensions);
+    }
+}
+
+/// Per-key deep merge for `components.callbacks`: when both sides define
+/// a callback under the same name and both are inline (`RefOr::Item`),
+/// merge in place via [`Callback::merge`].
+fn merge_callbacks_bag(
+    base: &mut Option<BTreeMap<String, RefOr<Callback>>>,
+    incoming: Option<BTreeMap<String, RefOr<Callback>>>,
+) {
+    let Some(incoming) = incoming else { return };
+    let target = base.get_or_insert_with(Default::default);
+    for (key, item) in incoming {
+        match target.entry(key) {
+            std::collections::btree_map::Entry::Occupied(mut e) => match (e.get_mut(), item) {
+                (RefOr::Item(base_cb), RefOr::Item(inc_cb)) => base_cb.merge(inc_cb),
+                (slot, item) => *slot = item,
+            },
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(item);
+            }
+        }
+    }
+}
+
 impl ValidateWithContext<Spec> for Components {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         let re = regex!(r"^[a-zA-Z0-9.\-_]+$");

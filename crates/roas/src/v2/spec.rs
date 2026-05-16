@@ -455,6 +455,52 @@ impl Spec {
             .insert(name, response);
         Ok(RefOr::new_ref(reference))
     }
+
+    /// Merge `other` into `self` in place. Incoming entries always win:
+    ///
+    /// * **Map-like sections** (`paths`, `definitions`, `parameters`,
+    ///   `responses`, `securityDefinitions`, top-level Specification
+    ///   Extensions): incoming entries replace base entries with the same
+    ///   key; new keys are appended.
+    /// * **`tags`** (and `x-tagGroups`): deduplicated by `name`; incoming
+    ///   wins per name and new entries are appended.
+    /// * **`schemes` / `consumes` / `produces` / `security` / `x-servers`**:
+    ///   replaced wholesale when incoming is non-empty; an absent or empty
+    ///   incoming list leaves the base alone.
+    /// * **`host`, `basePath`, `externalDocs`**: replaced when incoming is
+    ///   `Some`.
+    /// * **`info` / `swagger`**: untouched — the base keeps its identity.
+    ///
+    /// `$ref`s are not rewritten. If a base definition is replaced by an
+    /// incoming one of the same name, every existing `$ref` to that name
+    /// resolves to the incoming definition.
+    pub fn merge(&mut self, other: Self) {
+        use crate::common::merge::{
+            merge_named_list, merge_optional, merge_optional_list, merge_optional_map,
+        };
+
+        merge_optional(&mut self.host, other.host);
+        merge_optional(&mut self.base_path, other.base_path);
+        merge_optional_list(&mut self.schemes, other.schemes);
+        merge_optional_list(&mut self.consumes, other.consumes);
+        merge_optional_list(&mut self.produces, other.produces);
+
+        self.paths.merge(other.paths);
+
+        merge_optional_map(&mut self.definitions, other.definitions);
+        merge_optional_map(&mut self.parameters, other.parameters);
+        merge_optional_map(&mut self.responses, other.responses);
+        merge_optional_map(&mut self.security_definitions, other.security_definitions);
+
+        merge_optional_list(&mut self.security, other.security);
+        merge_named_list(&mut self.tags, other.tags, |t| t.name.as_str());
+        merge_optional(&mut self.external_docs, other.external_docs);
+        merge_optional_list(&mut self.x_servers, other.x_servers);
+        merge_named_list(&mut self.x_tag_groups, other.x_tag_groups, |g| {
+            g.name.as_str()
+        });
+        merge_optional_map(&mut self.extensions, other.extensions);
+    }
 }
 
 impl ResolveReference<Response> for Spec {
@@ -1624,5 +1670,266 @@ mod tests {
             leftover.iter().all(|s| !s.contains("already exists")),
             "IgnoreNonUniqOperationIDs must suppress the duplicate, got: {leftover:?}",
         );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // `Spec::merge` coverage.
+    // ────────────────────────────────────────────────────────────────────
+
+    fn base_spec(value: serde_json::Value) -> Spec {
+        serde_json::from_value(value).expect("base spec must parse")
+    }
+
+    #[test]
+    fn merge_paths_deep_merges_path_items_and_appends_new() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "Base", "version": "1"},
+            "paths": {
+                "/a": {"get": {"responses": {"200": {"description": "base-a"}}}},
+                "/b": {"get": {"responses": {"200": {"description": "base-b"}}}}
+            }
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "Incoming", "version": "2"},
+            "paths": {
+                "/b": {"get": {"responses": {"200": {"description": "incoming-b"}}}},
+                "/c": {"get": {"responses": {"200": {"description": "incoming-c"}}}}
+            }
+        })));
+        // Round-trip to JSON to inspect descriptions without poking at every
+        // intermediate type.
+        let json = serde_json::to_value(&base).unwrap();
+        assert_eq!(
+            json["paths"]["/a"]["get"]["responses"]["200"]["description"],
+            "base-a"
+        );
+        assert_eq!(
+            json["paths"]["/b"]["get"]["responses"]["200"]["description"],
+            "incoming-b"
+        );
+        assert_eq!(
+            json["paths"]["/c"]["get"]["responses"]["200"]["description"],
+            "incoming-c"
+        );
+        assert_eq!(base.info.title, "Base");
+    }
+
+    #[test]
+    fn merge_path_items_preserves_methods_only_present_on_one_side() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {"responses": {"200": {"description": "base-get"}}}
+                }
+            }
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {"responses": {"201": {"description": "incoming-post"}}}
+                }
+            }
+        })));
+        let json = serde_json::to_value(&base).unwrap();
+        assert_eq!(
+            json["paths"]["/pets"]["get"]["responses"]["200"]["description"],
+            "base-get"
+        );
+        assert_eq!(
+            json["paths"]["/pets"]["post"]["responses"]["201"]["description"],
+            "incoming-post"
+        );
+    }
+
+    #[test]
+    fn merge_definitions_parameters_responses_security_definitions_per_key_incoming_wins() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "definitions": {"Pet": {"type": "string"}, "Owner": {"type": "string"}},
+            "responses": {"NotFound": {"description": "base"}}
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "y", "version": "2"},
+            "paths": {},
+            "definitions": {"Pet": {"type": "object"}, "Tag": {"type": "string"}},
+            "parameters": {"Limit": {"name": "limit", "in": "query", "type": "integer"}},
+            "securityDefinitions": {"apiKey": {"type": "apiKey", "name": "X-Key", "in": "header"}}
+        })));
+        let json = serde_json::to_value(&base).unwrap();
+        assert_eq!(
+            json["definitions"]["Pet"]["type"], "object",
+            "incoming Pet replaces base",
+        );
+        assert_eq!(json["definitions"]["Owner"]["type"], "string");
+        assert_eq!(json["definitions"]["Tag"]["type"], "string");
+        // Parameters bag was None on base; incoming materialises it.
+        assert_eq!(json["parameters"]["Limit"]["in"], "query");
+        // Base-only `responses` bag retained.
+        assert_eq!(json["responses"]["NotFound"]["description"], "base");
+        // securityDefinitions was None on base; incoming materialises it.
+        assert_eq!(json["securityDefinitions"]["apiKey"]["type"], "apiKey");
+    }
+
+    #[test]
+    fn merge_tags_dedupe_by_name_and_append_new() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "tags": [
+                {"name": "pets", "description": "base-pets"},
+                {"name": "users", "description": "base-users"}
+            ]
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "tags": [
+                {"name": "pets", "description": "incoming-pets"},
+                {"name": "orders", "description": "new-orders"}
+            ]
+        })));
+        let tags = base.tags.unwrap();
+        assert_eq!(tags.len(), 3);
+        let pets = tags.iter().find(|t| t.name == "pets").unwrap();
+        assert_eq!(pets.description.as_deref(), Some("incoming-pets"));
+    }
+
+    #[test]
+    fn merge_host_and_base_path_replaced_when_incoming_is_some() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "host": "base.example",
+            "basePath": "/v1",
+            "paths": {}
+        }));
+        // Absent host/basePath in incoming: base stays.
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {}
+        })));
+        assert_eq!(base.host.as_deref(), Some("base.example"));
+        assert_eq!(base.base_path.as_deref(), Some("/v1"));
+
+        // Present incoming: replaces.
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "host": "incoming.example",
+            "basePath": "/v2",
+            "paths": {}
+        })));
+        assert_eq!(base.host.as_deref(), Some("incoming.example"));
+        assert_eq!(base.base_path.as_deref(), Some("/v2"));
+    }
+
+    #[test]
+    fn merge_schemes_consumes_produces_replace_only_when_non_empty() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "schemes": ["https"],
+            "consumes": ["application/json"],
+            "produces": ["application/json"]
+        }));
+        // Absent in incoming: base stays.
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {}
+        })));
+        assert_eq!(
+            base.schemes.as_ref().map(|v| v.len()),
+            Some(1),
+            "schemes unchanged when incoming has none"
+        );
+
+        // Present non-empty in incoming: replace wholesale.
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "schemes": ["http", "ws"],
+            "consumes": ["application/xml"],
+            "produces": ["application/xml"]
+        })));
+        assert_eq!(base.schemes.as_ref().map(|v| v.len()), Some(2));
+        assert_eq!(
+            base.consumes.as_deref(),
+            Some(["application/xml".to_owned()].as_slice())
+        );
+        assert_eq!(
+            base.produces.as_deref(),
+            Some(["application/xml".to_owned()].as_slice())
+        );
+    }
+
+    #[test]
+    fn merge_keeps_base_info_and_swagger_version() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "Base", "version": "1"},
+            "paths": {}
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "Incoming", "version": "9"},
+            "paths": {}
+        })));
+        assert_eq!(base.info.title, "Base");
+        assert_eq!(base.info.version, "1");
+    }
+
+    #[test]
+    fn merge_top_level_extensions_per_key_incoming_wins() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "x-shared": "base",
+            "x-base-only": "kept"
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "x-shared": "incoming",
+            "x-incoming-only": "added"
+        })));
+        let ext = base.extensions.unwrap();
+        assert_eq!(ext["x-shared"], serde_json::json!("incoming"));
+        assert_eq!(ext["x-base-only"], serde_json::json!("kept"));
+        assert_eq!(ext["x-incoming-only"], serde_json::json!("added"));
+    }
+
+    #[test]
+    fn merge_round_trips_through_json() {
+        let mut base = base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok"}}}}},
+            "definitions": {"Pet": {"type": "string"}}
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "y", "version": "2"},
+            "paths": {"/b": {"get": {"responses": {"200": {"description": "ok"}}}}},
+            "definitions": {"Owner": {"type": "string"}}
+        })));
+        let json = serde_json::to_value(&base).unwrap();
+        let _: Spec = serde_json::from_value(json).expect("merged spec must re-parse");
     }
 }

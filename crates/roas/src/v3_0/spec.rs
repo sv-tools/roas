@@ -598,6 +598,43 @@ impl Spec {
             .insert(name, RefOr::new_item(callback));
         Ok(RefOr::new_ref(reference))
     }
+
+    /// Merge `other` into `self` in place. Incoming entries always win:
+    ///
+    /// * **Map-like sections** (`paths`, every `components.<bag>`,
+    ///   top-level Specification Extensions): incoming entries replace
+    ///   base entries with the same key; new keys are appended.
+    /// * **`tags`** (and `x-tagGroups`): deduplicated by `name`; incoming
+    ///   wins per name and new entries are appended.
+    /// * **`servers` / `security`**: replaced wholesale when incoming is
+    ///   non-empty; an absent or empty incoming list leaves the base
+    ///   alone.
+    /// * **`externalDocs`**: replaced when incoming is `Some`.
+    /// * **`info` / `openapi`**: untouched — the base keeps its identity.
+    ///
+    /// `$ref`s are not rewritten. If a base component is replaced by an
+    /// incoming one of the same name, every existing `$ref` to that name
+    /// resolves to the incoming definition.
+    pub fn merge(&mut self, other: Self) {
+        use crate::common::merge::{
+            merge_named_list, merge_optional, merge_optional_list, merge_optional_map,
+        };
+
+        merge_optional_list(&mut self.servers, other.servers);
+        self.paths.merge(other.paths);
+        match (&mut self.components, other.components) {
+            (Some(base), Some(inc)) => base.merge(inc),
+            (slot @ None, Some(inc)) => *slot = Some(inc),
+            (_, None) => {}
+        }
+        merge_optional_list(&mut self.security, other.security);
+        merge_named_list(&mut self.tags, other.tags, |t| t.name.as_str());
+        merge_optional(&mut self.external_docs, other.external_docs);
+        merge_named_list(&mut self.x_tag_groups, other.x_tag_groups, |g| {
+            g.name.as_str()
+        });
+        merge_optional_map(&mut self.extensions, other.extensions);
+    }
 }
 
 impl ResolveReference<Response> for Spec {
@@ -1577,5 +1614,308 @@ mod tests {
             leftover.iter().all(|s| !s.contains("already in use")),
             "IgnoreNonUniqOperationIDs must suppress the duplicate, got: {leftover:?}",
         );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // `Spec::merge` coverage.
+    // ────────────────────────────────────────────────────────────────────
+
+    fn base_spec(value: serde_json::Value) -> Spec {
+        serde_json::from_value(value).expect("base spec must parse")
+    }
+
+    #[test]
+    fn merge_paths_deep_merges_path_items_and_appends_new() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "Base", "version": "1"},
+            "paths": {
+                "/a": {"summary": "base-a"},
+                "/b": {"summary": "base-b"}
+            }
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "Incoming", "version": "2"},
+            "paths": {
+                "/b": {"summary": "incoming-b"},
+                "/c": {"summary": "incoming-c"}
+            }
+        })));
+        assert_eq!(base.paths.paths["/a"].summary.as_deref(), Some("base-a"));
+        assert_eq!(
+            base.paths.paths["/b"].summary.as_deref(),
+            Some("incoming-b")
+        );
+        assert_eq!(
+            base.paths.paths["/c"].summary.as_deref(),
+            Some("incoming-c")
+        );
+        assert_eq!(base.info.title, "Base");
+    }
+
+    #[test]
+    fn merge_path_items_preserves_methods_only_present_on_one_side() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {"responses": {"200": {"description": "base-get"}}}
+                }
+            }
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {"responses": {"201": {"description": "incoming-post"}}}
+                }
+            }
+        })));
+        let json = serde_json::to_value(&base).unwrap();
+        assert_eq!(
+            json["paths"]["/pets"]["get"]["responses"]["200"]["description"],
+            "base-get"
+        );
+        assert_eq!(
+            json["paths"]["/pets"]["post"]["responses"]["201"]["description"],
+            "incoming-post"
+        );
+    }
+
+    #[test]
+    fn merge_components_callbacks_bag_deep_merges_inline_callbacks() {
+        // v3.0 has no `components.pathItems`, but `callbacks` exist and
+        // need the same deep-merge contract.
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "callbacks": {
+                    "OnEvent": {
+                        "{$request.body#/url}": {
+                            "get": {"responses": {"200": {"description": "base-get"}}}
+                        },
+                        "{$request.body#/other}": {
+                            "post": {"responses": {"200": {"description": "base-only-cb"}}}
+                        }
+                    }
+                }
+            }
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "callbacks": {
+                    "OnEvent": {
+                        "{$request.body#/url}": {
+                            "post": {"responses": {"201": {"description": "incoming-post"}}}
+                        },
+                        "{$request.body#/new}": {
+                            "get": {"responses": {"200": {"description": "incoming-only-cb"}}}
+                        }
+                    }
+                }
+            }
+        })));
+        let json = serde_json::to_value(&base).unwrap();
+        let cb = &json["components"]["callbacks"]["OnEvent"];
+        assert_eq!(
+            cb["{$request.body#/url}"]["get"]["responses"]["200"]["description"],
+            "base-get"
+        );
+        assert_eq!(
+            cb["{$request.body#/url}"]["post"]["responses"]["201"]["description"],
+            "incoming-post"
+        );
+        assert_eq!(
+            cb["{$request.body#/other}"]["post"]["responses"]["200"]["description"],
+            "base-only-cb"
+        );
+        assert_eq!(
+            cb["{$request.body#/new}"]["get"]["responses"]["200"]["description"],
+            "incoming-only-cb"
+        );
+    }
+
+    #[test]
+    fn merge_components_callbacks_bag_ref_replaces_wholesale() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "callbacks": {
+                    "OnEvent": {
+                        "{$request.body#/url}": {
+                            "get": {"responses": {"200": {"description": "base-get"}}}
+                        }
+                    }
+                }
+            }
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "callbacks": {
+                    "OnEvent": {"$ref": "#/components/callbacks/Other"}
+                }
+            }
+        })));
+        let json = serde_json::to_value(&base).unwrap();
+        assert_eq!(
+            json["components"]["callbacks"]["OnEvent"]["$ref"],
+            "#/components/callbacks/Other"
+        );
+    }
+
+    #[test]
+    fn merge_components_each_bag_incoming_wins_per_name() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {"Pet": {"type": "string"}, "Owner": {"type": "string"}},
+                "responses": {"NotFound": {"description": "base"}}
+            }
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "y", "version": "2"},
+            "paths": {},
+            "components": {
+                "schemas": {"Pet": {"type": "object"}, "Tag": {"type": "string"}}
+            }
+        })));
+        let comp = base.components.expect("components present");
+        let schemas = comp.schemas.expect("schemas present");
+        let pet = serde_json::to_value(&schemas["Pet"]).unwrap();
+        assert_eq!(pet["type"], "object");
+        assert!(schemas.contains_key("Owner"));
+        assert!(schemas.contains_key("Tag"));
+        assert!(
+            comp.responses
+                .as_ref()
+                .is_some_and(|m| m.contains_key("NotFound"))
+        );
+    }
+
+    #[test]
+    fn merge_tags_dedupe_by_name_and_append_new() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "tags": [
+                {"name": "pets", "description": "base-pets"},
+                {"name": "users", "description": "base-users"}
+            ]
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "tags": [
+                {"name": "pets", "description": "incoming-pets"},
+                {"name": "orders", "description": "new-orders"}
+            ]
+        })));
+        let tags = base.tags.unwrap();
+        assert_eq!(tags.len(), 3);
+        let pets = tags.iter().find(|t| t.name == "pets").unwrap();
+        assert_eq!(pets.description.as_deref(), Some("incoming-pets"));
+    }
+
+    #[test]
+    fn merge_servers_replaces_only_when_incoming_is_non_empty() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "servers": [{"url": "https://base.example/"}]
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {}
+        })));
+        assert_eq!(
+            base.servers.as_ref().unwrap()[0].url,
+            "https://base.example/"
+        );
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "servers": [{"url": "https://incoming.example/"}]
+        })));
+        assert_eq!(
+            base.servers.as_ref().unwrap()[0].url,
+            "https://incoming.example/"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_base_info_and_openapi_version() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "Base", "version": "1"},
+            "paths": {}
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "Incoming", "version": "9"},
+            "paths": {}
+        })));
+        assert_eq!(base.info.title, "Base");
+        assert_eq!(base.info.version, "1");
+    }
+
+    #[test]
+    fn merge_top_level_extensions_per_key_incoming_wins() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "x-shared": "base",
+            "x-base-only": "kept"
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "x-shared": "incoming",
+            "x-incoming-only": "added"
+        })));
+        let ext = base.extensions.unwrap();
+        assert_eq!(ext["x-shared"], serde_json::json!("incoming"));
+        assert_eq!(ext["x-base-only"], serde_json::json!("kept"));
+        assert_eq!(ext["x-incoming-only"], serde_json::json!("added"));
+    }
+
+    #[test]
+    fn merge_round_trips_through_json() {
+        let mut base = base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok"}}}}},
+            "components": {"schemas": {"Pet": {"type": "string"}}}
+        }));
+        base.merge(base_spec(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "y", "version": "2"},
+            "paths": {"/b": {"get": {"responses": {"200": {"description": "ok"}}}}},
+            "components": {"schemas": {"Owner": {"type": "string"}}}
+        })));
+        let json = serde_json::to_value(&base).unwrap();
+        let _: Spec = serde_json::from_value(json).expect("merged spec must re-parse");
     }
 }

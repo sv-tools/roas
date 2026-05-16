@@ -98,6 +98,23 @@ pub struct PathItem {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+impl PathItem {
+    /// Deep-merge: every method-keyed operation in `other.operations` is
+    /// merged into `self.operations` (incoming wins per method); operations
+    /// only present in one side are preserved. So merging a base with `get`
+    /// and an incoming with `post` keeps both. `$ref` is replaced when
+    /// incoming is `Some`, and `parameters` is replaced wholesale when
+    /// incoming is non-empty.
+    pub fn merge(&mut self, other: PathItem) {
+        use crate::common::merge::{merge_optional, merge_optional_list, merge_optional_map};
+
+        merge_optional(&mut self.reference, other.reference);
+        merge_optional_map(&mut self.operations, other.operations);
+        merge_optional_list(&mut self.parameters, other.parameters);
+        merge_optional_map(&mut self.extensions, other.extensions);
+    }
+}
+
 impl Serialize for PathItem {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -266,6 +283,23 @@ impl Paths {
 
     pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, PathItem> {
         self.paths.iter()
+    }
+
+    /// Per-key merge: for every `(path, PathItem)` in `other`, if `self`
+    /// already has that path the two `PathItem`s are merged in place via
+    /// [`PathItem::merge`]; otherwise the incoming entry is inserted.
+    /// Specification extensions (`^x-`) on the Paths Object itself are
+    /// merged per-key.
+    pub fn merge(&mut self, other: Paths) {
+        for (key, item) in other.paths {
+            match self.paths.entry(key) {
+                std::collections::btree_map::Entry::Occupied(mut e) => e.get_mut().merge(item),
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(item);
+                }
+            }
+        }
+        crate::common::merge::merge_optional_map(&mut self.extensions, other.extensions);
     }
 }
 
