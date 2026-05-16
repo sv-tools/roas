@@ -30,6 +30,14 @@ directly from Rust code. The SDK supports every released OpenAPI version: v2.0
 - **Command-line interface** — [`roas-cli`](crates/roas-cli) ships a `roas`
   binary with `validate` and `convert` subcommands for one-shot use without
   writing Rust.
+- **Documentation viewer** — [`roas-cli`](crates/roas-cli)'s `preview`
+  subcommand starts a local HTTP server and renders the spec in a browser
+  via [Redoc](https://redocly.com/redoc) or
+  [Swagger UI](https://swagger.io/tools/swagger-ui/), so you can browse the
+  API as documentation without leaving your terminal. Pick the renderer with
+  `--renderer redoc|swagger-ui`; upconvert on the fly with
+  `--convert-to <VERSION>` when the input is an older spec version than the
+  renderer supports.
 
 ## Crates
 
@@ -44,10 +52,10 @@ directly from Rust code. The SDK supports every released OpenAPI version: v2.0
 
 | Spec      | Status |
 |-----------|--------|
-| OpenAPI [v2.0](https://spec.openapis.org/oas/v2.0.html) (Swagger) | parser, description validator, schema validator, converter to v3 |
-| OpenAPI [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)       | parser, description validator, schema validator, converter to v3.1 / v3.2 |
-| OpenAPI [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html)       | parser, description validator, schema validator, converter to v3.2 |
-| OpenAPI [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html)       | parser, description validator, schema validator (target of all upconverters) |
+| OpenAPI [v2.0](https://spec.openapis.org/oas/v2.0.html) (Swagger) | parser, description validator, schema validator, converter to v3, documentation rendering via `roas preview` |
+| OpenAPI [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)       | parser, description validator, schema validator, converter to v3.1 / v3.2, documentation rendering via `roas preview` |
+| OpenAPI [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html)       | parser, description validator, schema validator, converter to v3.2, documentation rendering via `roas preview` |
+| OpenAPI [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html)       | parser, description validator, schema validator, documentation rendering via `roas preview` (target of all upconverters) |
 
 See each crate's `README.md` for usage examples, and `AGENTS.md` at the
 repository root for contributor guidelines.
