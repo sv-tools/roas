@@ -23,6 +23,12 @@ use roas_http_fetcher::HttpFetcher;
 use std::fs;
 use std::path::PathBuf;
 
+// `roas::validation::Options` implements `clap::ValueEnum` under the `clap`
+// feature (enabled on the `roas` dep in this crate's Cargo.toml), so we can
+// hand it straight to `#[arg(value_enum)]` without a CLI-local mirror enum.
+// Variants render as kebab-case with the `Ignore` prefix dropped: e.g.
+// `Options::IgnoreMissingTags` ↔ `--ignore missing-tags`.
+
 mod versioned;
 
 use versioned::{SpecVersion, parse_value, path_looks_like_yaml};
@@ -58,9 +64,10 @@ struct ValidateArgs {
     load: Vec<LoaderKind>,
 
     /// Skip a specific validation check. Repeat the flag to skip several
-    /// (e.g. `--ignore missing-tags --ignore external-references`).
+    /// (e.g. `--ignore missing-tags --ignore external-references`). Run
+    /// `roas validate --help` to see the full list.
     #[arg(long, value_enum)]
-    ignore: Vec<IgnoreKind>,
+    ignore: Vec<Options>,
 
     /// Shorthand for `--ignore missing-tags --ignore unused-tags`. Matches
     /// the in-repo fixture-suite default.
@@ -86,51 +93,6 @@ struct ConvertArgs {
 enum LoaderKind {
     File,
     Http,
-}
-
-/// CLI-facing names for `roas::validation::Options`. Each variant maps to
-/// exactly one `Options` flag; together they cover every check the loader
-/// knows how to skip.
-#[derive(Copy, Clone, Debug, ValueEnum)]
-enum IgnoreKind {
-    /// Skip the "tag referenced but not declared" check.
-    MissingTags,
-    /// Don't error on external `$ref`s — process them only if `--load` is
-    /// configured for the right scheme.
-    ExternalReferences,
-    /// Skip URL syntax validation.
-    InvalidUrls,
-    /// Allow duplicate `operationId` values across operations.
-    NonUniqOperationIds,
-    /// (v3.1) Allow path items that are declared but never referenced.
-    UnusedPathItems,
-    /// Skip the "tag declared but not used" check.
-    UnusedTags,
-    /// Allow components / schemas (definitions in v2.0) that are never used.
-    UnusedSchemas,
-    /// Allow components / parameters that are never used.
-    UnusedParameters,
-    /// Allow components / responses that are never used.
-    UnusedResponses,
-    /// Allow server variables that are never used.
-    UnusedServerVariables,
-}
-
-impl IgnoreKind {
-    fn to_option(self) -> Options {
-        match self {
-            IgnoreKind::MissingTags => Options::IgnoreMissingTags,
-            IgnoreKind::ExternalReferences => Options::IgnoreExternalReferences,
-            IgnoreKind::InvalidUrls => Options::IgnoreInvalidUrls,
-            IgnoreKind::NonUniqOperationIds => Options::IgnoreNonUniqOperationIDs,
-            IgnoreKind::UnusedPathItems => Options::IgnoreUnusedPathItems,
-            IgnoreKind::UnusedTags => Options::IgnoreUnusedTags,
-            IgnoreKind::UnusedSchemas => Options::IgnoreUnusedSchemas,
-            IgnoreKind::UnusedParameters => Options::IgnoreUnusedParameters,
-            IgnoreKind::UnusedResponses => Options::IgnoreUnusedResponses,
-            IgnoreKind::UnusedServerVariables => Options::IgnoreUnusedServerVariables,
-        }
-    }
 }
 
 fn main() -> Result<()> {
@@ -176,7 +138,7 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
 
     let mut options = enumset::EnumSet::<Options>::new();
     for ignore in &args.ignore {
-        options |= ignore.to_option();
+        options |= *ignore;
     }
     if args.lenient_tags {
         options |= Options::IgnoreMissingTags;

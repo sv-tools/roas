@@ -32,15 +32,19 @@ roas validate --load http spec.yaml       # follow `http(s)://` $refs
 roas validate --load file --load http spec.yaml  # both
 ```
 
-`--ignore <CHECK>` skips a specific validation check; repeat the flag to skip more than one. Available checks:
+`--ignore <CHECK>` skips a specific validation check; repeat the flag to skip more than one. The list is sourced from `roas::validation::Options` (via roas's `clap` feature), so it stays in sync with the library:
 
 ```
 missing-tags, external-references, invalid-urls, non-uniq-operation-ids,
 unused-path-items, unused-tags, unused-schemas, unused-parameters,
-unused-responses, unused-server-variables
+unused-responses, unused-server-variables, unused-examples,
+unused-request-bodies, unused-headers, unused-security-schemes,
+unused-links, unused-callbacks, unused-media-types,
+empty-info-title, empty-info-version, empty-response-description,
+empty-external-documentation-url
 ```
 
-`--lenient-tags` is a shorthand for `--ignore missing-tags --ignore unused-tags`.
+Run `roas validate --help` for descriptions of each check. `--lenient-tags` is a shorthand for `--ignore missing-tags --ignore unused-tags`.
 
 ### `convert`
 
