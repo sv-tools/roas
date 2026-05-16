@@ -102,7 +102,18 @@ fn renderer_html(renderer: Renderer) -> &'static str {
     }
 }
 
-pub fn run_preview(args: PreviewArgs) -> Result<()> {
+/// Everything `run_preview` collects before it commits to the blocking
+/// `incoming_requests()` loop. Pulled out so unit tests can exercise the
+/// happy path of `run_preview` without owning a server that blocks forever.
+struct PreparedPreview {
+    server: tiny_http::Server,
+    url: String,
+    renderer_label: &'static str,
+    html: &'static str,
+    spec_json: String,
+}
+
+fn prepare_preview(args: &PreviewArgs) -> Result<PreparedPreview> {
     let value = read_and_parse(&args.file)?;
     let detected = versioned::detect_or_use(args.from, value)?;
     // `convert_to(<same version>)` is a "serialise back as Value" pass —
@@ -122,21 +133,43 @@ pub fn run_preview(args: PreviewArgs) -> Result<()> {
         Renderer::Redoc => "Redoc",
         Renderer::SwaggerUi => "Swagger UI",
     };
+    let html = renderer_html(args.renderer);
 
+    Ok(PreparedPreview {
+        server,
+        url,
+        renderer_label,
+        html,
+        spec_json,
+    })
+}
+
+pub fn run_preview(args: PreviewArgs) -> Result<()> {
+    let prepared = prepare_preview(&args)?;
+    drive_prepared_preview(&args, prepared);
+    Ok(())
+}
+
+/// Tail of `run_preview` — prints the "Serving …" banner, optionally pokes
+/// `webbrowser::open`, and runs the blocking request loop. Split out so a
+/// test thread can drive it against a `PreparedPreview` it constructed itself
+/// and observe behaviour without having to discover the auto-bound port.
+fn drive_prepared_preview(args: &PreviewArgs, prepared: PreparedPreview) {
     eprintln!(
-        "Serving {} via {renderer_label} at {url}",
+        "Serving {} via {} at {}",
         args.file.display(),
+        prepared.renderer_label,
+        prepared.url,
     );
     eprintln!("Press Ctrl+C to stop.");
 
     if !args.no_open {
         // Browser open is best-effort; if it fails the user can still hit
         // the URL manually from stderr.
-        let _ = webbrowser::open(&url);
+        let _ = webbrowser::open(&prepared.url);
     }
 
-    serve_preview_requests(server, renderer_html(args.renderer), &spec_json);
-    Ok(())
+    serve_preview_requests(prepared.server, prepared.html, &prepared.spec_json);
 }
 
 fn serve_preview_requests(server: tiny_http::Server, html: &str, spec_json: &str) {
@@ -316,5 +349,147 @@ mod tests {
             err.to_string().contains("reading"),
             "expected `reading` context, got: {err}",
         );
+    }
+
+    /// `prepare_preview` is the happy path of `run_preview` minus the blocking
+    /// `serve_preview_requests` call — driving it directly is the only way to
+    /// observe the bound server, the assembled URL, and the renderer-specific
+    /// fields without spawning a background thread that we can't reliably
+    /// shut down.
+    fn write_minimal_v3_2_spec() -> PathBuf {
+        let path = temp_path("ok.json");
+        std::fs::write(
+            &path,
+            br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .expect("write temp spec");
+        path
+    }
+
+    #[test]
+    fn prepare_preview_with_redoc_returns_bound_server_and_redoc_assets() {
+        let path = write_minimal_v3_2_spec();
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: None,
+            no_open: true,
+            renderer: Renderer::Redoc,
+        };
+        let prepared = prepare_preview(&args).expect("prepare ok");
+
+        // Server is bound on loopback with a non-zero port we can format into a URL.
+        let port = match prepared.server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => {
+                assert!(addr.ip().is_loopback(), "must bind to loopback");
+                assert!(addr.port() > 0, "must allocate an ephemeral port");
+                addr.port()
+            }
+            other => panic!("unexpected listen addr: {other:?}"),
+        };
+        assert_eq!(prepared.url, format!("http://127.0.0.1:{port}/"));
+
+        // Renderer-specific fields wire through correctly.
+        assert_eq!(prepared.renderer_label, "Redoc");
+        assert!(prepared.html.contains("cdn.redoc.ly"));
+
+        // Spec was parsed + re-serialised back to JSON — round-trip preserves
+        // the `openapi` field we put in.
+        let parsed: serde_json::Value = serde_json::from_str(&prepared.spec_json).unwrap();
+        assert_eq!(parsed["openapi"], "3.2.0");
+
+        // Drop the prepared server explicitly to release the port before the
+        // tempfile teardown runs.
+        drop(prepared);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prepare_preview_with_swagger_ui_switches_renderer_fields() {
+        let path = write_minimal_v3_2_spec();
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: None,
+            no_open: true,
+            renderer: Renderer::SwaggerUi,
+        };
+        let prepared = prepare_preview(&args).expect("prepare ok");
+
+        assert_eq!(prepared.renderer_label, "Swagger UI");
+        assert!(prepared.html.contains("swagger-ui-dist"));
+
+        drop(prepared);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Drive `drive_prepared_preview` on a background thread and hit `/spec`
+    /// through the URL it printed. Covers the eprintln + serve loop body that
+    /// `run_preview`'s in-process tests can't reach directly.
+    #[test]
+    fn drive_prepared_preview_serves_spec_through_the_published_url() {
+        let path = write_minimal_v3_2_spec();
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: None,
+            no_open: true,
+            renderer: Renderer::Redoc,
+        };
+        let prepared = prepare_preview(&args).expect("prepare ok");
+        let addr = match prepared.server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr,
+            other => panic!("unexpected listen addr: {other:?}"),
+        };
+
+        // Move `prepared` into the thread; rebuild args so the thread can own
+        // its own copy without us forcing `PreviewArgs: Clone`.
+        let path_for_thread = path.clone();
+        let thread = std::thread::spawn(move || {
+            let thread_args = PreviewArgs {
+                file: path_for_thread,
+                from: None,
+                no_open: true,
+                renderer: Renderer::Redoc,
+            };
+            drive_prepared_preview(&thread_args, prepared);
+        });
+
+        let mut s = send_request(addr, "/spec");
+        let (code, ctype, body) = parse_status_and_body(&mut s);
+        assert_eq!(code, 200);
+        assert!(ctype.contains("application/json"));
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["openapi"], "3.2.0");
+
+        // Background thread keeps blocking on `incoming_requests()` until
+        // process exit; the server's listener is dropped when this test
+        // function returns and `prepared` is dropped on the thread's stack.
+        // Detach intentionally — we don't need to wait.
+        drop(thread);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prepare_preview_with_forced_version_round_trips_through_parse_as() {
+        // `--from v3_1` on a v3.2-shaped doc force-parses as v3.1; serialised
+        // output should advertise `openapi: 3.1.*`.
+        let path = temp_path("forced.json");
+        std::fs::write(
+            &path,
+            br#"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .expect("write temp spec");
+
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: Some(SpecVersion::V3_1),
+            no_open: true,
+            renderer: Renderer::Redoc,
+        };
+        let prepared = prepare_preview(&args).expect("prepare ok");
+        let parsed: serde_json::Value = serde_json::from_str(&prepared.spec_json).unwrap();
+        let openapi = parsed["openapi"].as_str().unwrap();
+        assert!(openapi.starts_with("3.1"), "got openapi = {openapi}");
+
+        drop(prepared);
+        let _ = std::fs::remove_file(&path);
     }
 }
