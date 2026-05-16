@@ -1580,4 +1580,49 @@ mod tests {
             err.errors
         );
     }
+
+    #[test]
+    fn ignore_non_uniq_operation_ids_suppresses_duplicate_error() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "operationId": "dup",
+                        "responses": {"200": {"description": "ok"}},
+                    },
+                },
+                "/b": {
+                    "get": {
+                        "operationId": "dup",
+                        "responses": {"200": {"description": "ok"}},
+                    },
+                },
+            },
+        }))
+        .expect("spec must parse");
+
+        let err = spec
+            .validate(IGNORE_UNUSED, None)
+            .expect_err("duplicate operationId must error by default");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("`dup` already exists")),
+            "expected duplicate diagnostic, got: {:?}",
+            err.errors,
+        );
+
+        let opts = IGNORE_UNUSED | Options::IgnoreNonUniqOperationIDs;
+        let result = spec.validate(opts, None);
+        let leftover: Vec<String> = result
+            .err()
+            .map(|e| e.errors.iter().map(|e| e.to_string()).collect())
+            .unwrap_or_default();
+        assert!(
+            leftover.iter().all(|s| !s.contains("already exists")),
+            "IgnoreNonUniqOperationIDs must suppress the duplicate, got: {leftover:?}",
+        );
+    }
 }
