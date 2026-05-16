@@ -1,15 +1,22 @@
 //! `roas` command-line front-end.
 //!
-//! Two subcommands today:
+//! Three subcommands today:
 //!
-//! - `roas validate <FILE>` — parse and validate an OpenAPI spec.
-//!   Version is auto-detected from the document; pass `--from` to force.
-//!   External `$ref`s are skipped by default; use `--load file` / `--load http`
+//! - `roas validate <FILE>` — parse and validate an OpenAPI spec. Version is
+//!   auto-detected from the document; pass `--from` to force. External
+//!   `$ref`s are skipped by default; use `--load file` / `--load http`
 //!   (or both) to enable the loader.
 //!
 //! - `roas convert --to <VERSION> <FILE>` — chain the existing
 //!   `From<v_X::Spec> for v_Y::Spec` migrations to upconvert a spec.
 //!   Pass `--from` to force the input version.
+//!
+//! - `roas preview <FILE>` — start a local HTTP server on
+//!   `127.0.0.1:<random>` that serves the spec rendered with
+//!   [Redoc](https://redocly.com/redoc) (default) or
+//!   [Swagger UI](https://swagger.io/tools/swagger-ui/) (`--renderer
+//!   swagger-ui`), and open the default browser at it. `--no-open` skips
+//!   the launch. Ctrl+C tears the server down.
 //!
 //! Input may be JSON or YAML; the parser is selected by file extension
 //! (`.yaml` / `.yml` → YAML, otherwise JSON).
@@ -29,8 +36,10 @@ use std::path::PathBuf;
 // Variants render as kebab-case with the `Ignore` prefix dropped: e.g.
 // `Options::IgnoreMissingTags` ↔ `--ignore missing-tags`.
 
+mod preview;
 mod versioned;
 
+use preview::PreviewArgs;
 use versioned::{SpecVersion, parse_value, path_looks_like_yaml};
 
 #[derive(Parser)]
@@ -46,6 +55,8 @@ enum Command {
     Validate(ValidateArgs),
     /// Convert an OpenAPI spec to a different version.
     Convert(ConvertArgs),
+    /// Preview the spec in a browser, rendered with Redoc or Swagger UI.
+    Preview(PreviewArgs),
 }
 
 #[derive(clap::Args)]
@@ -95,10 +106,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Validate(args) => run_validate(args),
         Command::Convert(args) => run_convert(args),
+        Command::Preview(args) => preview::run_preview(args),
     }
 }
 
-fn read_and_parse(path: &std::path::Path) -> Result<serde_json::Value> {
+pub(crate) fn read_and_parse(path: &std::path::Path) -> Result<serde_json::Value> {
     let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     parse_value(&raw, path_looks_like_yaml(path))
 }
@@ -220,7 +232,7 @@ mod tests {
                 assert!(args.load.is_empty());
                 assert!(args.ignore.is_empty());
             }
-            Command::Convert(_) => panic!("expected Validate"),
+            _ => panic!("expected Validate"),
         }
     }
 
@@ -249,7 +261,7 @@ mod tests {
                     ]
                 );
             }
-            Command::Convert(_) => panic!("expected Validate"),
+            _ => panic!("expected Validate"),
         }
     }
 
@@ -278,7 +290,7 @@ mod tests {
                 assert!(matches!(args.load[0], LoaderKind::File));
                 assert!(matches!(args.load[1], LoaderKind::Http));
             }
-            Command::Convert(_) => panic!("expected Validate"),
+            _ => panic!("expected Validate"),
         }
     }
 
@@ -299,7 +311,7 @@ mod tests {
                 assert_eq!(args.from, Some(SpecVersion::V2));
                 assert_eq!(args.to, SpecVersion::V3_2);
             }
-            Command::Validate(_) => panic!("expected Convert"),
+            _ => panic!("expected Convert"),
         }
     }
 
@@ -499,5 +511,54 @@ mod tests {
             err.to_string().contains("reading"),
             "expected `reading` context, got: {err}",
         );
+    }
+
+    // The server-side / helper-fn coverage for `preview` lives in
+    // `preview.rs`'s own test module. These tests only confirm the
+    // clap-wiring surface on `Cli` itself.
+    #[test]
+    fn cli_parses_preview_subcommand_with_defaults() {
+        let cli = Cli::try_parse_from(["roas", "preview", "spec.json", "--no-open"])
+            .expect("preview parse");
+        match cli.command {
+            Command::Preview(args) => {
+                assert_eq!(args.file.to_string_lossy(), "spec.json");
+                assert!(args.no_open);
+                assert!(args.from.is_none());
+                assert!(!args.watch);
+                assert!(matches!(args.renderer, preview::Renderer::Redoc));
+            }
+            _ => panic!("expected Preview"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_preview_subcommand_with_watch_flag() {
+        let cli = Cli::try_parse_from(["roas", "preview", "--watch", "spec.json"])
+            .expect("preview parse");
+        match cli.command {
+            Command::Preview(args) => {
+                assert!(args.watch);
+            }
+            _ => panic!("expected Preview"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_preview_subcommand_with_swagger_ui_renderer() {
+        let cli = Cli::try_parse_from(["roas", "preview", "--renderer", "swagger-ui", "spec.json"])
+            .expect("preview parse");
+        match cli.command {
+            Command::Preview(args) => {
+                assert!(matches!(args.renderer, preview::Renderer::SwaggerUi));
+            }
+            _ => panic!("expected Preview"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_unknown_preview_renderer() {
+        let res = Cli::try_parse_from(["roas", "preview", "--renderer", "stoplight", "spec.json"]);
+        assert!(res.is_err(), "unknown renderer must be rejected");
     }
 }

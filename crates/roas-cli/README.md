@@ -17,6 +17,7 @@ The installed binary is named `roas`.
 ```shell
 roas validate <FILE>            # parse + validate
 roas convert --to v3_2 <FILE>   # upconvert across versions
+roas preview <FILE>             # open the spec in a browser via Redoc
 ```
 
 Input can be JSON or YAML; the parser is selected by file extension (`.yaml` / `.yml` → YAML, everything else → JSON).
@@ -56,6 +57,19 @@ roas convert --to v3_1 --from v2 spec.yaml
 ```
 
 Output is JSON on stdout.
+
+### `preview`
+
+Starts a local HTTP server on `127.0.0.1:<random>` that serves the spec, embedded inside an HTML page rendered with either [Redoc](https://redocly.com/redoc) (default) or [Swagger UI](https://swagger.io/tools/swagger-ui/), and opens the default browser pointed at it. Pass `--no-open` to skip the browser launch (the URL is printed to stderr in either case). Ctrl+C tears the server down.
+
+```shell
+roas preview spec.yaml                               # Redoc (default)
+roas preview --renderer swagger-ui spec.yaml         # Swagger UI
+roas preview --watch spec.yaml                       # live-reload on file change
+roas preview --no-open --from v3_1 spec.json
+```
+
+`--watch` watches the spec file and pushes a Server-Sent-Events reload to the browser on every change; the page reloads itself and re-fetches `/spec`. If a write produces a parse error the previous good JSON is kept and the error is logged to stderr. Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently. To preview an older spec under a v3.0+ renderer, upconvert it once with `roas convert --to v3_1 spec.json` and serve the result.
 
 ## License
 
