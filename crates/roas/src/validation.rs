@@ -307,6 +307,130 @@ pub enum Options {
     IgnoreEmptyExternalDocumentationUrl,
 }
 
+/// `clap::ValueEnum` impl for [`Options`], available behind the `clap` Cargo
+/// feature. Each variant maps to a kebab-case name with the leading `Ignore`
+/// dropped — e.g. `Options::IgnoreMissingTags` ↔ `"missing-tags"` — so
+/// downstream CLIs can wire `Options` directly into a `--ignore` style flag
+/// without a hand-rolled mirror enum.
+#[cfg(feature = "clap")]
+impl clap::ValueEnum for Options {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            Options::IgnoreMissingTags,
+            Options::IgnoreExternalReferences,
+            Options::IgnoreInvalidUrls,
+            Options::IgnoreNonUniqOperationIDs,
+            Options::IgnoreUnusedPathItems,
+            Options::IgnoreUnusedTags,
+            Options::IgnoreUnusedSchemas,
+            Options::IgnoreUnusedParameters,
+            Options::IgnoreUnusedResponses,
+            Options::IgnoreUnusedServerVariables,
+            Options::IgnoreUnusedExamples,
+            Options::IgnoreUnusedRequestBodies,
+            Options::IgnoreUnusedHeaders,
+            Options::IgnoreUnusedSecuritySchemes,
+            Options::IgnoreUnusedLinks,
+            Options::IgnoreUnusedCallbacks,
+            Options::IgnoreUnusedMediaTypes,
+            Options::IgnoreEmptyInfoTitle,
+            Options::IgnoreEmptyInfoVersion,
+            Options::IgnoreEmptyResponseDescription,
+            Options::IgnoreEmptyExternalDocumentationUrl,
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        let (name, help) = match self {
+            Options::IgnoreMissingTags => (
+                "missing-tags",
+                "Skip the `tag referenced but not declared` check (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreExternalReferences => (
+                "external-references",
+                "Don't error on external `$ref`s (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreInvalidUrls => (
+                "invalid-urls",
+                "Skip URL syntax validation (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreNonUniqOperationIDs => (
+                "non-uniq-operation-ids",
+                "Allow duplicate `operationId` values (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedPathItems => (
+                "unused-path-items",
+                "Allow declared-but-unreferenced path items (v3.1)",
+            ),
+            Options::IgnoreUnusedTags => (
+                "unused-tags",
+                "Skip the `tag declared but not used` check (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedSchemas => (
+                "unused-schemas",
+                "Allow unused schemas / definitions (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedParameters => (
+                "unused-parameters",
+                "Allow unused components / parameters (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedResponses => (
+                "unused-responses",
+                "Allow unused components / responses (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedServerVariables => (
+                "unused-server-variables",
+                "Allow unused server variables (v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedExamples => (
+                "unused-examples",
+                "Allow unused components / examples (v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedRequestBodies => (
+                "unused-request-bodies",
+                "Allow unused components / request bodies (v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedHeaders => (
+                "unused-headers",
+                "Allow unused components / headers (v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedSecuritySchemes => (
+                "unused-security-schemes",
+                "Allow unused components / security schemes (v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedLinks => (
+                "unused-links",
+                "Allow unused components / links (v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedCallbacks => (
+                "unused-callbacks",
+                "Allow unused components / callbacks (v3.0, v3.1)",
+            ),
+            Options::IgnoreUnusedMediaTypes => (
+                "unused-media-types",
+                "Allow unused components / media types (v3.2)",
+            ),
+            Options::IgnoreEmptyInfoTitle => (
+                "empty-info-title",
+                "Allow empty `info.title` (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreEmptyInfoVersion => (
+                "empty-info-version",
+                "Allow empty `info.version` (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreEmptyResponseDescription => (
+                "empty-response-description",
+                "Allow empty response `description` (v2.0, v3.0, v3.1)",
+            ),
+            Options::IgnoreEmptyExternalDocumentationUrl => (
+                "empty-external-documentation-url",
+                "Allow empty `externalDocs.url` (v2.0, v3.0, v3.1)",
+            ),
+        };
+        Some(clap::builder::PossibleValue::new(name).help(help))
+    }
+}
+
 /// A set of options to ignore unused objects.
 pub const IGNORE_UNUSED: EnumSet<Options> = enum_set!(
     Options::IgnoreUnusedTags
@@ -588,6 +712,52 @@ impl<'a, T> From<Context<'a, T>> for Result<(), Error> {
             Ok(())
         } else {
             Err(Error { errors: val.errors })
+        }
+    }
+}
+
+#[cfg(all(test, feature = "clap"))]
+mod clap_value_enum_tests {
+    use super::*;
+    use clap::ValueEnum;
+
+    #[test]
+    fn value_variants_covers_every_options_variant_exactly_once() {
+        // Folding the listed variants into an EnumSet collapses any duplicate
+        // — equal cardinality + equality vs the full `EnumSet::all()` proves
+        // we list each variant exactly once and miss none. Catches drift when
+        // new `Options` variants are added without updating `value_variants`.
+        let variants = <Options as ValueEnum>::value_variants();
+        let listed: EnumSet<Options> = variants.iter().copied().collect();
+        assert_eq!(listed.len(), variants.len(), "duplicate variant listed");
+        assert_eq!(listed, EnumSet::<Options>::all());
+    }
+
+    #[test]
+    fn possible_value_names_are_unique_and_kebab_case() {
+        let mut seen: Vec<String> = Vec::new();
+        for variant in <Options as ValueEnum>::value_variants() {
+            let pv = variant
+                .to_possible_value()
+                .expect("every variant must have a possible value");
+            let name = pv.get_name().to_string();
+            assert!(
+                name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
+                "name `{name}` is not kebab-case",
+            );
+            assert!(!seen.contains(&name), "duplicate name `{name}`");
+            seen.push(name);
+        }
+    }
+
+    #[test]
+    fn from_str_round_trips_for_every_variant() {
+        for variant in <Options as ValueEnum>::value_variants() {
+            let pv = variant.to_possible_value().unwrap();
+            let name = pv.get_name();
+            let parsed = <Options as ValueEnum>::from_str(name, false)
+                .expect("name must parse back to a variant");
+            assert_eq!(parsed, *variant);
         }
     }
 }
