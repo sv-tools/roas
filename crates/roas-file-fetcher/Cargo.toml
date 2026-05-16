@@ -28,5 +28,11 @@ roas = { version = ">=0.13", path = "../roas" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["fs", "macros", "rt"] }
+tokio = { workspace = true, optional = true, features = ["fs", "rt"] }
 url.workspace = true
+
+[dev-dependencies]
+# `macros` is needed only by `#[tokio::test]` in the async integration tests;
+# downstream consumers of the public `async` feature should not have to pull
+# in tokio-macros just to use `AsyncFileFetcher`.
+tokio = { workspace = true, features = ["macros"] }

@@ -6,11 +6,11 @@
 //! [`LoaderError::Parse`].
 //!
 //! Optional features:
-//!   * `async` — also expose [`AsyncFileFetcher`] for
-//!     [`Loader::register_async_fetcher`](roas::loader::Loader::register_async_fetcher),
-//!     backed by [`tokio::fs::read`]. Requires an active tokio runtime when
-//!     the returned future is awaited. Off by default; enabling it pulls in
-//!     `tokio` with `fs` + `rt` features.
+//!   * `async` — also expose `AsyncFileFetcher` for
+//!     `roas::loader::Loader::register_async_fetcher`, backed by
+//!     `tokio::fs::read`. Requires an active tokio runtime when the returned
+//!     future is awaited. Off by default; enabling it pulls in `tokio` with
+//!     `fs` + `rt` features.
 //!   * `yaml` — parse YAML file bodies in addition to JSON. Selection is by
 //!     file path extension (`.yaml` / `.yml`). Pulls in `serde_yaml_ng`.
 
