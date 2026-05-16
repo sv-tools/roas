@@ -422,4 +422,135 @@ mod tests {
             assert_eq!(v.label(), expected);
         }
     }
+
+    // Helpers used by the per-version-arm tests below — minimal in-memory
+    // specs we round-trip through `detect_or_use`.
+    fn v2_spec() -> DetectedSpec {
+        let v: Value = serde_json::from_str(
+            r#"{"swagger":"2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        detect_or_use(None, v).unwrap()
+    }
+    fn v3_0_spec() -> DetectedSpec {
+        let v: Value = serde_json::from_str(
+            r#"{"openapi":"3.0.4","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        detect_or_use(None, v).unwrap()
+    }
+    fn v3_1_spec() -> DetectedSpec {
+        let v: Value = serde_json::from_str(
+            r#"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        detect_or_use(None, v).unwrap()
+    }
+    fn v3_2_spec() -> DetectedSpec {
+        let v: Value = serde_json::from_str(
+            r#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        detect_or_use(None, v).unwrap()
+    }
+
+    #[test]
+    fn detected_spec_version_and_label_cover_all_arms() {
+        assert_eq!(v2_spec().version(), SpecVersion::V2);
+        assert_eq!(v2_spec().label(), "OpenAPI 2.0");
+        assert_eq!(v3_0_spec().version(), SpecVersion::V3_0);
+        assert_eq!(v3_0_spec().label(), "OpenAPI 3.0");
+        assert_eq!(v3_1_spec().version(), SpecVersion::V3_1);
+        assert_eq!(v3_1_spec().label(), "OpenAPI 3.1");
+        assert_eq!(v3_2_spec().version(), SpecVersion::V3_2);
+        assert_eq!(v3_2_spec().label(), "OpenAPI 3.2");
+    }
+
+    #[test]
+    fn detected_spec_validate_dispatches_to_each_version() {
+        // Reasonable defaults for v2.0 paths — empty paths object is legal.
+        // Each call exercises one arm of `DetectedSpec::validate`.
+        let opts = enumset::EnumSet::<Options>::new();
+        v2_spec().validate(opts, None).unwrap();
+        v3_0_spec().validate(opts, None).unwrap();
+        v3_1_spec().validate(opts, None).unwrap();
+        v3_2_spec().validate(opts, None).unwrap();
+    }
+
+    #[test]
+    fn convert_to_v2_same_version_noop_serialises_swagger() {
+        let out = v2_spec().convert_to(SpecVersion::V2).unwrap();
+        assert_eq!(out["swagger"], "2.0");
+    }
+
+    #[test]
+    fn convert_to_v3_0_same_version_noop() {
+        let out = v3_0_spec().convert_to(SpecVersion::V3_0).unwrap();
+        assert_major_minor(&out, "3.0");
+    }
+
+    #[test]
+    fn convert_to_v3_1_same_version_noop() {
+        let out = v3_1_spec().convert_to(SpecVersion::V3_1).unwrap();
+        assert_major_minor(&out, "3.1");
+    }
+
+    #[test]
+    fn convert_to_v2_to_v3_0_single_step() {
+        let out = v2_spec().convert_to(SpecVersion::V3_0).unwrap();
+        assert_major_minor(&out, "3.0");
+    }
+
+    #[test]
+    fn convert_to_v2_to_v3_1_chains_through_v3_0() {
+        let out = v2_spec().convert_to(SpecVersion::V3_1).unwrap();
+        assert_major_minor(&out, "3.1");
+    }
+
+    #[test]
+    fn convert_to_v3_0_to_v3_2_chains_through_v3_1() {
+        let out = v3_0_spec().convert_to(SpecVersion::V3_2).unwrap();
+        assert_major_minor(&out, "3.2");
+    }
+
+    #[test]
+    fn convert_to_v3_1_to_v3_2_single_step() {
+        let out = v3_1_spec().convert_to(SpecVersion::V3_2).unwrap();
+        assert_major_minor(&out, "3.2");
+    }
+
+    #[test]
+    fn convert_to_rejects_downconversion_safety_net() {
+        // The CLI rejects downconversion before calling `convert_to`; this is
+        // the safety-net branch inside `convert_to` itself, exercised here by
+        // directly asking for a v3.2 → v2 conversion.
+        let err = v3_2_spec()
+            .convert_to(SpecVersion::V2)
+            .expect_err("downconversion must error")
+            .to_string();
+        assert!(err.contains("unsupported conversion"), "got: {err}",);
+    }
+
+    #[test]
+    fn parse_as_errors_when_forced_version_mismatches_doc() {
+        // A v3.2 doc force-parsed as v2 must fail at deserialise time with
+        // the OpenAPI 2.0 context attached.
+        let v: Value = serde_json::from_str(
+            r#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        // `Result<DetectedSpec, _>::unwrap_err` would require
+        // `DetectedSpec: Debug`; match the result explicitly to avoid that bound.
+        let err = match detect_or_use(Some(SpecVersion::V2), v) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected Err, got Ok"),
+        };
+        assert!(err.contains("deserialising as OpenAPI 2.0"), "got: {err}",);
+    }
+
+    #[test]
+    fn parse_version_returns_none_when_minor_is_not_parseable_int() {
+        // "3.." => minor segment is empty.
+        assert_eq!(parse_version("3.."), None);
+    }
 }

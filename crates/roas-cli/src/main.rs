@@ -381,4 +381,123 @@ mod tests {
             "expected `parsing YAML` context, got: {err}",
         );
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // run_validate / run_convert end-to-end-ish tests (drive each function
+    // with a constructed args struct + a temp-file spec; assert return
+    // shape, not stdout/stderr text).
+    // ────────────────────────────────────────────────────────────────────
+
+    /// A minimal valid v3.2 spec body — used by several validate / convert
+    /// tests that just need *some* spec on disk.
+    const MINIMAL_V3_2: &[u8] =
+        br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#;
+    const MINIMAL_V2: &[u8] = br#"{"swagger":"2.0","info":{"title":"x","version":"1"},"paths":{}}"#;
+
+    #[test]
+    fn run_validate_returns_ok_for_clean_spec() {
+        let f = TempFile::write("clean.json", MINIMAL_V3_2);
+        let args = ValidateArgs {
+            file: f.0.clone(),
+            from: None,
+            load: Vec::new(),
+            ignore: Vec::new(),
+        };
+        run_validate(args).expect("clean spec must validate");
+    }
+
+    #[test]
+    fn run_validate_returns_err_for_spec_with_unused_tag() {
+        // Default ignore set fires on unused tags.
+        let body = br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{},"tags":[{"name":"unused"}]}"#;
+        let f = TempFile::write("unused-tag.json", body);
+        let args = ValidateArgs {
+            file: f.0.clone(),
+            from: None,
+            load: Vec::new(),
+            ignore: Vec::new(),
+        };
+        let err = run_validate(args).expect_err("unused tag must fail");
+        assert!(err.to_string().contains("validation failed"), "got: {err}",);
+    }
+
+    #[test]
+    fn run_validate_with_ignore_suppresses_validation_failure() {
+        let body = br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{},"tags":[{"name":"unused"}]}"#;
+        let f = TempFile::write("ignored.json", body);
+        let args = ValidateArgs {
+            file: f.0.clone(),
+            from: None,
+            load: Vec::new(),
+            ignore: vec![Options::IgnoreUnusedTags],
+        };
+        run_validate(args).expect("--ignore unused-tags must suppress");
+    }
+
+    #[test]
+    fn run_validate_with_load_file_builds_loader() {
+        let f = TempFile::write("with-load.json", MINIMAL_V3_2);
+        let args = ValidateArgs {
+            file: f.0.clone(),
+            from: None,
+            load: vec![LoaderKind::File],
+            ignore: Vec::new(),
+        };
+        run_validate(args).expect("clean spec with file loader must validate");
+    }
+
+    #[test]
+    fn run_validate_missing_file_errors_with_reading_context() {
+        let args = ValidateArgs {
+            file: temp_path("missing.json"),
+            from: None,
+            load: Vec::new(),
+            ignore: Vec::new(),
+        };
+        let err = run_validate(args).expect_err("missing file must error");
+        assert!(
+            err.to_string().contains("reading"),
+            "expected `reading` context, got: {err}",
+        );
+    }
+
+    #[test]
+    fn run_convert_v2_to_v3_2_succeeds() {
+        let f = TempFile::write("v2.json", MINIMAL_V2);
+        let args = ConvertArgs {
+            file: f.0.clone(),
+            to: SpecVersion::V3_2,
+            from: None,
+        };
+        run_convert(args).expect("v2 → v3.2 must succeed");
+    }
+
+    #[test]
+    fn run_convert_rejects_downconversion() {
+        let f = TempFile::write("v3.json", MINIMAL_V3_2);
+        let args = ConvertArgs {
+            file: f.0.clone(),
+            to: SpecVersion::V2,
+            from: None,
+        };
+        let err = run_convert(args).expect_err("downconversion must error");
+        assert!(
+            err.to_string().contains("downconversion is not supported"),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn run_convert_missing_file_errors_with_reading_context() {
+        let args = ConvertArgs {
+            file: temp_path("missing.json"),
+            to: SpecVersion::V3_2,
+            from: None,
+        };
+        let err = run_convert(args).expect_err("missing file must error");
+        assert!(
+            err.to_string().contains("reading"),
+            "expected `reading` context, got: {err}",
+        );
+    }
 }
