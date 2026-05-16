@@ -1,21 +1,19 @@
 # syntax=docker/dockerfile:1.7
+#
+# Release-pipeline Dockerfile. Expects prebuilt linux binaries staged in the
+# build context at `./linux/amd64/roas` and `./linux/arm64/roas`. Buildx
+# substitutes TARGETOS/TARGETARCH per platform when running with
+# `--platform linux/amd64,linux/arm64`, so a single Dockerfile + COPY yields
+# the right multi-arch image without QEMU rebuilds of the rust toolchain.
+#
+# To build locally (single arch matching the host):
+#   cargo build --release --package roas-cli
+#   mkdir -p ctx/linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+#   cp target/release/roas ctx/linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/
+#   docker build -t roas:dev ctx
 
-# Multi-stage build for the `roas` CLI binary. The release pipeline drives
-# this with QEMU under the hood for linux/arm64, so the Dockerfile itself
-# stays single-arch-shaped: each platform gets its own native build inside
-# its own emulated container.
-
-FROM rust:1-bookworm AS builder
-WORKDIR /src
-COPY . .
-# `--locked` enforces the workspace `Cargo.lock` so the image build can't
-# silently pick up a dep version that hasn't been tested yet.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    cargo build --release --package roas-cli --locked
-
-# distroless/cc has glibc + libgcc_s — enough for a default-target Rust
-# binary that doesn't pull in additional shared libraries. `nonroot` ships
-# UID 65532 by default which is the more defensible posture for a CLI image.
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=builder /src/target/release/roas /usr/local/bin/roas
+ARG TARGETOS
+ARG TARGETARCH
+COPY ${TARGETOS}/${TARGETARCH}/roas /usr/local/bin/roas
 ENTRYPOINT ["/usr/local/bin/roas"]
