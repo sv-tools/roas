@@ -30,4 +30,4 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
