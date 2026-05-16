@@ -126,7 +126,8 @@ jobs:
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sha256
           # The repo carries other crates (e.g. `roas`) with their own tags;
           # don't mark this roas-cli release as the repo-wide "Latest".
-          make_latest: "false"
+          make_latest: false
+          draft: true
 
       # ── Container image ──────────────────────────────────────────────────
       # Stage the linux binaries into a tiny build context so the multi-arch
