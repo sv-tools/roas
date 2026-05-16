@@ -235,9 +235,7 @@ pub enum Options {
     IgnoreInvalidUrls,
 
     /// Ignore non-unique operation IDs.
-    ///
-    /// Currently not enforced by any version's validator — reserved for a
-    /// future operationId-uniqueness check. Setting it today is a no-op.
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreNonUniqOperationIDs,
 
     /// Ignore unused path items.
@@ -358,7 +356,7 @@ impl clap::ValueEnum for Options {
             ),
             Options::IgnoreNonUniqOperationIDs => (
                 "non-uniq-operation-ids",
-                "Allow duplicate `operationId` values (reserved — no validator checks this today)",
+                "Allow duplicate `operationId` values (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedPathItems => (
                 "unused-path-items",

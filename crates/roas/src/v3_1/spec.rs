@@ -882,6 +882,7 @@ impl Spec {
                 && !ctx
                     .visited
                     .insert(format!("#/paths/operations/{operation_id}"))
+                && !ctx.is_option(Options::IgnoreNonUniqOperationIDs)
             {
                 ctx.error(
                     "#".to_owned(),
@@ -1375,6 +1376,20 @@ mod tests {
                 .any(|e| e.contains("`dup` already in use")),
             "expected operationId duplicate across paths/webhooks: {:?}",
             err.errors
+        );
+
+        // Same spec with `IgnoreNonUniqOperationIDs` set must not surface
+        // the duplicate.
+        let result = spec.validate(Options::IgnoreNonUniqOperationIDs.into(), None);
+        let errors_with_ignore: Vec<String> = result
+            .err()
+            .map(|e| e.errors.iter().map(|e| e.to_string()).collect())
+            .unwrap_or_default();
+        assert!(
+            errors_with_ignore
+                .iter()
+                .all(|s| !s.contains("already in use")),
+            "IgnoreNonUniqOperationIDs must suppress the duplicate, got: {errors_with_ignore:?}",
         );
     }
 
