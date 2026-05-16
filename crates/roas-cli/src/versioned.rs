@@ -253,6 +253,60 @@ mod tests {
     }
 
     #[test]
+    fn detect_v2_via_swagger_field() {
+        let v: Value = serde_json::from_str(r#"{"swagger":"2.0"}"#).unwrap();
+        assert_eq!(detect(&v).unwrap(), SpecVersion::V2);
+    }
+
+    #[test]
+    fn detect_v3_0_v3_1_v3_2_via_openapi_field() {
+        let cases = [
+            (r#"{"openapi":"3.0.4"}"#, SpecVersion::V3_0),
+            (r#"{"openapi":"3.1.2"}"#, SpecVersion::V3_1),
+            (r#"{"openapi":"3.2.0"}"#, SpecVersion::V3_2),
+        ];
+        for (raw, expected) in cases {
+            let v: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(detect(&v).unwrap(), expected, "input was {raw}");
+        }
+    }
+
+    #[test]
+    fn detect_rejects_unsupported_swagger_major() {
+        let v: Value = serde_json::from_str(r#"{"swagger":"1.2"}"#).unwrap();
+        let err = detect(&v).unwrap_err().to_string();
+        assert!(err.contains("unsupported swagger version"), "got: {err}",);
+    }
+
+    #[test]
+    fn detect_rejects_malformed_swagger() {
+        let v: Value = serde_json::from_str(r#"{"swagger":"not-a-version"}"#).unwrap();
+        let err = detect(&v).unwrap_err().to_string();
+        assert!(err.contains("unsupported swagger version"), "got: {err}",);
+    }
+
+    #[test]
+    fn detect_rejects_unsupported_openapi_major() {
+        let v: Value = serde_json::from_str(r#"{"openapi":"4.0.0"}"#).unwrap();
+        let err = detect(&v).unwrap_err().to_string();
+        assert!(err.contains("unsupported openapi version"), "got: {err}",);
+    }
+
+    #[test]
+    fn detect_rejects_document_without_version_field() {
+        let v: Value = serde_json::from_str(r#"{"info":{"title":"x"}}"#).unwrap();
+        let err = detect(&v).unwrap_err().to_string();
+        assert!(err.contains("could not detect spec version"), "got: {err}",);
+    }
+
+    #[test]
+    fn detect_rejects_non_object_root() {
+        let v: Value = serde_json::from_str(r#"[]"#).unwrap();
+        let err = detect(&v).unwrap_err().to_string();
+        assert!(err.contains("object at the top level"), "got: {err}");
+    }
+
+    #[test]
     fn parse_value_handles_both_formats() {
         let json = r#"{"hello":"world"}"#;
         let yaml = "hello: world\n";
@@ -274,5 +328,98 @@ mod tests {
         assert!(path_looks_like_yaml(Path::new("spec.YAML")));
         assert!(!path_looks_like_yaml(Path::new("spec.json")));
         assert!(!path_looks_like_yaml(Path::new("spec")));
+    }
+
+    #[test]
+    fn parse_value_yaml_format_surfaces_yaml_parser_error() {
+        // Tab-indented YAML is forbidden by the YAML 1.2 grammar.
+        let err = parse_value("key:\n\tvalue: oops\n", true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parsing YAML"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_value_json_format_surfaces_json_parser_error() {
+        let err = parse_value("@@@ not json", false).unwrap_err().to_string();
+        assert!(err.contains("parsing JSON"), "got: {err}");
+    }
+
+    #[test]
+    fn detect_or_use_forced_skips_detection_and_uses_target() {
+        let v: Value = serde_json::from_str(
+            r#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        let s = detect_or_use(Some(SpecVersion::V3_2), v).unwrap();
+        assert_eq!(s.version(), SpecVersion::V3_2);
+        assert_eq!(s.label(), "OpenAPI 3.2");
+    }
+
+    #[test]
+    fn detect_or_use_auto_detects_when_unforced() {
+        let v: Value = serde_json::from_str(
+            r#"{"openapi":"3.0.4","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        let s = detect_or_use(None, v).unwrap();
+        assert_eq!(s.version(), SpecVersion::V3_0);
+    }
+
+    /// Helper: assert the `openapi` field starts with `<major>.<minor>`.
+    /// Patch bumps within the same minor (e.g. roas's v3.1 currently emits
+    /// `3.1.2`) shouldn't churn the test surface.
+    fn assert_major_minor(out: &Value, want_prefix: &str) {
+        let got = out["openapi"].as_str().expect("openapi must be a string");
+        assert!(
+            got.starts_with(want_prefix),
+            "expected openapi to start with {want_prefix}, got {got}",
+        );
+    }
+
+    #[test]
+    fn convert_to_same_version_serialises_as_is() {
+        let v: Value = serde_json::from_str(
+            r#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        let s = detect_or_use(None, v).unwrap();
+        let out = s.convert_to(SpecVersion::V3_2).unwrap();
+        assert_major_minor(&out, "3.2");
+    }
+
+    #[test]
+    fn convert_to_chains_through_intermediate_versions() {
+        // v2 → v3_2 must walk through v3_0 and v3_1.
+        let v: Value = serde_json::from_str(
+            r#"{"swagger":"2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        let s = detect_or_use(None, v).unwrap();
+        let out = s.convert_to(SpecVersion::V3_2).unwrap();
+        assert_major_minor(&out, "3.2");
+    }
+
+    #[test]
+    fn convert_to_single_step_upconvert_changes_minor() {
+        let v: Value = serde_json::from_str(
+            r#"{"openapi":"3.0.4","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        let s = detect_or_use(None, v).unwrap();
+        let out = s.convert_to(SpecVersion::V3_1).unwrap();
+        assert_major_minor(&out, "3.1");
+    }
+
+    #[test]
+    fn spec_version_label_round_trip() {
+        for (v, expected) in [
+            (SpecVersion::V2, "OpenAPI 2.0"),
+            (SpecVersion::V3_0, "OpenAPI 3.0"),
+            (SpecVersion::V3_1, "OpenAPI 3.1"),
+            (SpecVersion::V3_2, "OpenAPI 3.2"),
+        ] {
+            assert_eq!(v.label(), expected);
+        }
     }
 }
