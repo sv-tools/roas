@@ -34,8 +34,10 @@ use std::path::PathBuf;
 // Variants render as kebab-case with the `Ignore` prefix dropped: e.g.
 // `Options::IgnoreMissingTags` ↔ `--ignore missing-tags`.
 
+mod preview;
 mod versioned;
 
+use preview::PreviewArgs;
 use versioned::{SpecVersion, parse_value, path_looks_like_yaml};
 
 #[derive(Parser)]
@@ -91,20 +93,6 @@ struct ConvertArgs {
     from: Option<SpecVersion>,
 }
 
-#[derive(clap::Args)]
-struct PreviewArgs {
-    /// Path to the spec file (JSON or YAML).
-    file: PathBuf,
-
-    /// Force the input version (auto-detected by default).
-    #[arg(long, value_enum)]
-    from: Option<SpecVersion>,
-
-    /// Don't open the browser; just print the server URL and serve.
-    #[arg(long)]
-    no_open: bool,
-}
-
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum LoaderKind {
     File,
@@ -116,11 +104,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Validate(args) => run_validate(args),
         Command::Convert(args) => run_convert(args),
-        Command::Preview(args) => run_preview(args),
+        Command::Preview(args) => preview::run_preview(args),
     }
 }
 
-fn read_and_parse(path: &std::path::Path) -> Result<serde_json::Value> {
+pub(crate) fn read_and_parse(path: &std::path::Path) -> Result<serde_json::Value> {
     let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     parse_value(&raw, path_looks_like_yaml(path))
 }
@@ -194,82 +182,6 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
     let json = serde_json::to_string_pretty(&converted).context("serializing converted spec")?;
     println!("{json}");
     Ok(())
-}
-
-/// Embedded Redoc shell. The page mounts a `<redoc spec-url='/spec'>` element
-/// and pulls the Redoc bundle from the official CDN; the spec is fetched
-/// asynchronously from our own server at `/spec`. No build-time templating
-/// because there's nothing to interpolate — the URL is fixed.
-const REDOC_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <title>roas — OpenAPI viewer</title>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>body { margin: 0; padding: 0; }</style>
-  </head>
-  <body>
-    <redoc spec-url='/spec'></redoc>
-    <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
-  </body>
-</html>
-"#;
-
-fn run_preview(args: PreviewArgs) -> Result<()> {
-    let value = read_and_parse(&args.file)?;
-    let detected = versioned::detect_or_use(args.from, value)?;
-    // Reuse `convert_to(<same version>)` as a "serialise back as Value" pass —
-    // pluck the version first so we don't move `detected` while borrowing it.
-    let version = detected.version();
-    let spec_json = serde_json::to_string(&detected.convert_to(version)?)
-        .context("serializing spec for the viewer")?;
-
-    let server = tiny_http::Server::http("127.0.0.1:0")
-        .map_err(|e| anyhow!("starting Redoc viewer server: {e}"))?;
-    let port = match server.server_addr() {
-        tiny_http::ListenAddr::IP(addr) => addr.port(),
-        other => bail!("unexpected listen address: {other:?}"),
-    };
-    let url = format!("http://127.0.0.1:{port}/");
-
-    eprintln!("Serving {} via Redoc at {url}", args.file.display());
-    eprintln!("Press Ctrl+C to stop.");
-
-    if !args.no_open {
-        // Browser open is best-effort; if it fails the user can still hit
-        // the URL manually from stderr.
-        let _ = webbrowser::open(&url);
-    }
-
-    serve_preview_requests(server, REDOC_HTML, &spec_json);
-    Ok(())
-}
-
-fn serve_preview_requests(server: tiny_http::Server, html: &str, spec_json: &str) {
-    for request in server.incoming_requests() {
-        let response = match request.url() {
-            "/" | "/index.html" => http_response(html, "text/html; charset=utf-8"),
-            "/spec" | "/spec.json" => http_response(spec_json, "application/json"),
-            _ => not_found_response(),
-        };
-        // If the client disconnected before we finished writing, there's
-        // nothing useful to log at CLI level — drop the error.
-        let _ = request.respond(response);
-    }
-}
-
-fn http_response(body: &str, content_type: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let mut response = tiny_http::Response::from_string(body.to_string());
-    if let Ok(header) =
-        tiny_http::Header::from_bytes(b"Content-Type".as_ref(), content_type.as_bytes())
-    {
-        response = response.with_header(header);
-    }
-    response
-}
-
-fn not_found_response() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    tiny_http::Response::from_string("not found").with_status_code(404)
 }
 
 #[cfg(test)]
@@ -599,16 +511,13 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // `roas ui` tests. The Cli wiring is unit-tested directly; the server's
-    // request handling is exercised end-to-end by binding our own listener
-    // on an ephemeral port and hitting it with a stdlib TcpStream.
-    // ────────────────────────────────────────────────────────────────────
-
+    // The server-side / helper-fn coverage for `preview` lives in
+    // `preview.rs`'s own test module. This test only confirms the clap-wiring
+    // surface on `Cli` itself.
     #[test]
     fn cli_parses_preview_subcommand() {
-        let cli =
-            Cli::try_parse_from(["roas", "preview", "spec.json", "--no-open"]).expect("ui parse");
+        let cli = Cli::try_parse_from(["roas", "preview", "spec.json", "--no-open"])
+            .expect("preview parse");
         match cli.command {
             Command::Preview(args) => {
                 assert_eq!(args.file.to_string_lossy(), "spec.json");
@@ -617,128 +526,5 @@ mod tests {
             }
             _ => panic!("expected Preview"),
         }
-    }
-
-    #[test]
-    fn redoc_html_constant_references_spec_url_and_redoc_cdn() {
-        assert!(
-            REDOC_HTML.contains("spec-url='/spec'"),
-            "REDOC_HTML must point at /spec",
-        );
-        assert!(
-            REDOC_HTML.contains("cdn.redoc.ly"),
-            "REDOC_HTML must load Redoc from its CDN",
-        );
-    }
-
-    fn parse_status_and_body(stream: &mut std::net::TcpStream) -> (u16, String, String) {
-        use std::io::Read;
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).expect("read response");
-        let text = String::from_utf8_lossy(&raw).to_string();
-        let (head, body) = text
-            .split_once("\r\n\r\n")
-            .map(|(h, b)| (h.to_string(), b.to_string()))
-            .unwrap_or_else(|| (text.clone(), String::new()));
-        // Parse "HTTP/1.1 <code> ..."
-        let status: u16 = head
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|c| c.parse().ok())
-            .unwrap_or(0);
-        let content_type = head
-            .lines()
-            .find(|l| l.to_ascii_lowercase().starts_with("content-type:"))
-            .map(|l| {
-                l.split_once(':')
-                    .map(|x| x.1)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
-            .unwrap_or_default();
-        (status, content_type, body)
-    }
-
-    fn send_request(addr: std::net::SocketAddr, path: &str) -> std::net::TcpStream {
-        use std::io::Write;
-        let mut stream = std::net::TcpStream::connect(addr).expect("connect");
-        let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-        stream.write_all(req.as_bytes()).expect("write request");
-        stream
-    }
-
-    /// Stand up a real `tiny_http::Server`, drive `serve_preview_requests` on a
-    /// background thread, hit all four routes, and verify each. Tears the
-    /// server down by dropping our reference to it via the join handle.
-    #[test]
-    fn serve_preview_requests_routes_html_spec_and_404() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-        let addr = match server.server_addr() {
-            tiny_http::ListenAddr::IP(addr) => addr,
-            other => panic!("unexpected listen addr: {other:?}"),
-        };
-
-        let html = "<!doctype html><body>HELLO</body>";
-        let spec = r#"{"openapi":"3.2.0"}"#;
-        let html_owned = html.to_string();
-        let spec_owned = spec.to_string();
-
-        let thread = std::thread::spawn(move || {
-            serve_preview_requests(server, &html_owned, &spec_owned);
-        });
-
-        // `/` → html
-        let mut s = send_request(addr, "/");
-        let (code, ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert!(ctype.contains("text/html"));
-        assert!(body.contains("HELLO"));
-
-        // `/index.html` → html (alias)
-        let mut s = send_request(addr, "/index.html");
-        let (code, _ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert!(body.contains("HELLO"));
-
-        // `/spec` → json
-        let mut s = send_request(addr, "/spec");
-        let (code, ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert!(ctype.contains("application/json"));
-        assert_eq!(body, spec);
-
-        // `/spec.json` → json (alias)
-        let mut s = send_request(addr, "/spec.json");
-        let (code, _ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert_eq!(body, spec);
-
-        // unknown path → 404
-        let mut s = send_request(addr, "/nope");
-        let (code, _ctype, _body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 404);
-
-        // The server thread blocks in `incoming_requests()`; the
-        // background-thread `tiny_http::Server` it owns is dropped when the
-        // main thread exits the test scope, which closes the listener and
-        // unblocks the loop. Detach the join handle — we don't strictly need
-        // to wait for it.
-        drop(thread);
-    }
-
-    #[test]
-    fn run_preview_missing_file_errors_with_reading_context() {
-        let args = PreviewArgs {
-            file: temp_path("missing-ui.json"),
-            from: None,
-            no_open: true,
-        };
-        let err = run_preview(args).expect_err("missing file must error before server starts");
-        assert!(
-            err.to_string().contains("reading"),
-            "expected `reading` context, got: {err}",
-        );
     }
 }
