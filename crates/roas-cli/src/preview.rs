@@ -7,21 +7,33 @@
 //!     and pulls its bundle from the official CDN.
 //!   * `/spec` (and `/spec.json`) — the input spec, parsed via the existing
 //!     `read_and_parse` / `detect_or_use` pipeline and re-serialised as JSON.
-//!   * `/reload` — when `--watch` is on, a long-poll endpoint that the
-//!     injected page-side JS hits in a loop; the handler blocks until the
-//!     filesystem watcher signals a reload or a 30 s server-side timeout
-//!     elapses (the page polls again either way).
+//!   * `/reload` — when `--watch` is on, a Server-Sent-Events endpoint that
+//!     pushes one `data: reload` frame per file change. The injected
+//!     page-side `EventSource` subscriber calls `window.location.reload()` on
+//!     every event.
 //!
-//! The default browser is launched at the server URL via the `webbrowser`
-//! crate; `--no-open` suppresses the launch. Ctrl+C tears the server down.
+//! Backed by [`axum`] on top of [`tokio`] / [`hyper`]; the per-process tokio
+//! runtime is constructed inside [`run_preview`] so the rest of the CLI
+//! stays sync.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result};
+use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::http::header;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::get;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{Debouncer, new_debouncer};
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::read_and_parse;
 use crate::versioned::{self, SpecVersion};
@@ -47,11 +59,6 @@ pub struct PreviewArgs {
     #[arg(long, value_enum)]
     pub(crate) from: Option<SpecVersion>,
 
-    /// Convert the spec to this OpenAPI version before serving it. Uses the
-    /// same upconvert chain as `roas convert`; downconversion is rejected.
-    #[arg(long, value_enum)]
-    pub(crate) convert_to: Option<SpecVersion>,
-
     /// Don't open the browser; just print the server URL and serve.
     #[arg(long)]
     pub(crate) no_open: bool,
@@ -74,7 +81,6 @@ pub struct PreviewArgs {
 struct SpecSource {
     file: PathBuf,
     from: Option<SpecVersion>,
-    convert_to: Option<SpecVersion>,
 }
 
 impl SpecSource {
@@ -82,30 +88,17 @@ impl SpecSource {
         Self {
             file: args.file.clone(),
             from: args.from,
-            convert_to: args.convert_to,
         }
     }
 
-    /// Read + parse + (optionally up)convert the spec, returning the JSON
-    /// string the preview server hands to the renderer.
+    /// Read + parse the spec, returning the JSON string the preview server
+    /// hands to the renderer. Uses `convert_to(<same version>)` as a
+    /// "serialise back as a `Value`" pass.
     fn build_spec_json(&self) -> Result<String> {
         let value = read_and_parse(&self.file)?;
         let detected = versioned::detect_or_use(self.from, value)?;
-        // `convert_to(<same version>)` is a "serialise back as Value" pass —
-        // pluck the version first so we don't move `detected` while borrowing it.
         let version = detected.version();
-        // Resolve the target version: `--convert-to` if set, else same version
-        // (no-op transform). Downconversion is rejected explicitly, matching
-        // `roas convert`'s guard so users get the same error shape.
-        let target = self.convert_to.unwrap_or(version);
-        if (version as u8) > (target as u8) {
-            bail!(
-                "downconversion is not supported: input is {}, target is {}",
-                version.label(),
-                target.label(),
-            );
-        }
-        serde_json::to_string(&detected.convert_to(target)?)
+        serde_json::to_string(&detected.convert_to(version)?)
             .context("serializing spec for the viewer")
     }
 }
@@ -154,29 +147,13 @@ const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
-/// Long-poll-subscriber `<script>` block. Injected into the served HTML shell
-/// when `--watch` is on so the browser reloads itself on every file change.
-///
-/// SSE would be the elegant fit here but `tiny_http::Response::new` reads the
-/// body to EOF before sending — fatal for a never-ending event stream — so
-/// `/reload` is implemented as a long-poll that returns `200 OK` on a reload
-/// event and `204 No Content` on a server-side timeout. The page polls in a
-/// loop; on `200` it reloads, on `204` (or any network error) it polls again.
+/// SSE-subscriber `<script>` block. Injected into the served HTML shell when
+/// `--watch` is on so the browser reloads itself on every file change.
 const RELOAD_SCRIPT: &str = r#"
     <script>
       (function () {
-        function poll() {
-          fetch('/reload')
-            .then(function (r) {
-              if (r.status === 200) {
-                window.location.reload();
-              } else {
-                poll();
-              }
-            })
-            .catch(function () { setTimeout(poll, 2000); });
-        }
-        poll();
+        const es = new EventSource('/reload');
+        es.onmessage = function () { window.location.reload(); };
       })();
     </script>"#;
 
@@ -198,13 +175,13 @@ fn render_html(renderer: Renderer, watch: bool) -> String {
 
 /// Spawn a debounced filesystem watcher on `source.file`. On each detected
 /// change we re-run the spec-building pipeline and, on success, swap the
-/// cached JSON and broadcast a reload to every subscriber in `bus`. Parse
+/// cached JSON and broadcast a reload to every SSE subscriber. Parse
 /// failures are logged to stderr and the previous good JSON is left in
 /// place, so a half-saved file doesn't black-hole the preview.
 fn spawn_file_watcher(
     source: SpecSource,
     spec_json: Arc<Mutex<String>>,
-    bus: ReloadBus,
+    reload_tx: broadcast::Sender<()>,
 ) -> Result<Debouncer<notify::RecommendedWatcher>> {
     let (event_tx, event_rx) = mpsc::channel::<()>();
     let mut debouncer = new_debouncer(
@@ -231,7 +208,9 @@ fn spawn_file_watcher(
             match source.build_spec_json() {
                 Ok(new_json) => {
                     *spec_json.lock().unwrap() = new_json;
-                    broadcast_reload(&bus);
+                    // Ignored: a `SendError` here just means no SSE
+                    // subscribers are connected right now, which is fine.
+                    let _ = reload_tx.send(());
                     eprintln!("preview: reloaded {display_path}");
                 }
                 Err(e) => {
@@ -245,91 +224,97 @@ fn spawn_file_watcher(
     Ok(debouncer)
 }
 
-/// Push a reload event to every connected SSE subscriber, dropping any
-/// senders whose receiver has been disconnected (i.e. browser tab closed).
-fn broadcast_reload(bus: &ReloadBus) {
-    let mut senders = bus.lock().unwrap();
-    senders.retain(|tx| tx.send(()).is_ok());
+/// Shared state injected into every axum handler via [`State`]. Cloning is
+/// cheap (everything is `Arc`-backed).
+#[derive(Clone)]
+struct AppState {
+    html: Arc<String>,
+    spec_json: Arc<Mutex<String>>,
+    /// Broadcast sender for `--watch`. Each `/reload` SSE handler calls
+    /// `subscribe()`; the filesystem watcher calls `send(())`. `None` when
+    /// `--watch` is off, in which case `/reload` returns 404.
+    reload_tx: Option<broadcast::Sender<()>>,
 }
 
-fn subscribe_reload(bus: &ReloadBus) -> mpsc::Receiver<()> {
-    let (tx, rx) = mpsc::channel();
-    bus.lock().unwrap().push(tx);
-    rx
-}
-
-/// Everything `run_preview` collects before it commits to the blocking
-/// `incoming_requests()` loop. Pulled out so unit tests can exercise the
-/// happy path of `run_preview` without owning a server that blocks forever.
+/// Everything `run_preview` constructs before it hands control to
+/// `axum::serve`. Pulled out so unit tests can exercise the setup path
+/// (state assembly, filesystem watcher, listener) without taking over the
+/// runtime indefinitely.
 struct PreparedPreview {
-    server: tiny_http::Server,
+    listener: tokio::net::TcpListener,
     url: String,
     renderer_label: &'static str,
-    html: String,
-    spec_json: Arc<Mutex<String>>,
-    /// Multi-consumer list of senders for the SSE `/reload` route. Each
-    /// connected browser tab registers its own receiver; when the watcher
-    /// updates the cached spec, we broadcast to all of them. `None` when
-    /// `--watch` is off, in which case `/reload` returns 404.
-    reload_bus: Option<ReloadBus>,
+    state: AppState,
     /// Kept alive only to hold the filesystem watch open for as long as the
     /// server is running. Dropped when `PreparedPreview` is dropped.
     _debouncer: Option<Debouncer<notify::RecommendedWatcher>>,
 }
 
-type ReloadBus = Arc<Mutex<Vec<mpsc::Sender<()>>>>;
-
-fn prepare_preview(args: &PreviewArgs) -> Result<PreparedPreview> {
+async fn prepare_preview(args: &PreviewArgs) -> Result<PreparedPreview> {
     let source = SpecSource::from_args(args);
     let initial_json = source.build_spec_json()?;
     let spec_json = Arc::new(Mutex::new(initial_json));
 
-    let server = tiny_http::Server::http("127.0.0.1:0")
-        .map_err(|e| anyhow!("starting preview server: {e}"))?;
-    let port = match server.server_addr() {
-        tiny_http::ListenAddr::IP(addr) => addr.port(),
-        other => bail!("unexpected listen address: {other:?}"),
-    };
-    let url = format!("http://127.0.0.1:{port}/");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("binding preview server listener")?;
+    let addr = listener
+        .local_addr()
+        .context("reading preview server local addr")?;
+    let url = format!("http://{addr}/");
     let renderer_label = match args.renderer {
         Renderer::Redoc => "Redoc",
         Renderer::SwaggerUi => "Swagger UI",
     };
-    let html = render_html(args.renderer, args.watch);
+    let html = Arc::new(render_html(args.renderer, args.watch));
 
     // Wire up the file watcher if `--watch` was passed. The debouncer is
     // returned so the caller can keep it alive — it stops watching when
     // dropped.
-    let (reload_bus, debouncer) = if args.watch {
-        let bus: ReloadBus = Arc::new(Mutex::new(Vec::new()));
-        let debouncer = spawn_file_watcher(source, Arc::clone(&spec_json), Arc::clone(&bus))?;
-        (Some(bus), Some(debouncer))
+    let (reload_tx, debouncer) = if args.watch {
+        let (tx, _initial_rx) = broadcast::channel::<()>(16);
+        let debouncer = spawn_file_watcher(source, Arc::clone(&spec_json), tx.clone())?;
+        (Some(tx), Some(debouncer))
     } else {
         (None, None)
     };
 
-    Ok(PreparedPreview {
-        server,
-        url,
-        renderer_label,
+    let state = AppState {
         html,
         spec_json,
-        reload_bus,
+        reload_tx,
+    };
+
+    Ok(PreparedPreview {
+        listener,
+        url,
+        renderer_label,
+        state,
         _debouncer: debouncer,
     })
 }
 
 pub fn run_preview(args: PreviewArgs) -> Result<()> {
-    let prepared = prepare_preview(&args)?;
-    drive_prepared_preview(&args, prepared);
-    Ok(())
+    // Spin up a per-command multi-threaded runtime so the rest of the CLI
+    // can stay synchronous. `enable_all` switches on the I/O + time drivers
+    // axum / hyper / notify all rely on.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime for preview server")?;
+    runtime.block_on(run_preview_async(args))
 }
 
-/// Tail of `run_preview` — prints the "Serving …" banner, optionally pokes
-/// `webbrowser::open`, and runs the blocking request loop. Split out so a
-/// test thread can drive it against a `PreparedPreview` it constructed itself
-/// and observe behaviour without having to discover the auto-bound port.
-fn drive_prepared_preview(args: &PreviewArgs, prepared: PreparedPreview) {
+async fn run_preview_async(args: PreviewArgs) -> Result<()> {
+    let prepared = prepare_preview(&args).await?;
+    drive_prepared_preview(&args, prepared).await
+}
+
+/// Tail of `run_preview_async` — prints the "Serving …" banner, optionally
+/// pokes `webbrowser::open`, and runs `axum::serve` until the listener
+/// closes. Split out so a test can drive it against a `PreparedPreview`
+/// it constructed itself.
+async fn drive_prepared_preview(args: &PreviewArgs, prepared: PreparedPreview) -> Result<()> {
     eprintln!(
         "Serving {} via {} at {}",
         args.file.display(),
@@ -347,109 +332,55 @@ fn drive_prepared_preview(args: &PreviewArgs, prepared: PreparedPreview) {
         let _ = webbrowser::open(&prepared.url);
     }
 
-    serve_preview_requests(
-        prepared.server,
-        prepared.html,
-        prepared.spec_json,
-        prepared.reload_bus,
-    );
+    let app = preview_router(prepared.state);
+    axum::serve(prepared.listener, app)
+        .await
+        .context("serving preview HTTP requests")
 }
 
-fn serve_preview_requests(
-    server: tiny_http::Server,
-    html: String,
-    spec_json: Arc<Mutex<String>>,
-    reload_bus: Option<ReloadBus>,
-) {
-    let html = Arc::new(html);
-    for request in server.incoming_requests() {
-        // Thread per request: `/reload` is a long-lived SSE connection that
-        // would otherwise block the main loop. The short-lived `/` and
-        // `/spec` handlers also run on their own threads — small overhead,
-        // but symmetric and avoids head-of-line blocking against reload
-        // streams.
-        let html = Arc::clone(&html);
-        let spec_json = Arc::clone(&spec_json);
-        let reload_bus = reload_bus.clone();
-        thread::spawn(move || {
-            handle_request(request, &html, &spec_json, reload_bus.as_ref());
-        });
-    }
+/// Build the axum router for the preview server. Pulled out so tests can
+/// assemble the router against a hand-rolled `AppState`.
+fn preview_router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(handler_index))
+        .route("/index.html", get(handler_index))
+        .route("/spec", get(handler_spec))
+        .route("/spec.json", get(handler_spec))
+        .route("/reload", get(handler_reload))
+        .with_state(state)
 }
 
-fn handle_request(
-    request: tiny_http::Request,
-    html: &str,
-    spec_json: &Mutex<String>,
-    reload_bus: Option<&ReloadBus>,
-) {
-    let url = request.url().to_string();
-    match url.as_str() {
-        "/" | "/index.html" => {
-            let _ = request.respond(http_response(html, "text/html; charset=utf-8"));
-        }
-        "/spec" | "/spec.json" => {
-            let body = spec_json.lock().unwrap().clone();
-            let _ = request.respond(http_response(&body, "application/json"));
-        }
-        "/reload" => match reload_bus {
-            Some(bus) => handle_reload_long_poll(request, bus),
-            None => {
-                let _ = request.respond(not_found_response());
-            }
-        },
-        _ => {
-            let _ = request.respond(not_found_response());
-        }
-    }
+async fn handler_index(State(state): State<AppState>) -> Html<String> {
+    Html((*state.html).clone())
 }
 
-/// Server-side timeout for the long-poll. After this elapses without a reload
-/// signal we return `204 No Content`; the page-side script polls again
-/// immediately. The page-visible cost of bumping this higher is one stale
-/// reload-or-nothing window after the file changes, capped by this value.
-const RELOAD_POLL_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Long-poll handler for `/reload`. Subscribes to the bus and blocks until
-/// either an event arrives (→ `200 OK`) or the timeout fires (→ `204 No
-/// Content`). The injected page-side `RELOAD_SCRIPT` retries on every
-/// response, so a `204` is just a "still here, keep polling".
-fn handle_reload_long_poll(request: tiny_http::Request, bus: &ReloadBus) {
-    let rx = subscribe_reload(bus);
-    match rx.recv_timeout(RELOAD_POLL_TIMEOUT) {
-        Ok(()) => {
-            let _ = request.respond(http_response("reload", "text/plain"));
-        }
-        Err(_) => {
-            // mpsc::RecvTimeoutError covers both Timeout and Disconnected;
-            // either way the right move is "204, please poll again".
-            let _ = request.respond(no_content_response());
-        }
-    }
+async fn handler_spec(State(state): State<AppState>) -> Response {
+    let body = state.spec_json.lock().unwrap().clone();
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-fn http_response(body: &str, content_type: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let mut response = tiny_http::Response::from_string(body.to_string());
-    if let Ok(header) =
-        tiny_http::Header::from_bytes(b"Content-Type".as_ref(), content_type.as_bytes())
-    {
-        response = response.with_header(header);
-    }
-    response
-}
-
-fn not_found_response() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    tiny_http::Response::from_string("not found").with_status_code(404)
-}
-
-fn no_content_response() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    tiny_http::Response::from_string("").with_status_code(204)
+async fn handler_reload(State(state): State<AppState>) -> Response {
+    let Some(tx) = state.reload_tx.as_ref() else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let rx = tx.subscribe();
+    // `BroadcastStream` yields `Result<(), BroadcastStreamRecvError>`; a
+    // `Lagged` error just means this subscriber missed some events because
+    // the channel filled up. Drop those silently — the next real event
+    // still produces a reload, which is all the browser cares about.
+    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+        Ok(()) => Some(Ok::<_, Infallible>(Event::default().data("reload"))),
+        Err(_) => None,
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{Read as IoRead, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -462,6 +393,100 @@ mod tests {
             std::process::id(),
             n,
         ))
+    }
+
+    fn write_minimal_v3_2_spec() -> PathBuf {
+        let path = temp_path("ok.json");
+        std::fs::write(
+            &path,
+            br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .expect("write temp spec");
+        path
+    }
+
+    /// Stand the prepared preview's axum router up on its bound listener and
+    /// return the bound address + a handle (kept alive until the test drops
+    /// it) plus the `AppState` clone the router was constructed from. Tests
+    /// hit the address with raw `TcpStream` so we don't pull in `reqwest`
+    /// (and stay tolerant of axum-version churn around test clients).
+    async fn spawn_axum_for_prepared(
+        prepared: PreparedPreview,
+    ) -> (SocketAddr, AppState, ServerHandle) {
+        let addr = prepared
+            .listener
+            .local_addr()
+            .expect("local_addr on prepared listener");
+        let state = prepared.state.clone();
+        let app = preview_router(prepared.state);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(prepared.listener, app).await;
+            // Keep the debouncer alive until the server exits.
+            drop(prepared._debouncer);
+        });
+        // Give axum a tick to register the route table on the listener.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (addr, state, ServerHandle(Some(handle)))
+    }
+
+    /// `JoinHandle` newtype that aborts the running axum task on drop.
+    /// Without this, every test would leave a server task running until the
+    /// process exits.
+    struct ServerHandle(Option<tokio::task::JoinHandle<()>>);
+    impl Drop for ServerHandle {
+        fn drop(&mut self) {
+            if let Some(h) = self.0.take() {
+                h.abort();
+            }
+        }
+    }
+
+    fn send_request_sync(addr: SocketAddr, path: &str) -> TcpStream {
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).expect("write request");
+        stream
+    }
+
+    fn parse_status_and_body(stream: &mut TcpStream) -> (u16, String, String) {
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).expect("read response");
+        let text = String::from_utf8_lossy(&raw).to_string();
+        let (head, body) = text
+            .split_once("\r\n\r\n")
+            .map(|(h, b)| (h.to_string(), b.to_string()))
+            .unwrap_or_else(|| (text.clone(), String::new()));
+        let status: u16 = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        let content_type = head
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("content-type:"))
+            .map(|l| {
+                l.split_once(':')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        (status, content_type, body)
+    }
+
+    /// Async helper for hitting the running axum server. Wraps the sync
+    /// `TcpStream` logic in `spawn_blocking` so it can be awaited from
+    /// `#[tokio::test]` cases without blocking the runtime thread.
+    async fn get(addr: SocketAddr, path: &str) -> (u16, String, String) {
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut s = send_request_sync(addr, &path);
+            parse_status_and_body(&mut s)
+        })
+        .await
+        .expect("blocking task")
     }
 
     #[test]
@@ -502,98 +527,13 @@ mod tests {
     fn render_html_injects_reload_script_when_watch_is_on() {
         let off = render_html(Renderer::Redoc, false);
         let on = render_html(Renderer::Redoc, true);
-        // Without --watch, no poll loop should be present.
-        assert!(!off.contains("fetch('/reload')"));
-        // With --watch, the long-poll subscriber lands in the page.
-        assert!(on.contains("fetch('/reload')"));
+        // Without --watch, no SSE subscriber should be present.
+        assert!(!off.contains("EventSource"));
+        // With --watch, the EventSource subscriber lands in the page.
+        assert!(on.contains("new EventSource('/reload')"));
         assert!(on.contains("window.location.reload()"));
         // Still has the renderer base content.
         assert!(on.contains("cdn.redoc.ly"));
-    }
-
-    fn parse_status_and_body(stream: &mut TcpStream) -> (u16, String, String) {
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).expect("read response");
-        let text = String::from_utf8_lossy(&raw).to_string();
-        let (head, body) = text
-            .split_once("\r\n\r\n")
-            .map(|(h, b)| (h.to_string(), b.to_string()))
-            .unwrap_or_else(|| (text.clone(), String::new()));
-        let status: u16 = head
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|c| c.parse().ok())
-            .unwrap_or(0);
-        let content_type = head
-            .lines()
-            .find(|l| l.to_ascii_lowercase().starts_with("content-type:"))
-            .map(|l| {
-                l.split_once(':')
-                    .map(|x| x.1)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
-            .unwrap_or_default();
-        (status, content_type, body)
-    }
-
-    fn send_request(addr: SocketAddr, path: &str) -> TcpStream {
-        let mut stream = TcpStream::connect(addr).expect("connect");
-        let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-        stream.write_all(req.as_bytes()).expect("write request");
-        stream
-    }
-
-    /// Stand up a real `tiny_http::Server`, drive `serve_preview_requests` on
-    /// a background thread, hit all four routes, and verify each.
-    #[test]
-    fn serve_preview_requests_routes_html_spec_and_404() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-        let addr = match server.server_addr() {
-            tiny_http::ListenAddr::IP(addr) => addr,
-            other => panic!("unexpected listen addr: {other:?}"),
-        };
-
-        let html = "<!doctype html><body>HELLO</body>";
-        let spec = r#"{"openapi":"3.2.0"}"#;
-        let html_owned = html.to_string();
-        let spec_owned = spec.to_string();
-
-        let thread = std::thread::spawn(move || {
-            serve_preview_requests(server, html_owned, Arc::new(Mutex::new(spec_owned)), None);
-        });
-
-        let mut s = send_request(addr, "/");
-        let (code, ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert!(ctype.contains("text/html"));
-        assert!(body.contains("HELLO"));
-
-        let mut s = send_request(addr, "/index.html");
-        let (code, _ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert!(body.contains("HELLO"));
-
-        let mut s = send_request(addr, "/spec");
-        let (code, ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert!(ctype.contains("application/json"));
-        assert_eq!(body, spec);
-
-        let mut s = send_request(addr, "/spec.json");
-        let (code, _ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert_eq!(body, spec);
-
-        let mut s = send_request(addr, "/nope");
-        let (code, _ctype, _body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 404);
-
-        // Background-thread `tiny_http::Server` is dropped when the test
-        // exits, which closes the listener and unblocks the loop. Detach.
-        drop(thread);
     }
 
     #[test]
@@ -604,7 +544,6 @@ mod tests {
             no_open: true,
             renderer: Renderer::Redoc,
             watch: false,
-            convert_to: None,
         };
         let err = run_preview(args).expect_err("missing file must error before server starts");
         assert!(
@@ -613,23 +552,8 @@ mod tests {
         );
     }
 
-    /// `prepare_preview` is the happy path of `run_preview` minus the blocking
-    /// `serve_preview_requests` call — driving it directly is the only way to
-    /// observe the bound server, the assembled URL, and the renderer-specific
-    /// fields without spawning a background thread that we can't reliably
-    /// shut down.
-    fn write_minimal_v3_2_spec() -> PathBuf {
-        let path = temp_path("ok.json");
-        std::fs::write(
-            &path,
-            br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
-        )
-        .expect("write temp spec");
-        path
-    }
-
-    #[test]
-    fn prepare_preview_with_redoc_returns_bound_server_and_redoc_assets() {
+    #[tokio::test]
+    async fn prepare_preview_with_redoc_returns_bound_listener_and_redoc_assets() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
             file: path.clone(),
@@ -637,39 +561,27 @@ mod tests {
             no_open: true,
             renderer: Renderer::Redoc,
             watch: false,
-            convert_to: None,
         };
-        let prepared = prepare_preview(&args).expect("prepare ok");
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
 
-        // Server is bound on loopback with a non-zero port we can format into a URL.
-        let port = match prepared.server.server_addr() {
-            tiny_http::ListenAddr::IP(addr) => {
-                assert!(addr.ip().is_loopback(), "must bind to loopback");
-                assert!(addr.port() > 0, "must allocate an ephemeral port");
-                addr.port()
-            }
-            other => panic!("unexpected listen addr: {other:?}"),
-        };
-        assert_eq!(prepared.url, format!("http://127.0.0.1:{port}/"));
+        let addr = prepared.listener.local_addr().expect("local_addr");
+        assert!(addr.ip().is_loopback(), "must bind to loopback");
+        assert!(addr.port() > 0, "must allocate an ephemeral port");
+        assert_eq!(prepared.url, format!("http://127.0.0.1:{}/", addr.port()));
 
-        // Renderer-specific fields wire through correctly.
         assert_eq!(prepared.renderer_label, "Redoc");
-        assert!(prepared.html.contains("cdn.redoc.ly"));
+        assert!(prepared.state.html.contains("cdn.redoc.ly"));
 
-        // Spec was parsed + re-serialised back to JSON — round-trip preserves
-        // the `openapi` field we put in.
         let parsed: serde_json::Value =
-            serde_json::from_str(&prepared.spec_json.lock().unwrap()).unwrap();
+            serde_json::from_str(&prepared.state.spec_json.lock().unwrap()).unwrap();
         assert_eq!(parsed["openapi"], "3.2.0");
 
-        // Drop the prepared server explicitly to release the port before the
-        // tempfile teardown runs.
         drop(prepared);
         let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn prepare_preview_with_swagger_ui_switches_renderer_fields() {
+    #[tokio::test]
+    async fn prepare_preview_with_swagger_ui_switches_renderer_fields() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
             file: path.clone(),
@@ -677,128 +589,18 @@ mod tests {
             no_open: true,
             renderer: Renderer::SwaggerUi,
             watch: false,
-            convert_to: None,
         };
-        let prepared = prepare_preview(&args).expect("prepare ok");
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
 
         assert_eq!(prepared.renderer_label, "Swagger UI");
-        assert!(prepared.html.contains("swagger-ui-dist"));
+        assert!(prepared.state.html.contains("swagger-ui-dist"));
 
         drop(prepared);
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Drive `drive_prepared_preview` on a background thread and hit `/spec`
-    /// through the URL it printed. Covers the eprintln + serve loop body that
-    /// `run_preview`'s in-process tests can't reach directly.
-    #[test]
-    fn drive_prepared_preview_serves_spec_through_the_published_url() {
-        let path = write_minimal_v3_2_spec();
-        let args = PreviewArgs {
-            file: path.clone(),
-            from: None,
-            no_open: true,
-            renderer: Renderer::Redoc,
-            watch: false,
-            convert_to: None,
-        };
-        let prepared = prepare_preview(&args).expect("prepare ok");
-        let addr = match prepared.server.server_addr() {
-            tiny_http::ListenAddr::IP(addr) => addr,
-            other => panic!("unexpected listen addr: {other:?}"),
-        };
-
-        // Move `prepared` into the thread; rebuild args so the thread can own
-        // its own copy without us forcing `PreviewArgs: Clone`.
-        let path_for_thread = path.clone();
-        let thread = std::thread::spawn(move || {
-            let thread_args = PreviewArgs {
-                file: path_for_thread,
-                from: None,
-                no_open: true,
-                renderer: Renderer::Redoc,
-                watch: false,
-                convert_to: None,
-            };
-            drive_prepared_preview(&thread_args, prepared);
-        });
-
-        let mut s = send_request(addr, "/spec");
-        let (code, ctype, body) = parse_status_and_body(&mut s);
-        assert_eq!(code, 200);
-        assert!(ctype.contains("application/json"));
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(parsed["openapi"], "3.2.0");
-
-        // Background thread keeps blocking on `incoming_requests()` until
-        // process exit; the server's listener is dropped when this test
-        // function returns and `prepared` is dropped on the thread's stack.
-        // Detach intentionally — we don't need to wait.
-        drop(thread);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn prepare_preview_with_convert_to_upconverts_before_serving() {
-        // v2.0 input + `--convert-to v3_2` → output advertises 3.2.x.
-        let path = temp_path("v2.json");
-        std::fs::write(
-            &path,
-            br#"{"swagger":"2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
-        )
-        .expect("write temp spec");
-
-        let args = PreviewArgs {
-            file: path.clone(),
-            from: None,
-            convert_to: Some(SpecVersion::V3_2),
-            no_open: true,
-            renderer: Renderer::Redoc,
-            watch: false,
-        };
-        let prepared = prepare_preview(&args).expect("prepare ok");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&prepared.spec_json.lock().unwrap()).unwrap();
-        let openapi = parsed["openapi"].as_str().unwrap_or("");
-        assert!(
-            openapi.starts_with("3.2"),
-            "expected upconvert to 3.2.x, got openapi = {openapi}",
-        );
-
-        drop(prepared);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn prepare_preview_rejects_downconvert_target() {
-        // v3.2 input + `--convert-to v2` must hit the explicit guard with a
-        // "downconversion is not supported" diagnostic (same shape as
-        // `roas convert`'s rejection).
-        let path = write_minimal_v3_2_spec();
-        let args = PreviewArgs {
-            file: path.clone(),
-            from: None,
-            convert_to: Some(SpecVersion::V2),
-            no_open: true,
-            renderer: Renderer::Redoc,
-            watch: false,
-        };
-        let err = prepare_preview(&args)
-            .err()
-            .expect("downconversion must error")
-            .to_string();
-        assert!(
-            err.contains("downconversion is not supported"),
-            "got: {err}",
-        );
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn prepare_preview_with_forced_version_round_trips_through_parse_as() {
-        // `--from v3_1` on a v3.2-shaped doc force-parses as v3.1; serialised
-        // output should advertise `openapi: 3.1.*`.
+    #[tokio::test]
+    async fn prepare_preview_with_forced_version_round_trips_through_parse_as() {
         let path = temp_path("forced.json");
         std::fs::write(
             &path,
@@ -812,11 +614,10 @@ mod tests {
             no_open: true,
             renderer: Renderer::Redoc,
             watch: false,
-            convert_to: None,
         };
-        let prepared = prepare_preview(&args).expect("prepare ok");
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
         let parsed: serde_json::Value =
-            serde_json::from_str(&prepared.spec_json.lock().unwrap()).unwrap();
+            serde_json::from_str(&prepared.state.spec_json.lock().unwrap()).unwrap();
         let openapi = parsed["openapi"].as_str().unwrap();
         assert!(openapi.starts_with("3.1"), "got openapi = {openapi}");
 
@@ -824,95 +625,134 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // `--watch` coverage: SSE wiring + the broadcast/subscribe primitives.
-    // The full live-reload pipeline (fs notify → re-parse → SSE event) is
-    // an integration concern with real fs events and isn't worth the test
-    // flakiness; we cover the deterministic pieces directly.
-    // ────────────────────────────────────────────────────────────────────
+    /// End-to-end: serve a real router on the bound listener and exercise
+    /// every route the public API exposes.
+    #[tokio::test]
+    async fn axum_router_serves_html_spec_and_404s_unknown_routes() {
+        let path = write_minimal_v3_2_spec();
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: None,
+            no_open: true,
+            renderer: Renderer::Redoc,
+            watch: false,
+        };
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
+        let (addr, _state, _server) = spawn_axum_for_prepared(prepared).await;
 
-    #[test]
-    fn broadcast_reload_delivers_to_every_subscriber_and_drops_dead_ones() {
-        let bus: ReloadBus = Arc::new(Mutex::new(Vec::new()));
-        let a = subscribe_reload(&bus);
-        let b = subscribe_reload(&bus);
-        broadcast_reload(&bus);
-        assert!(a.try_recv().is_ok());
-        assert!(b.try_recv().is_ok());
+        let (code, ctype, body) = get(addr, "/").await;
+        assert_eq!(code, 200);
+        assert!(ctype.contains("text/html"));
+        assert!(body.contains("cdn.redoc.ly"));
 
-        // Drop one receiver; broadcast must remove its sender from the bus.
-        drop(a);
-        broadcast_reload(&bus);
-        assert_eq!(
-            bus.lock().unwrap().len(),
-            1,
-            "dead sender must be retained-out"
-        );
-        assert!(b.try_recv().is_ok());
+        let (code, _ctype, body) = get(addr, "/index.html").await;
+        assert_eq!(code, 200);
+        assert!(body.contains("cdn.redoc.ly"));
+
+        let (code, ctype, body) = get(addr, "/spec").await;
+        assert_eq!(code, 200);
+        assert!(ctype.contains("application/json"));
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["openapi"], "3.2.0");
+
+        let (code, _ctype, body) = get(addr, "/spec.json").await;
+        assert_eq!(code, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["openapi"], "3.2.0");
+
+        let (code, _ctype, _body) = get(addr, "/nope").await;
+        assert_eq!(code, 404);
+
+        let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn reload_route_returns_404_when_watch_is_off() {
-        // serve_preview_requests with `reload_bus: None` must 404 the route.
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-        let addr = match server.server_addr() {
-            tiny_http::ListenAddr::IP(addr) => addr,
-            other => panic!("unexpected listen addr: {other:?}"),
+    /// `/reload` returns 404 when `--watch` is off (no broadcast sender on
+    /// the state).
+    #[tokio::test]
+    async fn reload_route_returns_404_when_watch_is_off() {
+        let path = write_minimal_v3_2_spec();
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: None,
+            no_open: true,
+            renderer: Renderer::Redoc,
+            watch: false,
         };
-        let html = "<!doctype html><body>HELLO</body>".to_string();
-        let spec_json = Arc::new(Mutex::new(r#"{}"#.to_string()));
-        let thread = std::thread::spawn(move || {
-            serve_preview_requests(server, html, spec_json, None);
-        });
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
+        let (addr, _state, _server) = spawn_axum_for_prepared(prepared).await;
 
-        let mut s = send_request(addr, "/reload");
-        let (code, _ctype, _body) = parse_status_and_body(&mut s);
+        let (code, _ctype, _body) = get(addr, "/reload").await;
         assert_eq!(code, 404, "/reload must 404 when --watch is off");
 
-        drop(thread);
+        let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn reload_route_returns_200_when_watch_event_fires() {
-        // Drive the long-poll: open `/reload` on a thread, broadcast, and
-        // verify the response is `200 OK` with `body: reload`.
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-        let addr = match server.server_addr() {
-            tiny_http::ListenAddr::IP(addr) => addr,
-            other => panic!("unexpected listen addr: {other:?}"),
+    /// `/reload` returns an SSE `text/event-stream` body containing a
+    /// `data: reload` frame when the watcher fires a broadcast. We don't
+    /// rely on a real fs event here — push directly through the broadcast
+    /// channel so the test is deterministic.
+    #[tokio::test]
+    async fn reload_route_emits_sse_frame_when_broadcast_fires() {
+        let path = write_minimal_v3_2_spec();
+        let args = PreviewArgs {
+            file: path.clone(),
+            from: None,
+            no_open: true,
+            renderer: Renderer::Redoc,
+            watch: true,
         };
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
+        let (addr, state, _server) = spawn_axum_for_prepared(prepared).await;
+        let tx = state
+            .reload_tx
+            .clone()
+            .expect("--watch must allocate a broadcast sender");
 
-        let html = "<!doctype html>".to_string();
-        let spec_json = Arc::new(Mutex::new(r#"{}"#.to_string()));
-        let bus: ReloadBus = Arc::new(Mutex::new(Vec::new()));
-        let bus_for_server = Arc::clone(&bus);
-        let server_thread = std::thread::spawn(move || {
-            serve_preview_requests(server, html, spec_json, Some(bus_for_server));
+        // Open the SSE stream on a blocking thread, then push a reload from
+        // here. Read just enough of the response to confirm the frame.
+        let client = tokio::task::spawn_blocking(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("set read timeout");
+            let req =
+                "GET /reload HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n";
+            stream.write_all(req.as_bytes()).expect("write");
+
+            // Drain enough bytes to see the SSE frame land. We can't read to
+            // EOF — the server keeps the stream open — so cap the read.
+            let mut buf = [0u8; 1024];
+            let mut acc = Vec::new();
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        acc.extend_from_slice(&buf[..n]);
+                        if String::from_utf8_lossy(&acc).contains("data: reload") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&acc).to_string()
         });
 
-        // Open the request on a thread so we can broadcast before reading.
-        let client_thread = std::thread::spawn(move || {
-            let mut stream = send_request(addr, "/reload");
-            parse_status_and_body(&mut stream)
-        });
+        // Give the handler a moment to subscribe before broadcasting.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = tx.send(());
 
-        // Wait for the long-poll handler to register, then signal it.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while std::time::Instant::now() < deadline && bus.lock().unwrap().is_empty() {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let body = client.await.expect("client task");
         assert!(
-            !bus.lock().unwrap().is_empty(),
-            "long-poll handler must register before we broadcast",
+            body.contains("text/event-stream"),
+            "expected SSE content-type, body was: {body:?}",
         );
-        broadcast_reload(&bus);
+        assert!(
+            body.contains("data: reload"),
+            "expected SSE reload frame, body was: {body:?}",
+        );
 
-        let (code, ctype, body) = client_thread.join().expect("client thread");
-        assert_eq!(code, 200, "got body: {body:?}");
-        assert!(ctype.contains("text/plain"));
-        assert_eq!(body, "reload");
-
-        drop(server_thread);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Real filesystem event: write a fresh spec, start the watcher, rewrite
@@ -920,42 +760,40 @@ mod tests {
     /// the new contents.
     ///
     /// Timing-sensitive. If this turns out to be flaky in CI we can pull it
-    /// behind a `#[ignore]` gate, but the deterministic-ish bits
-    /// (`broadcast_reload`, `ReloadReader`, `render_html` injection,
-    /// `prepare_preview` wiring) are already covered above, so a flake here
-    /// only loses *integration* coverage.
-    #[test]
-    fn file_watcher_broadcasts_reload_and_refreshes_spec_json_on_change() {
+    /// behind a `#[ignore]` gate, but it's the only test that exercises the
+    /// full notify-debouncer → re-parse → broadcast pipeline end-to-end.
+    #[tokio::test]
+    async fn file_watcher_broadcasts_reload_and_refreshes_spec_json_on_change() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
             file: path.clone(),
             from: None,
-            convert_to: None,
             no_open: true,
             watch: true,
             renderer: Renderer::Redoc,
         };
-        let prepared = prepare_preview(&args).expect("prepare ok");
-        let bus = prepared
-            .reload_bus
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
+        let tx = prepared
+            .state
+            .reload_tx
             .clone()
-            .expect("--watch must allocate a reload bus");
-        let spec_json = Arc::clone(&prepared.spec_json);
-        let rx = subscribe_reload(&bus);
+            .expect("--watch must allocate a broadcast sender");
+        let mut rx = tx.subscribe();
+        let spec_json = Arc::clone(&prepared.state.spec_json);
 
         // Brief pause so the OS-side watcher is fully wired before we touch
         // the file. notify's debouncer is set to 150ms so we don't need much.
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
         std::fs::write(
             &path,
             br#"{"openapi":"3.2.0","info":{"title":"changed","version":"1"},"paths":{}}"#,
         )
         .expect("rewrite spec");
 
-        let received = rx.recv_timeout(Duration::from_secs(3));
+        let received = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
         assert!(
-            received.is_ok(),
-            "watcher must broadcast reload within 3s of a real file change",
+            matches!(received, Ok(Ok(()))),
+            "watcher must broadcast reload within 3s of a real file change, got {received:?}",
         );
 
         let updated = spec_json.lock().unwrap().clone();
@@ -971,27 +809,26 @@ mod tests {
 
     /// Negative path: a broken save must not corrupt the cached JSON — the
     /// previous good version is left in place and stderr gets the diagnostic.
-    #[test]
-    fn file_watcher_keeps_previous_json_when_reparse_fails() {
+    #[tokio::test]
+    async fn file_watcher_keeps_previous_json_when_reparse_fails() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
             file: path.clone(),
             from: None,
-            convert_to: None,
             no_open: true,
             watch: true,
             renderer: Renderer::Redoc,
         };
-        let prepared = prepare_preview(&args).expect("prepare ok");
-        let spec_json = Arc::clone(&prepared.spec_json);
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
+        let spec_json = Arc::clone(&prepared.state.spec_json);
         let before = spec_json.lock().unwrap().clone();
 
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
         std::fs::write(&path, b"%%% not parseable %%%").expect("write garbage");
 
         // Wait past the debouncer window + a bit of slack for the watcher's
         // reparse attempt and its eprintln.
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let after = spec_json.lock().unwrap().clone();
         assert_eq!(
@@ -1003,25 +840,24 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn prepare_preview_with_watch_wires_up_reload_bus_and_html_injection() {
+    #[tokio::test]
+    async fn prepare_preview_with_watch_wires_up_broadcast_sender_and_html_injection() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
             file: path.clone(),
             from: None,
-            convert_to: None,
             no_open: true,
             watch: true,
             renderer: Renderer::Redoc,
         };
-        let prepared = prepare_preview(&args).expect("prepare ok");
+        let prepared = prepare_preview(&args).await.expect("prepare ok");
         assert!(
-            prepared.reload_bus.is_some(),
-            "--watch must allocate a reload bus"
+            prepared.state.reload_tx.is_some(),
+            "--watch must allocate a broadcast sender",
         );
         assert!(
-            prepared.html.contains("fetch('/reload')"),
-            "--watch must inject the long-poll-subscriber script",
+            prepared.state.html.contains("new EventSource('/reload')"),
+            "--watch must inject the SSE-subscriber script",
         );
 
         drop(prepared);

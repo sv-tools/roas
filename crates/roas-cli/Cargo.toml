@@ -22,6 +22,7 @@ roas = { version = ">=0.13.2", path = "../roas", features = ["clap", "v2", "v3_0
 roas-file-fetcher = { version = ">=0.1", path = "../roas-file-fetcher", features = ["yaml"] }
 roas-http-fetcher = { version = ">=0.1", path = "../roas-http-fetcher", features = ["yaml"] }
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
 enumset.workspace = true
 serde.workspace = true
@@ -29,5 +30,6 @@ serde_json.workspace = true
 serde_yaml_ng.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
-tiny_http.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "sync"] }
+tokio-stream = { workspace = true, features = ["sync"] }
 webbrowser.workspace = true

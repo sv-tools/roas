@@ -35,9 +35,8 @@ directly from Rust code. The SDK supports every released OpenAPI version: v2.0
   via [Redoc](https://redocly.com/redoc) or
   [Swagger UI](https://swagger.io/tools/swagger-ui/), so you can browse the
   API as documentation without leaving your terminal. Pick the renderer with
-  `--renderer redoc|swagger-ui`; upconvert on the fly with
-  `--convert-to <VERSION>` when the input is an older spec version than the
-  renderer supports.
+  `--renderer redoc|swagger-ui`, and pass `--watch` to live-reload the page
+  whenever the spec file changes on disk.
 
 ## Crates
 

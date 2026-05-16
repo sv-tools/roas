@@ -525,7 +525,6 @@ mod tests {
                 assert_eq!(args.file.to_string_lossy(), "spec.json");
                 assert!(args.no_open);
                 assert!(args.from.is_none());
-                assert!(args.convert_to.is_none());
                 assert!(!args.watch);
                 assert!(matches!(args.renderer, preview::Renderer::Redoc));
             }
@@ -540,18 +539,6 @@ mod tests {
         match cli.command {
             Command::Preview(args) => {
                 assert!(args.watch);
-            }
-            _ => panic!("expected Preview"),
-        }
-    }
-
-    #[test]
-    fn cli_parses_preview_subcommand_with_convert_to_flag() {
-        let cli = Cli::try_parse_from(["roas", "preview", "--convert-to", "v3_1", "spec.json"])
-            .expect("preview parse");
-        match cli.command {
-            Command::Preview(args) => {
-                assert_eq!(args.convert_to, Some(SpecVersion::V3_1));
             }
             _ => panic!("expected Preview"),
         }
