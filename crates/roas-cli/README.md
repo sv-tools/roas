@@ -17,6 +17,7 @@ The installed binary is named `roas`.
 ```shell
 roas validate <FILE>            # parse + validate
 roas convert --to v3_2 <FILE>   # upconvert across versions
+roas preview <FILE>             # open the spec in a browser via Redoc
 ```
 
 Input can be JSON or YAML; the parser is selected by file extension (`.yaml` / `.yml` → YAML, everything else → JSON).
@@ -56,6 +57,17 @@ roas convert --to v3_1 --from v2 spec.yaml
 ```
 
 Output is JSON on stdout.
+
+### `preview`
+
+Starts a local HTTP server on `127.0.0.1:<random>` that serves the spec, embedded inside an HTML page rendered with [Redoc](https://redocly.com/redoc), and opens the default browser pointed at it. Pass `--no-open` to skip the browser launch (the URL is printed to stderr in either case). Ctrl+C tears the server down.
+
+```shell
+roas preview spec.yaml
+roas preview --no-open --from v3_1 spec.json
+```
+
+Redoc currently targets OpenAPI 3.0 / 3.1 — v3.2-specific fields are skipped silently by the renderer.
 
 ## License
 
