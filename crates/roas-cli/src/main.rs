@@ -57,7 +57,12 @@ struct ValidateArgs {
     #[arg(long, value_enum)]
     load: Vec<LoaderKind>,
 
-    /// Treat unused / missing tags as warnings rather than errors. Matches
+    /// Skip a specific validation check. Repeat the flag to skip several
+    /// (e.g. `--ignore missing-tags --ignore external-references`).
+    #[arg(long, value_enum)]
+    ignore: Vec<IgnoreKind>,
+
+    /// Shorthand for `--ignore missing-tags --ignore unused-tags`. Matches
     /// the in-repo fixture-suite default.
     #[arg(long)]
     lenient_tags: bool,
@@ -81,6 +86,51 @@ struct ConvertArgs {
 enum LoaderKind {
     File,
     Http,
+}
+
+/// CLI-facing names for `roas::validation::Options`. Each variant maps to
+/// exactly one `Options` flag; together they cover every check the loader
+/// knows how to skip.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum IgnoreKind {
+    /// Skip the "tag referenced but not declared" check.
+    MissingTags,
+    /// Don't error on external `$ref`s — process them only if `--load` is
+    /// configured for the right scheme.
+    ExternalReferences,
+    /// Skip URL syntax validation.
+    InvalidUrls,
+    /// Allow duplicate `operationId` values across operations.
+    NonUniqOperationIds,
+    /// (v3.1) Allow path items that are declared but never referenced.
+    UnusedPathItems,
+    /// Skip the "tag declared but not used" check.
+    UnusedTags,
+    /// Allow components / schemas (definitions in v2.0) that are never used.
+    UnusedSchemas,
+    /// Allow components / parameters that are never used.
+    UnusedParameters,
+    /// Allow components / responses that are never used.
+    UnusedResponses,
+    /// Allow server variables that are never used.
+    UnusedServerVariables,
+}
+
+impl IgnoreKind {
+    fn to_option(self) -> Options {
+        match self {
+            IgnoreKind::MissingTags => Options::IgnoreMissingTags,
+            IgnoreKind::ExternalReferences => Options::IgnoreExternalReferences,
+            IgnoreKind::InvalidUrls => Options::IgnoreInvalidUrls,
+            IgnoreKind::NonUniqOperationIds => Options::IgnoreNonUniqOperationIDs,
+            IgnoreKind::UnusedPathItems => Options::IgnoreUnusedPathItems,
+            IgnoreKind::UnusedTags => Options::IgnoreUnusedTags,
+            IgnoreKind::UnusedSchemas => Options::IgnoreUnusedSchemas,
+            IgnoreKind::UnusedParameters => Options::IgnoreUnusedParameters,
+            IgnoreKind::UnusedResponses => Options::IgnoreUnusedResponses,
+            IgnoreKind::UnusedServerVariables => Options::IgnoreUnusedServerVariables,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -125,6 +175,9 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
     let mut loader = build_loader(&args.load);
 
     let mut options = enumset::EnumSet::<Options>::new();
+    for ignore in &args.ignore {
+        options |= ignore.to_option();
+    }
     if args.lenient_tags {
         options |= Options::IgnoreMissingTags;
         options |= Options::IgnoreUnusedTags;

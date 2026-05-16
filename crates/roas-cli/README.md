@@ -32,7 +32,15 @@ roas validate --load http spec.yaml       # follow `http(s)://` $refs
 roas validate --load file --load http spec.yaml  # both
 ```
 
-`--lenient-tags` treats missing / unused tag references as warnings rather than errors.
+`--ignore <CHECK>` skips a specific validation check; repeat the flag to skip more than one. Available checks:
+
+```
+missing-tags, external-references, invalid-urls, non-uniq-operation-ids,
+unused-path-items, unused-tags, unused-schemas, unused-parameters,
+unused-responses, unused-server-variables
+```
+
+`--lenient-tags` is a shorthand for `--ignore missing-tags --ignore unused-tags`.
 
 ### `convert`
 
