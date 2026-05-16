@@ -128,6 +128,7 @@ impl ValidateWithContext<Spec> for Operation {
             && !ctx
                 .visited
                 .insert(format!("#/paths/operations/{operation_id}"))
+            && !ctx.is_option(Options::IgnoreNonUniqOperationIDs)
         {
             ctx.error(
                 path.clone(),

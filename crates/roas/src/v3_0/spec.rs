@@ -721,6 +721,7 @@ impl Spec {
                         && !ctx
                             .visited
                             .insert(format!("#/paths/operations/{operation_id}"))
+                        && !ctx.is_option(Options::IgnoreNonUniqOperationIDs)
                     {
                         ctx.error(
                             "#".to_owned(),
@@ -1530,6 +1531,51 @@ mod tests {
                 .has_exact("#.x-tagGroups[0].name: must not be empty"),
             "expected name error: {:?}",
             ctx.errors
+        );
+    }
+
+    #[test]
+    fn ignore_non_uniq_operation_ids_suppresses_duplicate_error() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "operationId": "dup",
+                        "responses": {"200": {"description": "ok"}},
+                    },
+                },
+                "/b": {
+                    "get": {
+                        "operationId": "dup",
+                        "responses": {"200": {"description": "ok"}},
+                    },
+                },
+            },
+        }))
+        .expect("spec must parse");
+
+        let err = spec
+            .validate(IGNORE_UNUSED, None)
+            .expect_err("duplicate operationId must error by default");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("`dup` already in use")),
+            "expected duplicate diagnostic, got: {:?}",
+            err.errors,
+        );
+
+        let opts = IGNORE_UNUSED | Options::IgnoreNonUniqOperationIDs;
+        let result = spec.validate(opts, None);
+        let leftover: Vec<String> = result
+            .err()
+            .map(|e| e.errors.iter().map(|e| e.to_string()).collect())
+            .unwrap_or_default();
+        assert!(
+            leftover.iter().all(|s| !s.contains("already in use")),
+            "IgnoreNonUniqOperationIDs must suppress the duplicate, got: {leftover:?}",
         );
     }
 }

@@ -223,67 +223,67 @@ impl Display for Error {
 #[derive(EnumSetType, Debug)]
 pub enum Options {
     /// Ignore missing tags.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreMissingTags,
 
     /// Ignore external references.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreExternalReferences,
 
     /// Ignore invalid URLs.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreInvalidUrls,
 
     /// Ignore non-unique operation IDs.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreNonUniqOperationIDs,
 
     /// Ignore unused path items.
-    /// Applies for v3.1
+    /// Applies for v3.1, v3.2
     IgnoreUnusedPathItems,
 
     /// Ignore unused tags.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreUnusedTags,
 
     /// Ignore unused schemas (definitions for v2.0).
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreUnusedSchemas,
 
     /// Ignore unused parameters.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreUnusedParameters,
 
     /// Ignore unused responses.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreUnusedResponses,
 
     /// Ignore unused server variables.
-    /// Applies for v3.0, v3.1
+    /// Applies for v3.0, v3.1, v3.2
     IgnoreUnusedServerVariables,
 
     /// Ignore unused examples.
-    /// Applies for v3.0, v3.1
+    /// Applies for v3.0, v3.1, v3.2
     IgnoreUnusedExamples,
 
     /// Ignore unused request bodies.
-    /// Applies for v3.0, v3.1
+    /// Applies for v3.0, v3.1, v3.2
     IgnoreUnusedRequestBodies,
 
     /// Ignore unused headers.
-    /// Applies for v3.0, v3.1
+    /// Applies for v3.0, v3.1, v3.2
     IgnoreUnusedHeaders,
 
     /// Ignore unused security schemes.
-    /// Applies for v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreUnusedSecuritySchemes,
 
     /// Ignore unused links.
-    /// Applies for v3.0, v3.1
+    /// Applies for v3.0, v3.1, v3.2
     IgnoreUnusedLinks,
 
     /// Ignore unused callbacks.
-    /// Applies for v3.0, v3.1
+    /// Applies for v3.0, v3.1, v3.2
     IgnoreUnusedCallbacks,
 
     /// Ignore unused media types (added in OAS 3.2).
@@ -291,19 +291,19 @@ pub enum Options {
     IgnoreUnusedMediaTypes,
 
     /// Ignore empty Info.Title field.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreEmptyInfoTitle,
 
     /// Ignore empty Info.Version field.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreEmptyInfoVersion,
 
     /// Ignore empty Response.Description field.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreEmptyResponseDescription,
 
     /// Ignore empty ExternalDocumentation.URL field.
-    /// Applies for v2.0, v3.0, v3.1
+    /// Applies for v2.0, v3.0, v3.1, v3.2
     IgnoreEmptyExternalDocumentationUrl,
 }
 
@@ -344,67 +344,67 @@ impl clap::ValueEnum for Options {
         let (name, help) = match self {
             Options::IgnoreMissingTags => (
                 "missing-tags",
-                "Skip the `tag referenced but not declared` check (v2.0, v3.0, v3.1)",
+                "Skip the `tag referenced but not declared` check (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreExternalReferences => (
                 "external-references",
-                "Don't error on external `$ref`s (v2.0, v3.0, v3.1)",
+                "Don't error on external `$ref`s (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreInvalidUrls => (
                 "invalid-urls",
-                "Skip URL syntax validation (v2.0, v3.0, v3.1)",
+                "Skip URL syntax validation (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreNonUniqOperationIDs => (
                 "non-uniq-operation-ids",
-                "Allow duplicate `operationId` values (v2.0, v3.0, v3.1)",
+                "Allow duplicate `operationId` values (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedPathItems => (
                 "unused-path-items",
-                "Allow declared-but-unreferenced path items (v3.1)",
+                "Allow declared-but-unreferenced path items (v3.1, v3.2)",
             ),
             Options::IgnoreUnusedTags => (
                 "unused-tags",
-                "Skip the `tag declared but not used` check (v2.0, v3.0, v3.1)",
+                "Skip the `tag declared but not used` check (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedSchemas => (
                 "unused-schemas",
-                "Allow unused schemas / definitions (v2.0, v3.0, v3.1)",
+                "Allow unused schemas / definitions (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedParameters => (
                 "unused-parameters",
-                "Allow unused components / parameters (v2.0, v3.0, v3.1)",
+                "Allow unused components / parameters (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedResponses => (
                 "unused-responses",
-                "Allow unused components / responses (v2.0, v3.0, v3.1)",
+                "Allow unused components / responses (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedServerVariables => (
                 "unused-server-variables",
-                "Allow unused server variables (v3.0, v3.1)",
+                "Allow unused server variables (v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedExamples => (
                 "unused-examples",
-                "Allow unused components / examples (v3.0, v3.1)",
+                "Allow unused components / examples (v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedRequestBodies => (
                 "unused-request-bodies",
-                "Allow unused components / request bodies (v3.0, v3.1)",
+                "Allow unused components / request bodies (v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedHeaders => (
                 "unused-headers",
-                "Allow unused components / headers (v3.0, v3.1)",
+                "Allow unused components / headers (v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedSecuritySchemes => (
                 "unused-security-schemes",
-                "Allow unused components / security schemes (v3.0, v3.1)",
+                "Allow unused components / security schemes (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedLinks => (
                 "unused-links",
-                "Allow unused components / links (v3.0, v3.1)",
+                "Allow unused components / links (v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedCallbacks => (
                 "unused-callbacks",
-                "Allow unused components / callbacks (v3.0, v3.1)",
+                "Allow unused components / callbacks (v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreUnusedMediaTypes => (
                 "unused-media-types",
@@ -412,19 +412,19 @@ impl clap::ValueEnum for Options {
             ),
             Options::IgnoreEmptyInfoTitle => (
                 "empty-info-title",
-                "Allow empty `info.title` (v2.0, v3.0, v3.1)",
+                "Allow empty `info.title` (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreEmptyInfoVersion => (
                 "empty-info-version",
-                "Allow empty `info.version` (v2.0, v3.0, v3.1)",
+                "Allow empty `info.version` (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreEmptyResponseDescription => (
                 "empty-response-description",
-                "Allow empty response `description` (v2.0, v3.0, v3.1)",
+                "Allow empty response `description` (v2.0, v3.0, v3.1, v3.2)",
             ),
             Options::IgnoreEmptyExternalDocumentationUrl => (
                 "empty-external-documentation-url",
-                "Allow empty `externalDocs.url` (v2.0, v3.0, v3.1)",
+                "Allow empty `externalDocs.url` (v2.0, v3.0, v3.1, v3.2)",
             ),
         };
         Some(clap::builder::PossibleValue::new(name).help(help))
