@@ -13,8 +13,10 @@
 //!
 //! - `roas preview <FILE>` — start a local HTTP server on
 //!   `127.0.0.1:<random>` that serves the spec rendered with
-//!   [Redoc](https://redocly.com/redoc), and open the default browser at it.
-//!   `--no-open` skips the launch. Ctrl+C tears the server down.
+//!   [Redoc](https://redocly.com/redoc) (default) or
+//!   [Swagger UI](https://swagger.io/tools/swagger-ui/) (`--renderer
+//!   swagger-ui`), and open the default browser at it. `--no-open` skips
+//!   the launch. Ctrl+C tears the server down.
 //!
 //! Input may be JSON or YAML; the parser is selected by file extension
 //! (`.yaml` / `.yml` → YAML, otherwise JSON).
@@ -53,7 +55,7 @@ enum Command {
     Validate(ValidateArgs),
     /// Convert an OpenAPI spec to a different version.
     Convert(ConvertArgs),
-    /// Preview the spec in a browser, rendered with Redoc.
+    /// Preview the spec in a browser, rendered with Redoc or Swagger UI.
     Preview(PreviewArgs),
 }
 
@@ -512,10 +514,10 @@ mod tests {
     }
 
     // The server-side / helper-fn coverage for `preview` lives in
-    // `preview.rs`'s own test module. This test only confirms the clap-wiring
-    // surface on `Cli` itself.
+    // `preview.rs`'s own test module. These tests only confirm the
+    // clap-wiring surface on `Cli` itself.
     #[test]
-    fn cli_parses_preview_subcommand() {
+    fn cli_parses_preview_subcommand_with_defaults() {
         let cli = Cli::try_parse_from(["roas", "preview", "spec.json", "--no-open"])
             .expect("preview parse");
         match cli.command {
@@ -523,8 +525,27 @@ mod tests {
                 assert_eq!(args.file.to_string_lossy(), "spec.json");
                 assert!(args.no_open);
                 assert!(args.from.is_none());
+                assert!(matches!(args.renderer, preview::Renderer::Redoc));
             }
             _ => panic!("expected Preview"),
         }
+    }
+
+    #[test]
+    fn cli_parses_preview_subcommand_with_swagger_ui_renderer() {
+        let cli = Cli::try_parse_from(["roas", "preview", "--renderer", "swagger-ui", "spec.json"])
+            .expect("preview parse");
+        match cli.command {
+            Command::Preview(args) => {
+                assert!(matches!(args.renderer, preview::Renderer::SwaggerUi));
+            }
+            _ => panic!("expected Preview"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_unknown_preview_renderer() {
+        let res = Cli::try_parse_from(["roas", "preview", "--renderer", "stoplight", "spec.json"]);
+        assert!(res.is_err(), "unknown renderer must be rejected");
     }
 }

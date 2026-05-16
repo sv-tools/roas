@@ -60,14 +60,15 @@ Output is JSON on stdout.
 
 ### `preview`
 
-Starts a local HTTP server on `127.0.0.1:<random>` that serves the spec, embedded inside an HTML page rendered with [Redoc](https://redocly.com/redoc), and opens the default browser pointed at it. Pass `--no-open` to skip the browser launch (the URL is printed to stderr in either case). Ctrl+C tears the server down.
+Starts a local HTTP server on `127.0.0.1:<random>` that serves the spec, embedded inside an HTML page rendered with either [Redoc](https://redocly.com/redoc) (default) or [Swagger UI](https://swagger.io/tools/swagger-ui/), and opens the default browser pointed at it. Pass `--no-open` to skip the browser launch (the URL is printed to stderr in either case). Ctrl+C tears the server down.
 
 ```shell
-roas preview spec.yaml
+roas preview spec.yaml                               # Redoc (default)
+roas preview --renderer swagger-ui spec.yaml         # Swagger UI
 roas preview --no-open --from v3_1 spec.json
 ```
 
-Redoc currently targets OpenAPI 3.0 / 3.1 — v3.2-specific fields are skipped silently by the renderer.
+Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently.
 
 ## License
 

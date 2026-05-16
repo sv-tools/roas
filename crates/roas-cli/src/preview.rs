@@ -20,6 +20,18 @@ use std::path::PathBuf;
 use crate::read_and_parse;
 use crate::versioned::{self, SpecVersion};
 
+/// Renderer choice for the preview page. Both load their bundle from a public
+/// CDN; the spec itself is always served from the local server.
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+pub(crate) enum Renderer {
+    /// [Redoc](https://redocly.com/redoc) — single-page reference renderer.
+    Redoc,
+    /// [Swagger UI](https://swagger.io/tools/swagger-ui/) — the canonical
+    /// interactive UI from the Swagger project.
+    #[value(name = "swagger-ui")]
+    SwaggerUi,
+}
+
 #[derive(clap::Args)]
 pub struct PreviewArgs {
     /// Path to the spec file (JSON or YAML).
@@ -32,6 +44,10 @@ pub struct PreviewArgs {
     /// Don't open the browser; just print the server URL and serve.
     #[arg(long)]
     pub(crate) no_open: bool,
+
+    /// Renderer for the preview page. Defaults to Redoc.
+    #[arg(long, value_enum, default_value = "redoc")]
+    pub(crate) renderer: Renderer,
 }
 
 /// Embedded Redoc shell. The page mounts a `<redoc spec-url='/spec'>` element
@@ -53,6 +69,39 @@ const REDOC_HTML: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
+/// Embedded Swagger UI shell. Loads the `swagger-ui-dist` bundle + CSS from
+/// the public `unpkg.com` CDN and initialises against our `/spec` route. The
+/// `window.onload` hook is the pattern Swagger UI's own examples use to avoid
+/// racing the script load.
+const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>roas — OpenAPI viewer</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@latest/swagger-ui.css" />
+    <style>body { margin: 0; padding: 0; }</style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@latest/swagger-ui-bundle.js"></script>
+    <script>
+      window.onload = () => {
+        window.ui = SwaggerUIBundle({ url: '/spec', dom_id: '#swagger-ui' });
+      };
+    </script>
+  </body>
+</html>
+"#;
+
+/// Resolve the chosen renderer to its embedded HTML shell.
+fn renderer_html(renderer: Renderer) -> &'static str {
+    match renderer {
+        Renderer::Redoc => REDOC_HTML,
+        Renderer::SwaggerUi => SWAGGER_UI_HTML,
+    }
+}
+
 pub fn run_preview(args: PreviewArgs) -> Result<()> {
     let value = read_and_parse(&args.file)?;
     let detected = versioned::detect_or_use(args.from, value)?;
@@ -69,8 +118,15 @@ pub fn run_preview(args: PreviewArgs) -> Result<()> {
         other => bail!("unexpected listen address: {other:?}"),
     };
     let url = format!("http://127.0.0.1:{port}/");
+    let renderer_label = match args.renderer {
+        Renderer::Redoc => "Redoc",
+        Renderer::SwaggerUi => "Swagger UI",
+    };
 
-    eprintln!("Serving {} via Redoc at {url}", args.file.display());
+    eprintln!(
+        "Serving {} via {renderer_label} at {url}",
+        args.file.display(),
+    );
     eprintln!("Press Ctrl+C to stop.");
 
     if !args.no_open {
@@ -79,7 +135,7 @@ pub fn run_preview(args: PreviewArgs) -> Result<()> {
         let _ = webbrowser::open(&url);
     }
 
-    serve_preview_requests(server, REDOC_HTML, &spec_json);
+    serve_preview_requests(server, renderer_html(args.renderer), &spec_json);
     Ok(())
 }
 
@@ -138,6 +194,28 @@ mod tests {
             REDOC_HTML.contains("cdn.redoc.ly"),
             "REDOC_HTML must load Redoc from its CDN",
         );
+    }
+
+    #[test]
+    fn swagger_ui_html_constant_references_spec_url_and_swagger_ui_bundle() {
+        assert!(
+            SWAGGER_UI_HTML.contains("url: '/spec'"),
+            "SWAGGER_UI_HTML must point SwaggerUIBundle at /spec",
+        );
+        assert!(
+            SWAGGER_UI_HTML.contains("swagger-ui-dist"),
+            "SWAGGER_UI_HTML must load swagger-ui-dist from the CDN",
+        );
+        assert!(
+            SWAGGER_UI_HTML.contains("swagger-ui.css"),
+            "SWAGGER_UI_HTML must include the swagger-ui stylesheet",
+        );
+    }
+
+    #[test]
+    fn renderer_html_selects_the_right_shell_per_variant() {
+        assert!(renderer_html(Renderer::Redoc).contains("cdn.redoc.ly"));
+        assert!(renderer_html(Renderer::SwaggerUi).contains("swagger-ui-dist"));
     }
 
     fn parse_status_and_body(stream: &mut TcpStream) -> (u16, String, String) {
@@ -231,6 +309,7 @@ mod tests {
             file: temp_path("missing.json"),
             from: None,
             no_open: true,
+            renderer: Renderer::Redoc,
         };
         let err = run_preview(args).expect_err("missing file must error before server starts");
         assert!(
