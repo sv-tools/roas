@@ -11,6 +11,7 @@ repository = "https://github.com/sv-tools/roas"
 keywords = ["openapi", "swagger"]
 
 [workspace.dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
 enumset = "1.1.10"
 lazy-regex = "3.6.0"
 monostate = "1.0.0"

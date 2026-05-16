@@ -1,6 +1,6 @@
 [package]
 name = "roas"
-version = "0.13.0"
+version = "0.13.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -27,7 +27,12 @@ v3_1 = []
 # Support for OpenAPI v3.2.x
 v3_2 = []
 
+# `clap::ValueEnum` impl for `validation::Options`, for downstream CLIs that
+# want to surface each `Ignore*` flag as a value-enum choice.
+clap = ["dep:clap"]
+
 [dependencies]
+clap = { workspace = true, optional = true }
 enumset.workspace = true
 lazy-regex.workspace = true
 monostate.workspace = true
