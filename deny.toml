@@ -100,9 +100,11 @@ exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
     #{ allow = ["Zlib"], crate = "adler32" },
-    # webpki-roots ships Mozilla's root CA bundle under the data license used
-    # by the upstream CCADB; allow it just for this crate.
-    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+    # webpki-root-certs ships Mozilla's root CA bundle under the data license
+    # used by the upstream CCADB; allow it just for this crate. (The crate was
+    # named `webpki-roots` before reqwest 0.13 + rustls-platform-verifier
+    # switched to the singular-noun crate.)
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,
