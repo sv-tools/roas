@@ -28,6 +28,10 @@ jobs:
       # block — without `contents: read`, `actions/checkout` cannot fetch the repo.
       contents: read
       id-token: write
+      # `packages: write` is required for the roas-cli-only steps below that
+      # push the container image to ghcr.io. Cargo publishing itself doesn't
+      # need it, but adding it at the job level keeps the matrix uniform.
+      packages: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
@@ -36,3 +40,125 @@ jobs:
       - run: cargo publish --all-features --package ${{ matrix.package }} --verbose
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      # roas-cli-only publish targets. Gated on both the matrix package and
+      # the tag prefix so that a `roas/v…` tag (which expands the matrix to
+      # include roas-cli for cargo-publish purposes) doesn't accidentally
+      # push a Docker image or commit a Homebrew formula tied to the wrong
+      # version.
+      - name: Extract roas-cli version from tag
+        if: matrix.package == 'roas-cli' && startsWith(github.ref, 'refs/tags/roas-cli/v')
+        id: roas-cli
+        run: |
+          version="${GITHUB_REF#refs/tags/roas-cli/v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          tag="roas-cli/v${version}"
+          # GitHub source archive URL — tarball SHA lands in the Homebrew formula.
+          echo "tarball=https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: matrix.package == 'roas-cli' && startsWith(github.ref, 'refs/tags/roas-cli/v')
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        if: matrix.package == 'roas-cli' && startsWith(github.ref, 'refs/tags/roas-cli/v')
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        if: matrix.package == 'roas-cli' && startsWith(github.ref, 'refs/tags/roas-cli/v')
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # The built-in token already has `packages: write` against
+          # ghcr.io/${owner-of-repo}/*. No separate secret needed.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push roas-cli container image
+        if: matrix.package == 'roas-cli' && startsWith(github.ref, 'refs/tags/roas-cli/v')
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Tag the release version and `latest`. Both point at the
+          # multi-arch index; users pulling `:latest` get the right arch
+          # automatically.
+          tags: |
+            ghcr.io/sv-tools/roas:${{ steps.roas-cli.outputs.version }}
+            ghcr.io/sv-tools/roas:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/sv-tools/roas
+            org.opencontainers.image.description=Command-line front-end for the roas OpenAPI library
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+            org.opencontainers.image.version=${{ steps.roas-cli.outputs.version }}
+
+      - name: Compute Homebrew tarball SHA256
+        if: matrix.package == 'roas-cli' && startsWith(github.ref, 'refs/tags/roas-cli/v')
+        id: tarball
+        run: |
+          # Use `-fL` so GitHub's redirect to the codeload tarball is followed
+          # and a non-200 fails loudly (otherwise sha256sum would hash the
+          # error page).
+          sha=$(curl -sfL "${{ steps.roas-cli.outputs.tarball }}" | sha256sum | cut -d' ' -f1)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Homebrew tap
+        if: matrix.package == 'roas-cli' && startsWith(github.ref, 'refs/tags/roas-cli/v')
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: sv-tools/homebrew-apps
+          # PAT (fine-grained, Contents: read+write on sv-tools/homebrew-apps)
+          # stored as a secret in this repo. Required because the default
+          # GITHUB_TOKEN is scoped to sv-tools/roas only.
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-apps
+
+      - name: Render and commit Homebrew formula
+        if: matrix.package == 'roas-cli' && startsWith(github.ref, 'refs/tags/roas-cli/v')
+        working-directory: homebrew-apps
+        env:
+          VERSION: ${{ steps.roas-cli.outputs.version }}
+          URL: ${{ steps.roas-cli.outputs.tarball }}
+          SHA256: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          mkdir -p Formula
+          # The formula compiles from source via `cargo install`. Bottles
+          # (prebuilt binaries) would be faster for users but require a
+          # darwin runner matrix and an extra release-asset upload step; we
+          # can layer that on later without changing the tap layout.
+          cat > Formula/roas.rb <<EOF
+          # typed: false
+          # frozen_string_literal: true
+          #
+          # Auto-generated by sv-tools/roas .github/workflows/publish.yaml.
+          # Do not edit by hand — changes are overwritten on the next release.
+          class Roas < Formula
+            desc "Command-line front-end for the roas OpenAPI library"
+            homepage "https://github.com/sv-tools/roas"
+            url "${URL}"
+            sha256 "${SHA256}"
+            license any_of: ["MIT", "Apache-2.0"]
+            head "https://github.com/sv-tools/roas.git", branch: "main"
+
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "install", *std_cargo_args(path: "crates/roas-cli")
+            end
+
+            test do
+              assert_match "roas ${VERSION}", shell_output("#{bin}/roas --version")
+            end
+          end
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/roas.rb
+          if git diff --cached --quiet; then
+            echo "roas formula unchanged at ${VERSION}; nothing to commit"
+          else
+            git commit -m "roas ${VERSION}"
+            git push
+          fi
