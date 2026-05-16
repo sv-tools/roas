@@ -24,7 +24,7 @@ async = ["dep:tokio"]
 yaml = ["dep:serde_yaml_ng"]
 
 [dependencies]
-roas = { version = ">=0.13.1", path = "../roas" }
+roas = { version = ">=0.13", path = "../roas" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng = { workspace = true, optional = true }
