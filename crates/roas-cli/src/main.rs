@@ -526,7 +526,20 @@ mod tests {
                 assert!(args.no_open);
                 assert!(args.from.is_none());
                 assert!(args.convert_to.is_none());
+                assert!(!args.watch);
                 assert!(matches!(args.renderer, preview::Renderer::Redoc));
+            }
+            _ => panic!("expected Preview"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_preview_subcommand_with_watch_flag() {
+        let cli = Cli::try_parse_from(["roas", "preview", "--watch", "spec.json"])
+            .expect("preview parse");
+        match cli.command {
+            Command::Preview(args) => {
+                assert!(args.watch);
             }
             _ => panic!("expected Preview"),
         }
