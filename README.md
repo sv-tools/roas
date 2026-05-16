@@ -8,6 +8,7 @@ OpenAPI Specification (v2.0, v3.0.x, v3.1.x, v3.2.x).
 | [`roas`](crates/roas)                           | [![docs.rs](https://docs.rs/roas/badge.svg)](https://docs.rs/roas)                           | [![crates.io](https://img.shields.io/crates/v/roas.svg)](https://crates.io/crates/roas)                           |
 | [`roas-file-fetcher`](crates/roas-file-fetcher) | [![docs.rs](https://docs.rs/roas-file-fetcher/badge.svg)](https://docs.rs/roas-file-fetcher) | [![crates.io](https://img.shields.io/crates/v/roas-file-fetcher.svg)](https://crates.io/crates/roas-file-fetcher) |
 | [`roas-http-fetcher`](crates/roas-http-fetcher) | [![docs.rs](https://docs.rs/roas-http-fetcher/badge.svg)](https://docs.rs/roas-http-fetcher) | [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher) |
+| [`roas-cli`](crates/roas-cli)                   | —                                                                                            | [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)                   |
 
 See each crate's `README.md` for usage, and `AGENTS.md` at the repository root for contributor guidelines.
 
