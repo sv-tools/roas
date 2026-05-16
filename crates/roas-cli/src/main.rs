@@ -68,11 +68,6 @@ struct ValidateArgs {
     /// `roas validate --help` to see the full list.
     #[arg(long, value_enum)]
     ignore: Vec<Options>,
-
-    /// Shorthand for `--ignore missing-tags --ignore unused-tags`. Matches
-    /// the in-repo fixture-suite default.
-    #[arg(long)]
-    lenient_tags: bool,
 }
 
 #[derive(clap::Args)]
@@ -139,10 +134,6 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
     let mut options = enumset::EnumSet::<Options>::new();
     for ignore in &args.ignore {
         options |= *ignore;
-    }
-    if args.lenient_tags {
-        options |= Options::IgnoreMissingTags;
-        options |= Options::IgnoreUnusedTags;
     }
     match detected.validate(options, loader.as_mut()) {
         Ok(()) => {
@@ -228,7 +219,6 @@ mod tests {
                 assert!(args.from.is_none());
                 assert!(args.load.is_empty());
                 assert!(args.ignore.is_empty());
-                assert!(!args.lenient_tags);
             }
             Command::Convert(_) => panic!("expected Validate"),
         }

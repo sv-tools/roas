@@ -44,7 +44,7 @@ empty-info-title, empty-info-version, empty-response-description,
 empty-external-documentation-url
 ```
 
-Run `roas validate --help` for descriptions of each check. `--lenient-tags` is a shorthand for `--ignore missing-tags --ignore unused-tags`.
+Run `roas validate --help` for descriptions of each check.
 
 ### `convert`
 
