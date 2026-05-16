@@ -1,18 +1,19 @@
 //! `roas preview <FILE>` — start a local HTTP server that renders the spec in
-//! a browser via [Redoc](https://redocly.com/redoc).
+//! a browser via [Redoc](https://redocly.com/redoc) or
+//! [Swagger UI](https://swagger.io/tools/swagger-ui/).
 //!
-//! Two routes only:
-//!   * `/` (and `/index.html`) — a small HTML shell that mounts
-//!     `<redoc spec-url='/spec'></redoc>` and pulls the Redoc bundle from the
-//!     official CDN.
+//! Routes:
+//!   * `/` (and `/index.html`) — a small HTML shell that mounts the renderer
+//!     and pulls its bundle from the official CDN.
 //!   * `/spec` (and `/spec.json`) — the input spec, parsed via the existing
 //!     `read_and_parse` / `detect_or_use` pipeline and re-serialised as JSON.
+//!   * `/reload` — when `--watch` is on, a long-poll endpoint that the
+//!     injected page-side JS hits in a loop; the handler blocks until the
+//!     filesystem watcher signals a reload or a 30 s server-side timeout
+//!     elapses (the page polls again either way).
 //!
 //! The default browser is launched at the server URL via the `webbrowser`
-//! crate; `--no-open` suppresses the launch (the URL is still printed to
-//! stderr). Ctrl+C tears the server down. The spec is served as-is — no
-//! auto-downconversion; Redoc handles OAS 3.0 / 3.1 today and silently skips
-//! 3.2-only fields.
+//! crate; `--no-open` suppresses the launch. Ctrl+C tears the server down.
 
 use anyhow::{Context, Result, anyhow, bail};
 use notify::RecursiveMode;
@@ -153,13 +154,29 @@ const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
-/// SSE-subscriber `<script>` block. Injected into the served HTML shell when
-/// `--watch` is on so the browser reloads itself on every file change.
+/// Long-poll-subscriber `<script>` block. Injected into the served HTML shell
+/// when `--watch` is on so the browser reloads itself on every file change.
+///
+/// SSE would be the elegant fit here but `tiny_http::Response::new` reads the
+/// body to EOF before sending — fatal for a never-ending event stream — so
+/// `/reload` is implemented as a long-poll that returns `200 OK` on a reload
+/// event and `204 No Content` on a server-side timeout. The page polls in a
+/// loop; on `200` it reloads, on `204` (or any network error) it polls again.
 const RELOAD_SCRIPT: &str = r#"
     <script>
       (function () {
-        const es = new EventSource('/reload');
-        es.onmessage = function () { window.location.reload(); };
+        function poll() {
+          fetch('/reload')
+            .then(function (r) {
+              if (r.status === 200) {
+                window.location.reload();
+              } else {
+                poll();
+              }
+            })
+            .catch(function () { setTimeout(poll, 2000); });
+        }
+        poll();
       })();
     </script>"#;
 
@@ -376,7 +393,7 @@ fn handle_request(
             let _ = request.respond(http_response(&body, "application/json"));
         }
         "/reload" => match reload_bus {
-            Some(bus) => handle_reload_stream(request, bus),
+            Some(bus) => handle_reload_long_poll(request, bus),
             None => {
                 let _ = request.respond(not_found_response());
             }
@@ -387,61 +404,27 @@ fn handle_request(
     }
 }
 
-fn handle_reload_stream(request: tiny_http::Request, bus: &ReloadBus) {
+/// Server-side timeout for the long-poll. After this elapses without a reload
+/// signal we return `204 No Content`; the page-side script polls again
+/// immediately. The page-visible cost of bumping this higher is one stale
+/// reload-or-nothing window after the file changes, capped by this value.
+const RELOAD_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Long-poll handler for `/reload`. Subscribes to the bus and blocks until
+/// either an event arrives (→ `200 OK`) or the timeout fires (→ `204 No
+/// Content`). The injected page-side `RELOAD_SCRIPT` retries on every
+/// response, so a `204` is just a "still here, keep polling".
+fn handle_reload_long_poll(request: tiny_http::Request, bus: &ReloadBus) {
     let rx = subscribe_reload(bus);
-    let reader = ReloadReader::new(rx);
-    let headers = [
-        tiny_http::Header::from_bytes(b"Content-Type".as_ref(), b"text/event-stream".as_ref()),
-        tiny_http::Header::from_bytes(b"Cache-Control".as_ref(), b"no-cache".as_ref()),
-    ]
-    .into_iter()
-    .filter_map(|h| h.ok())
-    .collect();
-    let response =
-        tiny_http::Response::new(tiny_http::StatusCode(200), headers, reader, None, None);
-    let _ = request.respond(response);
-}
-
-/// A blocking `Read` adapter that turns the reload-bus receiver into an SSE
-/// byte stream. The first call emits an SSE comment so the browser gets a
-/// chunk and surfaces the `EventSource` as `open`; each subsequent call
-/// blocks on the receiver and emits `data: reload\n\n` per event.
-struct ReloadReader {
-    rx: mpsc::Receiver<()>,
-    buffer: Vec<u8>,
-    primed: bool,
-}
-
-impl ReloadReader {
-    fn new(rx: mpsc::Receiver<()>) -> Self {
-        Self {
-            rx,
-            buffer: Vec::new(),
-            primed: false,
+    match rx.recv_timeout(RELOAD_POLL_TIMEOUT) {
+        Ok(()) => {
+            let _ = request.respond(http_response("reload", "text/plain"));
         }
-    }
-}
-
-impl std::io::Read for ReloadReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.buffer.is_empty() {
-            if !self.primed {
-                // First read: emit a comment frame so the browser receives
-                // chunked headers + opens `EventSource.readyState=OPEN`.
-                self.buffer = b": preview-stream\n\n".to_vec();
-                self.primed = true;
-            } else {
-                // Subsequent reads: block until the next file change.
-                match self.rx.recv() {
-                    Ok(()) => self.buffer = b"data: reload\n\n".to_vec(),
-                    Err(_) => return Ok(0),
-                }
-            }
+        Err(_) => {
+            // mpsc::RecvTimeoutError covers both Timeout and Disconnected;
+            // either way the right move is "204, please poll again".
+            let _ = request.respond(no_content_response());
         }
-        let n = buf.len().min(self.buffer.len());
-        buf[..n].copy_from_slice(&self.buffer[..n]);
-        self.buffer.drain(..n);
-        Ok(n)
     }
 }
 
@@ -457,6 +440,10 @@ fn http_response(body: &str, content_type: &str) -> tiny_http::Response<std::io:
 
 fn not_found_response() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     tiny_http::Response::from_string("not found").with_status_code(404)
+}
+
+fn no_content_response() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    tiny_http::Response::from_string("").with_status_code(204)
 }
 
 #[cfg(test)]
@@ -515,9 +502,11 @@ mod tests {
     fn render_html_injects_reload_script_when_watch_is_on() {
         let off = render_html(Renderer::Redoc, false);
         let on = render_html(Renderer::Redoc, true);
-        assert!(!off.contains("EventSource"));
-        assert!(on.contains("EventSource"));
-        assert!(on.contains("'/reload'"));
+        // Without --watch, no poll loop should be present.
+        assert!(!off.contains("fetch('/reload')"));
+        // With --watch, the long-poll subscriber lands in the page.
+        assert!(on.contains("fetch('/reload')"));
+        assert!(on.contains("window.location.reload()"));
         // Still has the renderer base content.
         assert!(on.contains("cdn.redoc.ly"));
     }
@@ -863,35 +852,6 @@ mod tests {
     }
 
     #[test]
-    fn reload_reader_emits_priming_comment_then_blocks_for_events() {
-        use std::io::Read;
-        let (tx, rx) = mpsc::channel();
-        let mut reader = ReloadReader::new(rx);
-
-        // First read: priming comment frame (SSE convention so the browser
-        // surfaces `EventSource.readyState=OPEN`).
-        let mut buf = [0u8; 64];
-        let n = reader.read(&mut buf).unwrap();
-        let primed = std::str::from_utf8(&buf[..n]).unwrap();
-        assert!(primed.contains(": preview-stream"), "got: {primed}");
-        assert!(primed.ends_with("\n\n"));
-
-        // Push an event; next read should yield `data: reload\n\n`.
-        tx.send(()).unwrap();
-        let mut buf = [0u8; 64];
-        let n = reader.read(&mut buf).unwrap();
-        let event = std::str::from_utf8(&buf[..n]).unwrap();
-        assert_eq!(event, "data: reload\n\n");
-
-        // Drop the sender; the reader returns EOF (Ok(0)) rather than
-        // blocking forever.
-        drop(tx);
-        let mut buf = [0u8; 64];
-        let n = reader.read(&mut buf).unwrap();
-        assert_eq!(n, 0, "reader must return EOF when the sender is dropped");
-    }
-
-    #[test]
     fn reload_route_returns_404_when_watch_is_off() {
         // serve_preview_requests with `reload_bus: None` must 404 the route.
         let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
@@ -913,14 +873,9 @@ mod tests {
     }
 
     #[test]
-    fn reload_route_registers_subscriber_when_watch_is_on() {
-        // End-to-end verification that /reload, when `--watch` is on,
-        // reaches `handle_reload_stream` and subscribes a sender to the
-        // bus. The byte-level SSE protocol (priming comment + `data: reload`
-        // framing on broadcast) is covered by the standalone `ReloadReader`
-        // test; reading those bytes via a `TcpStream` and tiny_http's
-        // chunked encoding is timing-sensitive enough that we skip it
-        // here and trust the unit test.
+    fn reload_route_returns_200_when_watch_event_fires() {
+        // Drive the long-poll: open `/reload` on a thread, broadcast, and
+        // verify the response is `200 OK` with `body: reload`.
         let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
         let addr = match server.server_addr() {
             tiny_http::ListenAddr::IP(addr) => addr,
@@ -931,24 +886,33 @@ mod tests {
         let spec_json = Arc::new(Mutex::new(r#"{}"#.to_string()));
         let bus: ReloadBus = Arc::new(Mutex::new(Vec::new()));
         let bus_for_server = Arc::clone(&bus);
-        let thread = std::thread::spawn(move || {
+        let server_thread = std::thread::spawn(move || {
             serve_preview_requests(server, html, spec_json, Some(bus_for_server));
         });
 
-        // Keep the connection open in `_stream` so the server-side handler
-        // doesn't bail on a half-written response — we don't read from it,
-        // we just need it to exist long enough for the handler to subscribe.
-        let _stream = send_request(addr, "/reload");
+        // Open the request on a thread so we can broadcast before reading.
+        let client_thread = std::thread::spawn(move || {
+            let mut stream = send_request(addr, "/reload");
+            parse_status_and_body(&mut stream)
+        });
+
+        // Wait for the long-poll handler to register, then signal it.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while std::time::Instant::now() < deadline && bus.lock().unwrap().is_empty() {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
             !bus.lock().unwrap().is_empty(),
-            "SSE handler must register a subscriber on /reload",
+            "long-poll handler must register before we broadcast",
         );
+        broadcast_reload(&bus);
 
-        drop(thread);
+        let (code, ctype, body) = client_thread.join().expect("client thread");
+        assert_eq!(code, 200, "got body: {body:?}");
+        assert!(ctype.contains("text/plain"));
+        assert_eq!(body, "reload");
+
+        drop(server_thread);
     }
 
     /// Real filesystem event: write a fresh spec, start the watcher, rewrite
@@ -1056,8 +1020,8 @@ mod tests {
             "--watch must allocate a reload bus"
         );
         assert!(
-            prepared.html.contains("EventSource"),
-            "--watch must inject the SSE-subscriber script",
+            prepared.html.contains("fetch('/reload')"),
+            "--watch must inject the long-poll-subscriber script",
         );
 
         drop(prepared);
