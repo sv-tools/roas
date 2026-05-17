@@ -13,7 +13,7 @@ on:
       publish:
         value: ${{ jobs.RustMeta.outputs.publish }}
   schedule:
-    - cron: "0 0 * * 0"
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC
 
 env:
   CARGO_TERM_COLOR: always
@@ -112,6 +112,19 @@ jobs:
         run: cargo machete
       - name: Deny
         run: cargo deny check all
+  OsvScanner:
+    name: OSV Scanner (PR diff)
+    # Comparative scan that diffs the base branch's deps against the PR
+    # head — only meaningful on `pull_request` events. Skip on push (a
+    # merged PR already had this run on it), workflow_call (the publish
+    # workflow gets crates.io + GHCR coverage from its own deny check),
+    # and the weekly schedule.
+    if: github.event_name == 'pull_request'
+    permissions:
+      actions: read
+      contents: read
+      security-events: write  # for SARIF upload to the Security tab
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
   PublishCrateJob:
     name: Test publishing per crate
     needs: RustMeta
@@ -149,10 +162,15 @@ jobs:
       - Clippy
       - Tests
       - Deps
+      - OsvScanner
       - Publish
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
+      # `OsvScanner` is intentionally skipped on non-`pull_request` events,
+      # so we deliberately don't treat 'skipped' as a failure here — every
+      # other job in the needs list runs unconditionally and will surface
+      # as 'failure' / 'cancelled' if anything went wrong.
       - name: Verify all checks succeeded
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: exit 1
