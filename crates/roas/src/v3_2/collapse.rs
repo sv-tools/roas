@@ -594,69 +594,23 @@ impl<'a> Collapser<'a> {
     }
 
     /// Insert `schema` into the components.schemas bag. If a
-    /// structurally identical schema is already there, return the
-    /// existing name and drop `schema`. Otherwise generate a name (via
-    /// `title`, falling back to context) and insert.
+    /// structurally identical schema is already there (canonical-JSON
+    /// equality), return the existing name and drop `schema`.
+    /// Otherwise generate a name (via `title`, falling back to context)
+    /// and insert.
+    ///
+    /// Dedup is *strict*: `title` is part of the canonical form, so
+    /// two schemas that differ only in `title` presence don't collapse.
+    /// First-seen wins for the component name on a dedup hit.
     fn intern_schema(&mut self, schema: Schema, ctx: NameContext) -> Result<String, CollapseError> {
         let canonical = serde_json::to_string(&schema)?;
         if let Some(existing) = self.seen.get(&canonical) {
-            // Equivalent schema already lifted — return its name.
-            // Optionally upgrade the name if the new schema has a
-            // title and the existing entry was named from context.
-            let existing = existing.clone();
-            return Ok(self.maybe_upgrade_name(existing, &schema, canonical));
+            return Ok(existing.clone());
         }
         let name = self.generate_name(&schema, &ctx);
         self.seen.insert(canonical, name.clone());
         self.schemas.insert(name.clone(), RefOr::new_item(schema));
         Ok(name)
-    }
-
-    /// First-seen wins for the component name — unless the new
-    /// occurrence carries an explicit `title` that the existing entry
-    /// was missing. In that case, rename the existing entry so the
-    /// human-readable title takes precedence over a context-derived
-    /// name. All previously-emitted refs still resolve because
-    /// `self.seen[canonical]` is updated to the new name.
-    fn maybe_upgrade_name(
-        &mut self,
-        existing_name: String,
-        new_schema: &Schema,
-        canonical: String,
-    ) -> String {
-        let Some(title) = schema_title(new_schema) else {
-            return existing_name;
-        };
-        let suggested = sanitize_component_name(title);
-        if suggested == existing_name {
-            return existing_name;
-        }
-        // Only upgrade when the existing schema *also* has no title —
-        // otherwise we'd be overriding an author's deliberate choice.
-        let existing_has_title = self
-            .schemas
-            .get(&existing_name)
-            .and_then(|v| match v {
-                RefOr::Item(s) => schema_title(s),
-                RefOr::Ref(_) => None,
-            })
-            .is_some();
-        if existing_has_title {
-            return existing_name;
-        }
-        // Rename: same content, but stored under the title-derived name.
-        let final_name = if self.schemas.contains_key(&suggested) {
-            // Collision against an unrelated entry; keep the
-            // context-derived name to avoid clobbering anything.
-            return existing_name;
-        } else {
-            suggested
-        };
-        if let Some(value) = self.schemas.remove(&existing_name) {
-            self.schemas.insert(final_name.clone(), value);
-        }
-        self.seen.insert(canonical, final_name.clone());
-        final_name
     }
 
     fn generate_name(&self, schema: &Schema, ctx: &NameContext) -> String {
@@ -1255,5 +1209,737 @@ mod tests {
         spec.collapse(None).unwrap();
         let json = serde_json::to_value(&spec).unwrap();
         let _: Spec = serde_json::from_value(json).expect("merged spec must re-parse");
+    }
+
+    // ── Walker coverage: every container / location a schema can live in
+    //
+    // The "kitchen sink" test below stuffs one inline schema into every
+    // schema-bearing slot v3.2 supports, then asserts that every site
+    // ended up rewritten to a ref. Driving them through one spec keeps
+    // the test compact and exercises the cross-cutting walker
+    // machinery (visitor recursion, ctx threading, dedup interplay).
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn walker_covers_every_schema_bearing_slot() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    // PathItem-level parameters list.
+                    "parameters": [
+                        {"name": "tenant", "in": "header", "schema": {"title": "Tenant", "type": "string"}}
+                    ],
+                    "get": {
+                        "operationId": "kitchenSink",
+                        // Operation-level parameters — every `in` variant.
+                        "parameters": [
+                            {"name": "id", "in": "path", "required": true, "schema": {"title": "Id", "type": "integer"}},
+                            {"name": "tag", "in": "query", "schema": {"title": "Tag", "type": "string"}},
+                            {"name": "x-trace", "in": "header", "schema": {"title": "Trace", "type": "string"}},
+                            {"name": "sid", "in": "cookie", "schema": {"title": "Sid", "type": "string"}},
+                            // Querystring (v3.2): no `schema`, `content` only.
+                            {"name": "qs", "in": "querystring", "content": {
+                                "application/x-www-form-urlencoded": {
+                                    "schema": {"title": "QsBody", "type": "object", "properties": {"q": {"type": "string"}}}
+                                }
+                            }}
+                        ],
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"title": "PetBody", "type": "object", "properties": {"name": {"type": "string"}}},
+                                    "itemSchema": {"title": "PetItem", "type": "object", "properties": {"id": {"type": "integer"}}}
+                                }
+                            }
+                        },
+                        "responses": {
+                            "default": {
+                                "description": "fallback",
+                                "content": {
+                                    "application/json": {"schema": {"title": "Err", "type": "object", "properties": {"msg": {"type": "string"}}}}
+                                }
+                            },
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-Rate": {"schema": {"title": "Rate", "type": "integer"}}
+                                },
+                                "content": {
+                                    "application/json": {"schema": {"title": "OkBody", "type": "object", "properties": {"id": {"type": "integer"}}}}
+                                }
+                            }
+                        },
+                        // Inline Operation-level callback whose nested
+                        // PathItem itself has a schema slot.
+                        "callbacks": {
+                            "onPing": {
+                                "{$request.body#/url}": {
+                                    "post": {
+                                        "responses": {
+                                            "200": {
+                                                "description": "ack",
+                                                "content": {
+                                                    "application/json": {"schema": {"title": "Ack", "type": "object", "properties": {"ok": {"type": "boolean"}}}}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    // PathItem.additional_operations (v3.2).
+                    "additionalOperations": {
+                        "QUERY": {
+                            "responses": {
+                                "200": {
+                                    "description": "ok",
+                                    "content": {
+                                        "application/json": {"schema": {"title": "Custom", "type": "object", "properties": {"id": {"type": "integer"}}}}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            // Webhooks (v3.1+): Paths-shaped, walker hits the same code.
+            "webhooks": {
+                "newPet": {
+                    "post": {
+                        "responses": {
+                            "200": {
+                                "description": "received",
+                                "content": {
+                                    "application/json": {"schema": {"title": "WebhookBody", "type": "object", "properties": {"id": {"type": "integer"}}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            // Inline components.* of every bag that can hold a schema slot.
+            "components": {
+                "parameters": {
+                    "PageParam": {"name": "page", "in": "query", "schema": {"title": "Page", "type": "integer"}}
+                },
+                "responses": {
+                    "NotFound": {
+                        "description": "not found",
+                        "headers": {"X-Reason": {"schema": {"title": "Reason", "type": "string"}}},
+                        "content": {
+                            "application/json": {"schema": {"title": "NotFoundBody", "type": "object", "properties": {"msg": {"type": "string"}}}}
+                        }
+                    }
+                },
+                "requestBodies": {
+                    "PetCreate": {
+                        "content": {
+                            "application/json": {"schema": {"title": "PetCreateBody", "type": "object", "properties": {"name": {"type": "string"}}}}
+                        }
+                    }
+                },
+                "headers": {
+                    "XCorrelation": {"schema": {"title": "Correlation", "type": "string"}}
+                },
+                "pathItems": {
+                    "Echo": {
+                        "post": {
+                            "responses": {
+                                "200": {
+                                    "description": "echoed",
+                                    "content": {
+                                        "application/json": {"schema": {"title": "EchoBody", "type": "object", "properties": {"v": {"type": "string"}}}}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "callbacks": {
+                    "OnDelete": {
+                        "{$request.body#/url}": {
+                            "post": {
+                                "responses": {
+                                    "200": {
+                                        "description": "ack",
+                                        "content": {
+                                            "application/json": {"schema": {"title": "DelAck", "type": "object", "properties": {"ok": {"type": "boolean"}}}}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "mediaTypes": {
+                    "Json": {"schema": {"title": "MediaTypeJson", "type": "object", "properties": {"v": {"type": "string"}}}}
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+        let names = lifted_schema_names(&spec);
+        for expected in [
+            // PathItem-level parameter.
+            "Tenant",
+            // Operation parameters (every `in`).
+            "Id",
+            "Tag",
+            "Trace",
+            "Sid",
+            // Querystring -> content -> MediaType.schema.
+            "QsBody",
+            // Operation.requestBody MediaType.schema + item_schema.
+            "PetBody",
+            "PetItem",
+            // Operation.responses default + 200 + 200.headers.
+            "Err",
+            "Rate",
+            "OkBody",
+            // Operation.callbacks inline Callback -> PathItem -> response.
+            "Ack",
+            // PathItem.additional_operations response.
+            "Custom",
+            // Webhooks.
+            "WebhookBody",
+            // components.* (every bag).
+            "Page",
+            "Reason",
+            "NotFoundBody",
+            "PetCreateBody",
+            "Correlation",
+            "EchoBody",
+            "DelAck",
+            "MediaTypeJson",
+        ] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "expected lifted name `{expected}`, got {names:?}",
+            );
+        }
+        // And confirm nothing's left inline at one representative site.
+        let inline = inline_to_ref(
+            &spec,
+            "/paths/~1pets/get/responses/200/content/application~1json/schema",
+        );
+        assert_eq!(inline["$ref"], "#/components/schemas/OkBody");
+    }
+
+    // ── Walker coverage: RefOr::Ref container types bail cleanly ─────────
+
+    #[test]
+    fn ref_or_ref_containers_are_skipped_by_walker() {
+        // When a Parameter / Response / RequestBody / Header / MediaType /
+        // Callback is itself a `RefOr::Ref`, the walker doesn't recurse
+        // into it — but it also doesn't error. Use that path so the
+        // RefOr::Ref arms of every container walker get exercised.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [{"$ref": "#/components/parameters/PageParam"}],
+                        "requestBody": {"$ref": "#/components/requestBodies/PetCreate"},
+                        "responses": {
+                            "200": {"$ref": "#/components/responses/NotFound"}
+                        },
+                        "callbacks": {
+                            "onPing": {"$ref": "#/components/callbacks/OnDelete"}
+                        }
+                    }
+                }
+            },
+            "components": {
+                "parameters": {
+                    "PageParam": {"name": "page", "in": "query", "schema": {"title": "Page", "type": "integer"}}
+                },
+                "responses": {
+                    "NotFound": {
+                        "description": "not found",
+                        "headers": {"X-Reason": {"$ref": "#/components/headers/H"}},
+                        "content": {"application/json": {"$ref": "#/components/mediaTypes/J"}}
+                    }
+                },
+                "requestBodies": {
+                    "PetCreate": {
+                        "content": {"application/json": {"$ref": "#/components/mediaTypes/J"}}
+                    }
+                },
+                "headers": {"H": {"schema": {"title": "H", "type": "string"}}},
+                "mediaTypes": {"J": {"schema": {"title": "J", "type": "string"}}},
+                "callbacks": {
+                    "OnDelete": {
+                        "{$request.body#/url}": {
+                            "post": {"responses": {"200": {"description": "ok"}}}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("ref-only spec collapses");
+        // Components-level walkers still lift the schemas inside the
+        // pointed-at components — just confirm we didn't blow up and
+        // the schemas reachable from components.* got lifted.
+        let names = lifted_schema_names(&spec);
+        assert!(names.contains(&"Page".to_owned()), "got {names:?}");
+        assert!(names.contains(&"H".to_owned()));
+        assert!(names.contains(&"J".to_owned()));
+    }
+
+    // ── Walker coverage: Header with inline `content` (no schema) ────────
+
+    #[test]
+    fn header_with_inline_content_is_walked() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-Trace": {
+                                        "content": {
+                                            "application/json": {
+                                                "schema": {"title": "TraceMime", "type": "object", "properties": {"id": {"type": "string"}}}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        assert!(names.contains(&"TraceMime".to_owned()), "got {names:?}");
+    }
+
+    // ── Recursion coverage: Schema composition variants ──────────────────
+
+    #[test]
+    fn allof_anyof_oneof_not_children_are_lifted() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "components": {
+                "schemas": {
+                    "Combined": {
+                        "allOf": [
+                            {"title": "A", "type": "object", "properties": {"a": {"type": "string"}}},
+                            {"title": "B", "type": "object", "properties": {"b": {"type": "integer"}}}
+                        ]
+                    },
+                    "Either": {
+                        "anyOf": [
+                            {"title": "C", "type": "string"},
+                            {"title": "D", "type": "integer"}
+                        ]
+                    },
+                    "Exactly": {
+                        "oneOf": [
+                            {"title": "E", "type": "string"},
+                            {"title": "F", "type": "boolean"}
+                        ]
+                    },
+                    "Inverse": {
+                        "not": {"title": "G", "type": "string"}
+                    }
+                }
+            },
+            "paths": {}
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        for expected in [
+            "A", "B", "C", "D", "E", "F", "G", "Combined", "Either", "Exactly", "Inverse",
+        ] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "missing {expected}, got {names:?}"
+            );
+        }
+        // Confirm each composition slot now points at a ref.
+        let combined = schema_at(&spec, "Combined");
+        assert!(combined["allOf"][0]["$ref"].is_string());
+        assert!(combined["allOf"][1]["$ref"].is_string());
+        let either = schema_at(&spec, "Either");
+        assert!(either["anyOf"][0]["$ref"].is_string());
+        let exactly = schema_at(&spec, "Exactly");
+        assert!(exactly["oneOf"][0]["$ref"].is_string());
+        let inverse = schema_at(&spec, "Inverse");
+        assert!(inverse["not"]["$ref"].is_string());
+    }
+
+    // ── Recursion coverage: ObjectSchema's full kitchen ─────────────────
+
+    #[test]
+    fn object_schema_recurses_through_every_nested_slot() {
+        // Single Pet schema exercising properties + patternProperties +
+        // additionalProperties (Item, not Bool) + unevaluatedProperties +
+        // propertyNames.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "components": {
+                "schemas": {
+                    "Pet": {
+                        "type": "object",
+                        "properties": {"name": {"title": "Name", "type": "string"}},
+                        "patternProperties": {
+                            "^x-": {"title": "ExtVal", "type": "object", "properties": {"v": {"type": "string"}}}
+                        },
+                        "additionalProperties": {"title": "Extra", "type": "object", "properties": {"v": {"type": "string"}}},
+                        "unevaluatedProperties": {"title": "Unev", "type": "object", "properties": {"v": {"type": "string"}}},
+                        "propertyNames": {"title": "PropKey", "type": "string"}
+                    }
+                }
+            },
+            "paths": {}
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        for expected in ["Name", "ExtVal", "Extra", "Unev", "PropKey", "Pet"] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "missing {expected}, got {names:?}"
+            );
+        }
+        let pet = schema_at(&spec, "Pet");
+        assert!(pet["properties"]["name"]["$ref"].is_string());
+        assert!(pet["patternProperties"]["^x-"]["$ref"].is_string());
+        assert!(pet["additionalProperties"]["$ref"].is_string());
+        assert!(pet["unevaluatedProperties"]["$ref"].is_string());
+        assert!(pet["propertyNames"]["$ref"].is_string());
+    }
+
+    // ── Recursion coverage: ArraySchema items ────────────────────────────
+
+    #[test]
+    fn array_schema_items_is_lifted() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "components": {
+                "schemas": {
+                    "Pets": {
+                        "type": "array",
+                        "items": {"title": "Pet", "type": "object", "properties": {"id": {"type": "integer"}}}
+                    }
+                }
+            },
+            "paths": {}
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        assert!(names.contains(&"Pet".to_owned()), "got {names:?}");
+        let pets = schema_at(&spec, "Pets");
+        assert!(pets["items"]["$ref"].is_string());
+    }
+
+    // ── Recursion: bool-typed schema slots are left alone ────────────────
+
+    #[test]
+    fn bool_schema_slots_do_not_lift() {
+        // `additionalProperties: true` and `items: false` are valid
+        // JSON Schema 2020-12 sugar. The walker must not try to lift
+        // the BoolOr::Bool arm.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "components": {
+                "schemas": {
+                    "Map": {"type": "object", "additionalProperties": true},
+                    "EmptyList": {"type": "array", "items": false}
+                }
+            },
+            "paths": {}
+        }));
+        // Just an assertion that the call succeeds + the shape survives.
+        spec.collapse(None).unwrap();
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["components"]["schemas"]["Map"]["additionalProperties"],
+            true
+        );
+        assert_eq!(v["components"]["schemas"]["EmptyList"]["items"], false);
+    }
+
+    // ── Lift behavior: internal `$ref` slots are left alone ──────────────
+
+    #[test]
+    fn internal_ref_slots_are_untouched_by_collapse() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "Pet": {"title": "Pet", "type": "object", "properties": {"id": {"type": "integer"}}}
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let inline = inline_to_ref(
+            &spec,
+            "/paths/~1a/get/responses/200/content/application~1json/schema",
+        );
+        assert_eq!(inline["$ref"], "#/components/schemas/Pet");
+    }
+
+    // ── Strict dedup: titled and untitled near-duplicates stay split ───
+
+    #[test]
+    fn titled_and_untitled_near_duplicates_do_not_collapse() {
+        // Strict canonical-JSON dedup means an untitled occurrence and
+        // a title-bearing one with otherwise-identical content end up
+        // as two separate components. (Loose dedup that ignores `title`
+        // would collapse them; this is documented as out of scope.)
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "operationId": "first",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}
+                                }
+                            }
+                        }
+                    }
+                },
+                "/b": {
+                    "get": {
+                        "operationId": "second",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {"schema": {"title": "Pet", "type": "object", "properties": {"id": {"type": "integer"}}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        assert!(names.contains(&"Pet".to_owned()), "got {names:?}");
+        // /b's titled occurrence lands at `Pet`. /a's untitled
+        // occurrence lands at some context-derived name (don't pin it).
+        let b = inline_to_ref(
+            &spec,
+            "/paths/~1b/get/responses/200/content/application~1json/schema",
+        );
+        assert_eq!(b["$ref"], "#/components/schemas/Pet");
+        let a = inline_to_ref(
+            &spec,
+            "/paths/~1a/get/responses/200/content/application~1json/schema",
+        );
+        // Different ref target — the title differs, so they don't dedupe.
+        assert_ne!(a["$ref"], b["$ref"]);
+    }
+
+    #[test]
+    fn collision_suffix_increments_past_existing_lifted_entries() {
+        // Force multiple collisions on the same context-derived base
+        // name. With two pre-existing entries `Foo` and `Foo_2`, the
+        // newly-lifted untitled schema should land at `Foo_3`.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "components": {
+                "schemas": {
+                    "Foo": {"type": "string"},
+                    "Foo_2": {"type": "integer"}
+                }
+            },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "operationId": "Foo",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        assert!(
+            names.iter().any(|n| n.starts_with("Foo_")),
+            "expected Foo_3 or later, got {names:?}",
+        );
+    }
+
+    // ── External-ref edge: ref without fragment falls back to context ────
+
+    #[test]
+    fn external_ref_without_fragment_uses_context_name() {
+        // `external.json` (no `#` fragment) — `from_external_ref` falls
+        // through to the surrounding context for naming. Whole external
+        // document gets lifted as a single schema.
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({"title": "WholeFile", "type": "object", "properties": {"id": {"type": "integer"}}}),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {"schema": {"$ref": "external.json"}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let names = lifted_schema_names(&spec);
+        // The external document had a `title`, which the lifter picks
+        // up regardless of the fragment shape.
+        assert!(names.contains(&"WholeFile".to_owned()), "got {names:?}");
+    }
+
+    // ── External-ref edge: missing resource surfaces as External error ──
+
+    #[test]
+    fn loader_failure_surfaces_as_external_error() {
+        // No preload; loader will fail to find `external.json`. The
+        // CollapseError::External arm runs and the source is the
+        // underlying LoaderError.
+        let mut loader = Loader::new();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {"schema": {"$ref": "external.json#/Pet"}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        let err = spec
+            .collapse(Some(&mut loader))
+            .expect_err("loader has no fetcher for `external.json`");
+        match err {
+            CollapseError::External { reference, .. } => {
+                assert_eq!(reference, "external.json#/Pet")
+            }
+            other => panic!("expected External error, got {other:?}"),
+        }
+    }
+
+    // ── Helper coverage: sanitize_component_name + NameContext ───────────
+
+    #[test]
+    fn sanitize_component_name_handles_edge_cases() {
+        assert_eq!(sanitize_component_name("Pet"), "Pet");
+        // Slashes, spaces, and brackets all collapse to underscores.
+        assert_eq!(
+            sanitize_component_name("paths./pets[0].schema"),
+            "paths._pets_0_.schema"
+        );
+        // Trim leading/trailing underscores produced by sanitisation.
+        assert_eq!(sanitize_component_name("/foo/"), "foo");
+        // Spaces collapse via the run-of-underscore reduction.
+        assert_eq!(sanitize_component_name("Hello World"), "Hello_World");
+        // Empty / all-invalid input falls back to the literal "Schema".
+        assert_eq!(sanitize_component_name("///"), "Schema");
+        assert_eq!(sanitize_component_name(""), "Schema");
+    }
+
+    #[test]
+    fn name_context_from_external_ref_falls_back_on_empty_fragment() {
+        let fallback = NameContext::new(["fallback"]);
+        // No `#`: use fallback.
+        let ctx = NameContext::from_external_ref("external.json", &fallback);
+        assert_eq!(ctx.derive_name(), "fallback");
+        // Empty fragment (`#`): also falls back.
+        let ctx = NameContext::from_external_ref("external.json#", &fallback);
+        assert_eq!(ctx.derive_name(), "fallback");
+        // Fragment with only a slash (trailing) — last segment is empty,
+        // so we fall back to the surrounding context.
+        let ctx = NameContext::from_external_ref("external.json#/", &fallback);
+        assert_eq!(ctx.derive_name(), "fallback");
+    }
+
+    #[test]
+    fn name_context_from_external_ref_uses_last_pointer_segment() {
+        let fallback = NameContext::new(["fallback"]);
+        let ctx =
+            NameContext::from_external_ref("external.json#/components/schemas/Pet", &fallback);
+        assert_eq!(ctx.derive_name(), "Pet");
+    }
+
+    #[test]
+    fn schema_title_returns_none_for_composite_and_terminal_shapes() {
+        // Parse one of each composition variant via JSON — most don't
+        // implement Default so this is the shortest construction route.
+        let allof: Schema =
+            serde_json::from_value(serde_json::json!({"allOf": [{"type": "string"}]})).unwrap();
+        let anyof: Schema =
+            serde_json::from_value(serde_json::json!({"anyOf": [{"type": "string"}]})).unwrap();
+        let oneof: Schema =
+            serde_json::from_value(serde_json::json!({"oneOf": [{"type": "string"}]})).unwrap();
+        let not: Schema =
+            serde_json::from_value(serde_json::json!({"not": {"type": "string"}})).unwrap();
+        let empty: Schema = serde_json::from_value(serde_json::json!({})).unwrap();
+        let bool_schema: Schema = serde_json::from_value(serde_json::json!(true)).unwrap();
+        assert!(schema_title(&bool_schema).is_none());
+        assert!(schema_title(&empty).is_none());
+        assert!(schema_title(&allof).is_none());
+        assert!(schema_title(&anyof).is_none());
+        assert!(schema_title(&oneof).is_none());
+        assert!(schema_title(&not).is_none());
     }
 }
