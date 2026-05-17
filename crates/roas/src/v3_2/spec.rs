@@ -621,6 +621,42 @@ impl Spec {
             ..Default::default()
         })
     }
+
+    /// Lift every inline `Schema` in the document into
+    /// `components.schemas`, replacing each inline location with a
+    /// `RefOr::Ref` to the new component. Names come from
+    /// `schema.title` when present, otherwise from a sanitised path
+    /// through the spec tree. Structurally identical schemas collapse
+    /// to a single component; every call site that previously held
+    /// the inline shape gets the same `$ref`.
+    ///
+    /// When `loader` is `Some`, every external `$ref` (anything not
+    /// starting with `#`) is fetched, parsed as a `Schema`, lifted via
+    /// the same recursion + dedup pipeline, and rewritten as a local
+    /// `#/components/schemas/<name>` ref. The dedup map spans both
+    /// inline and external sources, so an inline schema that's
+    /// structurally identical to an externally-fetched one collapses
+    /// to one component.
+    ///
+    /// `info` and `openapi` are untouched. Pre-existing
+    /// `components.schemas` entries keep their names but their own
+    /// nested inline schemas are still lifted.
+    ///
+    /// Errors come from two sources: the loader (fetch / parse /
+    /// pointer-not-found via [`CollapseError::External`]) and serde
+    /// serialisation of a schema for the dedup map (in practice
+    /// infallible for every `Schema` in this crate, but exposed via
+    /// [`CollapseError::Serialize`] rather than panicked on).
+    ///
+    /// [`CollapseError`]: crate::v3_2::collapse::CollapseError
+    /// [`CollapseError::External`]: crate::v3_2::collapse::CollapseError::External
+    /// [`CollapseError::Serialize`]: crate::v3_2::collapse::CollapseError::Serialize
+    pub fn collapse(
+        &mut self,
+        loader: Option<&mut Loader>,
+    ) -> Result<(), crate::v3_2::collapse::CollapseError> {
+        crate::v3_2::collapse::collapse_spec(self, loader)
+    }
 }
 
 impl ResolveReference<Response> for Spec {
