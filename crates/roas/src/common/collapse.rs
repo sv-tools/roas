@@ -78,10 +78,6 @@ impl<T> Default for Bag<T> {
 }
 
 impl<T> Bag<T> {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// True when this bag has no entries — caller uses this to skip
     /// writing back into `spec.components.<bag>` so a no-op collapse
     /// of an input without that bag doesn't materialise an empty one.
@@ -148,15 +144,15 @@ impl<T: Serialize> Bag<T> {
 
     /// Take a pre-existing inline entry out of the bag. Returns
     /// `None` if the name is missing or refers to a `RefOr::Ref`
-    /// (no inline body to recurse into).
+    /// (no inline body to recurse into). The `Ref` branch is
+    /// unreachable when paired with [`Self::inline_names`] (which
+    /// filters refs out), but if a caller bypasses that filter the
+    /// ref is put back so the bag isn't left short an entry.
     pub fn take_inline(&mut self, name: &str) -> Option<T> {
         match self.entries.remove(name)? {
             RefOr::Item(item) => Some(item),
-            RefOr::Ref(_) => {
-                // Put the ref back — we shouldn't have removed it.
-                // (This branch is unreachable in practice because
-                // `inline_names()` filters refs out; the guard is
-                // defensive only.)
+            r @ RefOr::Ref(_) => {
+                self.entries.insert(name.to_owned(), r);
                 None
             }
         }
