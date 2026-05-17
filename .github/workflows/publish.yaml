@@ -26,7 +26,9 @@ jobs:
     permissions:
       # Job-level `permissions:` replaces (does not merge with) the workflow-level
       # block — without `contents: read`, `actions/checkout` cannot fetch the repo.
-      contents: read
+      # `contents: write` is required by `softprops/action-gh-release` below to
+      # create the draft GitHub Release for the tag.
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -36,6 +38,23 @@ jobs:
       - run: cargo publish --all-features --package ${{ matrix.package }} --verbose
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      # Mint (or update) a draft GitHub Release for the tag that triggered
+      # this run. Same flow for every published crate so a single
+      # `git push origin <package>/v<version>` is all it takes to mint
+      # both the crates.io release and the GitHub Release.
+      #
+      # For `roas-cli`, `PublishRoasCli` below later calls
+      # `softprops/action-gh-release` again with `files: …` — that call
+      # finds the existing draft (lookup is by tag) and appends the
+      # prebuilt binaries instead of creating a second release.
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          draft: true
+          # The repo carries multiple crates with their own tags; don't
+          # let any one release hijack the repo-wide "Latest" badge.
+          make_latest: false
 
   # ────────────────────────────────────────────────────────────────────────
   # roas-cli release pipeline. Only fires when `roas-cli` is in the publish
