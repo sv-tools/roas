@@ -17,13 +17,21 @@
 //! between lifted inline values and fetched external ones, so two
 //! structurally identical sources collapse together.
 //!
-//! Bags lifted in this module today: `schemas`, `parameters`,
+//! Bags lifted in this module: `schemas`, `parameters`,
 //! `responses`, `requestBodies`, `headers`, `mediaTypes`,
 //! `examples`, `links`, `callbacks`. Recursion goes leaf-up — leaf
 //! types (schemas, examples, links) lift first; container types
 //! (mediaTypes, parameters, headers, responses, requestBodies,
-//! callbacks) lift after their children. `pathItems` follows in a
-//! subsequent commit.
+//! callbacks) lift after their children.
+//!
+//! `pathItems` is *not* lifted out of its primary locations
+//! (`paths.<path>`, `webhooks.<name>`, `callback.paths.<expr>`)
+//! because doing so would replace every operation site with a
+//! single-level indirection through `components.pathItems`, which
+//! is rarely what callers of `collapse` want. Pre-existing entries
+//! in `components.pathItems` are still seeded into the dedup map
+//! and their nested children (schemas, parameters, etc.) are
+//! lifted.
 //!
 //! This is the OAS 3.2 implementation; v3.0 / v3.1 / v2 follow in
 //! subsequent PRs.
@@ -131,6 +139,11 @@ pub(crate) fn collapse_spec(
         .as_mut()
         .and_then(|c| c.callbacks.take())
         .unwrap_or_default();
+    let initial_path_items = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.path_items.take())
+        .unwrap_or_default();
 
     let mut collapser = Collapser {
         schemas: BTreeMap::new(),
@@ -151,6 +164,8 @@ pub(crate) fn collapse_spec(
         links_seen: HashMap::new(),
         callbacks: BTreeMap::new(),
         callbacks_seen: HashMap::new(),
+        path_items: BTreeMap::new(),
+        path_items_seen: HashMap::new(),
         loader,
     };
 
@@ -246,6 +261,19 @@ pub(crate) fn collapse_spec(
                 .or_insert_with(|| name.clone());
         }
         collapser.callbacks.insert(name, value);
+    }
+    for (name, value) in initial_path_items {
+        // `PathItem` is bare; skip pure-ref entries (whose
+        // `reference` field is the only thing set) from dedup so
+        // we don't intern the placeholder shape.
+        if value.reference.is_none() {
+            let canonical = serde_json::to_string(&value)?;
+            collapser
+                .path_items_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.path_items.insert(name, value);
     }
 
     // ── Phase 2a: recurse into pre-existing components.schemas ───────
@@ -382,6 +410,26 @@ pub(crate) fn collapse_spec(
         }
     }
 
+    // Same for components.pathItems — but skip entries that are
+    // already in ref form (reference is Some).
+    let existing_pi_names: Vec<String> = collapser.path_items.keys().cloned().collect();
+    for name in existing_pi_names {
+        let is_inline = collapser
+            .path_items
+            .get(&name)
+            .is_some_and(|pi| pi.reference.is_none());
+        if is_inline && let Some(mut pi) = collapser.path_items.remove(&name) {
+            let ctx = NameContext::new(["components", "pathItems", &name]);
+            collapser.walk_path_item(&mut pi, ctx)?;
+            let canonical = serde_json::to_string(&pi)?;
+            collapser
+                .path_items_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.path_items.insert(name, pi);
+        }
+    }
+
     // ── Phase 2b: walk the rest of the spec ──────────────────────────
     if let Some(paths) = spec.paths.as_mut() {
         collapser.walk_paths(paths, NameContext::new(["paths"]))?;
@@ -437,6 +485,11 @@ pub(crate) fn collapse_spec(
             .get_or_insert_with(Default::default)
             .callbacks = Some(collapser.callbacks);
     }
+    if !collapser.path_items.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .path_items = Some(collapser.path_items);
+    }
 
     Ok(())
 }
@@ -472,6 +525,11 @@ struct Collapser<'a> {
     /// In-progress `components.callbacks` bag.
     callbacks: BTreeMap<String, RefOr<Callback>>,
     callbacks_seen: HashMap<String, String>,
+    /// In-progress `components.pathItems` bag. `PathItem` is bare
+    /// (not wrapped in `RefOr`); its ref form lives in
+    /// `PathItem.reference`.
+    path_items: BTreeMap<String, PathItem>,
+    path_items_seen: HashMap<String, String>,
     /// Optional loader for resolving external `$ref`s.
     loader: Option<&'a mut Loader>,
 }
@@ -480,6 +538,14 @@ impl<'a> Collapser<'a> {
     // ── Spec-tree walk ──────────────────────────────────────────────
 
     fn walk_paths(&mut self, paths: &mut Paths, ctx: NameContext) -> Result<(), CollapseError> {
+        // Note: `paths.<path>` PathItems are walked (lifting nested
+        // schemas / parameters / responses inside them) but the
+        // PathItem itself is *not* lifted to `components.pathItems`
+        // — that would replace every `paths.<path>` with a `$ref`
+        // and bury operations under one extra indirection, which is
+        // rarely what callers of `collapse` want. Pre-existing
+        // entries in `components.pathItems` are still kept (and
+        // recursed into) by phase 2a.
         for (path_key, path_item) in paths.paths.iter_mut() {
             self.walk_path_item(path_item, ctx.push(path_key))?;
         }
@@ -934,7 +1000,9 @@ impl<'a> Collapser<'a> {
 
     /// Walk into a `Callback`: recurse into every `(expression,
     /// PathItem)` entry so the nested operations / responses /
-    /// requestBodies inside lift first.
+    /// requestBodies inside lift first. The PathItem itself is not
+    /// lifted to `components.pathItems` — see the note on
+    /// `walk_paths`.
     fn walk_callback(&mut self, cb: &mut Callback, ctx: NameContext) -> Result<(), CollapseError> {
         for (expr, pi) in cb.paths.iter_mut() {
             self.walk_path_item(pi, ctx.push(expr))?;
@@ -1006,17 +1074,13 @@ impl<'a> Collapser<'a> {
         components: &mut Components,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        // `components.schemas`, `components.parameters`,
-        // `components.responses`, `components.requestBodies`, and
-        // `components.headers` are handled separately by phases 1 + 2a
-        // above; this walks every other bag for nested slots.
-        if let Some(map) = components.path_items.as_mut() {
-            for (name, pi) in map.iter_mut() {
-                self.walk_path_item(pi, ctx.push(&format!("pathItems.{name}")))?;
-            }
-        }
-        // components.callbacks and components.mediaTypes are handled
-        // by phases 1 + 2a.
+        // Every component bag is now handled by phases 1 + 2a above
+        // (the lift methods walk into a freshly-extracted component
+        // and place it back through `intern_*`). Nothing left for
+        // this method to do — keeping it as a single empty body
+        // makes the call site in `collapse_spec` symmetric with
+        // `walk_paths` / `walk_paths(webhooks)`.
+        let _ = (components, ctx);
         Ok(())
     }
 
@@ -3670,6 +3734,141 @@ mod tests {
         }));
         spec.collapse(Some(&mut loader)).unwrap();
         assert!(!lifted_callback_names(&spec).is_empty());
+    }
+
+    // ── PathItems: pre-existing-bag recursion only ─────────────────────
+
+    fn lifted_path_item_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.path_items.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn existing_components_path_items_keep_names_and_recurse_children() {
+        // Pre-existing `components.pathItems` entries keep their
+        // names; their nested inline schemas / parameters / etc.
+        // still lift. Operations on `paths.<path>` are *not* lifted
+        // into `components.pathItems`.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {"responses": {"200": {"description": "ok"}}}
+                }
+            },
+            "components": {
+                "pathItems": {
+                    "Echo": {
+                        "post": {
+                            "responses": {
+                                "200": {
+                                    "description": "echoed",
+                                    "content": {"application/json": {"schema": {"title": "EchoBody", "type": "string"}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let pi_names = lifted_path_item_names(&spec);
+        assert!(pi_names.contains(&"Echo".to_owned()), "got {pi_names:?}");
+        // The schema inside Echo's response is lifted.
+        let schema_names = lifted_schema_names(&spec);
+        assert!(
+            schema_names.contains(&"EchoBody".to_owned()),
+            "got {schema_names:?}",
+        );
+        // paths./pets is *not* turned into a $ref to components.pathItems.
+        let v = serde_json::to_value(&spec).unwrap();
+        assert!(
+            v["paths"]["/pets"]["get"].is_object(),
+            "paths./pets.get must stay inline, got {:?}",
+            v["paths"]["/pets"]["get"],
+        );
+    }
+
+    #[test]
+    fn existing_components_in_every_bag_are_preserved_and_recursed() {
+        // One spec with pre-existing entries in every component bag.
+        // Each entry's nested inline schema gets lifted into
+        // `components.schemas`; the bag entries themselves keep
+        // their names.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "requestBodies": {
+                    "MyBody": {"content": {"application/json": {"schema": {"title": "BodyT", "type": "string"}}}}
+                },
+                "headers": {
+                    "MyHeader": {"schema": {"title": "HeaderT", "type": "string"}}
+                },
+                "mediaTypes": {
+                    "MyMt": {"schema": {"title": "MtT", "type": "string"}}
+                },
+                "callbacks": {
+                    "MyCb": {"{$request.body#/url}": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"title": "CbT", "type": "string"}}}}}}}}
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let schemas = lifted_schema_names(&spec);
+        for s in ["BodyT", "HeaderT", "MtT", "CbT"] {
+            assert!(
+                schemas.contains(&s.to_owned()),
+                "missing `{s}`: {schemas:?}"
+            );
+        }
+        assert!(lifted_request_body_names(&spec).contains(&"MyBody".to_owned()));
+        assert!(lifted_header_names(&spec).contains(&"MyHeader".to_owned()));
+        assert!(lifted_media_type_names(&spec).contains(&"MyMt".to_owned()));
+        assert!(lifted_callback_names(&spec).contains(&"MyCb".to_owned()));
+    }
+
+    #[test]
+    fn external_container_refs_left_alone_without_loader() {
+        // For every container type that can hold an external `$ref`,
+        // verify that without a loader the slot is left untouched
+        // (the early-return branch in each `lift_ref_or_*`).
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "parameters": [{"$ref": "shared.json#/PageParam"}],
+                        "requestBody": {"$ref": "shared.json#/Body"},
+                        "responses": {"200": {"$ref": "shared.json#/Resp"}},
+                        "callbacks": {"OnPing": {"$ref": "shared.json#/Cb"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("no loader, no lift");
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["paths"]["/x"]["post"]["parameters"][0]["$ref"],
+            "shared.json#/PageParam"
+        );
+        assert_eq!(
+            v["paths"]["/x"]["post"]["requestBody"]["$ref"],
+            "shared.json#/Body"
+        );
+        assert_eq!(
+            v["paths"]["/x"]["post"]["responses"]["200"]["$ref"],
+            "shared.json#/Resp"
+        );
+        assert_eq!(
+            v["paths"]["/x"]["post"]["callbacks"]["OnPing"]["$ref"],
+            "shared.json#/Cb"
+        );
     }
 
     #[test]
