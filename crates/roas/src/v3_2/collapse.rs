@@ -18,12 +18,11 @@
 //! structurally identical sources collapse together.
 //!
 //! Bags lifted in this module today: `schemas`, `parameters`,
-//! `responses`, `requestBodies`, `headers`. Recursion goes leaf-up
-//! — schemas are lifted before their containing parameters /
-//! headers / responses / requestBodies, so each parent's canonical
-//! JSON has its children already substituted for refs before it goes
-//! through dedup. `examples`, `links`, `callbacks`, `pathItems`,
-//! `mediaTypes` follow in subsequent commits.
+//! `responses`, `requestBodies`, `headers`, `mediaTypes`. Recursion
+//! goes leaf-up — schemas are lifted before their containing
+//! mediaTypes / parameters / headers, those before their containing
+//! responses / requestBodies. `examples`, `links`, `callbacks`,
+//! `pathItems` follow in subsequent commits.
 //!
 //! This is the OAS 3.2 implementation; v3.0 / v3.1 / v2 follow in
 //! subsequent PRs.
@@ -109,6 +108,11 @@ pub(crate) fn collapse_spec(
         .as_mut()
         .and_then(|c| c.headers.take())
         .unwrap_or_default();
+    let initial_media_types = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.media_types.take())
+        .unwrap_or_default();
 
     let mut collapser = Collapser {
         schemas: BTreeMap::new(),
@@ -121,6 +125,8 @@ pub(crate) fn collapse_spec(
         request_bodies_seen: HashMap::new(),
         headers: BTreeMap::new(),
         headers_seen: HashMap::new(),
+        media_types: BTreeMap::new(),
+        media_types_seen: HashMap::new(),
         loader,
     };
 
@@ -176,6 +182,16 @@ pub(crate) fn collapse_spec(
                 .or_insert_with(|| name.clone());
         }
         collapser.headers.insert(name, value);
+    }
+    for (name, value) in initial_media_types {
+        if let RefOr::Item(m) = &value {
+            let canonical = serde_json::to_string(m)?;
+            collapser
+                .media_types_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.media_types.insert(name, value);
     }
 
     // ── Phase 2a: recurse into pre-existing components.schemas ───────
@@ -276,6 +292,24 @@ pub(crate) fn collapse_spec(
         }
     }
 
+    // Same for components.mediaTypes.
+    let existing_mt_names: Vec<String> = collapser.media_types.keys().cloned().collect();
+    for name in existing_mt_names {
+        if let Some(RefOr::Item(_)) = collapser.media_types.get(&name) {
+            let Some(RefOr::Item(mut mt)) = collapser.media_types.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "mediaTypes", &name]);
+            collapser.walk_media_type(&mut mt, ctx)?;
+            let canonical = serde_json::to_string(&mt)?;
+            collapser
+                .media_types_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.media_types.insert(name, RefOr::new_item(mt));
+        }
+    }
+
     // ── Phase 2b: walk the rest of the spec ──────────────────────────
     if let Some(paths) = spec.paths.as_mut() {
         collapser.walk_paths(paths, NameContext::new(["paths"]))?;
@@ -313,6 +347,11 @@ pub(crate) fn collapse_spec(
     if !collapser.headers.is_empty() {
         spec.components.get_or_insert_with(Default::default).headers = Some(collapser.headers);
     }
+    if !collapser.media_types.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .media_types = Some(collapser.media_types);
+    }
 
     Ok(())
 }
@@ -336,6 +375,9 @@ struct Collapser<'a> {
     /// In-progress `components.headers` bag.
     headers: BTreeMap<String, RefOr<Header>>,
     headers_seen: HashMap<String, String>,
+    /// In-progress `components.mediaTypes` bag (v3.2-only).
+    media_types: BTreeMap<String, RefOr<MediaType>>,
+    media_types_seen: HashMap<String, String>,
     /// Optional loader for resolving external `$ref`s.
     loader: Option<&'a mut Loader>,
 }
@@ -479,7 +521,7 @@ impl<'a> Collapser<'a> {
         }
         if let Some(content) = response.content.as_mut() {
             for (mime, mt) in content.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
             }
         }
         Ok(())
@@ -536,21 +578,55 @@ impl<'a> Collapser<'a> {
         }
         if let Some(content) = header.content.as_mut() {
             for (mime, mt) in content.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
             }
         }
         Ok(())
     }
 
-    fn walk_ref_or_media_type(
+    /// Lift an inline `RefOr<MediaType>`: recurse first (lift nested
+    /// `schema` / `itemSchema`), intern, rewrite the slot to a
+    /// `#/components/mediaTypes/<name>` ref. External `$ref`s
+    /// resolve via the loader when present.
+    fn lift_ref_or_media_type(
         &mut self,
-        item: &mut RefOr<MediaType>,
+        slot: &mut RefOr<MediaType>,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        if let RefOr::Item(m) = item {
-            self.walk_media_type(m, ctx)?;
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: MediaType =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_media_type(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_media_type(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/mediaTypes/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut mt) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_media_type(&mut mt, ctx.clone())?;
+                let name = self.intern_media_type(mt, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/mediaTypes/{name}"));
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn walk_media_type(
@@ -648,7 +724,7 @@ impl<'a> Collapser<'a> {
             Parameter::Querystring(p) => {
                 let ctx = ctx.push(p.name.as_str());
                 for (mime, mt) in p.content.iter_mut() {
-                    self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                    self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
                 }
                 Ok(())
             }
@@ -666,7 +742,7 @@ impl<'a> Collapser<'a> {
         }
         if let Some(content) = content {
             for (mime, mt) in content.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
             }
         }
         Ok(())
@@ -681,7 +757,7 @@ impl<'a> Collapser<'a> {
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
         for (mime, mt) in rb.content.iter_mut() {
-            self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+            self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
         }
         Ok(())
     }
@@ -764,11 +840,7 @@ impl<'a> Collapser<'a> {
                 self.walk_ref_or_callback(cb, ctx.push(&format!("callbacks.{name}")))?;
             }
         }
-        if let Some(map) = components.media_types.as_mut() {
-            for (name, mt) in map.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("mediaTypes.{name}")))?;
-            }
-        }
+        // components.mediaTypes is handled by phases 1 + 2a.
         Ok(())
     }
 
@@ -1013,6 +1085,25 @@ impl<'a> Collapser<'a> {
         Ok(name)
     }
 
+    /// Same shape as [`Self::intern_schema`] but for `MediaType`.
+    /// No canonical name field — naming is context-derived
+    /// (typically the mime-type pushed by the walker).
+    fn intern_media_type(
+        &mut self,
+        mt: MediaType,
+        ctx: NameContext,
+    ) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&mt)?;
+        if let Some(existing) = self.media_types_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.media_types, &base);
+        self.media_types_seen.insert(canonical, name.clone());
+        self.media_types.insert(name.clone(), RefOr::new_item(mt));
+        Ok(name)
+    }
+
     fn generate_name(&self, schema: &Schema, ctx: &NameContext) -> String {
         let base = match schema_title(schema) {
             Some(t) => sanitize_component_name(t),
@@ -1190,6 +1281,29 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Walk through a lifted Response / RequestBody / Parameter /
+    /// Header (or any container whose `content[mime]` slot may itself
+    /// be a lifted MediaType ref) and return the inner `schema` slot.
+    /// Lets tests assert on the schema regardless of whether
+    /// mediaTypes have been lifted.
+    fn schema_in_lifted_content(
+        v: &serde_json::Value,
+        container_ref: &str,
+        mime: &str,
+    ) -> serde_json::Value {
+        let pointer = container_ref.trim_start_matches('#');
+        let container = v
+            .pointer(pointer)
+            .unwrap_or_else(|| panic!("ref `{container_ref}` must resolve in spec"));
+        let mt_slot = &container["content"][mime];
+        if let Some(mt_ref) = mt_slot.get("$ref").and_then(|s| s.as_str()) {
+            let mt_name = mt_ref.trim_start_matches("#/components/mediaTypes/");
+            v["components"]["mediaTypes"][mt_name]["schema"].clone()
+        } else {
+            mt_slot["schema"].clone()
+        }
+    }
+
     fn schema_at(spec: &Spec, name: &str) -> serde_json::Value {
         let item = spec
             .components
@@ -1224,14 +1338,11 @@ mod tests {
             }
         }));
         spec.collapse(None).expect("collapse ok");
-        // The response is now lifted; navigate into the lifted response.
         let v = serde_json::to_value(&spec).unwrap();
         let resp_ref = v["paths"]["/pets"]["get"]["responses"]["200"]["$ref"]
             .as_str()
             .expect("response slot must be lifted to a ref");
-        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
-        let schema_slot =
-            &v["components"]["responses"][resp_name]["content"]["application/json"]["schema"];
+        let schema_slot = schema_in_lifted_content(&v, resp_ref, "application/json");
         assert!(
             schema_slot.get("$ref").is_some(),
             "expected the inline schema to be a `$ref`, got: {schema_slot}",
@@ -1289,9 +1400,8 @@ mod tests {
         let resp_ref = v["paths"]["/pets"]["get"]["responses"]["200"]["$ref"]
             .as_str()
             .unwrap();
-        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
         assert_eq!(
-            v["components"]["responses"][resp_name]["content"]["application/json"]["schema"]["$ref"],
+            schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
             "#/components/schemas/Pet"
         );
     }
@@ -1397,10 +1507,9 @@ mod tests {
             .expect("/b 200 must be a response ref");
         // Both call sites point at the *same* response (response dedup).
         assert_eq!(a_resp, b_resp);
-        let resp_name = a_resp.trim_start_matches("#/components/responses/");
         // The shared response's body points at the single Pet schema.
         assert_eq!(
-            v["components"]["responses"][resp_name]["content"]["application/json"]["schema"]["$ref"],
+            schema_in_lifted_content(&v, a_resp, "application/json")["$ref"],
             "#/components/schemas/Pet"
         );
     }
@@ -1549,9 +1658,8 @@ mod tests {
             .as_str()
             .unwrap();
         for resp_ref in [a_resp, b_resp] {
-            let resp_name = resp_ref.trim_start_matches("#/components/responses/");
             assert_eq!(
-                v["components"]["responses"][resp_name]["content"]["application/json"]["schema"]["$ref"],
+                schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
                 "#/components/schemas/Pet"
             );
         }
@@ -1587,9 +1695,8 @@ mod tests {
         let resp_ref = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
             .as_str()
             .expect("response slot must be lifted to a ref");
-        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
         assert_eq!(
-            v["components"]["responses"][resp_name]["content"]["application/json"]["schema"]["$ref"],
+            schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
             "external.json#/Pet",
             "external refs must stay external when no loader is provided",
         );
@@ -1889,9 +1996,8 @@ mod tests {
         let resp_ref = v["paths"]["/pets"]["get"]["responses"]["200"]["$ref"]
             .as_str()
             .unwrap();
-        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
         assert_eq!(
-            v["components"]["responses"][resp_name]["content"]["application/json"]["schema"]["$ref"],
+            schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
             "#/components/schemas/OkBody"
         );
     }
@@ -2175,9 +2281,8 @@ mod tests {
         let resp_ref = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
             .as_str()
             .expect("response slot must be lifted");
-        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
         assert_eq!(
-            v["components"]["responses"][resp_name]["content"]["application/json"]["schema"]["$ref"],
+            schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
             "#/components/schemas/Pet"
         );
     }
@@ -2232,8 +2337,7 @@ mod tests {
             let resp_ref = v["paths"][path_key]["get"]["responses"]["200"]["$ref"]
                 .as_str()
                 .unwrap();
-            let resp_name = resp_ref.trim_start_matches("#/components/responses/");
-            v["components"]["responses"][resp_name]["content"]["application/json"]["schema"].clone()
+            schema_in_lifted_content(&v, resp_ref, "application/json")
         };
         // /b's titled occurrence lands at `Pet`.
         assert_eq!(lookup_schema("/b")["$ref"], "#/components/schemas/Pet");
@@ -2774,7 +2878,7 @@ mod tests {
         );
         let v = serde_json::to_value(&spec).unwrap();
         assert_eq!(
-            v["components"]["responses"]["NotFound"]["content"]["application/json"]["schema"]["$ref"],
+            schema_in_lifted_content(&v, "#/components/responses/NotFound", "application/json")["$ref"],
             "#/components/schemas/ErrBody"
         );
     }
@@ -2844,10 +2948,9 @@ mod tests {
         let rb_ref = v["paths"]["/pets"]["post"]["requestBody"]["$ref"]
             .as_str()
             .expect("requestBody must be lifted");
-        let rb_name = rb_ref.trim_start_matches("#/components/requestBodies/");
         // Nested schema is also lifted.
         assert_eq!(
-            v["components"]["requestBodies"][rb_name]["content"]["application/json"]["schema"]["$ref"],
+            schema_in_lifted_content(&v, rb_ref, "application/json")["$ref"],
             "#/components/schemas/PetCreate"
         );
     }
@@ -2990,6 +3093,81 @@ mod tests {
         }));
         spec.collapse(Some(&mut loader)).unwrap();
         assert!(!lifted_header_names(&spec).is_empty());
+    }
+
+    // ── MediaTypes: lift contract + dedup ──────────────────────────────
+
+    fn lifted_media_type_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.media_types.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_media_types_lift_to_components_media_types() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "requestBody": {"content": {"application/json": {"schema": {"title": "Body", "type": "string"}}}},
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(
+            !lifted_media_type_names(&spec).is_empty(),
+            "mediaType should be lifted, got bag {:?}",
+            lifted_media_type_names(&spec),
+        );
+        // Walk RB -> mediaType -> schema.
+        let v = serde_json::to_value(&spec).unwrap();
+        let rb_ref = v["paths"]["/x"]["post"]["requestBody"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            schema_in_lifted_content(&v, rb_ref, "application/json")["$ref"],
+            "#/components/schemas/Body"
+        );
+    }
+
+    #[test]
+    fn identical_inline_media_types_dedupe_to_one_component() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}},
+                "/b": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}}
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert_eq!(lifted_media_type_names(&spec).len(), 1);
+    }
+
+    #[test]
+    fn loader_resolves_external_media_type_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({"JsonBody": {"schema": {"type": "string"}}}),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"post": {"requestBody": {"content": {"application/json": {"$ref": "shared.json#/JsonBody"}}}, "responses": {"200": {"description": "ok"}}}}
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_media_type_names(&spec).is_empty());
     }
 
     #[test]
