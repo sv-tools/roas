@@ -23,13 +23,6 @@ jobs:
         package: ${{ fromJSON(needs.Checks.outputs.publish) }}
       fail-fast: false
     runs-on: ubuntu-latest
-    permissions:
-      # Job-level `permissions:` replaces (does not merge with) the workflow-level
-      # block — without `contents: read`, `actions/checkout` cannot fetch the repo.
-      # `contents: write` is required by `softprops/action-gh-release` below to
-      # create the draft GitHub Release for the tag.
-      contents: write
-      id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
@@ -38,7 +31,16 @@ jobs:
       - run: cargo publish --all-features --package ${{ matrix.package }} --verbose
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-
+  DraftRelease:
+    needs: Publish
+    runs-on: ubuntu-latest
+    permissions:
+      # `softprops/action-gh-release` calls the Releases API and needs
+      # `contents: write`. Nothing else in this job uses `GITHUB_TOKEN`,
+      # so the workflow-level `read-all` default applies for everything
+      # else.
+      contents: write
+    steps:
       # Mint (or update) a draft GitHub Release for the tag that triggered
       # this run. Same flow for every published crate so a single
       # `git push origin <package>/v<version>` is all it takes to mint
@@ -116,12 +118,12 @@ jobs:
   PublishRoasCli:
     needs:
       - Checks
-      - Publish
+      - DraftRelease
       - RoasCliBuild
     if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # create the GitHub Release + upload assets
+      contents: write  # upload assets to the draft GitHub Release `DraftRelease` minted
       packages: write  # push the container image to ghcr.io
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -136,7 +138,7 @@ jobs:
           pattern: roas-cli-*
           merge-multiple: true
 
-      - name: Create GitHub Release with prebuilt binaries
+      - name: Upload prebuilt binaries to GitHub Release
         id: release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
@@ -145,7 +147,6 @@ jobs:
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sha256
           # The repo carries other crates (e.g. `roas`) with their own tags;
           # don't mark this roas-cli release as the repo-wide "Latest".
-          make_latest: false
           draft: true
 
       # ── Container image ──────────────────────────────────────────────────
