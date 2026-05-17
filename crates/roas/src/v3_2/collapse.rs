@@ -1,19 +1,37 @@
-//! `Spec::collapse` — lift every inline schema into `components.schemas`.
+//! `Spec::collapse` — lift every inline component out of the spec tree
+//! into `components.<bag>`.
 //!
-//! Walks the entire spec, replacing each inline `RefOr::Item<Schema>` with
-//! a `RefOr::Ref` pointing at a freshly-interned entry under
-//! `components.schemas.<name>`. Names come from `schema.title` when
-//! present, otherwise from a sanitised dot-joined path through the spec
-//! tree. Structurally identical schemas (serde-canonical JSON equality)
-//! collapse to a single component; every call site that previously had
-//! the inline schema gets the same `$ref`.
+//! Walks the entire spec, replacing each inline `RefOr::Item<T>` with a
+//! `RefOr::Ref` pointing at a freshly-interned entry under
+//! `components.<bag>.<name>`. Schemas get a name from `schema.title`
+//! when present; every other component type derives its name from a
+//! sanitised dot-joined path through the spec tree. Structurally
+//! identical components (serde-canonical JSON equality) collapse to a
+//! single entry; every call site that previously held the same inline
+//! shape now points at the same `$ref`.
 //!
 //! When the caller passes a [`Loader`], every external `$ref` (anything
-//! not starting with `#`) is fetched, parsed as a `Schema`, run through
-//! the same recursion + dedup pipeline, and rewritten as a local
-//! `#/components/schemas/<name>` ref. The dedup map is shared between
-//! lifted inline schemas and fetched external schemas, so two
+//! not starting with `#`) is fetched, parsed as the bag's concrete
+//! type, run through the same recursion + dedup pipeline, and rewritten
+//! as a local `#/components/<bag>/<name>` ref. The dedup map is shared
+//! between lifted inline values and fetched external ones, so two
 //! structurally identical sources collapse together.
+//!
+//! Bags lifted in this module: `schemas`, `parameters`,
+//! `responses`, `requestBodies`, `headers`, `mediaTypes`,
+//! `examples`, `links`, `callbacks`. Recursion goes leaf-up — leaf
+//! types (schemas, examples, links) lift first; container types
+//! (mediaTypes, parameters, headers, responses, requestBodies,
+//! callbacks) lift after their children.
+//!
+//! `pathItems` is *not* lifted out of its primary locations
+//! (`paths.<path>`, `webhooks.<name>`, `callback.paths.<expr>`)
+//! because doing so would replace every operation site with a
+//! single-level indirection through `components.pathItems`, which
+//! is rarely what callers of `collapse` want. Pre-existing entries
+//! in `components.pathItems` are still seeded into the dedup map
+//! and their nested children (schemas, parameters, etc.) are
+//! lifted.
 //!
 //! This is the OAS 3.2 implementation; v3.0 / v3.1 / v2 follow in
 //! subsequent PRs.
@@ -25,8 +43,9 @@ use crate::common::bool_or::BoolOr;
 use crate::common::reference::{Ref, RefOr};
 use crate::loader::{Loader, LoaderError};
 use crate::v3_2::callback::Callback;
-use crate::v3_2::components::Components;
+use crate::v3_2::example::Example;
 use crate::v3_2::header::Header;
+use crate::v3_2::link::Link;
 use crate::v3_2::media_type::MediaType;
 use crate::v3_2::operation::Operation;
 use crate::v3_2::parameter::Parameter;
@@ -71,33 +90,189 @@ pub(crate) fn collapse_spec(
     spec: &mut Spec,
     loader: Option<&mut Loader>,
 ) -> Result<(), CollapseError> {
-    // Take the existing `components.schemas` out of the spec so the
+    // Take each existing components bag out of the spec so the
     // Collapser owns it mutably while we walk the rest of the tree.
-    // We write it back at the very end.
-    let initial = spec
+    // We write each one back at the very end.
+    let initial_schemas = spec
         .components
         .as_mut()
         .and_then(|c| c.schemas.take())
         .unwrap_or_default();
+    let initial_parameters = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.parameters.take())
+        .unwrap_or_default();
+    let initial_responses = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.responses.take())
+        .unwrap_or_default();
+    let initial_request_bodies = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.request_bodies.take())
+        .unwrap_or_default();
+    let initial_headers = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.headers.take())
+        .unwrap_or_default();
+    let initial_media_types = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.media_types.take())
+        .unwrap_or_default();
+    let initial_examples = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.examples.take())
+        .unwrap_or_default();
+    let initial_links = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.links.take())
+        .unwrap_or_default();
+    let initial_callbacks = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.callbacks.take())
+        .unwrap_or_default();
+    let initial_path_items = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.path_items.take())
+        .unwrap_or_default();
 
     let mut collapser = Collapser {
         schemas: BTreeMap::new(),
-        seen: HashMap::new(),
+        schemas_seen: HashMap::new(),
+        parameters: BTreeMap::new(),
+        parameters_seen: HashMap::new(),
+        responses: BTreeMap::new(),
+        responses_seen: HashMap::new(),
+        request_bodies: BTreeMap::new(),
+        request_bodies_seen: HashMap::new(),
+        headers: BTreeMap::new(),
+        headers_seen: HashMap::new(),
+        media_types: BTreeMap::new(),
+        media_types_seen: HashMap::new(),
+        examples: BTreeMap::new(),
+        examples_seen: HashMap::new(),
+        links: BTreeMap::new(),
+        links_seen: HashMap::new(),
+        callbacks: BTreeMap::new(),
+        callbacks_seen: HashMap::new(),
+        path_items: BTreeMap::new(),
+        path_items_seen: HashMap::new(),
         loader,
     };
 
-    // ── Phase 1: seed pre-existing components.schemas ────────────────
+    // ── Phase 1: seed pre-existing components.* bags ────────────────
     // Each pre-existing entry keeps its name; we seed the dedup map so
     // newly-lifted equivalents collapse onto the existing names.
-    for (name, value) in initial {
+    for (name, value) in initial_schemas {
         if let RefOr::Item(schema) = &value {
             let canonical = serde_json::to_string(schema)?;
             collapser
-                .seen
+                .schemas_seen
                 .entry(canonical)
                 .or_insert_with(|| name.clone());
         }
         collapser.schemas.insert(name, value);
+    }
+    for (name, value) in initial_parameters {
+        if let RefOr::Item(p) = &value {
+            let canonical = serde_json::to_string(p)?;
+            collapser
+                .parameters_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.parameters.insert(name, value);
+    }
+    for (name, value) in initial_responses {
+        if let RefOr::Item(r) = &value {
+            let canonical = serde_json::to_string(r)?;
+            collapser
+                .responses_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.responses.insert(name, value);
+    }
+    for (name, value) in initial_request_bodies {
+        if let RefOr::Item(rb) = &value {
+            let canonical = serde_json::to_string(rb)?;
+            collapser
+                .request_bodies_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.request_bodies.insert(name, value);
+    }
+    for (name, value) in initial_headers {
+        if let RefOr::Item(h) = &value {
+            let canonical = serde_json::to_string(h)?;
+            collapser
+                .headers_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.headers.insert(name, value);
+    }
+    for (name, value) in initial_media_types {
+        if let RefOr::Item(m) = &value {
+            let canonical = serde_json::to_string(m)?;
+            collapser
+                .media_types_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.media_types.insert(name, value);
+    }
+    for (name, value) in initial_examples {
+        if let RefOr::Item(e) = &value {
+            let canonical = serde_json::to_string(e)?;
+            collapser
+                .examples_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.examples.insert(name, value);
+    }
+    for (name, value) in initial_links {
+        if let RefOr::Item(l) = &value {
+            let canonical = serde_json::to_string(l)?;
+            collapser
+                .links_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.links.insert(name, value);
+    }
+    for (name, value) in initial_callbacks {
+        if let RefOr::Item(c) = &value {
+            let canonical = serde_json::to_string(c)?;
+            collapser
+                .callbacks_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.callbacks.insert(name, value);
+    }
+    for (name, value) in initial_path_items {
+        // `PathItem` is bare; skip pure-ref entries (whose
+        // `reference` field is the only thing set) from dedup so
+        // we don't intern the placeholder shape.
+        if value.reference.is_none() {
+            let canonical = serde_json::to_string(&value)?;
+            collapser
+                .path_items_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.path_items.insert(name, value);
     }
 
     // ── Phase 2a: recurse into pre-existing components.schemas ───────
@@ -117,10 +292,143 @@ pub(crate) fn collapse_spec(
             // canonical form of the parent.
             let canonical = serde_json::to_string(&schema)?;
             collapser
-                .seen
+                .schemas_seen
                 .entry(canonical)
                 .or_insert_with(|| name.clone());
             collapser.schemas.insert(name, RefOr::new_item(schema));
+        }
+    }
+
+    // Same Phase 2a treatment for components.parameters: pre-existing
+    // entries keep their names, but their inline nested schemas / content
+    // schemas still get lifted into `self.schemas`.
+    let existing_param_names: Vec<String> = collapser.parameters.keys().cloned().collect();
+    for name in existing_param_names {
+        if let Some(RefOr::Item(_)) = collapser.parameters.get(&name) {
+            let Some(RefOr::Item(mut param)) = collapser.parameters.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "parameters", &name]);
+            collapser.walk_parameter(&mut param, ctx)?;
+            let canonical = serde_json::to_string(&param)?;
+            collapser
+                .parameters_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.parameters.insert(name, RefOr::new_item(param));
+        }
+    }
+
+    // Same for components.responses.
+    let existing_resp_names: Vec<String> = collapser.responses.keys().cloned().collect();
+    for name in existing_resp_names {
+        if let Some(RefOr::Item(_)) = collapser.responses.get(&name) {
+            let Some(RefOr::Item(mut resp)) = collapser.responses.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "responses", &name]);
+            collapser.walk_response(&mut resp, ctx)?;
+            let canonical = serde_json::to_string(&resp)?;
+            collapser
+                .responses_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.responses.insert(name, RefOr::new_item(resp));
+        }
+    }
+
+    // Same for components.requestBodies.
+    let existing_rb_names: Vec<String> = collapser.request_bodies.keys().cloned().collect();
+    for name in existing_rb_names {
+        if let Some(RefOr::Item(_)) = collapser.request_bodies.get(&name) {
+            let Some(RefOr::Item(mut rb)) = collapser.request_bodies.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "requestBodies", &name]);
+            collapser.walk_request_body(&mut rb, ctx)?;
+            let canonical = serde_json::to_string(&rb)?;
+            collapser
+                .request_bodies_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.request_bodies.insert(name, RefOr::new_item(rb));
+        }
+    }
+
+    // Same for components.headers.
+    let existing_header_names: Vec<String> = collapser.headers.keys().cloned().collect();
+    for name in existing_header_names {
+        if let Some(RefOr::Item(_)) = collapser.headers.get(&name) {
+            let Some(RefOr::Item(mut h)) = collapser.headers.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "headers", &name]);
+            collapser.walk_header(&mut h, ctx)?;
+            let canonical = serde_json::to_string(&h)?;
+            collapser
+                .headers_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.headers.insert(name, RefOr::new_item(h));
+        }
+    }
+
+    // Same for components.mediaTypes.
+    let existing_mt_names: Vec<String> = collapser.media_types.keys().cloned().collect();
+    for name in existing_mt_names {
+        if let Some(RefOr::Item(_)) = collapser.media_types.get(&name) {
+            let Some(RefOr::Item(mut mt)) = collapser.media_types.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "mediaTypes", &name]);
+            collapser.walk_media_type(&mut mt, ctx)?;
+            let canonical = serde_json::to_string(&mt)?;
+            collapser
+                .media_types_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.media_types.insert(name, RefOr::new_item(mt));
+        }
+    }
+
+    // Same for components.callbacks.
+    let existing_cb_names: Vec<String> = collapser.callbacks.keys().cloned().collect();
+    for name in existing_cb_names {
+        if let Some(RefOr::Item(_)) = collapser.callbacks.get(&name) {
+            let Some(RefOr::Item(mut cb)) = collapser.callbacks.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "callbacks", &name]);
+            collapser.walk_callback(&mut cb, ctx)?;
+            let canonical = serde_json::to_string(&cb)?;
+            collapser
+                .callbacks_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.callbacks.insert(name, RefOr::new_item(cb));
+        }
+    }
+
+    // Same for components.pathItems — but skip entries that are
+    // already in ref form (`reference` is Some). PathItem is bare
+    // (not wrapped in `RefOr`), so the "inline vs ref" probe is on
+    // `pi.reference.is_none()` rather than `RefOr::Item(_)`.
+    let existing_pi_names: Vec<String> = collapser.path_items.keys().cloned().collect();
+    for name in existing_pi_names {
+        if let Some(pi) = collapser.path_items.get(&name)
+            && pi.reference.is_none()
+        {
+            let Some(mut pi) = collapser.path_items.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "pathItems", &name]);
+            collapser.walk_path_item(&mut pi, ctx)?;
+            let canonical = serde_json::to_string(&pi)?;
+            collapser
+                .path_items_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.path_items.insert(name, pi);
         }
     }
 
@@ -131,23 +439,99 @@ pub(crate) fn collapse_spec(
     if let Some(webhooks) = spec.webhooks.as_mut() {
         collapser.walk_paths(webhooks, NameContext::new(["webhooks"]))?;
     }
-    if let Some(components) = spec.components.as_mut() {
-        collapser.walk_components_non_schemas(components, NameContext::new(["components"]))?;
-    }
+    // Note: there's no phase-2b pass over `spec.components.<bag>`
+    // here — every bag is owned by phase 1+2a (take it out, recurse,
+    // intern back). Writing the bags back happens below.
 
-    // Write the lifted schemas back to components.schemas.
+    // Write each lifted bag back to its slot under `components`. The
+    // `get_or_insert_with` only creates a `Components` when at least
+    // one bag is non-empty; an unconditional touch would leave a
+    // stray empty `components: {}` on collapse-of-empty-input round
+    // trips.
     if !collapser.schemas.is_empty() {
         spec.components.get_or_insert_with(Default::default).schemas = Some(collapser.schemas);
+    }
+    if !collapser.parameters.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .parameters = Some(collapser.parameters);
+    }
+    if !collapser.responses.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .responses = Some(collapser.responses);
+    }
+    if !collapser.request_bodies.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .request_bodies = Some(collapser.request_bodies);
+    }
+    if !collapser.headers.is_empty() {
+        spec.components.get_or_insert_with(Default::default).headers = Some(collapser.headers);
+    }
+    if !collapser.media_types.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .media_types = Some(collapser.media_types);
+    }
+    if !collapser.examples.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .examples = Some(collapser.examples);
+    }
+    if !collapser.links.is_empty() {
+        spec.components.get_or_insert_with(Default::default).links = Some(collapser.links);
+    }
+    if !collapser.callbacks.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .callbacks = Some(collapser.callbacks);
+    }
+    if !collapser.path_items.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .path_items = Some(collapser.path_items);
     }
 
     Ok(())
 }
 
 struct Collapser<'a> {
-    /// In-progress component bag. Grows as schemas are lifted.
+    /// In-progress `components.schemas` bag. Grows as schemas are lifted.
     schemas: BTreeMap<String, RefOr<Schema>>,
-    /// Dedup map: canonical-JSON-serialised Schema → component name.
-    seen: HashMap<String, String>,
+    /// Per-bag dedup map: canonical-JSON-serialised `Schema` →
+    /// component name. Kept separate from other bags' dedup maps
+    /// because each bag holds a different type.
+    schemas_seen: HashMap<String, String>,
+    /// In-progress `components.parameters` bag.
+    parameters: BTreeMap<String, RefOr<Parameter>>,
+    parameters_seen: HashMap<String, String>,
+    /// In-progress `components.responses` bag.
+    responses: BTreeMap<String, RefOr<Response>>,
+    responses_seen: HashMap<String, String>,
+    /// In-progress `components.requestBodies` bag.
+    request_bodies: BTreeMap<String, RefOr<RequestBody>>,
+    request_bodies_seen: HashMap<String, String>,
+    /// In-progress `components.headers` bag.
+    headers: BTreeMap<String, RefOr<Header>>,
+    headers_seen: HashMap<String, String>,
+    /// In-progress `components.mediaTypes` bag (v3.2-only).
+    media_types: BTreeMap<String, RefOr<MediaType>>,
+    media_types_seen: HashMap<String, String>,
+    /// In-progress `components.examples` bag.
+    examples: BTreeMap<String, RefOr<Example>>,
+    examples_seen: HashMap<String, String>,
+    /// In-progress `components.links` bag.
+    links: BTreeMap<String, RefOr<Link>>,
+    links_seen: HashMap<String, String>,
+    /// In-progress `components.callbacks` bag.
+    callbacks: BTreeMap<String, RefOr<Callback>>,
+    callbacks_seen: HashMap<String, String>,
+    /// In-progress `components.pathItems` bag. `PathItem` is bare
+    /// (not wrapped in `RefOr`); its ref form lives in
+    /// `PathItem.reference`.
+    path_items: BTreeMap<String, PathItem>,
+    path_items_seen: HashMap<String, String>,
     /// Optional loader for resolving external `$ref`s.
     loader: Option<&'a mut Loader>,
 }
@@ -156,6 +540,14 @@ impl<'a> Collapser<'a> {
     // ── Spec-tree walk ──────────────────────────────────────────────
 
     fn walk_paths(&mut self, paths: &mut Paths, ctx: NameContext) -> Result<(), CollapseError> {
+        // Note: `paths.<path>` PathItems are walked (lifting nested
+        // schemas / parameters / responses inside them) but the
+        // PathItem itself is *not* lifted to `components.pathItems`
+        // — that would replace every `paths.<path>` with a `$ref`
+        // and bury operations under one extra indirection, which is
+        // rarely what callers of `collapse` want. Pre-existing
+        // entries in `components.pathItems` are still kept (and
+        // recursed into) by phase 2a.
         for (path_key, path_item) in paths.paths.iter_mut() {
             self.walk_path_item(path_item, ctx.push(path_key))?;
         }
@@ -169,7 +561,7 @@ impl<'a> Collapser<'a> {
     ) -> Result<(), CollapseError> {
         if let Some(params) = path_item.parameters.as_mut() {
             for (i, p) in params.iter_mut().enumerate() {
-                self.walk_ref_or_parameter(p, ctx.push(&format!("parameters[{i}]")))?;
+                self.lift_ref_or_parameter(p, ctx.push(&format!("parameters[{i}]")))?;
             }
         }
         if let Some(ops) = path_item.operations.as_mut() {
@@ -200,18 +592,18 @@ impl<'a> Collapser<'a> {
         };
         if let Some(params) = op.parameters.as_mut() {
             for (i, p) in params.iter_mut().enumerate() {
-                self.walk_ref_or_parameter(p, ctx.push(&format!("parameters[{i}]")))?;
+                self.lift_ref_or_parameter(p, ctx.push(&format!("parameters[{i}]")))?;
             }
         }
         if let Some(rb) = op.request_body.as_mut() {
-            self.walk_ref_or_request_body(rb, ctx.push("requestBody"))?;
+            self.lift_ref_or_request_body(rb, ctx.push("requestBody"))?;
         }
         if let Some(responses) = op.responses.as_mut() {
             self.walk_responses(responses, ctx.push("responses"))?;
         }
         if let Some(callbacks) = op.callbacks.as_mut() {
             for (name, cb) in callbacks.iter_mut() {
-                self.walk_ref_or_callback(cb, ctx.push(name))?;
+                self.lift_ref_or_callback(cb, ctx.push(name))?;
             }
         }
         Ok(())
@@ -223,28 +615,60 @@ impl<'a> Collapser<'a> {
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
         if let Some(default) = responses.default.as_mut() {
-            self.walk_ref_or_response(default, ctx.push("default"))?;
+            self.lift_ref_or_response(default, ctx.push("default"))?;
         }
         if let Some(map) = responses.responses.as_mut() {
             for (status, resp) in map.iter_mut() {
-                self.walk_ref_or_response(resp, ctx.push(status))?;
+                self.lift_ref_or_response(resp, ctx.push(status))?;
             }
         }
         Ok(())
     }
 
-    fn walk_ref_or_response(
+    /// Lift an inline `RefOr<Response>`: recurse into the response
+    /// (lifting nested headers / content schemas first), intern it,
+    /// rewrite the slot to a `#/components/responses/<name>` ref.
+    /// External `$ref`s are resolved via the loader when present;
+    /// internal refs are left alone.
+    fn lift_ref_or_response(
         &mut self,
-        item: &mut RefOr<Response>,
+        slot: &mut RefOr<Response>,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        // External `$ref`s on container types (Response, Parameter,
-        // RequestBody, etc.) are left alone: this PR scopes lifting to
-        // schemas only. Future PRs will recurse the same way.
-        if let RefOr::Item(r) = item {
-            self.walk_response(r, ctx)?;
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: Response =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_response(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_response(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/responses/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut response) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_response(&mut response, ctx.clone())?;
+                let name = self.intern_response(response, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/responses/{name}"));
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn walk_response(
@@ -254,26 +678,65 @@ impl<'a> Collapser<'a> {
     ) -> Result<(), CollapseError> {
         if let Some(headers) = response.headers.as_mut() {
             for (name, h) in headers.iter_mut() {
-                self.walk_ref_or_header(h, ctx.push(&format!("headers.{name}")))?;
+                self.lift_ref_or_header(h, ctx.push(&format!("headers.{name}")))?;
             }
         }
         if let Some(content) = response.content.as_mut() {
             for (mime, mt) in content.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+            }
+        }
+        if let Some(links) = response.links.as_mut() {
+            for (name, l) in links.iter_mut() {
+                self.lift_ref_or_link(l, ctx.push(&format!("links.{name}")))?;
             }
         }
         Ok(())
     }
 
-    fn walk_ref_or_header(
+    /// Lift an inline `RefOr<Header>`: recurse first (lift nested
+    /// schema + content media-type schemas), intern the header,
+    /// rewrite the slot to a `#/components/headers/<name>` ref.
+    /// External `$ref`s resolve via the loader when present.
+    fn lift_ref_or_header(
         &mut self,
-        item: &mut RefOr<Header>,
+        slot: &mut RefOr<Header>,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        if let RefOr::Item(h) = item {
-            self.walk_header(h, ctx)?;
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: Header =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_header(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_header(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/headers/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut header) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_header(&mut header, ctx.clone())?;
+                let name = self.intern_header(header, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/headers/{name}"));
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn walk_header(&mut self, header: &mut Header, ctx: NameContext) -> Result<(), CollapseError> {
@@ -282,21 +745,60 @@ impl<'a> Collapser<'a> {
         }
         if let Some(content) = header.content.as_mut() {
             for (mime, mt) in content.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+            }
+        }
+        if let Some(examples) = header.examples.as_mut() {
+            for (name, e) in examples.iter_mut() {
+                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
             }
         }
         Ok(())
     }
 
-    fn walk_ref_or_media_type(
+    /// Lift an inline `RefOr<MediaType>`: recurse first (lift nested
+    /// `schema` / `itemSchema`), intern, rewrite the slot to a
+    /// `#/components/mediaTypes/<name>` ref. External `$ref`s
+    /// resolve via the loader when present.
+    fn lift_ref_or_media_type(
         &mut self,
-        item: &mut RefOr<MediaType>,
+        slot: &mut RefOr<MediaType>,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        if let RefOr::Item(m) = item {
-            self.walk_media_type(m, ctx)?;
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: MediaType =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_media_type(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_media_type(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/mediaTypes/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut mt) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_media_type(&mut mt, ctx.clone())?;
+                let name = self.intern_media_type(mt, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/mediaTypes/{name}"));
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn walk_media_type(
@@ -310,18 +812,59 @@ impl<'a> Collapser<'a> {
         if let Some(s) = mt.item_schema.as_mut() {
             self.lift_ref_or_schema(s, ctx.push("itemSchema"))?;
         }
+        if let Some(examples) = mt.examples.as_mut() {
+            for (name, e) in examples.iter_mut() {
+                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
+            }
+        }
         Ok(())
     }
 
-    fn walk_ref_or_parameter(
+    /// Lift an inline `RefOr<Parameter>`: recurse into the parameter
+    /// (lifting its nested `schema` / `content[…].schema` first),
+    /// intern the resulting parameter, rewrite the slot to a
+    /// `#/components/parameters/<name>` ref. External `$ref`s are
+    /// resolved via the loader when one is present; internal refs are
+    /// left alone.
+    fn lift_ref_or_parameter(
         &mut self,
-        item: &mut RefOr<Parameter>,
+        slot: &mut RefOr<Parameter>,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        if let RefOr::Item(p) = item {
-            self.walk_parameter(p, ctx)?;
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: Parameter =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_parameter(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_parameter(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/parameters/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut parameter) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_parameter(&mut parameter, ctx.clone())?;
+                let name = self.intern_parameter(parameter, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/parameters/{name}"));
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn walk_parameter(
@@ -335,122 +878,197 @@ impl<'a> Collapser<'a> {
         // out: per OAS 3.2, it carries `content` only and forbids
         // `schema`, so we walk its `content` map directly.
         match param {
-            Parameter::Path(p) => self.walk_param_schema_and_content(
+            Parameter::Path(p) => self.walk_param_slots(
                 ctx.push(p.name.as_str()),
                 p.schema.as_mut(),
                 p.content.as_mut(),
+                p.examples.as_mut(),
             ),
-            Parameter::Query(p) => self.walk_param_schema_and_content(
+            Parameter::Query(p) => self.walk_param_slots(
                 ctx.push(p.name.as_str()),
                 p.schema.as_mut(),
                 p.content.as_mut(),
+                p.examples.as_mut(),
             ),
-            Parameter::Header(p) => self.walk_param_schema_and_content(
+            Parameter::Header(p) => self.walk_param_slots(
                 ctx.push(p.name.as_str()),
                 p.schema.as_mut(),
                 p.content.as_mut(),
+                p.examples.as_mut(),
             ),
-            Parameter::Cookie(p) => self.walk_param_schema_and_content(
+            Parameter::Cookie(p) => self.walk_param_slots(
                 ctx.push(p.name.as_str()),
                 p.schema.as_mut(),
                 p.content.as_mut(),
+                p.examples.as_mut(),
             ),
             Parameter::Querystring(p) => {
                 let ctx = ctx.push(p.name.as_str());
                 for (mime, mt) in p.content.iter_mut() {
-                    self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                    self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                }
+                if let Some(examples) = p.examples.as_mut() {
+                    for (name, e) in examples.iter_mut() {
+                        self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
+                    }
                 }
                 Ok(())
             }
         }
     }
 
-    fn walk_param_schema_and_content(
+    fn walk_param_slots(
         &mut self,
         ctx: NameContext,
         schema: Option<&mut RefOr<Schema>>,
         content: Option<&mut BTreeMap<String, RefOr<MediaType>>>,
+        examples: Option<&mut BTreeMap<String, RefOr<Example>>>,
     ) -> Result<(), CollapseError> {
         if let Some(s) = schema {
             self.lift_ref_or_schema(s, ctx.push("schema"))?;
         }
         if let Some(content) = content {
             for (mime, mt) in content.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+            }
+        }
+        if let Some(examples) = examples {
+            for (name, e) in examples.iter_mut() {
+                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
             }
         }
         Ok(())
     }
 
-    fn walk_ref_or_request_body(
+    /// Walk into a `RequestBody`, lifting its content schemas. Used
+    /// by both phase 2a (pre-existing components.requestBodies) and
+    /// the lift path on inline bodies.
+    fn walk_request_body(
         &mut self,
-        item: &mut RefOr<RequestBody>,
+        rb: &mut RequestBody,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        if let RefOr::Item(rb) = item {
-            for (mime, mt) in rb.content.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
-            }
+        for (mime, mt) in rb.content.iter_mut() {
+            self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
         }
         Ok(())
     }
 
-    fn walk_ref_or_callback(
+    /// Lift an inline `RefOr<RequestBody>`: recurse into the body
+    /// first (lift nested content schemas), intern, rewrite the slot
+    /// to a `#/components/requestBodies/<name>` ref. External `$ref`s
+    /// are resolved via the loader when present; internal refs are
+    /// left alone.
+    fn lift_ref_or_request_body(
         &mut self,
-        item: &mut RefOr<Callback>,
+        slot: &mut RefOr<RequestBody>,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        if let RefOr::Item(cb) = item {
-            for (expr, pi) in cb.paths.iter_mut() {
-                self.walk_path_item(pi, ctx.push(expr))?;
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: RequestBody =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_request_body(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_request_body(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/requestBodies/{name}"));
+                Ok(())
             }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut rb) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_request_body(&mut rb, ctx.clone())?;
+                let name = self.intern_request_body(rb, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/requestBodies/{name}"));
+                Ok(())
+            }
+        }
+    }
+
+    /// Walk into a `Callback`: recurse into every `(expression,
+    /// PathItem)` entry so the nested operations / responses /
+    /// requestBodies inside lift first. The PathItem itself is not
+    /// lifted to `components.pathItems` — see the note on
+    /// `walk_paths`.
+    fn walk_callback(&mut self, cb: &mut Callback, ctx: NameContext) -> Result<(), CollapseError> {
+        for (expr, pi) in cb.paths.iter_mut() {
+            self.walk_path_item(pi, ctx.push(expr))?;
         }
         Ok(())
     }
 
-    fn walk_components_non_schemas(
+    /// Lift an inline `RefOr<Callback>`: recurse first (lift nested
+    /// PathItem contents), intern, rewrite the slot to a
+    /// `#/components/callbacks/<name>` ref.
+    fn lift_ref_or_callback(
         &mut self,
-        components: &mut Components,
+        slot: &mut RefOr<Callback>,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        // `components.schemas` is handled separately by phases 1 + 2a
-        // above; this walks every other bag for nested schema slots.
-        if let Some(params) = components.parameters.as_mut() {
-            for (name, p) in params.iter_mut() {
-                self.walk_ref_or_parameter(p, ctx.push(&format!("parameters.{name}")))?;
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: Callback =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_callback(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_callback(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/callbacks/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut cb) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_callback(&mut cb, ctx.clone())?;
+                let name = self.intern_callback(cb, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/callbacks/{name}"));
+                Ok(())
             }
         }
-        if let Some(map) = components.responses.as_mut() {
-            for (name, r) in map.iter_mut() {
-                self.walk_ref_or_response(r, ctx.push(&format!("responses.{name}")))?;
-            }
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Callback`.
+    /// Context-derived naming (typically the callback name pushed
+    /// by the walker).
+    fn intern_callback(&mut self, cb: Callback, ctx: NameContext) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&cb)?;
+        if let Some(existing) = self.callbacks_seen.get(&canonical) {
+            return Ok(existing.clone());
         }
-        if let Some(map) = components.request_bodies.as_mut() {
-            for (name, rb) in map.iter_mut() {
-                self.walk_ref_or_request_body(rb, ctx.push(&format!("requestBodies.{name}")))?;
-            }
-        }
-        if let Some(map) = components.headers.as_mut() {
-            for (name, h) in map.iter_mut() {
-                self.walk_ref_or_header(h, ctx.push(&format!("headers.{name}")))?;
-            }
-        }
-        if let Some(map) = components.path_items.as_mut() {
-            for (name, pi) in map.iter_mut() {
-                self.walk_path_item(pi, ctx.push(&format!("pathItems.{name}")))?;
-            }
-        }
-        if let Some(map) = components.callbacks.as_mut() {
-            for (name, cb) in map.iter_mut() {
-                self.walk_ref_or_callback(cb, ctx.push(&format!("callbacks.{name}")))?;
-            }
-        }
-        if let Some(map) = components.media_types.as_mut() {
-            for (name, mt) in map.iter_mut() {
-                self.walk_ref_or_media_type(mt, ctx.push(&format!("mediaTypes.{name}")))?;
-            }
-        }
-        Ok(())
+        let base = ctx.derive_name();
+        let name = unique_name(&self.callbacks, &base);
+        self.callbacks_seen.insert(canonical, name.clone());
+        self.callbacks.insert(name.clone(), RefOr::new_item(cb));
+        Ok(name)
     }
 
     // ── Lift + dedup core ──────────────────────────────────────────
@@ -604,13 +1222,229 @@ impl<'a> Collapser<'a> {
     /// First-seen wins for the component name on a dedup hit.
     fn intern_schema(&mut self, schema: Schema, ctx: NameContext) -> Result<String, CollapseError> {
         let canonical = serde_json::to_string(&schema)?;
-        if let Some(existing) = self.seen.get(&canonical) {
+        if let Some(existing) = self.schemas_seen.get(&canonical) {
             return Ok(existing.clone());
         }
         let name = self.generate_name(&schema, &ctx);
-        self.seen.insert(canonical, name.clone());
+        self.schemas_seen.insert(canonical, name.clone());
         self.schemas.insert(name.clone(), RefOr::new_item(schema));
         Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Parameter`. No
+    /// `title` field on parameters — we use a `<name><In>` hint
+    /// (e.g., `limitQuery`, `petIdPath`) when the parameter carries a
+    /// non-empty `name`, otherwise the surrounding context.
+    fn intern_parameter(
+        &mut self,
+        parameter: Parameter,
+        ctx: NameContext,
+    ) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&parameter)?;
+        if let Some(existing) = self.parameters_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let hint = parameter_name_hint(&parameter);
+        let base = if hint.is_empty() {
+            ctx.derive_name()
+        } else {
+            sanitize_component_name(hint)
+        };
+        let name = unique_name(&self.parameters, &base);
+        self.parameters_seen.insert(canonical, name.clone());
+        self.parameters
+            .insert(name.clone(), RefOr::new_item(parameter));
+        Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Response`.
+    /// Responses have no canonical name field — naming falls back to
+    /// the surrounding context (e.g., the status code pushed by the
+    /// walker).
+    fn intern_response(
+        &mut self,
+        response: Response,
+        ctx: NameContext,
+    ) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&response)?;
+        if let Some(existing) = self.responses_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.responses, &base);
+        self.responses_seen.insert(canonical, name.clone());
+        self.responses
+            .insert(name.clone(), RefOr::new_item(response));
+        Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `RequestBody`.
+    /// No canonical name field — naming is context-derived.
+    fn intern_request_body(
+        &mut self,
+        rb: RequestBody,
+        ctx: NameContext,
+    ) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&rb)?;
+        if let Some(existing) = self.request_bodies_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.request_bodies, &base);
+        self.request_bodies_seen.insert(canonical, name.clone());
+        self.request_bodies
+            .insert(name.clone(), RefOr::new_item(rb));
+        Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Header`.
+    /// Header has no canonical name field — naming is
+    /// context-derived (typically the header key pushed by the walker).
+    fn intern_header(&mut self, header: Header, ctx: NameContext) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&header)?;
+        if let Some(existing) = self.headers_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.headers, &base);
+        self.headers_seen.insert(canonical, name.clone());
+        self.headers.insert(name.clone(), RefOr::new_item(header));
+        Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `MediaType`.
+    /// No canonical name field — naming is context-derived
+    /// (typically the mime-type pushed by the walker).
+    fn intern_media_type(
+        &mut self,
+        mt: MediaType,
+        ctx: NameContext,
+    ) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&mt)?;
+        if let Some(existing) = self.media_types_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.media_types, &base);
+        self.media_types_seen.insert(canonical, name.clone());
+        self.media_types.insert(name.clone(), RefOr::new_item(mt));
+        Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Example`.
+    /// `Example` carries no canonical name field — naming is
+    /// context-derived (typically the example key pushed by the
+    /// walker). `Example` has no nested `RefOr<T>` fields, so the
+    /// lift path doesn't need to recurse first.
+    fn intern_example(
+        &mut self,
+        example: Example,
+        ctx: NameContext,
+    ) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&example)?;
+        if let Some(existing) = self.examples_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.examples, &base);
+        self.examples_seen.insert(canonical, name.clone());
+        self.examples.insert(name.clone(), RefOr::new_item(example));
+        Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Link`. Leaf
+    /// type — no recursion. Context-derived naming.
+    fn intern_link(&mut self, link: Link, ctx: NameContext) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&link)?;
+        if let Some(existing) = self.links_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.links, &base);
+        self.links_seen.insert(canonical, name.clone());
+        self.links.insert(name.clone(), RefOr::new_item(link));
+        Ok(name)
+    }
+
+    /// Lift an inline `RefOr<Link>` into `components.links`. No
+    /// recursion needed (Link has no nested `RefOr` slots).
+    fn lift_ref_or_link(
+        &mut self,
+        slot: &mut RefOr<Link>,
+        ctx: NameContext,
+    ) -> Result<(), CollapseError> {
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let fetched: Link = loader.resolve_reference_as(&reference).map_err(|source| {
+                    CollapseError::External {
+                        reference: reference.clone(),
+                        source,
+                    }
+                })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                let name = self.intern_link(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/links/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(link) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                let name = self.intern_link(link, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/links/{name}"));
+                Ok(())
+            }
+        }
+    }
+
+    /// Lift an inline `RefOr<Example>` into `components.examples`.
+    /// No recursion needed (Example has no nested RefOr slots).
+    fn lift_ref_or_example(
+        &mut self,
+        slot: &mut RefOr<Example>,
+        ctx: NameContext,
+    ) -> Result<(), CollapseError> {
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let fetched: Example =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                let name = self.intern_example(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/examples/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(example) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                let name = self.intern_example(example, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/examples/{name}"));
+                Ok(())
+            }
+        }
     }
 
     fn generate_name(&self, schema: &Schema, ctx: &NameContext) -> String {
@@ -638,6 +1472,41 @@ impl<'a> Collapser<'a> {
 
 fn is_internal_ref(reference: &str) -> bool {
     reference.starts_with('#')
+}
+
+/// `<name><In>` hint for a `Parameter` — e.g. `limitQuery`, `petIdPath`.
+/// Returns the empty string when the parameter has no usable `name`,
+/// signalling that the caller should fall back to context-derived
+/// naming.
+fn parameter_name_hint(param: &Parameter) -> String {
+    let (name, in_) = match param {
+        Parameter::Path(p) => (p.name.as_str(), "Path"),
+        Parameter::Query(p) => (p.name.as_str(), "Query"),
+        Parameter::Querystring(p) => (p.name.as_str(), "Querystring"),
+        Parameter::Header(p) => (p.name.as_str(), "Header"),
+        Parameter::Cookie(p) => (p.name.as_str(), "Cookie"),
+    };
+    if name.is_empty() {
+        String::new()
+    } else {
+        format!("{name}{in_}")
+    }
+}
+
+/// Pick the first non-colliding name in `bag` starting from `base`. On
+/// collision, appends `_2`, `_3`, …. Shared by every bag's intern
+/// method.
+fn unique_name<V>(bag: &BTreeMap<String, V>, base: &str) -> String {
+    if !bag.contains_key(base) {
+        return base.to_owned();
+    }
+    for i in 2..u32::MAX {
+        let candidate = format!("{base}_{i}");
+        if !bag.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("exhausted u32 suffixes for `{base}`");
 }
 
 fn schema_title(schema: &Schema) -> Option<&str> {
@@ -755,6 +1624,29 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Walk through a lifted Response / RequestBody / Parameter /
+    /// Header (or any container whose `content[mime]` slot may itself
+    /// be a lifted MediaType ref) and return the inner `schema` slot.
+    /// Lets tests assert on the schema regardless of whether
+    /// mediaTypes have been lifted.
+    fn schema_in_lifted_content(
+        v: &serde_json::Value,
+        container_ref: &str,
+        mime: &str,
+    ) -> serde_json::Value {
+        let pointer = container_ref.trim_start_matches('#');
+        let container = v
+            .pointer(pointer)
+            .unwrap_or_else(|| panic!("ref `{container_ref}` must resolve in spec"));
+        let mt_slot = &container["content"][mime];
+        if let Some(mt_ref) = mt_slot.get("$ref").and_then(|s| s.as_str()) {
+            let mt_name = mt_ref.trim_start_matches("#/components/mediaTypes/");
+            v["components"]["mediaTypes"][mt_name]["schema"].clone()
+        } else {
+            mt_slot["schema"].clone()
+        }
+    }
+
     fn schema_at(spec: &Spec, name: &str) -> serde_json::Value {
         let item = spec
             .components
@@ -763,13 +1655,6 @@ mod tests {
             .and_then(|m| m.get(name))
             .expect("schema present");
         serde_json::to_value(item).unwrap()
-    }
-
-    fn inline_to_ref(spec: &Spec, pointer: &str) -> serde_json::Value {
-        let v = serde_json::to_value(spec).unwrap();
-        v.pointer(pointer)
-            .cloned()
-            .unwrap_or_else(|| panic!("no value at `{pointer}` in serialised spec"))
     }
 
     #[test]
@@ -796,20 +1681,20 @@ mod tests {
             }
         }));
         spec.collapse(None).expect("collapse ok");
-        // Inline schema at the response should have become a `$ref`.
-        let inline = inline_to_ref(
-            &spec,
-            "/paths/~1pets/get/responses/200/content/application~1json/schema",
-        );
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp_ref = v["paths"]["/pets"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .expect("response slot must be lifted to a ref");
+        let schema_slot = schema_in_lifted_content(&v, resp_ref, "application/json");
         assert!(
-            inline.get("$ref").is_some(),
-            "expected the inline schema to be replaced by a `$ref`, got: {inline}",
+            schema_slot.get("$ref").is_some(),
+            "expected the inline schema to be a `$ref`, got: {schema_slot}",
         );
         // The lifted component should exist under a context-derived name
         // rooted at the operationId. We don't pin the exact name here
         // because the path-flattening rule is internal; check that the
         // expected ref target is one of the lifted schemas.
-        let ref_str = inline["$ref"].as_str().unwrap();
+        let ref_str = schema_slot["$ref"].as_str().unwrap();
         assert!(
             ref_str.starts_with("#/components/schemas/"),
             "ref must point at #/components/schemas, got `{ref_str}`",
@@ -853,11 +1738,15 @@ mod tests {
             "lifted name must be the schema's title; got {:?}",
             lifted_schema_names(&spec),
         );
-        let inline = inline_to_ref(
-            &spec,
-            "/paths/~1pets/get/responses/200/content/application~1json/schema",
+        // Response is lifted; the Pet schema ref lives inside it.
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp_ref = v["paths"]["/pets"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
+            "#/components/schemas/Pet"
         );
-        assert_eq!(inline["$ref"], "#/components/schemas/Pet");
     }
 
     #[test]
@@ -942,23 +1831,30 @@ mod tests {
             }
         }));
         spec.collapse(None).unwrap();
-        // Exactly one `Pet` component, with both call sites pointing at it.
+        // Exactly one `Pet` component (schemas dedupe).
         let names = lifted_schema_names(&spec);
         assert_eq!(
             names.iter().filter(|n| n.as_str() == "Pet").count(),
             1,
             "got {names:?}"
         );
-        let a = inline_to_ref(
-            &spec,
-            "/paths/~1a/get/responses/200/content/application~1json/schema",
+        // Both responses are now lifted (and dedupe to one response
+        // component since their content is identical); the response's
+        // content[json].schema still resolves to the same Pet ref.
+        let v = serde_json::to_value(&spec).unwrap();
+        let a_resp = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .expect("/a 200 must be a response ref");
+        let b_resp = v["paths"]["/b"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .expect("/b 200 must be a response ref");
+        // Both call sites point at the *same* response (response dedup).
+        assert_eq!(a_resp, b_resp);
+        // The shared response's body points at the single Pet schema.
+        assert_eq!(
+            schema_in_lifted_content(&v, a_resp, "application/json")["$ref"],
+            "#/components/schemas/Pet"
         );
-        let b = inline_to_ref(
-            &spec,
-            "/paths/~1b/get/responses/200/content/application~1json/schema",
-        );
-        assert_eq!(a["$ref"], "#/components/schemas/Pet");
-        assert_eq!(b["$ref"], "#/components/schemas/Pet");
     }
 
     #[test]
@@ -1094,16 +1990,22 @@ mod tests {
             1,
             "expected single Pet entry, got {names:?}",
         );
-        let inline = inline_to_ref(
-            &spec,
-            "/paths/~1a/get/responses/200/content/application~1json/schema",
-        );
-        let external = inline_to_ref(
-            &spec,
-            "/paths/~1b/get/responses/200/content/application~1json/schema",
-        );
-        assert_eq!(inline["$ref"], "#/components/schemas/Pet");
-        assert_eq!(external["$ref"], "#/components/schemas/Pet");
+        // Both responses are now lifted (and dedupe — identical
+        // content); navigate through to verify both content schemas
+        // resolve to the single Pet.
+        let v = serde_json::to_value(&spec).unwrap();
+        let a_resp = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        let b_resp = v["paths"]["/b"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        for resp_ref in [a_resp, b_resp] {
+            assert_eq!(
+                schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
+                "#/components/schemas/Pet"
+            );
+        }
     }
 
     #[test]
@@ -1129,12 +2031,16 @@ mod tests {
             }
         }));
         spec.collapse(None).expect("collapse ok");
-        let inline = inline_to_ref(
-            &spec,
-            "/paths/~1a/get/responses/200/content/application~1json/schema",
-        );
+        // The response is now lifted; navigate through to its
+        // content.application/json.schema to verify the external ref
+        // is preserved.
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp_ref = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .expect("response slot must be lifted to a ref");
         assert_eq!(
-            inline["$ref"], "external.json#/Pet",
+            schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
+            "external.json#/Pet",
             "external refs must stay external when no loader is provided",
         );
     }
@@ -1162,11 +2068,19 @@ mod tests {
             }
         }));
         spec.collapse(None).unwrap();
+        // Parameters are now lifted into their own components bag too,
+        // so the call site is replaced by a parameter ref and the
+        // schema lives inside the lifted parameter.
         let names = lifted_schema_names(&spec);
         assert!(names.contains(&"Limit".to_owned()), "got {names:?}");
         let v = serde_json::to_value(&spec).unwrap();
+        let param_ref = v["paths"]["/pets"]["get"]["parameters"][0]["$ref"]
+            .as_str()
+            .expect("parameter slot must be a $ref after collapse");
+        assert!(param_ref.starts_with("#/components/parameters/"));
+        let param_name = param_ref.trim_start_matches("#/components/parameters/");
         assert_eq!(
-            v["paths"]["/pets"]["get"]["parameters"][0]["schema"]["$ref"],
+            v["components"]["parameters"][param_name]["schema"]["$ref"],
             "#/components/schemas/Limit"
         );
     }
@@ -1419,12 +2333,16 @@ mod tests {
                 "expected lifted name `{expected}`, got {names:?}",
             );
         }
-        // And confirm nothing's left inline at one representative site.
-        let inline = inline_to_ref(
-            &spec,
-            "/paths/~1pets/get/responses/200/content/application~1json/schema",
+        // And confirm nothing's left inline at one representative
+        // site: the lifted response's content schema points at OkBody.
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp_ref = v["paths"]["/pets"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
+            "#/components/schemas/OkBody"
         );
-        assert_eq!(inline["$ref"], "#/components/schemas/OkBody");
     }
 
     // ── Walker coverage: RefOr::Ref container types bail cleanly ─────────
@@ -1700,11 +2618,16 @@ mod tests {
             }
         }));
         spec.collapse(None).unwrap();
-        let inline = inline_to_ref(
-            &spec,
-            "/paths/~1a/get/responses/200/content/application~1json/schema",
+        // Response is now lifted; the schema's existing internal ref
+        // is preserved inside the lifted response.
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp_ref = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .expect("response slot must be lifted");
+        assert_eq!(
+            schema_in_lifted_content(&v, resp_ref, "application/json")["$ref"],
+            "#/components/schemas/Pet"
         );
-        assert_eq!(inline["$ref"], "#/components/schemas/Pet");
     }
 
     // ── Strict dedup: titled and untitled near-duplicates stay split ───
@@ -1750,19 +2673,20 @@ mod tests {
         spec.collapse(None).unwrap();
         let names = lifted_schema_names(&spec);
         assert!(names.contains(&"Pet".to_owned()), "got {names:?}");
-        // /b's titled occurrence lands at `Pet`. /a's untitled
-        // occurrence lands at some context-derived name (don't pin it).
-        let b = inline_to_ref(
-            &spec,
-            "/paths/~1b/get/responses/200/content/application~1json/schema",
-        );
-        assert_eq!(b["$ref"], "#/components/schemas/Pet");
-        let a = inline_to_ref(
-            &spec,
-            "/paths/~1a/get/responses/200/content/application~1json/schema",
-        );
-        // Different ref target — the title differs, so they don't dedupe.
-        assert_ne!(a["$ref"], b["$ref"]);
+        // Responses are now lifted; descend through each lifted
+        // response's content schema.
+        let v = serde_json::to_value(&spec).unwrap();
+        let lookup_schema = |path_key: &str| -> serde_json::Value {
+            let resp_ref = v["paths"][path_key]["get"]["responses"]["200"]["$ref"]
+                .as_str()
+                .unwrap();
+            schema_in_lifted_content(&v, resp_ref, "application/json")
+        };
+        // /b's titled occurrence lands at `Pet`.
+        assert_eq!(lookup_schema("/b")["$ref"], "#/components/schemas/Pet");
+        // Different ref target — the schema titles differ, so they
+        // don't dedupe.
+        assert_ne!(lookup_schema("/a")["$ref"], lookup_schema("/b")["$ref"]);
     }
 
     #[test]
@@ -1941,5 +2865,1072 @@ mod tests {
         assert!(schema_title(&anyof).is_none());
         assert!(schema_title(&oneof).is_none());
         assert!(schema_title(&not).is_none());
+    }
+
+    // ── Parameters: lift contract + dedup ────────────────────────────────
+
+    fn lifted_parameter_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.parameters.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_parameters_lift_to_components_parameters_with_name_in_hint() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [
+                            {"name": "limit", "in": "query", "schema": {"type": "integer"}},
+                            {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_parameter_names(&spec);
+        // Each parameter's component name is `<name><In>`.
+        assert!(names.contains(&"limitQuery".to_owned()), "got {names:?}");
+        assert!(names.contains(&"idPath".to_owned()), "got {names:?}");
+        let v = serde_json::to_value(&spec).unwrap();
+        // Call sites are refs.
+        assert_eq!(
+            v["paths"]["/pets"]["get"]["parameters"][0]["$ref"],
+            "#/components/parameters/limitQuery"
+        );
+        assert_eq!(
+            v["paths"]["/pets"]["get"]["parameters"][1]["$ref"],
+            "#/components/parameters/idPath"
+        );
+    }
+
+    #[test]
+    fn identical_inline_parameters_dedupe_to_one_component() {
+        // Two operations carry an identical inline parameter — the
+        // canonical-JSON dedup collapses them to a single entry under
+        // `components.parameters`.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer"}}],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                },
+                "/b": {
+                    "get": {
+                        "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer"}}],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_parameter_names(&spec);
+        assert_eq!(
+            names.iter().filter(|n| n.as_str() == "limitQuery").count(),
+            1,
+            "got {names:?}",
+        );
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["paths"]["/a"]["get"]["parameters"][0]["$ref"],
+            "#/components/parameters/limitQuery"
+        );
+        assert_eq!(
+            v["paths"]["/b"]["get"]["parameters"][0]["$ref"],
+            "#/components/parameters/limitQuery"
+        );
+    }
+
+    #[test]
+    fn parameter_with_same_name_different_schema_does_not_dedupe() {
+        // Two parameters with the same `name + in` but different
+        // schemas — different canonical JSON, two separate
+        // components (second gets a `_2` suffix).
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "parameters": [{"name": "id", "in": "query", "schema": {"type": "integer"}}],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                },
+                "/b": {
+                    "get": {
+                        "parameters": [{"name": "id", "in": "query", "schema": {"type": "string"}}],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_parameter_names(&spec);
+        assert!(names.contains(&"idQuery".to_owned()), "got {names:?}");
+        assert!(names.contains(&"idQuery_2".to_owned()), "got {names:?}");
+    }
+
+    #[test]
+    fn parameters_lift_every_variant_of_the_in_enum() {
+        // Exercises the `match` over every Parameter variant inside
+        // `parameter_name_hint`.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "parameters": [
+                            {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}},
+                            {"name": "tag", "in": "query", "schema": {"type": "string"}},
+                            {"name": "x-trace", "in": "header", "schema": {"type": "string"}},
+                            {"name": "sid", "in": "cookie", "schema": {"type": "string"}},
+                            {"name": "qs", "in": "querystring", "content": {
+                                "application/x-www-form-urlencoded": {"schema": {"type": "object", "properties": {"q": {"type": "string"}}}}
+                            }}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_parameter_names(&spec);
+        // `-` is valid in component names, so `x-trace` is preserved
+        // verbatim by the sanitiser.
+        for expected in [
+            "idPath",
+            "tagQuery",
+            "x-traceHeader",
+            "sidCookie",
+            "qsQuerystring",
+        ] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "missing `{expected}`: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_components_parameters_are_preserved_and_recursed() {
+        // Pre-existing components.parameters entries keep their names;
+        // their inline nested schemas are still lifted into
+        // components.schemas.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "parameters": {
+                    "Limit": {"name": "limit", "in": "query", "schema": {"title": "LimitSchema", "type": "integer"}}
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let param_names = lifted_parameter_names(&spec);
+        assert!(
+            param_names.contains(&"Limit".to_owned()),
+            "got {param_names:?}"
+        );
+        let schema_names = lifted_schema_names(&spec);
+        assert!(
+            schema_names.contains(&"LimitSchema".to_owned()),
+            "got {schema_names:?}",
+        );
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["components"]["parameters"]["Limit"]["schema"]["$ref"],
+            "#/components/schemas/LimitSchema"
+        );
+    }
+
+    #[test]
+    fn loader_resolves_external_parameter_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({
+                    "PageParam": {"name": "page", "in": "query", "schema": {"type": "integer"}}
+                }),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "parameters": [{"$ref": "shared.json#/PageParam"}],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        let names = lifted_parameter_names(&spec);
+        // External ref points at `PageParam` — the fragment's last
+        // segment, then dedup name-hinted further by `name + in`.
+        // For external refs the from_external_ref ctx wins on
+        // generate-name, but our intern_parameter prefers the
+        // parameter-name hint when the parameter has a name. Verify
+        // *some* parameter ended up lifted from the external doc.
+        assert!(
+            !names.is_empty(),
+            "expected at least one lifted parameter, got {names:?}",
+        );
+        let v = serde_json::to_value(&spec).unwrap();
+        let param = &v["paths"]["/a"]["get"]["parameters"][0]["$ref"];
+        let s = param.as_str().expect("parameter slot must be a ref");
+        assert!(
+            s.starts_with("#/components/parameters/"),
+            "got `{s}` — external ref must be rewritten to internal",
+        );
+    }
+
+    #[test]
+    fn parameter_name_hint_helper_returns_empty_for_empty_name() {
+        // Build a Parameter with an empty `name` so the hint returns
+        // "" and the caller falls back to context-derived naming.
+        let param: Parameter = serde_json::from_value(serde_json::json!({
+            "name": "",
+            "in": "query",
+            "schema": {"type": "integer"}
+        }))
+        .unwrap();
+        assert_eq!(parameter_name_hint(&param), "");
+    }
+
+    #[test]
+    fn unique_name_appends_suffix_against_existing_keys() {
+        let mut bag: BTreeMap<String, ()> = BTreeMap::new();
+        assert_eq!(unique_name(&bag, "foo"), "foo");
+        bag.insert("foo".to_owned(), ());
+        assert_eq!(unique_name(&bag, "foo"), "foo_2");
+        bag.insert("foo_2".to_owned(), ());
+        assert_eq!(unique_name(&bag, "foo"), "foo_3");
+    }
+
+    // ── Responses: lift contract + dedup ────────────────────────────────
+
+    fn lifted_response_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.responses.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_responses_lift_to_components_responses_via_context() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "operationId": "listPets",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}}
+                            },
+                            "default": {"description": "err"}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_response_names(&spec);
+        // Both responses lift; we don't pin the derived names, just
+        // verify the call sites became refs.
+        assert!(
+            names.len() >= 2,
+            "expected at least 2 response components, got {names:?}"
+        );
+        let v = serde_json::to_value(&spec).unwrap();
+        assert!(
+            v["paths"]["/pets"]["get"]["responses"]["200"]["$ref"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("#/components/responses/"))
+        );
+        assert!(
+            v["paths"]["/pets"]["get"]["responses"]["default"]["$ref"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("#/components/responses/"))
+        );
+    }
+
+    #[test]
+    fn identical_inline_responses_dedupe_to_one_component() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"get": {"responses": {"200": {"description": "ok"}}}},
+                "/b": {"get": {"responses": {"200": {"description": "ok"}}}}
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let v = serde_json::to_value(&spec).unwrap();
+        // Both call sites point at the same lifted response.
+        assert_eq!(
+            v["paths"]["/a"]["get"]["responses"]["200"]["$ref"],
+            v["paths"]["/b"]["get"]["responses"]["200"]["$ref"],
+        );
+        assert_eq!(lifted_response_names(&spec).len(), 1);
+    }
+
+    #[test]
+    fn existing_components_responses_are_preserved_and_recursed() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "responses": {
+                    "NotFound": {
+                        "description": "not found",
+                        "content": {"application/json": {"schema": {"title": "ErrBody", "type": "object", "properties": {"msg": {"type": "string"}}}}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_response_names(&spec);
+        assert!(names.contains(&"NotFound".to_owned()), "got {names:?}");
+        // The nested schema inside the pre-existing response is still
+        // lifted into components.schemas.
+        let schema_names = lifted_schema_names(&spec);
+        assert!(
+            schema_names.contains(&"ErrBody".to_owned()),
+            "got {schema_names:?}"
+        );
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            schema_in_lifted_content(&v, "#/components/responses/NotFound", "application/json")["$ref"],
+            "#/components/schemas/ErrBody"
+        );
+    }
+
+    #[test]
+    fn loader_resolves_external_response_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({
+                    "NotFound": {"description": "not found"}
+                }),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"get": {"responses": {"404": {"$ref": "shared.json#/NotFound"}}}}
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        // External ref was resolved + lifted; call site rewritten to
+        // an internal ref.
+        let v = serde_json::to_value(&spec).unwrap();
+        let s = v["paths"]["/a"]["get"]["responses"]["404"]["$ref"]
+            .as_str()
+            .expect("response slot must be a ref");
+        assert!(s.starts_with("#/components/responses/"), "got `{s}`",);
+        assert!(!lifted_response_names(&spec).is_empty());
+    }
+
+    // ── RequestBodies: lift contract + dedup ────────────────────────────
+
+    fn lifted_request_body_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.request_bodies.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_request_body_lifts_to_components_request_bodies() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "operationId": "createPet",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {"schema": {"title": "PetCreate", "type": "object", "properties": {"name": {"type": "string"}}}}
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_request_body_names(&spec);
+        assert!(!names.is_empty(), "request body should be lifted");
+        let v = serde_json::to_value(&spec).unwrap();
+        let rb_ref = v["paths"]["/pets"]["post"]["requestBody"]["$ref"]
+            .as_str()
+            .expect("requestBody must be lifted");
+        // Nested schema is also lifted.
+        assert_eq!(
+            schema_in_lifted_content(&v, rb_ref, "application/json")["$ref"],
+            "#/components/schemas/PetCreate"
+        );
+    }
+
+    #[test]
+    fn identical_inline_request_bodies_dedupe_to_one_component() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}},
+                "/b": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}}
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["paths"]["/a"]["post"]["requestBody"]["$ref"],
+            v["paths"]["/b"]["post"]["requestBody"]["$ref"],
+        );
+        assert_eq!(lifted_request_body_names(&spec).len(), 1);
+    }
+
+    #[test]
+    fn loader_resolves_external_request_body_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({
+                    "PetCreate": {"content": {"application/json": {"schema": {"type": "string"}}}}
+                }),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"post": {"requestBody": {"$ref": "shared.json#/PetCreate"}, "responses": {"200": {"description": "ok"}}}}
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        let v = serde_json::to_value(&spec).unwrap();
+        let s = v["paths"]["/a"]["post"]["requestBody"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert!(s.starts_with("#/components/requestBodies/"), "got `{s}`");
+        assert!(!lifted_request_body_names(&spec).is_empty());
+    }
+
+    // ── Headers: lift contract + dedup ─────────────────────────────────
+
+    fn lifted_header_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.headers.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_headers_lift_to_components_headers() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-Rate": {"schema": {"title": "Rate", "type": "integer"}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_header_names(&spec);
+        assert!(!names.is_empty(), "header should be lifted");
+        // The schema inside the lifted header is itself lifted.
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp_ref = v["paths"]["/x"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
+        let header_ref = v["components"]["responses"][resp_name]["headers"]["X-Rate"]["$ref"]
+            .as_str()
+            .expect("X-Rate header must be a ref");
+        let header_name = header_ref.trim_start_matches("#/components/headers/");
+        assert_eq!(
+            v["components"]["headers"][header_name]["schema"]["$ref"],
+            "#/components/schemas/Rate"
+        );
+    }
+
+    #[test]
+    fn identical_inline_headers_dedupe_to_one_component() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-A": {"schema": {"type": "string"}},
+                                    "X-B": {"schema": {"type": "string"}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert_eq!(lifted_header_names(&spec).len(), 1);
+    }
+
+    #[test]
+    fn loader_resolves_external_header_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({"Rate": {"schema": {"type": "integer"}}}),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {"get": {"responses": {"200": {"description": "ok", "headers": {"X-Rate": {"$ref": "shared.json#/Rate"}}}}}}
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_header_names(&spec).is_empty());
+    }
+
+    // ── MediaTypes: lift contract + dedup ──────────────────────────────
+
+    fn lifted_media_type_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.media_types.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_media_types_lift_to_components_media_types() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "requestBody": {"content": {"application/json": {"schema": {"title": "Body", "type": "string"}}}},
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(
+            !lifted_media_type_names(&spec).is_empty(),
+            "mediaType should be lifted, got bag {:?}",
+            lifted_media_type_names(&spec),
+        );
+        // Walk RB -> mediaType -> schema.
+        let v = serde_json::to_value(&spec).unwrap();
+        let rb_ref = v["paths"]["/x"]["post"]["requestBody"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            schema_in_lifted_content(&v, rb_ref, "application/json")["$ref"],
+            "#/components/schemas/Body"
+        );
+    }
+
+    #[test]
+    fn identical_inline_media_types_dedupe_to_one_component() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}},
+                "/b": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}}
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert_eq!(lifted_media_type_names(&spec).len(), 1);
+    }
+
+    #[test]
+    fn loader_resolves_external_media_type_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({"JsonBody": {"schema": {"type": "string"}}}),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"post": {"requestBody": {"content": {"application/json": {"$ref": "shared.json#/JsonBody"}}}, "responses": {"200": {"description": "ok"}}}}
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_media_type_names(&spec).is_empty());
+    }
+
+    // ── Examples: lift contract + dedup ────────────────────────────────
+
+    fn lifted_example_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.examples.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_examples_lift_to_components_examples() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [
+                            {"name": "tag", "in": "query", "schema": {"type": "string"}, "examples": {
+                                "Dog": {"summary": "a dog", "value": "dog"},
+                                "Cat": {"summary": "a cat", "value": "cat"}
+                            }}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_example_names(&spec);
+        assert!(names.len() >= 2, "expected 2 examples, got {names:?}");
+    }
+
+    #[test]
+    fn identical_inline_examples_dedupe_to_one_component() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [
+                            {"name": "a", "in": "query", "schema": {"type": "string"}, "examples": {"X": {"value": "v"}}},
+                            {"name": "b", "in": "query", "schema": {"type": "string"}, "examples": {"X": {"value": "v"}}}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert_eq!(lifted_example_names(&spec).len(), 1);
+    }
+
+    #[test]
+    fn loader_resolves_external_example_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("shared.json", serde_json::json!({"Dog": {"value": "dog"}}))
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [
+                            {"name": "tag", "in": "query", "schema": {"type": "string"}, "examples": {"Dog": {"$ref": "shared.json#/Dog"}}}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_example_names(&spec).is_empty());
+    }
+
+    // ── Links: lift contract + dedup ───────────────────────────────────
+
+    fn lifted_link_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.links.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_links_lift_to_components_links() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "responses": {
+                            "201": {
+                                "description": "created",
+                                "links": {
+                                    "GetPet": {"operationId": "getPet"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(!lifted_link_names(&spec).is_empty());
+    }
+
+    #[test]
+    fn loader_resolves_external_link_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({"GetPet": {"operationId": "getPet"}}),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "responses": {
+                            "201": {
+                                "description": "created",
+                                "links": {"GetPet": {"$ref": "shared.json#/GetPet"}}
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_link_names(&spec).is_empty());
+    }
+
+    // ── Callbacks: lift contract + dedup ───────────────────────────────
+
+    fn lifted_callback_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.callbacks.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_callbacks_lift_to_components_callbacks() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "operationId": "createPet",
+                        "callbacks": {
+                            "onPing": {
+                                "{$request.body#/url}": {
+                                    "post": {
+                                        "responses": {"200": {"description": "ack"}}
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(!lifted_callback_names(&spec).is_empty());
+    }
+
+    #[test]
+    fn loader_resolves_external_callback_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({
+                    "OnPing": {
+                        "{$request.body#/url}": {
+                            "post": {"responses": {"200": {"description": "ack"}}}
+                        }
+                    }
+                }),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "callbacks": {"onPing": {"$ref": "shared.json#/OnPing"}},
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_callback_names(&spec).is_empty());
+    }
+
+    // ── PathItems: pre-existing-bag recursion only ─────────────────────
+
+    fn lifted_path_item_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.path_items.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn existing_components_path_items_keep_names_and_recurse_children() {
+        // Pre-existing `components.pathItems` entries keep their
+        // names; their nested inline schemas / parameters / etc.
+        // still lift. Operations on `paths.<path>` are *not* lifted
+        // into `components.pathItems`.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {"responses": {"200": {"description": "ok"}}}
+                }
+            },
+            "components": {
+                "pathItems": {
+                    "Echo": {
+                        "post": {
+                            "responses": {
+                                "200": {
+                                    "description": "echoed",
+                                    "content": {"application/json": {"schema": {"title": "EchoBody", "type": "string"}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let pi_names = lifted_path_item_names(&spec);
+        assert!(pi_names.contains(&"Echo".to_owned()), "got {pi_names:?}");
+        // The schema inside Echo's response is lifted.
+        let schema_names = lifted_schema_names(&spec);
+        assert!(
+            schema_names.contains(&"EchoBody".to_owned()),
+            "got {schema_names:?}",
+        );
+        // paths./pets is *not* turned into a $ref to components.pathItems.
+        let v = serde_json::to_value(&spec).unwrap();
+        assert!(
+            v["paths"]["/pets"]["get"].is_object(),
+            "paths./pets.get must stay inline, got {:?}",
+            v["paths"]["/pets"]["get"],
+        );
+    }
+
+    #[test]
+    fn existing_components_in_every_bag_are_preserved_and_recursed() {
+        // One spec with pre-existing entries in every component bag.
+        // Each entry's nested inline schema gets lifted into
+        // `components.schemas`; the bag entries themselves keep
+        // their names.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "requestBodies": {
+                    "MyBody": {"content": {"application/json": {"schema": {"title": "BodyT", "type": "string"}}}}
+                },
+                "headers": {
+                    "MyHeader": {"schema": {"title": "HeaderT", "type": "string"}}
+                },
+                "mediaTypes": {
+                    "MyMt": {"schema": {"title": "MtT", "type": "string"}}
+                },
+                "callbacks": {
+                    "MyCb": {"{$request.body#/url}": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"title": "CbT", "type": "string"}}}}}}}}
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let schemas = lifted_schema_names(&spec);
+        for s in ["BodyT", "HeaderT", "MtT", "CbT"] {
+            assert!(
+                schemas.contains(&s.to_owned()),
+                "missing `{s}`: {schemas:?}"
+            );
+        }
+        assert!(lifted_request_body_names(&spec).contains(&"MyBody".to_owned()));
+        assert!(lifted_header_names(&spec).contains(&"MyHeader".to_owned()));
+        assert!(lifted_media_type_names(&spec).contains(&"MyMt".to_owned()));
+        assert!(lifted_callback_names(&spec).contains(&"MyCb".to_owned()));
+    }
+
+    #[test]
+    fn external_container_refs_left_alone_without_loader() {
+        // For every container type that can hold an external `$ref`,
+        // verify that without a loader the slot is left untouched
+        // (the early-return branch in each `lift_ref_or_*`). This
+        // includes the "leaf" container types `Example` and `Link`,
+        // exercised at the parameter / response level where they
+        // naturally appear.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "parameters": [{"$ref": "shared.json#/PageParam"}],
+                        "requestBody": {"$ref": "shared.json#/Body"},
+                        "responses": {
+                            "200": {"$ref": "shared.json#/Resp"},
+                            // Inline response so we can exercise
+                            // external link / header refs inside it.
+                            "201": {
+                                "description": "created",
+                                "headers": {"X-Rate": {"$ref": "shared.json#/Rate"}},
+                                "content": {"application/json": {"$ref": "shared.json#/Mt"}},
+                                "links": {"GetPet": {"$ref": "shared.json#/Link"}}
+                            }
+                        },
+                        "callbacks": {"OnPing": {"$ref": "shared.json#/Cb"}}
+                    },
+                    "get": {
+                        // Inline parameter so we can exercise an
+                        // external example ref inside its `examples`
+                        // map.
+                        "parameters": [
+                            {
+                                "name": "tag",
+                                "in": "query",
+                                "schema": {"type": "string"},
+                                "examples": {"Dog": {"$ref": "shared.json#/Dog"}}
+                            }
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("no loader, no lift");
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["paths"]["/x"]["post"]["parameters"][0]["$ref"],
+            "shared.json#/PageParam"
+        );
+        assert_eq!(
+            v["paths"]["/x"]["post"]["requestBody"]["$ref"],
+            "shared.json#/Body"
+        );
+        assert_eq!(
+            v["paths"]["/x"]["post"]["responses"]["200"]["$ref"],
+            "shared.json#/Resp"
+        );
+        assert_eq!(
+            v["paths"]["/x"]["post"]["callbacks"]["OnPing"]["$ref"],
+            "shared.json#/Cb"
+        );
+        // 201 response is now lifted; navigate through it to verify
+        // every inner external ref stuck (header, content/mediaType,
+        // link).
+        let resp_ref = v["paths"]["/x"]["post"]["responses"]["201"]["$ref"]
+            .as_str()
+            .expect("201 response was lifted");
+        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
+        assert_eq!(
+            v["components"]["responses"][resp_name]["headers"]["X-Rate"]["$ref"],
+            "shared.json#/Rate"
+        );
+        assert_eq!(
+            v["components"]["responses"][resp_name]["content"]["application/json"]["$ref"],
+            "shared.json#/Mt"
+        );
+        assert_eq!(
+            v["components"]["responses"][resp_name]["links"]["GetPet"]["$ref"],
+            "shared.json#/Link"
+        );
+        // The /x.get parameter is lifted; navigate to confirm the
+        // example ref stuck.
+        let p_ref = v["paths"]["/x"]["get"]["parameters"][0]["$ref"]
+            .as_str()
+            .expect("parameter was lifted");
+        let p_name = p_ref.trim_start_matches("#/components/parameters/");
+        assert_eq!(
+            v["components"]["parameters"][p_name]["examples"]["Dog"]["$ref"],
+            "shared.json#/Dog"
+        );
+    }
+
+    #[test]
+    fn response_with_internal_ref_is_left_alone() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {"get": {"responses": {"200": {"$ref": "#/components/responses/Existing"}}}}
+            },
+            "components": {
+                "responses": {"Existing": {"description": "shared"}}
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["paths"]["/a"]["get"]["responses"]["200"]["$ref"],
+            "#/components/responses/Existing"
+        );
     }
 }
