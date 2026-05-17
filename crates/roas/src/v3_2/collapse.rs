@@ -18,11 +18,11 @@
 //! structurally identical sources collapse together.
 //!
 //! Bags lifted in this module today: `schemas`, `parameters`,
-//! `responses`, `requestBodies`. Recursion goes leaf-up — schemas
-//! are lifted before their containing parameters / responses /
-//! requestBodies, so each parent's canonical JSON has its children
-//! already substituted for refs before it goes through dedup.
-//! `headers`, `examples`, `links`, `callbacks`, `pathItems`,
+//! `responses`, `requestBodies`, `headers`. Recursion goes leaf-up
+//! — schemas are lifted before their containing parameters /
+//! headers / responses / requestBodies, so each parent's canonical
+//! JSON has its children already substituted for refs before it goes
+//! through dedup. `examples`, `links`, `callbacks`, `pathItems`,
 //! `mediaTypes` follow in subsequent commits.
 //!
 //! This is the OAS 3.2 implementation; v3.0 / v3.1 / v2 follow in
@@ -104,6 +104,11 @@ pub(crate) fn collapse_spec(
         .as_mut()
         .and_then(|c| c.request_bodies.take())
         .unwrap_or_default();
+    let initial_headers = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.headers.take())
+        .unwrap_or_default();
 
     let mut collapser = Collapser {
         schemas: BTreeMap::new(),
@@ -114,6 +119,8 @@ pub(crate) fn collapse_spec(
         responses_seen: HashMap::new(),
         request_bodies: BTreeMap::new(),
         request_bodies_seen: HashMap::new(),
+        headers: BTreeMap::new(),
+        headers_seen: HashMap::new(),
         loader,
     };
 
@@ -159,6 +166,16 @@ pub(crate) fn collapse_spec(
                 .or_insert_with(|| name.clone());
         }
         collapser.request_bodies.insert(name, value);
+    }
+    for (name, value) in initial_headers {
+        if let RefOr::Item(h) = &value {
+            let canonical = serde_json::to_string(h)?;
+            collapser
+                .headers_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.headers.insert(name, value);
     }
 
     // ── Phase 2a: recurse into pre-existing components.schemas ───────
@@ -241,6 +258,24 @@ pub(crate) fn collapse_spec(
         }
     }
 
+    // Same for components.headers.
+    let existing_header_names: Vec<String> = collapser.headers.keys().cloned().collect();
+    for name in existing_header_names {
+        if let Some(RefOr::Item(_)) = collapser.headers.get(&name) {
+            let Some(RefOr::Item(mut h)) = collapser.headers.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "headers", &name]);
+            collapser.walk_header(&mut h, ctx)?;
+            let canonical = serde_json::to_string(&h)?;
+            collapser
+                .headers_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.headers.insert(name, RefOr::new_item(h));
+        }
+    }
+
     // ── Phase 2b: walk the rest of the spec ──────────────────────────
     if let Some(paths) = spec.paths.as_mut() {
         collapser.walk_paths(paths, NameContext::new(["paths"]))?;
@@ -275,6 +310,9 @@ pub(crate) fn collapse_spec(
             .get_or_insert_with(Default::default)
             .request_bodies = Some(collapser.request_bodies);
     }
+    if !collapser.headers.is_empty() {
+        spec.components.get_or_insert_with(Default::default).headers = Some(collapser.headers);
+    }
 
     Ok(())
 }
@@ -295,6 +333,9 @@ struct Collapser<'a> {
     /// In-progress `components.requestBodies` bag.
     request_bodies: BTreeMap<String, RefOr<RequestBody>>,
     request_bodies_seen: HashMap<String, String>,
+    /// In-progress `components.headers` bag.
+    headers: BTreeMap<String, RefOr<Header>>,
+    headers_seen: HashMap<String, String>,
     /// Optional loader for resolving external `$ref`s.
     loader: Option<&'a mut Loader>,
 }
@@ -433,7 +474,7 @@ impl<'a> Collapser<'a> {
     ) -> Result<(), CollapseError> {
         if let Some(headers) = response.headers.as_mut() {
             for (name, h) in headers.iter_mut() {
-                self.walk_ref_or_header(h, ctx.push(&format!("headers.{name}")))?;
+                self.lift_ref_or_header(h, ctx.push(&format!("headers.{name}")))?;
             }
         }
         if let Some(content) = response.content.as_mut() {
@@ -444,15 +485,49 @@ impl<'a> Collapser<'a> {
         Ok(())
     }
 
-    fn walk_ref_or_header(
+    /// Lift an inline `RefOr<Header>`: recurse first (lift nested
+    /// schema + content media-type schemas), intern the header,
+    /// rewrite the slot to a `#/components/headers/<name>` ref.
+    /// External `$ref`s resolve via the loader when present.
+    fn lift_ref_or_header(
         &mut self,
-        item: &mut RefOr<Header>,
+        slot: &mut RefOr<Header>,
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
-        if let RefOr::Item(h) = item {
-            self.walk_header(h, ctx)?;
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: Header =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_header(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_header(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/headers/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut header) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_header(&mut header, ctx.clone())?;
+                let name = self.intern_header(header, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/headers/{name}"));
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn walk_header(&mut self, header: &mut Header, ctx: NameContext) -> Result<(), CollapseError> {
@@ -676,14 +751,9 @@ impl<'a> Collapser<'a> {
         ctx: NameContext,
     ) -> Result<(), CollapseError> {
         // `components.schemas`, `components.parameters`,
-        // `components.responses`, and `components.requestBodies` are
-        // handled separately by phases 1 + 2a above; this walks every
-        // other bag for nested slots.
-        if let Some(map) = components.headers.as_mut() {
-            for (name, h) in map.iter_mut() {
-                self.walk_ref_or_header(h, ctx.push(&format!("headers.{name}")))?;
-            }
-        }
+        // `components.responses`, `components.requestBodies`, and
+        // `components.headers` are handled separately by phases 1 + 2a
+        // above; this walks every other bag for nested slots.
         if let Some(map) = components.path_items.as_mut() {
             for (name, pi) in map.iter_mut() {
                 self.walk_path_item(pi, ctx.push(&format!("pathItems.{name}")))?;
@@ -925,6 +995,21 @@ impl<'a> Collapser<'a> {
         self.request_bodies_seen.insert(canonical, name.clone());
         self.request_bodies
             .insert(name.clone(), RefOr::new_item(rb));
+        Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Header`.
+    /// Header has no canonical name field — naming is
+    /// context-derived (typically the header key pushed by the walker).
+    fn intern_header(&mut self, header: Header, ctx: NameContext) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&header)?;
+        if let Some(existing) = self.headers_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.headers, &base);
+        self.headers_seen.insert(canonical, name.clone());
+        self.headers.insert(name.clone(), RefOr::new_item(header));
         Ok(name)
     }
 
@@ -2811,6 +2896,100 @@ mod tests {
             .unwrap();
         assert!(s.starts_with("#/components/requestBodies/"), "got `{s}`");
         assert!(!lifted_request_body_names(&spec).is_empty());
+    }
+
+    // ── Headers: lift contract + dedup ─────────────────────────────────
+
+    fn lifted_header_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.headers.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_headers_lift_to_components_headers() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-Rate": {"schema": {"title": "Rate", "type": "integer"}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_header_names(&spec);
+        assert!(!names.is_empty(), "header should be lifted");
+        // The schema inside the lifted header is itself lifted.
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp_ref = v["paths"]["/x"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
+        let header_ref = v["components"]["responses"][resp_name]["headers"]["X-Rate"]["$ref"]
+            .as_str()
+            .expect("X-Rate header must be a ref");
+        let header_name = header_ref.trim_start_matches("#/components/headers/");
+        assert_eq!(
+            v["components"]["headers"][header_name]["schema"]["$ref"],
+            "#/components/schemas/Rate"
+        );
+    }
+
+    #[test]
+    fn identical_inline_headers_dedupe_to_one_component() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-A": {"schema": {"type": "string"}},
+                                    "X-B": {"schema": {"type": "string"}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert_eq!(lifted_header_names(&spec).len(), 1);
+    }
+
+    #[test]
+    fn loader_resolves_external_header_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({"Rate": {"schema": {"type": "integer"}}}),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {"get": {"responses": {"200": {"description": "ok", "headers": {"X-Rate": {"$ref": "shared.json#/Rate"}}}}}}
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_header_names(&spec).is_empty());
     }
 
     #[test]
