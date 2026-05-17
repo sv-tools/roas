@@ -19,10 +19,10 @@
 //!
 //! Bags lifted in this module today: `schemas`, `parameters`,
 //! `responses`, `requestBodies`, `headers`, `mediaTypes`,
-//! `examples`. Recursion goes leaf-up — schemas / examples are
-//! lifted before their containing mediaTypes / parameters / headers,
-//! those before their containing responses / requestBodies.
-//! `links`, `callbacks`, `pathItems` follow in subsequent commits.
+//! `examples`, `links`. Recursion goes leaf-up — schemas / examples
+//! / links are lifted before their containing mediaTypes /
+//! parameters / headers / responses / requestBodies. `callbacks`,
+//! `pathItems` follow in subsequent commits.
 //!
 //! This is the OAS 3.2 implementation; v3.0 / v3.1 / v2 follow in
 //! subsequent PRs.
@@ -37,6 +37,7 @@ use crate::v3_2::callback::Callback;
 use crate::v3_2::components::Components;
 use crate::v3_2::example::Example;
 use crate::v3_2::header::Header;
+use crate::v3_2::link::Link;
 use crate::v3_2::media_type::MediaType;
 use crate::v3_2::operation::Operation;
 use crate::v3_2::parameter::Parameter;
@@ -119,6 +120,11 @@ pub(crate) fn collapse_spec(
         .as_mut()
         .and_then(|c| c.examples.take())
         .unwrap_or_default();
+    let initial_links = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.links.take())
+        .unwrap_or_default();
 
     let mut collapser = Collapser {
         schemas: BTreeMap::new(),
@@ -135,6 +141,8 @@ pub(crate) fn collapse_spec(
         media_types_seen: HashMap::new(),
         examples: BTreeMap::new(),
         examples_seen: HashMap::new(),
+        links: BTreeMap::new(),
+        links_seen: HashMap::new(),
         loader,
     };
 
@@ -210,6 +218,16 @@ pub(crate) fn collapse_spec(
                 .or_insert_with(|| name.clone());
         }
         collapser.examples.insert(name, value);
+    }
+    for (name, value) in initial_links {
+        if let RefOr::Item(l) = &value {
+            let canonical = serde_json::to_string(l)?;
+            collapser
+                .links_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.links.insert(name, value);
     }
 
     // ── Phase 2a: recurse into pre-existing components.schemas ───────
@@ -375,6 +393,9 @@ pub(crate) fn collapse_spec(
             .get_or_insert_with(Default::default)
             .examples = Some(collapser.examples);
     }
+    if !collapser.links.is_empty() {
+        spec.components.get_or_insert_with(Default::default).links = Some(collapser.links);
+    }
 
     Ok(())
 }
@@ -404,6 +425,9 @@ struct Collapser<'a> {
     /// In-progress `components.examples` bag.
     examples: BTreeMap<String, RefOr<Example>>,
     examples_seen: HashMap<String, String>,
+    /// In-progress `components.links` bag.
+    links: BTreeMap<String, RefOr<Link>>,
+    links_seen: HashMap<String, String>,
     /// Optional loader for resolving external `$ref`s.
     loader: Option<&'a mut Loader>,
 }
@@ -548,6 +572,11 @@ impl<'a> Collapser<'a> {
         if let Some(content) = response.content.as_mut() {
             for (mime, mt) in content.iter_mut() {
                 self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+            }
+        }
+        if let Some(links) = response.links.as_mut() {
+            for (name, l) in links.iter_mut() {
+                self.lift_ref_or_link(l, ctx.push(&format!("links.{name}")))?;
             }
         }
         Ok(())
@@ -1174,6 +1203,60 @@ impl<'a> Collapser<'a> {
         self.examples_seen.insert(canonical, name.clone());
         self.examples.insert(name.clone(), RefOr::new_item(example));
         Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Link`. Leaf
+    /// type — no recursion. Context-derived naming.
+    fn intern_link(&mut self, link: Link, ctx: NameContext) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&link)?;
+        if let Some(existing) = self.links_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.links, &base);
+        self.links_seen.insert(canonical, name.clone());
+        self.links.insert(name.clone(), RefOr::new_item(link));
+        Ok(name)
+    }
+
+    /// Lift an inline `RefOr<Link>` into `components.links`. No
+    /// recursion needed (Link has no nested `RefOr` slots).
+    fn lift_ref_or_link(
+        &mut self,
+        slot: &mut RefOr<Link>,
+        ctx: NameContext,
+    ) -> Result<(), CollapseError> {
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let fetched: Link = loader.resolve_reference_as(&reference).map_err(|source| {
+                    CollapseError::External {
+                        reference: reference.clone(),
+                        source,
+                    }
+                })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                let name = self.intern_link(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/links/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(link) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                let name = self.intern_link(link, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/links/{name}"));
+                Ok(())
+            }
+        }
     }
 
     /// Lift an inline `RefOr<Example>` into `components.examples`.
@@ -3360,6 +3443,69 @@ mod tests {
         }));
         spec.collapse(Some(&mut loader)).unwrap();
         assert!(!lifted_example_names(&spec).is_empty());
+    }
+
+    // ── Links: lift contract + dedup ───────────────────────────────────
+
+    fn lifted_link_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.links.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_links_lift_to_components_links() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "responses": {
+                            "201": {
+                                "description": "created",
+                                "links": {
+                                    "GetPet": {"operationId": "getPet"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(!lifted_link_names(&spec).is_empty());
+    }
+
+    #[test]
+    fn loader_resolves_external_link_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({"GetPet": {"operationId": "getPet"}}),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "responses": {
+                            "201": {
+                                "description": "created",
+                                "links": {"GetPet": {"$ref": "shared.json#/GetPet"}}
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_link_names(&spec).is_empty());
     }
 
     #[test]
