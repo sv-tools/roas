@@ -1,47 +1,36 @@
-//! `Spec::collapse` — lift every inline component out of the spec tree
-//! into `components.<bag>`.
+//! `Spec::collapse` for OAS 3.2 — lift every inline component into
+//! `components.<bag>`.
 //!
-//! Walks the entire spec, replacing each inline `RefOr::Item<T>` with a
-//! `RefOr::Ref` pointing at a freshly-interned entry under
-//! `components.<bag>.<name>`. Schemas get a name from `schema.title`
-//! when present; every other component type derives its name from a
-//! sanitised dot-joined path through the spec tree. Structurally
-//! identical components (serde-canonical JSON equality) collapse to a
-//! single entry; every call site that previously held the same inline
-//! shape now points at the same `$ref`.
+//! All of the heavy lifting (dedup, naming, the generic `lift_ref_or`
+//! routine, the `LiftableBag` trait, the `Bag<T>` storage) lives in
+//! [`crate::common::collapse`]. This module just provides the v3.2
+//! pieces:
 //!
-//! When the caller passes a [`Loader`], every external `$ref` (anything
-//! not starting with `#`) is fetched, parsed as the bag's concrete
-//! type, run through the same recursion + dedup pipeline, and rewritten
-//! as a local `#/components/<bag>/<name>` ref. The dedup map is shared
-//! between lifted inline values and fetched external ones, so two
-//! structurally identical sources collapse together.
+//! * The concrete [`Collapser`] struct (one `Bag<T>` field per
+//!   component type plus the loader handle).
+//! * A [`LiftableBag`] impl per component type, with the per-type
+//!   [`tree-walk`](LiftableBag::walk) that calls
+//!   [`lift_ref_or`](crate::common::collapse::lift_ref_or) on every
+//!   nested component slot.
+//! * A small [`collapse_spec`] entrypoint that owns the Collapser,
+//!   runs phase 1 (seed bags) + phase 2a (recurse into pre-existing
+//!   `components.<bag>` entries) + phase 2b (walk paths / webhooks),
+//!   then writes each bag back.
 //!
-//! Bags lifted in this module: `schemas`, `parameters`,
-//! `responses`, `requestBodies`, `headers`, `mediaTypes`,
-//! `examples`, `links`, `callbacks`. Recursion goes leaf-up — leaf
-//! types (schemas, examples, links) lift first; container types
-//! (mediaTypes, parameters, headers, responses, requestBodies,
-//! callbacks) lift after their children.
-//!
-//! `pathItems` is *not* lifted out of its primary locations
-//! (`paths.<path>`, `webhooks.<name>`, `callback.paths.<expr>`)
-//! because doing so would replace every operation site with a
-//! single-level indirection through `components.pathItems`, which
-//! is rarely what callers of `collapse` want. Pre-existing entries
-//! in `components.pathItems` are still seeded into the dedup map
-//! and their nested children (schemas, parameters, etc.) are
-//! lifted.
-//!
-//! This is the OAS 3.2 implementation; v3.0 / v3.1 / v2 follow in
-//! subsequent PRs.
+//! Bags lifted: `schemas`, `parameters`, `responses`,
+//! `requestBodies`, `headers`, `mediaTypes`, `examples`, `links`,
+//! `callbacks`. `pathItems` is *not* lifted out of its primary
+//! locations (`paths.<path>`, `webhooks.<name>`,
+//! `callback.paths.<expr>`) — pre-existing `components.pathItems`
+//! entries are still seeded into the dedup map and their nested
+//! children are lifted.
 
 use std::collections::{BTreeMap, HashMap};
-use std::mem;
 
 use crate::common::bool_or::BoolOr;
-use crate::common::reference::{Ref, RefOr};
-use crate::loader::{Loader, LoaderError};
+use crate::common::collapse::{Bag, HasLoader, LiftableBag, NameContext, lift_ref_or};
+use crate::common::reference::RefOr;
+use crate::loader::Loader;
 use crate::v3_2::callback::Callback;
 use crate::v3_2::example::Example;
 use crate::v3_2::header::Header;
@@ -55,44 +44,541 @@ use crate::v3_2::response::{Response, Responses};
 use crate::v3_2::schema::{ArraySchema, ObjectSchema, Schema, SingleSchema};
 use crate::v3_2::spec::Spec;
 
-const SCHEMA_PREFIX: &str = "#/components/schemas/";
+pub use crate::common::collapse::CollapseError;
 
-/// Error returned by [`Spec::collapse`](crate::v3_2::spec::Spec::collapse).
-///
-/// Only fallible legs are loader-driven external-ref resolution and
-/// JSON serialisation of a schema for dedup; inline tree-rewriting
-/// itself never fails.
-#[derive(Debug, thiserror::Error)]
-pub enum CollapseError {
-    /// The loader was invoked to resolve an external `$ref` and failed —
-    /// no fetcher registered, fetch error, parse error, or missing JSON
-    /// Pointer target. The underlying `LoaderError` is exposed as the
-    /// error source.
-    #[error("failed to resolve external reference `{reference}`")]
-    External {
-        reference: String,
-        #[source]
-        source: LoaderError,
-    },
+// ── Collapser: per-bag state + loader handle ────────────────────────────
 
-    /// A schema couldn't be serialised to JSON for the dedup map. In
-    /// practice every concrete `Schema` is `Serialize` so this only
-    /// surfaces under custom serde error paths; it's exposed rather
-    /// than panicked on so callers can decide their own fallback.
-    #[error("failed to serialise schema for dedup")]
-    Serialize(#[from] serde_json::Error),
+pub(crate) struct Collapser<'a> {
+    schemas: Bag<Schema>,
+    parameters: Bag<Parameter>,
+    responses: Bag<Response>,
+    request_bodies: Bag<RequestBody>,
+    headers: Bag<Header>,
+    media_types: Bag<MediaType>,
+    examples: Bag<Example>,
+    links: Bag<Link>,
+    callbacks: Bag<Callback>,
+    /// PathItem is bare (not wrapped in `RefOr`); its ref form lives
+    /// in `PathItem.reference`. We don't lift inline PathItems out
+    /// of `paths.<path>` / `webhooks.<name>` / callback paths — but
+    /// pre-existing `components.pathItems` entries are still seeded
+    /// here so we can recurse into them and lift their nested
+    /// children.
+    path_items: BTreeMap<String, PathItem>,
+    path_items_seen: HashMap<String, String>,
+    loader: Option<&'a mut Loader>,
 }
 
-/// Crate-internal entrypoint. The public surface is
-/// [`Spec::collapse`](crate::v3_2::spec::Spec::collapse), which
-/// thin-wraps this.
+impl HasLoader for Collapser<'_> {
+    fn loader_mut(&mut self) -> Option<&mut Loader> {
+        self.loader.as_deref_mut()
+    }
+}
+
+// ── LiftableBag impls per component type ────────────────────────────────
+//
+// Each impl spells out (a) the component-bag ref prefix, (b) how to
+// reach this type's bag inside the Collapser, (c) the tree-walking
+// function that lifts nested slots, and (d) an optional name hint.
+// The generic `lift_ref_or` in `common::collapse` does the rest.
+
+impl<'a> LiftableBag<Collapser<'a>> for Schema {
+    const PREFIX: &'static str = "#/components/schemas/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.schemas
+    }
+
+    fn walk(
+        item: &mut Self,
+        ctx: &NameContext,
+        c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        recurse_schema(item, ctx, c)
+    }
+
+    fn name_hint(item: &Self) -> Option<String> {
+        schema_title(item).map(str::to_owned)
+    }
+}
+
+impl<'a> LiftableBag<Collapser<'a>> for Parameter {
+    const PREFIX: &'static str = "#/components/parameters/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.parameters
+    }
+
+    fn walk(
+        item: &mut Self,
+        ctx: &NameContext,
+        c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        walk_parameter(item, ctx, c)
+    }
+
+    fn name_hint(item: &Self) -> Option<String> {
+        let hint = parameter_name_hint(item);
+        if hint.is_empty() { None } else { Some(hint) }
+    }
+}
+
+impl<'a> LiftableBag<Collapser<'a>> for Response {
+    const PREFIX: &'static str = "#/components/responses/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.responses
+    }
+
+    fn walk(
+        item: &mut Self,
+        ctx: &NameContext,
+        c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        walk_response(item, ctx, c)
+    }
+}
+
+impl<'a> LiftableBag<Collapser<'a>> for RequestBody {
+    const PREFIX: &'static str = "#/components/requestBodies/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.request_bodies
+    }
+
+    fn walk(
+        item: &mut Self,
+        ctx: &NameContext,
+        c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        walk_request_body(item, ctx, c)
+    }
+}
+
+impl<'a> LiftableBag<Collapser<'a>> for Header {
+    const PREFIX: &'static str = "#/components/headers/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.headers
+    }
+
+    fn walk(
+        item: &mut Self,
+        ctx: &NameContext,
+        c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        walk_header(item, ctx, c)
+    }
+}
+
+impl<'a> LiftableBag<Collapser<'a>> for MediaType {
+    const PREFIX: &'static str = "#/components/mediaTypes/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.media_types
+    }
+
+    fn walk(
+        item: &mut Self,
+        ctx: &NameContext,
+        c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        walk_media_type(item, ctx, c)
+    }
+}
+
+impl<'a> LiftableBag<Collapser<'a>> for Example {
+    const PREFIX: &'static str = "#/components/examples/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.examples
+    }
+
+    fn walk(
+        _item: &mut Self,
+        _ctx: &NameContext,
+        _c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        // `Example` is a leaf — no nested RefOr slots to lift.
+        Ok(())
+    }
+}
+
+impl<'a> LiftableBag<Collapser<'a>> for Link {
+    const PREFIX: &'static str = "#/components/links/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.links
+    }
+
+    fn walk(
+        _item: &mut Self,
+        _ctx: &NameContext,
+        _c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        // `Link` is a leaf — no nested RefOr slots to lift.
+        Ok(())
+    }
+}
+
+impl<'a> LiftableBag<Collapser<'a>> for Callback {
+    const PREFIX: &'static str = "#/components/callbacks/";
+
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+        &mut c.callbacks
+    }
+
+    fn walk(
+        item: &mut Self,
+        ctx: &NameContext,
+        c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        walk_callback(item, ctx, c)
+    }
+}
+
+// ── Walkers: per-type tree recursion ────────────────────────────────────
+//
+// Each walker is a free function (not a method on Collapser) so it
+// can take `&mut Collapser` alongside the item it's walking. The
+// items here have always been removed from their containing bag by
+// the time the walker fires (via `mem::replace` inside
+// `lift_ref_or`), so there's no aliasing.
+
+fn recurse_schema(
+    schema: &mut Schema,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    match schema {
+        Schema::Bool(_) | Schema::Empty(_) | Schema::Multi(_) => Ok(()),
+        Schema::AllOf(s) => {
+            for (i, child) in s.all_of.iter_mut().enumerate() {
+                lift_ref_or::<Schema, _>(child, ctx.push(&format!("allOf[{i}]")), c)?;
+            }
+            Ok(())
+        }
+        Schema::AnyOf(s) => {
+            for (i, child) in s.any_of.iter_mut().enumerate() {
+                lift_ref_or::<Schema, _>(child, ctx.push(&format!("anyOf[{i}]")), c)?;
+            }
+            Ok(())
+        }
+        Schema::OneOf(s) => {
+            for (i, child) in s.one_of.iter_mut().enumerate() {
+                lift_ref_or::<Schema, _>(child, ctx.push(&format!("oneOf[{i}]")), c)?;
+            }
+            Ok(())
+        }
+        Schema::Not(s) => lift_ref_or::<Schema, _>(&mut s.not, ctx.push("not"), c),
+        Schema::Single(s) => recurse_single_schema(s.as_mut(), ctx, c),
+    }
+}
+
+fn recurse_single_schema(
+    s: &mut SingleSchema,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    match s {
+        SingleSchema::Object(o) => recurse_object_schema(o, ctx, c),
+        SingleSchema::Array(a) => recurse_array_schema(a, ctx, c),
+        // Primitive variants (String, Integer, Number, Boolean, Null)
+        // carry no nested schema slots.
+        _ => Ok(()),
+    }
+}
+
+fn recurse_object_schema(
+    o: &mut ObjectSchema,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(props) = o.properties.as_mut() {
+        for (name, child) in props.iter_mut() {
+            lift_ref_or::<Schema, _>(child, ctx.push(&format!("properties.{name}")), c)?;
+        }
+    }
+    if let Some(props) = o.pattern_properties.as_mut() {
+        for (name, child) in props.iter_mut() {
+            lift_ref_or::<Schema, _>(child, ctx.push(&format!("patternProperties.{name}")), c)?;
+        }
+    }
+    if let Some(BoolOr::Item(s)) = o.additional_properties.as_mut() {
+        lift_ref_or::<Schema, _>(s, ctx.push("additionalProperties"), c)?;
+    }
+    if let Some(BoolOr::Item(s)) = o.unevaluated_properties.as_mut() {
+        lift_ref_or::<Schema, _>(s, ctx.push("unevaluatedProperties"), c)?;
+    }
+    if let Some(s) = o.property_names.as_mut() {
+        lift_ref_or::<Schema, _>(s, ctx.push("propertyNames"), c)?;
+    }
+    Ok(())
+}
+
+fn recurse_array_schema(
+    a: &mut ArraySchema,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(BoolOr::Item(s)) = a.items.as_mut() {
+        lift_ref_or::<Schema, _>(s, ctx.push("items"), c)?;
+    }
+    Ok(())
+}
+
+fn walk_parameter(
+    param: &mut Parameter,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    // Push the parameter's `name` into ctx so derived child names
+    // mention it. Querystring is the odd one out: per OAS 3.2 it
+    // carries `content` only and forbids `schema`.
+    match param {
+        Parameter::Path(p) => walk_param_slots(
+            ctx.push(p.name.as_str()),
+            p.schema.as_mut(),
+            p.content.as_mut(),
+            p.examples.as_mut(),
+            c,
+        ),
+        Parameter::Query(p) => walk_param_slots(
+            ctx.push(p.name.as_str()),
+            p.schema.as_mut(),
+            p.content.as_mut(),
+            p.examples.as_mut(),
+            c,
+        ),
+        Parameter::Header(p) => walk_param_slots(
+            ctx.push(p.name.as_str()),
+            p.schema.as_mut(),
+            p.content.as_mut(),
+            p.examples.as_mut(),
+            c,
+        ),
+        Parameter::Cookie(p) => walk_param_slots(
+            ctx.push(p.name.as_str()),
+            p.schema.as_mut(),
+            p.content.as_mut(),
+            p.examples.as_mut(),
+            c,
+        ),
+        Parameter::Querystring(p) => {
+            let ctx = ctx.push(p.name.as_str());
+            for (mime, mt) in p.content.iter_mut() {
+                lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+            }
+            if let Some(examples) = p.examples.as_mut() {
+                for (name, e) in examples.iter_mut() {
+                    lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn walk_param_slots(
+    ctx: NameContext,
+    schema: Option<&mut RefOr<Schema>>,
+    content: Option<&mut BTreeMap<String, RefOr<MediaType>>>,
+    examples: Option<&mut BTreeMap<String, RefOr<Example>>>,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(s) = schema {
+        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+    }
+    if let Some(content) = content {
+        for (mime, mt) in content.iter_mut() {
+            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+        }
+    }
+    if let Some(examples) = examples {
+        for (name, e) in examples.iter_mut() {
+            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_response(
+    r: &mut Response,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(headers) = r.headers.as_mut() {
+        for (name, h) in headers.iter_mut() {
+            lift_ref_or::<Header, _>(h, ctx.push(&format!("headers.{name}")), c)?;
+        }
+    }
+    if let Some(content) = r.content.as_mut() {
+        for (mime, mt) in content.iter_mut() {
+            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+        }
+    }
+    if let Some(links) = r.links.as_mut() {
+        for (name, l) in links.iter_mut() {
+            lift_ref_or::<Link, _>(l, ctx.push(&format!("links.{name}")), c)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_responses(
+    responses: &mut Responses,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(default) = responses.default.as_mut() {
+        lift_ref_or::<Response, _>(default, ctx.push("default"), c)?;
+    }
+    if let Some(map) = responses.responses.as_mut() {
+        for (status, resp) in map.iter_mut() {
+            lift_ref_or::<Response, _>(resp, ctx.push(status), c)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_request_body(
+    rb: &mut RequestBody,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    for (mime, mt) in rb.content.iter_mut() {
+        lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+    }
+    Ok(())
+}
+
+fn walk_header(
+    h: &mut Header,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(s) = h.schema.as_mut() {
+        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+    }
+    if let Some(content) = h.content.as_mut() {
+        for (mime, mt) in content.iter_mut() {
+            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+        }
+    }
+    if let Some(examples) = h.examples.as_mut() {
+        for (name, e) in examples.iter_mut() {
+            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_media_type(
+    mt: &mut MediaType,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(s) = mt.schema.as_mut() {
+        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+    }
+    if let Some(s) = mt.item_schema.as_mut() {
+        lift_ref_or::<Schema, _>(s, ctx.push("itemSchema"), c)?;
+    }
+    if let Some(examples) = mt.examples.as_mut() {
+        for (name, e) in examples.iter_mut() {
+            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_callback(
+    cb: &mut Callback,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    for (expr, pi) in cb.paths.iter_mut() {
+        walk_path_item(pi, ctx.push(expr), c)?;
+    }
+    Ok(())
+}
+
+fn walk_path_item(
+    pi: &mut PathItem,
+    ctx: NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(params) = pi.parameters.as_mut() {
+        for (i, p) in params.iter_mut().enumerate() {
+            lift_ref_or::<Parameter, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
+        }
+    }
+    if let Some(ops) = pi.operations.as_mut() {
+        for (method, op) in ops.iter_mut() {
+            walk_operation(op, ctx.push(method), c)?;
+        }
+    }
+    if let Some(ops) = pi.additional_operations.as_mut() {
+        for (method, op) in ops.iter_mut() {
+            walk_operation(op, ctx.push(method), c)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_operation(
+    op: &mut Operation,
+    ctx: NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    // Prefer `operationId` for naming the operation's children — it's
+    // the canonical, author-chosen identifier and keeps derived names
+    // stable across spec edits.
+    let ctx = match op.operation_id.as_deref() {
+        Some(id) if !id.is_empty() => NameContext::new([id]),
+        _ => ctx,
+    };
+    if let Some(params) = op.parameters.as_mut() {
+        for (i, p) in params.iter_mut().enumerate() {
+            lift_ref_or::<Parameter, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
+        }
+    }
+    if let Some(rb) = op.request_body.as_mut() {
+        lift_ref_or::<RequestBody, _>(rb, ctx.push("requestBody"), c)?;
+    }
+    if let Some(responses) = op.responses.as_mut() {
+        walk_responses(responses, &ctx.push("responses"), c)?;
+    }
+    if let Some(callbacks) = op.callbacks.as_mut() {
+        for (name, cb) in callbacks.iter_mut() {
+            lift_ref_or::<Callback, _>(cb, ctx.push(name), c)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_paths(
+    paths: &mut Paths,
+    ctx: NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    // `paths.<path>` PathItems are walked (lifting nested schemas /
+    // parameters / responses inside them) but the PathItem itself is
+    // *not* lifted to `components.pathItems` — see the module
+    // docstring.
+    for (path_key, pi) in paths.paths.iter_mut() {
+        walk_path_item(pi, ctx.push(path_key), c)?;
+    }
+    Ok(())
+}
+
+// ── Orchestration ──────────────────────────────────────────────────────
+
 pub(crate) fn collapse_spec(
     spec: &mut Spec,
     loader: Option<&mut Loader>,
 ) -> Result<(), CollapseError> {
-    // Take each existing components bag out of the spec so the
-    // Collapser owns it mutably while we walk the rest of the tree.
-    // We write each one back at the very end.
+    // Phase 0: take each existing components bag out of the spec.
     let initial_schemas = spec
         .components
         .as_mut()
@@ -144,1339 +630,168 @@ pub(crate) fn collapse_spec(
         .and_then(|c| c.path_items.take())
         .unwrap_or_default();
 
-    let mut collapser = Collapser {
-        schemas: BTreeMap::new(),
-        schemas_seen: HashMap::new(),
-        parameters: BTreeMap::new(),
-        parameters_seen: HashMap::new(),
-        responses: BTreeMap::new(),
-        responses_seen: HashMap::new(),
-        request_bodies: BTreeMap::new(),
-        request_bodies_seen: HashMap::new(),
-        headers: BTreeMap::new(),
-        headers_seen: HashMap::new(),
-        media_types: BTreeMap::new(),
-        media_types_seen: HashMap::new(),
-        examples: BTreeMap::new(),
-        examples_seen: HashMap::new(),
-        links: BTreeMap::new(),
-        links_seen: HashMap::new(),
-        callbacks: BTreeMap::new(),
-        callbacks_seen: HashMap::new(),
+    let mut c = Collapser {
+        schemas: Bag::default(),
+        parameters: Bag::default(),
+        responses: Bag::default(),
+        request_bodies: Bag::default(),
+        headers: Bag::default(),
+        media_types: Bag::default(),
+        examples: Bag::default(),
+        links: Bag::default(),
+        callbacks: Bag::default(),
         path_items: BTreeMap::new(),
         path_items_seen: HashMap::new(),
         loader,
     };
 
-    // ── Phase 1: seed pre-existing components.* bags ────────────────
-    // Each pre-existing entry keeps its name; we seed the dedup map so
-    // newly-lifted equivalents collapse onto the existing names.
-    for (name, value) in initial_schemas {
-        if let RefOr::Item(schema) = &value {
-            let canonical = serde_json::to_string(schema)?;
-            collapser
-                .schemas_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.schemas.insert(name, value);
-    }
-    for (name, value) in initial_parameters {
-        if let RefOr::Item(p) = &value {
-            let canonical = serde_json::to_string(p)?;
-            collapser
-                .parameters_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.parameters.insert(name, value);
-    }
-    for (name, value) in initial_responses {
-        if let RefOr::Item(r) = &value {
-            let canonical = serde_json::to_string(r)?;
-            collapser
-                .responses_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.responses.insert(name, value);
-    }
-    for (name, value) in initial_request_bodies {
-        if let RefOr::Item(rb) = &value {
-            let canonical = serde_json::to_string(rb)?;
-            collapser
-                .request_bodies_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.request_bodies.insert(name, value);
-    }
-    for (name, value) in initial_headers {
-        if let RefOr::Item(h) = &value {
-            let canonical = serde_json::to_string(h)?;
-            collapser
-                .headers_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.headers.insert(name, value);
-    }
-    for (name, value) in initial_media_types {
-        if let RefOr::Item(m) = &value {
-            let canonical = serde_json::to_string(m)?;
-            collapser
-                .media_types_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.media_types.insert(name, value);
-    }
-    for (name, value) in initial_examples {
-        if let RefOr::Item(e) = &value {
-            let canonical = serde_json::to_string(e)?;
-            collapser
-                .examples_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.examples.insert(name, value);
-    }
-    for (name, value) in initial_links {
-        if let RefOr::Item(l) = &value {
-            let canonical = serde_json::to_string(l)?;
-            collapser
-                .links_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.links.insert(name, value);
-    }
-    for (name, value) in initial_callbacks {
-        if let RefOr::Item(c) = &value {
-            let canonical = serde_json::to_string(c)?;
-            collapser
-                .callbacks_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.callbacks.insert(name, value);
-    }
-    for (name, value) in initial_path_items {
-        // `PathItem` is bare; skip pure-ref entries (whose
-        // `reference` field is the only thing set) from dedup so
-        // we don't intern the placeholder shape.
-        if value.reference.is_none() {
-            let canonical = serde_json::to_string(&value)?;
-            collapser
-                .path_items_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        collapser.path_items.insert(name, value);
-    }
-
-    // ── Phase 2a: recurse into pre-existing components.schemas ───────
-    // Pull each entry out by name, recurse into it (which lifts nested
-    // schemas back into `self.schemas`), and put it back. Working on
-    // owned data sidesteps the aliasing problem of mutating the bag
-    // while we're iterating it.
-    let existing_names: Vec<String> = collapser.schemas.keys().cloned().collect();
-    for name in existing_names {
-        if let Some(RefOr::Item(_)) = collapser.schemas.get(&name) {
-            let Some(RefOr::Item(mut schema)) = collapser.schemas.remove(&name) else {
-                continue;
-            };
-            let ctx = NameContext::new(["components", "schemas", &name]);
-            collapser.recurse_schema(&mut schema, &ctx)?;
-            // Refresh the dedup entry — children may have changed the
-            // canonical form of the parent.
-            let canonical = serde_json::to_string(&schema)?;
-            collapser
-                .schemas_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-            collapser.schemas.insert(name, RefOr::new_item(schema));
-        }
-    }
-
-    // Same Phase 2a treatment for components.parameters: pre-existing
-    // entries keep their names, but their inline nested schemas / content
-    // schemas still get lifted into `self.schemas`.
-    let existing_param_names: Vec<String> = collapser.parameters.keys().cloned().collect();
-    for name in existing_param_names {
-        if let Some(RefOr::Item(_)) = collapser.parameters.get(&name) {
-            let Some(RefOr::Item(mut param)) = collapser.parameters.remove(&name) else {
-                continue;
-            };
-            let ctx = NameContext::new(["components", "parameters", &name]);
-            collapser.walk_parameter(&mut param, ctx)?;
-            let canonical = serde_json::to_string(&param)?;
-            collapser
-                .parameters_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-            collapser.parameters.insert(name, RefOr::new_item(param));
-        }
-    }
-
-    // Same for components.responses.
-    let existing_resp_names: Vec<String> = collapser.responses.keys().cloned().collect();
-    for name in existing_resp_names {
-        if let Some(RefOr::Item(_)) = collapser.responses.get(&name) {
-            let Some(RefOr::Item(mut resp)) = collapser.responses.remove(&name) else {
-                continue;
-            };
-            let ctx = NameContext::new(["components", "responses", &name]);
-            collapser.walk_response(&mut resp, ctx)?;
-            let canonical = serde_json::to_string(&resp)?;
-            collapser
-                .responses_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-            collapser.responses.insert(name, RefOr::new_item(resp));
-        }
-    }
-
-    // Same for components.requestBodies.
-    let existing_rb_names: Vec<String> = collapser.request_bodies.keys().cloned().collect();
-    for name in existing_rb_names {
-        if let Some(RefOr::Item(_)) = collapser.request_bodies.get(&name) {
-            let Some(RefOr::Item(mut rb)) = collapser.request_bodies.remove(&name) else {
-                continue;
-            };
-            let ctx = NameContext::new(["components", "requestBodies", &name]);
-            collapser.walk_request_body(&mut rb, ctx)?;
-            let canonical = serde_json::to_string(&rb)?;
-            collapser
-                .request_bodies_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-            collapser.request_bodies.insert(name, RefOr::new_item(rb));
-        }
-    }
-
-    // Same for components.headers.
-    let existing_header_names: Vec<String> = collapser.headers.keys().cloned().collect();
-    for name in existing_header_names {
-        if let Some(RefOr::Item(_)) = collapser.headers.get(&name) {
-            let Some(RefOr::Item(mut h)) = collapser.headers.remove(&name) else {
-                continue;
-            };
-            let ctx = NameContext::new(["components", "headers", &name]);
-            collapser.walk_header(&mut h, ctx)?;
-            let canonical = serde_json::to_string(&h)?;
-            collapser
-                .headers_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-            collapser.headers.insert(name, RefOr::new_item(h));
-        }
-    }
-
-    // Same for components.mediaTypes.
-    let existing_mt_names: Vec<String> = collapser.media_types.keys().cloned().collect();
-    for name in existing_mt_names {
-        if let Some(RefOr::Item(_)) = collapser.media_types.get(&name) {
-            let Some(RefOr::Item(mut mt)) = collapser.media_types.remove(&name) else {
-                continue;
-            };
-            let ctx = NameContext::new(["components", "mediaTypes", &name]);
-            collapser.walk_media_type(&mut mt, ctx)?;
-            let canonical = serde_json::to_string(&mt)?;
-            collapser
-                .media_types_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-            collapser.media_types.insert(name, RefOr::new_item(mt));
-        }
-    }
-
-    // Same for components.callbacks.
-    let existing_cb_names: Vec<String> = collapser.callbacks.keys().cloned().collect();
-    for name in existing_cb_names {
-        if let Some(RefOr::Item(_)) = collapser.callbacks.get(&name) {
-            let Some(RefOr::Item(mut cb)) = collapser.callbacks.remove(&name) else {
-                continue;
-            };
-            let ctx = NameContext::new(["components", "callbacks", &name]);
-            collapser.walk_callback(&mut cb, ctx)?;
-            let canonical = serde_json::to_string(&cb)?;
-            collapser
-                .callbacks_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-            collapser.callbacks.insert(name, RefOr::new_item(cb));
-        }
-    }
-
-    // Same for components.pathItems — but skip entries that are
-    // already in ref form (`reference` is Some). PathItem is bare
-    // (not wrapped in `RefOr`), so the "inline vs ref" probe is on
-    // `pi.reference.is_none()` rather than `RefOr::Item(_)`.
-    let existing_pi_names: Vec<String> = collapser.path_items.keys().cloned().collect();
-    for name in existing_pi_names {
-        if let Some(pi) = collapser.path_items.get(&name)
-            && pi.reference.is_none()
-        {
-            let Some(mut pi) = collapser.path_items.remove(&name) else {
-                continue;
-            };
-            let ctx = NameContext::new(["components", "pathItems", &name]);
-            collapser.walk_path_item(&mut pi, ctx)?;
+    // Phase 1: seed every bag from its existing entries. The dedup
+    // map gets pre-populated so newly-lifted equivalents collapse
+    // onto the existing names.
+    c.schemas.seed(initial_schemas)?;
+    c.parameters.seed(initial_parameters)?;
+    c.responses.seed(initial_responses)?;
+    c.request_bodies.seed(initial_request_bodies)?;
+    c.headers.seed(initial_headers)?;
+    c.media_types.seed(initial_media_types)?;
+    c.examples.seed(initial_examples)?;
+    c.links.seed(initial_links)?;
+    c.callbacks.seed(initial_callbacks)?;
+    // PathItems is bare — seed the dedup map and the entry map by
+    // hand. Only inline (reference: None) entries participate in
+    // dedup; ref-form ones are pure pointers.
+    for (name, pi) in initial_path_items {
+        if pi.reference.is_none() {
             let canonical = serde_json::to_string(&pi)?;
-            collapser
-                .path_items_seen
+            c.path_items_seen
                 .entry(canonical)
                 .or_insert_with(|| name.clone());
-            collapser.path_items.insert(name, pi);
         }
+        c.path_items.insert(name, pi);
     }
 
-    // ── Phase 2b: walk the rest of the spec ──────────────────────────
+    // Phase 2a: recurse into each pre-existing inline component,
+    // lifting its nested children. We compose this from the
+    // `inline_names` / `take_inline` / `put_inline` primitives so the
+    // walker has full `&mut Collapser` access during the recurse.
+    recurse_existing::<Schema>(&mut c, &["components", "schemas"])?;
+    recurse_existing::<Parameter>(&mut c, &["components", "parameters"])?;
+    recurse_existing::<Response>(&mut c, &["components", "responses"])?;
+    recurse_existing::<RequestBody>(&mut c, &["components", "requestBodies"])?;
+    recurse_existing::<Header>(&mut c, &["components", "headers"])?;
+    recurse_existing::<MediaType>(&mut c, &["components", "mediaTypes"])?;
+    // Examples and links are leaves — nothing to recurse INTO.
+    recurse_existing::<Callback>(&mut c, &["components", "callbacks"])?;
+
+    // PathItem phase 2a: only the inline (reference == None) entries
+    // get walked. Skip the ref-form ones (they're already pointers).
+    let pi_names: Vec<String> = c.path_items.keys().cloned().collect();
+    for name in pi_names {
+        let is_inline = c
+            .path_items
+            .get(&name)
+            .is_some_and(|pi| pi.reference.is_none());
+        if !is_inline {
+            continue;
+        }
+        let Some(mut pi) = c.path_items.remove(&name) else {
+            continue;
+        };
+        let ctx = NameContext::new(["components", "pathItems", &name]);
+        walk_path_item(&mut pi, ctx, &mut c)?;
+        let canonical = serde_json::to_string(&pi)?;
+        c.path_items_seen
+            .entry(canonical)
+            .or_insert_with(|| name.clone());
+        c.path_items.insert(name, pi);
+    }
+
+    // Phase 2b: walk paths and webhooks. (Components were drained
+    // into bags in Phase 0; there's nothing else to visit.)
     if let Some(paths) = spec.paths.as_mut() {
-        collapser.walk_paths(paths, NameContext::new(["paths"]))?;
+        walk_paths(paths, NameContext::new(["paths"]), &mut c)?;
     }
     if let Some(webhooks) = spec.webhooks.as_mut() {
-        collapser.walk_paths(webhooks, NameContext::new(["webhooks"]))?;
+        walk_paths(webhooks, NameContext::new(["webhooks"]), &mut c)?;
     }
-    // Note: there's no phase-2b pass over `spec.components.<bag>`
-    // here — every bag is owned by phase 1+2a (take it out, recurse,
-    // intern back). Writing the bags back happens below.
 
-    // Write each lifted bag back to its slot under `components`. The
-    // `get_or_insert_with` only creates a `Components` when at least
-    // one bag is non-empty; an unconditional touch would leave a
-    // stray empty `components: {}` on collapse-of-empty-input round
-    // trips.
-    if !collapser.schemas.is_empty() {
-        spec.components.get_or_insert_with(Default::default).schemas = Some(collapser.schemas);
+    // Phase 3: write each lifted bag back to its slot under
+    // `components`. Skip empty bags so a no-op collapse doesn't
+    // materialise an empty `components: {}` map.
+    if !c.schemas.is_empty() {
+        spec.components.get_or_insert_with(Default::default).schemas = Some(c.schemas.into_map());
     }
-    if !collapser.parameters.is_empty() {
+    if !c.parameters.is_empty() {
         spec.components
             .get_or_insert_with(Default::default)
-            .parameters = Some(collapser.parameters);
+            .parameters = Some(c.parameters.into_map());
     }
-    if !collapser.responses.is_empty() {
+    if !c.responses.is_empty() {
         spec.components
             .get_or_insert_with(Default::default)
-            .responses = Some(collapser.responses);
+            .responses = Some(c.responses.into_map());
     }
-    if !collapser.request_bodies.is_empty() {
+    if !c.request_bodies.is_empty() {
         spec.components
             .get_or_insert_with(Default::default)
-            .request_bodies = Some(collapser.request_bodies);
+            .request_bodies = Some(c.request_bodies.into_map());
     }
-    if !collapser.headers.is_empty() {
-        spec.components.get_or_insert_with(Default::default).headers = Some(collapser.headers);
+    if !c.headers.is_empty() {
+        spec.components.get_or_insert_with(Default::default).headers = Some(c.headers.into_map());
     }
-    if !collapser.media_types.is_empty() {
+    if !c.media_types.is_empty() {
         spec.components
             .get_or_insert_with(Default::default)
-            .media_types = Some(collapser.media_types);
+            .media_types = Some(c.media_types.into_map());
     }
-    if !collapser.examples.is_empty() {
+    if !c.examples.is_empty() {
         spec.components
             .get_or_insert_with(Default::default)
-            .examples = Some(collapser.examples);
+            .examples = Some(c.examples.into_map());
     }
-    if !collapser.links.is_empty() {
-        spec.components.get_or_insert_with(Default::default).links = Some(collapser.links);
+    if !c.links.is_empty() {
+        spec.components.get_or_insert_with(Default::default).links = Some(c.links.into_map());
     }
-    if !collapser.callbacks.is_empty() {
+    if !c.callbacks.is_empty() {
         spec.components
             .get_or_insert_with(Default::default)
-            .callbacks = Some(collapser.callbacks);
+            .callbacks = Some(c.callbacks.into_map());
     }
-    if !collapser.path_items.is_empty() {
+    if !c.path_items.is_empty() {
         spec.components
             .get_or_insert_with(Default::default)
-            .path_items = Some(collapser.path_items);
+            .path_items = Some(c.path_items);
     }
 
     Ok(())
 }
 
-struct Collapser<'a> {
-    /// In-progress `components.schemas` bag. Grows as schemas are lifted.
-    schemas: BTreeMap<String, RefOr<Schema>>,
-    /// Per-bag dedup map: canonical-JSON-serialised `Schema` →
-    /// component name. Kept separate from other bags' dedup maps
-    /// because each bag holds a different type.
-    schemas_seen: HashMap<String, String>,
-    /// In-progress `components.parameters` bag.
-    parameters: BTreeMap<String, RefOr<Parameter>>,
-    parameters_seen: HashMap<String, String>,
-    /// In-progress `components.responses` bag.
-    responses: BTreeMap<String, RefOr<Response>>,
-    responses_seen: HashMap<String, String>,
-    /// In-progress `components.requestBodies` bag.
-    request_bodies: BTreeMap<String, RefOr<RequestBody>>,
-    request_bodies_seen: HashMap<String, String>,
-    /// In-progress `components.headers` bag.
-    headers: BTreeMap<String, RefOr<Header>>,
-    headers_seen: HashMap<String, String>,
-    /// In-progress `components.mediaTypes` bag (v3.2-only).
-    media_types: BTreeMap<String, RefOr<MediaType>>,
-    media_types_seen: HashMap<String, String>,
-    /// In-progress `components.examples` bag.
-    examples: BTreeMap<String, RefOr<Example>>,
-    examples_seen: HashMap<String, String>,
-    /// In-progress `components.links` bag.
-    links: BTreeMap<String, RefOr<Link>>,
-    links_seen: HashMap<String, String>,
-    /// In-progress `components.callbacks` bag.
-    callbacks: BTreeMap<String, RefOr<Callback>>,
-    callbacks_seen: HashMap<String, String>,
-    /// In-progress `components.pathItems` bag. `PathItem` is bare
-    /// (not wrapped in `RefOr`); its ref form lives in
-    /// `PathItem.reference`.
-    path_items: BTreeMap<String, PathItem>,
-    path_items_seen: HashMap<String, String>,
-    /// Optional loader for resolving external `$ref`s.
-    loader: Option<&'a mut Loader>,
+/// Generic phase-2a driver: snapshot inline names of `T`'s bag,
+/// pull each out, walk via the trait's `walk`, put back with
+/// refreshed canonical form.
+fn recurse_existing<T>(c: &mut Collapser<'_>, ctx_root: &[&str]) -> Result<(), CollapseError>
+where
+    T: for<'b> LiftableBag<Collapser<'b>>,
+{
+    let names = T::bag(c).inline_names();
+    for name in names {
+        let Some(mut item) = T::bag(c).take_inline(&name) else {
+            continue;
+        };
+        let mut parts: Vec<String> = ctx_root.iter().map(|s| (*s).to_owned()).collect();
+        parts.push(name.clone());
+        let ctx = NameContext::new(parts);
+        T::walk(&mut item, &ctx, c)?;
+        T::bag(c).put_inline(name, item)?;
+    }
+    Ok(())
 }
 
-impl<'a> Collapser<'a> {
-    // ── Spec-tree walk ──────────────────────────────────────────────
+// ── Version-specific helpers ────────────────────────────────────────────
 
-    fn walk_paths(&mut self, paths: &mut Paths, ctx: NameContext) -> Result<(), CollapseError> {
-        // Note: `paths.<path>` PathItems are walked (lifting nested
-        // schemas / parameters / responses inside them) but the
-        // PathItem itself is *not* lifted to `components.pathItems`
-        // — that would replace every `paths.<path>` with a `$ref`
-        // and bury operations under one extra indirection, which is
-        // rarely what callers of `collapse` want. Pre-existing
-        // entries in `components.pathItems` are still kept (and
-        // recursed into) by phase 2a.
-        for (path_key, path_item) in paths.paths.iter_mut() {
-            self.walk_path_item(path_item, ctx.push(path_key))?;
-        }
-        Ok(())
-    }
-
-    fn walk_path_item(
-        &mut self,
-        path_item: &mut PathItem,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        if let Some(params) = path_item.parameters.as_mut() {
-            for (i, p) in params.iter_mut().enumerate() {
-                self.lift_ref_or_parameter(p, ctx.push(&format!("parameters[{i}]")))?;
-            }
-        }
-        if let Some(ops) = path_item.operations.as_mut() {
-            for (method, op) in ops.iter_mut() {
-                self.walk_operation(op, ctx.push(method))?;
-            }
-        }
-        if let Some(ops) = path_item.additional_operations.as_mut() {
-            for (method, op) in ops.iter_mut() {
-                self.walk_operation(op, ctx.push(method))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn walk_operation(
-        &mut self,
-        op: &mut Operation,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        // Prefer `operationId` for naming the operation's children —
-        // it's the canonical, author-chosen identifier and keeps
-        // derived names like `<operationId>Request` / `<operationId>200`
-        // stable across spec edits.
-        let ctx = match op.operation_id.as_deref() {
-            Some(id) if !id.is_empty() => NameContext::new([id]),
-            _ => ctx,
-        };
-        if let Some(params) = op.parameters.as_mut() {
-            for (i, p) in params.iter_mut().enumerate() {
-                self.lift_ref_or_parameter(p, ctx.push(&format!("parameters[{i}]")))?;
-            }
-        }
-        if let Some(rb) = op.request_body.as_mut() {
-            self.lift_ref_or_request_body(rb, ctx.push("requestBody"))?;
-        }
-        if let Some(responses) = op.responses.as_mut() {
-            self.walk_responses(responses, ctx.push("responses"))?;
-        }
-        if let Some(callbacks) = op.callbacks.as_mut() {
-            for (name, cb) in callbacks.iter_mut() {
-                self.lift_ref_or_callback(cb, ctx.push(name))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn walk_responses(
-        &mut self,
-        responses: &mut Responses,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        if let Some(default) = responses.default.as_mut() {
-            self.lift_ref_or_response(default, ctx.push("default"))?;
-        }
-        if let Some(map) = responses.responses.as_mut() {
-            for (status, resp) in map.iter_mut() {
-                self.lift_ref_or_response(resp, ctx.push(status))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Lift an inline `RefOr<Response>`: recurse into the response
-    /// (lifting nested headers / content schemas first), intern it,
-    /// rewrite the slot to a `#/components/responses/<name>` ref.
-    /// External `$ref`s are resolved via the loader when present;
-    /// internal refs are left alone.
-    fn lift_ref_or_response(
-        &mut self,
-        slot: &mut RefOr<Response>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let mut fetched: Response =
-                    loader.resolve_reference_as(&reference).map_err(|source| {
-                        CollapseError::External {
-                            reference: reference.clone(),
-                            source,
-                        }
-                    })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                self.walk_response(&mut fetched, derived_ctx.clone())?;
-                let name = self.intern_response(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/responses/{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(mut response) = owned else {
-                    unreachable!("matched RefOr::Item above");
-                };
-                self.walk_response(&mut response, ctx.clone())?;
-                let name = self.intern_response(response, ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/responses/{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    fn walk_response(
-        &mut self,
-        response: &mut Response,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        if let Some(headers) = response.headers.as_mut() {
-            for (name, h) in headers.iter_mut() {
-                self.lift_ref_or_header(h, ctx.push(&format!("headers.{name}")))?;
-            }
-        }
-        if let Some(content) = response.content.as_mut() {
-            for (mime, mt) in content.iter_mut() {
-                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
-            }
-        }
-        if let Some(links) = response.links.as_mut() {
-            for (name, l) in links.iter_mut() {
-                self.lift_ref_or_link(l, ctx.push(&format!("links.{name}")))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Lift an inline `RefOr<Header>`: recurse first (lift nested
-    /// schema + content media-type schemas), intern the header,
-    /// rewrite the slot to a `#/components/headers/<name>` ref.
-    /// External `$ref`s resolve via the loader when present.
-    fn lift_ref_or_header(
-        &mut self,
-        slot: &mut RefOr<Header>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let mut fetched: Header =
-                    loader.resolve_reference_as(&reference).map_err(|source| {
-                        CollapseError::External {
-                            reference: reference.clone(),
-                            source,
-                        }
-                    })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                self.walk_header(&mut fetched, derived_ctx.clone())?;
-                let name = self.intern_header(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/headers/{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(mut header) = owned else {
-                    unreachable!("matched RefOr::Item above");
-                };
-                self.walk_header(&mut header, ctx.clone())?;
-                let name = self.intern_header(header, ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/headers/{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    fn walk_header(&mut self, header: &mut Header, ctx: NameContext) -> Result<(), CollapseError> {
-        if let Some(s) = header.schema.as_mut() {
-            self.lift_ref_or_schema(s, ctx.push("schema"))?;
-        }
-        if let Some(content) = header.content.as_mut() {
-            for (mime, mt) in content.iter_mut() {
-                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
-            }
-        }
-        if let Some(examples) = header.examples.as_mut() {
-            for (name, e) in examples.iter_mut() {
-                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Lift an inline `RefOr<MediaType>`: recurse first (lift nested
-    /// `schema` / `itemSchema`), intern, rewrite the slot to a
-    /// `#/components/mediaTypes/<name>` ref. External `$ref`s
-    /// resolve via the loader when present.
-    fn lift_ref_or_media_type(
-        &mut self,
-        slot: &mut RefOr<MediaType>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let mut fetched: MediaType =
-                    loader.resolve_reference_as(&reference).map_err(|source| {
-                        CollapseError::External {
-                            reference: reference.clone(),
-                            source,
-                        }
-                    })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                self.walk_media_type(&mut fetched, derived_ctx.clone())?;
-                let name = self.intern_media_type(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/mediaTypes/{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(mut mt) = owned else {
-                    unreachable!("matched RefOr::Item above");
-                };
-                self.walk_media_type(&mut mt, ctx.clone())?;
-                let name = self.intern_media_type(mt, ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/mediaTypes/{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    fn walk_media_type(
-        &mut self,
-        mt: &mut MediaType,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        if let Some(s) = mt.schema.as_mut() {
-            self.lift_ref_or_schema(s, ctx.push("schema"))?;
-        }
-        if let Some(s) = mt.item_schema.as_mut() {
-            self.lift_ref_or_schema(s, ctx.push("itemSchema"))?;
-        }
-        if let Some(examples) = mt.examples.as_mut() {
-            for (name, e) in examples.iter_mut() {
-                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Lift an inline `RefOr<Parameter>`: recurse into the parameter
-    /// (lifting its nested `schema` / `content[…].schema` first),
-    /// intern the resulting parameter, rewrite the slot to a
-    /// `#/components/parameters/<name>` ref. External `$ref`s are
-    /// resolved via the loader when one is present; internal refs are
-    /// left alone.
-    fn lift_ref_or_parameter(
-        &mut self,
-        slot: &mut RefOr<Parameter>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let mut fetched: Parameter =
-                    loader.resolve_reference_as(&reference).map_err(|source| {
-                        CollapseError::External {
-                            reference: reference.clone(),
-                            source,
-                        }
-                    })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                self.walk_parameter(&mut fetched, derived_ctx.clone())?;
-                let name = self.intern_parameter(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/parameters/{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(mut parameter) = owned else {
-                    unreachable!("matched RefOr::Item above");
-                };
-                self.walk_parameter(&mut parameter, ctx.clone())?;
-                let name = self.intern_parameter(parameter, ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/parameters/{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    fn walk_parameter(
-        &mut self,
-        param: &mut Parameter,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        // Push the parameter's `name` field so derived schema names
-        // mention it: `getPets_parameters[0]_limit_schema` is more
-        // readable than the bare index. Querystring is the odd one
-        // out: per OAS 3.2, it carries `content` only and forbids
-        // `schema`, so we walk its `content` map directly.
-        match param {
-            Parameter::Path(p) => self.walk_param_slots(
-                ctx.push(p.name.as_str()),
-                p.schema.as_mut(),
-                p.content.as_mut(),
-                p.examples.as_mut(),
-            ),
-            Parameter::Query(p) => self.walk_param_slots(
-                ctx.push(p.name.as_str()),
-                p.schema.as_mut(),
-                p.content.as_mut(),
-                p.examples.as_mut(),
-            ),
-            Parameter::Header(p) => self.walk_param_slots(
-                ctx.push(p.name.as_str()),
-                p.schema.as_mut(),
-                p.content.as_mut(),
-                p.examples.as_mut(),
-            ),
-            Parameter::Cookie(p) => self.walk_param_slots(
-                ctx.push(p.name.as_str()),
-                p.schema.as_mut(),
-                p.content.as_mut(),
-                p.examples.as_mut(),
-            ),
-            Parameter::Querystring(p) => {
-                let ctx = ctx.push(p.name.as_str());
-                for (mime, mt) in p.content.iter_mut() {
-                    self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
-                }
-                if let Some(examples) = p.examples.as_mut() {
-                    for (name, e) in examples.iter_mut() {
-                        self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn walk_param_slots(
-        &mut self,
-        ctx: NameContext,
-        schema: Option<&mut RefOr<Schema>>,
-        content: Option<&mut BTreeMap<String, RefOr<MediaType>>>,
-        examples: Option<&mut BTreeMap<String, RefOr<Example>>>,
-    ) -> Result<(), CollapseError> {
-        if let Some(s) = schema {
-            self.lift_ref_or_schema(s, ctx.push("schema"))?;
-        }
-        if let Some(content) = content {
-            for (mime, mt) in content.iter_mut() {
-                self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
-            }
-        }
-        if let Some(examples) = examples {
-            for (name, e) in examples.iter_mut() {
-                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Walk into a `RequestBody`, lifting its content schemas. Used
-    /// by both phase 2a (pre-existing components.requestBodies) and
-    /// the lift path on inline bodies.
-    fn walk_request_body(
-        &mut self,
-        rb: &mut RequestBody,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        for (mime, mt) in rb.content.iter_mut() {
-            self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
-        }
-        Ok(())
-    }
-
-    /// Lift an inline `RefOr<RequestBody>`: recurse into the body
-    /// first (lift nested content schemas), intern, rewrite the slot
-    /// to a `#/components/requestBodies/<name>` ref. External `$ref`s
-    /// are resolved via the loader when present; internal refs are
-    /// left alone.
-    fn lift_ref_or_request_body(
-        &mut self,
-        slot: &mut RefOr<RequestBody>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let mut fetched: RequestBody =
-                    loader.resolve_reference_as(&reference).map_err(|source| {
-                        CollapseError::External {
-                            reference: reference.clone(),
-                            source,
-                        }
-                    })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                self.walk_request_body(&mut fetched, derived_ctx.clone())?;
-                let name = self.intern_request_body(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/requestBodies/{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(mut rb) = owned else {
-                    unreachable!("matched RefOr::Item above");
-                };
-                self.walk_request_body(&mut rb, ctx.clone())?;
-                let name = self.intern_request_body(rb, ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/requestBodies/{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    /// Walk into a `Callback`: recurse into every `(expression,
-    /// PathItem)` entry so the nested operations / responses /
-    /// requestBodies inside lift first. The PathItem itself is not
-    /// lifted to `components.pathItems` — see the note on
-    /// `walk_paths`.
-    fn walk_callback(&mut self, cb: &mut Callback, ctx: NameContext) -> Result<(), CollapseError> {
-        for (expr, pi) in cb.paths.iter_mut() {
-            self.walk_path_item(pi, ctx.push(expr))?;
-        }
-        Ok(())
-    }
-
-    /// Lift an inline `RefOr<Callback>`: recurse first (lift nested
-    /// PathItem contents), intern, rewrite the slot to a
-    /// `#/components/callbacks/<name>` ref.
-    fn lift_ref_or_callback(
-        &mut self,
-        slot: &mut RefOr<Callback>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let mut fetched: Callback =
-                    loader.resolve_reference_as(&reference).map_err(|source| {
-                        CollapseError::External {
-                            reference: reference.clone(),
-                            source,
-                        }
-                    })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                self.walk_callback(&mut fetched, derived_ctx.clone())?;
-                let name = self.intern_callback(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/callbacks/{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(mut cb) = owned else {
-                    unreachable!("matched RefOr::Item above");
-                };
-                self.walk_callback(&mut cb, ctx.clone())?;
-                let name = self.intern_callback(cb, ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/callbacks/{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    /// Same shape as [`Self::intern_schema`] but for `Callback`.
-    /// Context-derived naming (typically the callback name pushed
-    /// by the walker).
-    fn intern_callback(&mut self, cb: Callback, ctx: NameContext) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&cb)?;
-        if let Some(existing) = self.callbacks_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let base = ctx.derive_name();
-        let name = unique_name(&self.callbacks, &base);
-        self.callbacks_seen.insert(canonical, name.clone());
-        self.callbacks.insert(name.clone(), RefOr::new_item(cb));
-        Ok(name)
-    }
-
-    // ── Lift + dedup core ──────────────────────────────────────────
-
-    /// Lift an inline `RefOr<Schema>`: recurse into nested schemas
-    /// first (so children are already refs before we serialize the
-    /// parent for dedup), intern the result, rewrite the slot to a
-    /// `#/components/schemas/<name>` ref. External `$ref`s are
-    /// resolved via the loader when one is present; internal refs
-    /// (`#/...`) are left alone.
-    fn lift_ref_or_schema(
-        &mut self,
-        slot: &mut RefOr<Schema>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                // External ref. With a loader, fetch + lift; without
-                // one, leave the ref alone.
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let mut fetched: Schema =
-                    loader.resolve_reference_as(&reference).map_err(|source| {
-                        CollapseError::External {
-                            reference: reference.clone(),
-                            source,
-                        }
-                    })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                self.recurse_schema(&mut fetched, &derived_ctx)?;
-                let name = self.intern_schema(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("{SCHEMA_PREFIX}{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                // Take ownership out of the slot so we can recurse +
-                // intern without aliasing.
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(mut schema) = owned else {
-                    unreachable!("we matched RefOr::Item above");
-                };
-                self.recurse_schema(&mut schema, &ctx)?;
-                let name = self.intern_schema(schema, ctx)?;
-                *slot = RefOr::new_ref(format!("{SCHEMA_PREFIX}{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    /// Recurse into a `Schema`, lifting nested `RefOr<Schema>` slots
-    /// in place. After this returns, every nested inline schema has
-    /// been moved to `self.schemas` and replaced with a `$ref` — so
-    /// serialising `schema` produces canonical JSON we can key the
-    /// dedup map on.
-    fn recurse_schema(
-        &mut self,
-        schema: &mut Schema,
-        ctx: &NameContext,
-    ) -> Result<(), CollapseError> {
-        match schema {
-            Schema::Bool(_) | Schema::Empty(_) | Schema::Multi(_) => Ok(()),
-            Schema::AllOf(s) => {
-                for (i, child) in s.all_of.iter_mut().enumerate() {
-                    self.lift_ref_or_schema(child, ctx.push(&format!("allOf[{i}]")))?;
-                }
-                Ok(())
-            }
-            Schema::AnyOf(s) => {
-                for (i, child) in s.any_of.iter_mut().enumerate() {
-                    self.lift_ref_or_schema(child, ctx.push(&format!("anyOf[{i}]")))?;
-                }
-                Ok(())
-            }
-            Schema::OneOf(s) => {
-                for (i, child) in s.one_of.iter_mut().enumerate() {
-                    self.lift_ref_or_schema(child, ctx.push(&format!("oneOf[{i}]")))?;
-                }
-                Ok(())
-            }
-            Schema::Not(s) => self.lift_ref_or_schema(&mut s.not, ctx.push("not")),
-            Schema::Single(s) => self.recurse_single_schema(s.as_mut(), ctx),
-        }
-    }
-
-    fn recurse_single_schema(
-        &mut self,
-        s: &mut SingleSchema,
-        ctx: &NameContext,
-    ) -> Result<(), CollapseError> {
-        match s {
-            SingleSchema::Object(o) => self.recurse_object_schema(o, ctx),
-            SingleSchema::Array(a) => self.recurse_array_schema(a, ctx),
-            // Primitive variants (String, Integer, Number, Boolean, Null)
-            // carry no nested schema slots.
-            _ => Ok(()),
-        }
-    }
-
-    fn recurse_object_schema(
-        &mut self,
-        o: &mut ObjectSchema,
-        ctx: &NameContext,
-    ) -> Result<(), CollapseError> {
-        if let Some(props) = o.properties.as_mut() {
-            for (name, child) in props.iter_mut() {
-                self.lift_ref_or_schema(child, ctx.push(&format!("properties.{name}")))?;
-            }
-        }
-        if let Some(props) = o.pattern_properties.as_mut() {
-            for (name, child) in props.iter_mut() {
-                self.lift_ref_or_schema(child, ctx.push(&format!("patternProperties.{name}")))?;
-            }
-        }
-        if let Some(BoolOr::Item(s)) = o.additional_properties.as_mut() {
-            self.lift_ref_or_schema(s, ctx.push("additionalProperties"))?;
-        }
-        if let Some(BoolOr::Item(s)) = o.unevaluated_properties.as_mut() {
-            self.lift_ref_or_schema(s, ctx.push("unevaluatedProperties"))?;
-        }
-        if let Some(s) = o.property_names.as_mut() {
-            self.lift_ref_or_schema(s, ctx.push("propertyNames"))?;
-        }
-        Ok(())
-    }
-
-    fn recurse_array_schema(
-        &mut self,
-        a: &mut ArraySchema,
-        ctx: &NameContext,
-    ) -> Result<(), CollapseError> {
-        if let Some(BoolOr::Item(s)) = a.items.as_mut() {
-            self.lift_ref_or_schema(s, ctx.push("items"))?;
-        }
-        Ok(())
-    }
-
-    /// Insert `schema` into the components.schemas bag. If a
-    /// structurally identical schema is already there (canonical-JSON
-    /// equality), return the existing name and drop `schema`.
-    /// Otherwise generate a name (via `title`, falling back to context)
-    /// and insert.
-    ///
-    /// Dedup is *strict*: `title` is part of the canonical form, so
-    /// two schemas that differ only in `title` presence don't collapse.
-    /// First-seen wins for the component name on a dedup hit.
-    fn intern_schema(&mut self, schema: Schema, ctx: NameContext) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&schema)?;
-        if let Some(existing) = self.schemas_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let name = self.generate_name(&schema, &ctx);
-        self.schemas_seen.insert(canonical, name.clone());
-        self.schemas.insert(name.clone(), RefOr::new_item(schema));
-        Ok(name)
-    }
-
-    /// Same shape as [`Self::intern_schema`] but for `Parameter`. No
-    /// `title` field on parameters — we use a `<name><In>` hint
-    /// (e.g., `limitQuery`, `petIdPath`) when the parameter carries a
-    /// non-empty `name`, otherwise the surrounding context.
-    fn intern_parameter(
-        &mut self,
-        parameter: Parameter,
-        ctx: NameContext,
-    ) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&parameter)?;
-        if let Some(existing) = self.parameters_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let hint = parameter_name_hint(&parameter);
-        let base = if hint.is_empty() {
-            ctx.derive_name()
-        } else {
-            sanitize_component_name(hint)
-        };
-        let name = unique_name(&self.parameters, &base);
-        self.parameters_seen.insert(canonical, name.clone());
-        self.parameters
-            .insert(name.clone(), RefOr::new_item(parameter));
-        Ok(name)
-    }
-
-    /// Same shape as [`Self::intern_schema`] but for `Response`.
-    /// Responses have no canonical name field — naming falls back to
-    /// the surrounding context (e.g., the status code pushed by the
-    /// walker).
-    fn intern_response(
-        &mut self,
-        response: Response,
-        ctx: NameContext,
-    ) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&response)?;
-        if let Some(existing) = self.responses_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let base = ctx.derive_name();
-        let name = unique_name(&self.responses, &base);
-        self.responses_seen.insert(canonical, name.clone());
-        self.responses
-            .insert(name.clone(), RefOr::new_item(response));
-        Ok(name)
-    }
-
-    /// Same shape as [`Self::intern_schema`] but for `RequestBody`.
-    /// No canonical name field — naming is context-derived.
-    fn intern_request_body(
-        &mut self,
-        rb: RequestBody,
-        ctx: NameContext,
-    ) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&rb)?;
-        if let Some(existing) = self.request_bodies_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let base = ctx.derive_name();
-        let name = unique_name(&self.request_bodies, &base);
-        self.request_bodies_seen.insert(canonical, name.clone());
-        self.request_bodies
-            .insert(name.clone(), RefOr::new_item(rb));
-        Ok(name)
-    }
-
-    /// Same shape as [`Self::intern_schema`] but for `Header`.
-    /// Header has no canonical name field — naming is
-    /// context-derived (typically the header key pushed by the walker).
-    fn intern_header(&mut self, header: Header, ctx: NameContext) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&header)?;
-        if let Some(existing) = self.headers_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let base = ctx.derive_name();
-        let name = unique_name(&self.headers, &base);
-        self.headers_seen.insert(canonical, name.clone());
-        self.headers.insert(name.clone(), RefOr::new_item(header));
-        Ok(name)
-    }
-
-    /// Same shape as [`Self::intern_schema`] but for `MediaType`.
-    /// No canonical name field — naming is context-derived
-    /// (typically the mime-type pushed by the walker).
-    fn intern_media_type(
-        &mut self,
-        mt: MediaType,
-        ctx: NameContext,
-    ) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&mt)?;
-        if let Some(existing) = self.media_types_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let base = ctx.derive_name();
-        let name = unique_name(&self.media_types, &base);
-        self.media_types_seen.insert(canonical, name.clone());
-        self.media_types.insert(name.clone(), RefOr::new_item(mt));
-        Ok(name)
-    }
-
-    /// Same shape as [`Self::intern_schema`] but for `Example`.
-    /// `Example` carries no canonical name field — naming is
-    /// context-derived (typically the example key pushed by the
-    /// walker). `Example` has no nested `RefOr<T>` fields, so the
-    /// lift path doesn't need to recurse first.
-    fn intern_example(
-        &mut self,
-        example: Example,
-        ctx: NameContext,
-    ) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&example)?;
-        if let Some(existing) = self.examples_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let base = ctx.derive_name();
-        let name = unique_name(&self.examples, &base);
-        self.examples_seen.insert(canonical, name.clone());
-        self.examples.insert(name.clone(), RefOr::new_item(example));
-        Ok(name)
-    }
-
-    /// Same shape as [`Self::intern_schema`] but for `Link`. Leaf
-    /// type — no recursion. Context-derived naming.
-    fn intern_link(&mut self, link: Link, ctx: NameContext) -> Result<String, CollapseError> {
-        let canonical = serde_json::to_string(&link)?;
-        if let Some(existing) = self.links_seen.get(&canonical) {
-            return Ok(existing.clone());
-        }
-        let base = ctx.derive_name();
-        let name = unique_name(&self.links, &base);
-        self.links_seen.insert(canonical, name.clone());
-        self.links.insert(name.clone(), RefOr::new_item(link));
-        Ok(name)
-    }
-
-    /// Lift an inline `RefOr<Link>` into `components.links`. No
-    /// recursion needed (Link has no nested `RefOr` slots).
-    fn lift_ref_or_link(
-        &mut self,
-        slot: &mut RefOr<Link>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let fetched: Link = loader.resolve_reference_as(&reference).map_err(|source| {
-                    CollapseError::External {
-                        reference: reference.clone(),
-                        source,
-                    }
-                })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                let name = self.intern_link(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/links/{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(link) = owned else {
-                    unreachable!("matched RefOr::Item above");
-                };
-                let name = self.intern_link(link, ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/links/{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    /// Lift an inline `RefOr<Example>` into `components.examples`.
-    /// No recursion needed (Example has no nested RefOr slots).
-    fn lift_ref_or_example(
-        &mut self,
-        slot: &mut RefOr<Example>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        match slot {
-            RefOr::Ref(r) => {
-                if is_internal_ref(&r.reference) {
-                    return Ok(());
-                }
-                let Some(loader) = self.loader.as_deref_mut() else {
-                    return Ok(());
-                };
-                let reference = r.reference.clone();
-                let fetched: Example =
-                    loader.resolve_reference_as(&reference).map_err(|source| {
-                        CollapseError::External {
-                            reference: reference.clone(),
-                            source,
-                        }
-                    })?;
-                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
-                let name = self.intern_example(fetched, derived_ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/examples/{name}"));
-                Ok(())
-            }
-            RefOr::Item(_) => {
-                let placeholder = RefOr::Ref(Ref::new(String::new()));
-                let owned = mem::replace(slot, placeholder);
-                let RefOr::Item(example) = owned else {
-                    unreachable!("matched RefOr::Item above");
-                };
-                let name = self.intern_example(example, ctx)?;
-                *slot = RefOr::new_ref(format!("#/components/examples/{name}"));
-                Ok(())
-            }
-        }
-    }
-
-    fn generate_name(&self, schema: &Schema, ctx: &NameContext) -> String {
-        let base = match schema_title(schema) {
-            Some(t) => sanitize_component_name(t),
-            None => ctx.derive_name(),
-        };
-        if !self.schemas.contains_key(&base) {
-            return base;
-        }
-        for i in 2..u32::MAX {
-            let candidate = format!("{base}_{i}");
-            if !self.schemas.contains_key(&candidate) {
-                return candidate;
-            }
-        }
-        // 2 ^ 32 - 2 distinct names is unreachable in practice; if we
-        // ever hit it, the suffix loop has bigger problems than we can
-        // recover from at runtime.
-        unreachable!("exhausted u32 suffixes for `{base}`");
-    }
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────
-
-fn is_internal_ref(reference: &str) -> bool {
-    reference.starts_with('#')
-}
-
-/// `<name><In>` hint for a `Parameter` — e.g. `limitQuery`, `petIdPath`.
-/// Returns the empty string when the parameter has no usable `name`,
-/// signalling that the caller should fall back to context-derived
+/// `<name><In>` hint for a v3.2 `Parameter` — e.g. `limitQuery`,
+/// `petIdPath`. Returns `""` when the parameter has no usable name,
+/// signalling the intern path to fall back to context-derived
 /// naming.
 fn parameter_name_hint(param: &Parameter) -> String {
     let (name, in_) = match param {
@@ -1493,28 +808,8 @@ fn parameter_name_hint(param: &Parameter) -> String {
     }
 }
 
-/// Pick the first non-colliding name in `bag` starting from `base`. On
-/// collision, appends `_2`, `_3`, …. Shared by every bag's intern
-/// method.
-fn unique_name<V>(bag: &BTreeMap<String, V>, base: &str) -> String {
-    if !bag.contains_key(base) {
-        return base.to_owned();
-    }
-    for i in 2..u32::MAX {
-        let candidate = format!("{base}_{i}");
-        if !bag.contains_key(&candidate) {
-            return candidate;
-        }
-    }
-    unreachable!("exhausted u32 suffixes for `{base}`");
-}
-
 fn schema_title(schema: &Schema) -> Option<&str> {
     match schema {
-        // Composition forms (AllOf / AnyOf / OneOf / Not) and the
-        // bare-`true`/`false` / empty-object forms don't carry a
-        // `title` field on this crate's types — return None and let
-        // the context-path naming kick in.
         Schema::Bool(_)
         | Schema::Empty(_)
         | Schema::AllOf(_)
@@ -1535,76 +830,6 @@ fn single_schema_title(s: &SingleSchema) -> Option<&str> {
         SingleSchema::Number(s) => s.title.as_deref(),
         SingleSchema::Boolean(s) => s.title.as_deref(),
         SingleSchema::Null(s) => s.title.as_deref(),
-    }
-}
-
-/// Normalise a candidate name to OAS component-name format
-/// (`^[a-zA-Z0-9.\-_]+$`). Replaces invalid chars with `_`, collapses
-/// runs of `_`, and trims leading/trailing `_`. An empty result falls
-/// back to `Schema`.
-fn sanitize_component_name(s: impl AsRef<str>) -> String {
-    let s = s.as_ref();
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-            out.push(c);
-        } else {
-            out.push('_');
-        }
-    }
-    while out.contains("__") {
-        out = out.replace("__", "_");
-    }
-    let trimmed = out.trim_matches('_').to_owned();
-    if trimmed.is_empty() {
-        "Schema".to_owned()
-    } else {
-        trimmed
-    }
-}
-
-/// Context-derived name accumulator. Carries the path through the
-/// spec tree (e.g., `["getPets", "responses", "200", "content",
-/// "application/json", "schema"]`) so `derive_name` can flatten it
-/// into a valid component name.
-#[derive(Clone)]
-struct NameContext {
-    parts: Vec<String>,
-}
-
-impl NameContext {
-    fn new<I, S>(parts: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self {
-            parts: parts.into_iter().map(Into::into).collect(),
-        }
-    }
-
-    fn push(&self, part: &str) -> Self {
-        let mut next = self.clone();
-        next.parts.push(part.to_owned());
-        next
-    }
-
-    fn derive_name(&self) -> String {
-        sanitize_component_name(self.parts.join("_"))
-    }
-
-    /// Derive a name for a schema fetched via an external `$ref`. If
-    /// the reference has a JSON Pointer fragment, use the last segment
-    /// (e.g., `external.json#/components/schemas/Pet` → `Pet`); else
-    /// fall back to the surrounding context.
-    fn from_external_ref(reference: &str, fallback: &NameContext) -> Self {
-        if let Some((_, fragment)) = reference.split_once('#')
-            && let Some(last) = fragment.rsplit('/').next()
-            && !last.is_empty()
-        {
-            return NameContext::new([last.to_owned()]);
-        }
-        fallback.clone()
     }
 }
 
@@ -2803,47 +2028,9 @@ mod tests {
         }
     }
 
-    // ── Helper coverage: sanitize_component_name + NameContext ───────────
-
-    #[test]
-    fn sanitize_component_name_handles_edge_cases() {
-        assert_eq!(sanitize_component_name("Pet"), "Pet");
-        // Slashes, spaces, and brackets all collapse to underscores.
-        assert_eq!(
-            sanitize_component_name("paths./pets[0].schema"),
-            "paths._pets_0_.schema"
-        );
-        // Trim leading/trailing underscores produced by sanitisation.
-        assert_eq!(sanitize_component_name("/foo/"), "foo");
-        // Spaces collapse via the run-of-underscore reduction.
-        assert_eq!(sanitize_component_name("Hello World"), "Hello_World");
-        // Empty / all-invalid input falls back to the literal "Schema".
-        assert_eq!(sanitize_component_name("///"), "Schema");
-        assert_eq!(sanitize_component_name(""), "Schema");
-    }
-
-    #[test]
-    fn name_context_from_external_ref_falls_back_on_empty_fragment() {
-        let fallback = NameContext::new(["fallback"]);
-        // No `#`: use fallback.
-        let ctx = NameContext::from_external_ref("external.json", &fallback);
-        assert_eq!(ctx.derive_name(), "fallback");
-        // Empty fragment (`#`): also falls back.
-        let ctx = NameContext::from_external_ref("external.json#", &fallback);
-        assert_eq!(ctx.derive_name(), "fallback");
-        // Fragment with only a slash (trailing) — last segment is empty,
-        // so we fall back to the surrounding context.
-        let ctx = NameContext::from_external_ref("external.json#/", &fallback);
-        assert_eq!(ctx.derive_name(), "fallback");
-    }
-
-    #[test]
-    fn name_context_from_external_ref_uses_last_pointer_segment() {
-        let fallback = NameContext::new(["fallback"]);
-        let ctx =
-            NameContext::from_external_ref("external.json#/components/schemas/Pet", &fallback);
-        assert_eq!(ctx.derive_name(), "Pet");
-    }
+    // Coverage for `sanitize_component_name`, `unique_name`, and
+    // `NameContext` lives in `crate::common::collapse`'s own test
+    // module since those helpers are now shared.
 
     #[test]
     fn schema_title_returns_none_for_composite_and_terminal_shapes() {
@@ -3111,16 +2298,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(parameter_name_hint(&param), "");
-    }
-
-    #[test]
-    fn unique_name_appends_suffix_against_existing_keys() {
-        let mut bag: BTreeMap<String, ()> = BTreeMap::new();
-        assert_eq!(unique_name(&bag, "foo"), "foo");
-        bag.insert("foo".to_owned(), ());
-        assert_eq!(unique_name(&bag, "foo"), "foo_2");
-        bag.insert("foo_2".to_owned(), ());
-        assert_eq!(unique_name(&bag, "foo"), "foo_3");
     }
 
     // ── Responses: lift contract + dedup ────────────────────────────────
