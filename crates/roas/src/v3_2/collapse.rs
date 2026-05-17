@@ -18,11 +18,11 @@
 //! structurally identical sources collapse together.
 //!
 //! Bags lifted in this module today: `schemas`, `parameters`,
-//! `responses`, `requestBodies`, `headers`, `mediaTypes`. Recursion
-//! goes leaf-up — schemas are lifted before their containing
-//! mediaTypes / parameters / headers, those before their containing
-//! responses / requestBodies. `examples`, `links`, `callbacks`,
-//! `pathItems` follow in subsequent commits.
+//! `responses`, `requestBodies`, `headers`, `mediaTypes`,
+//! `examples`. Recursion goes leaf-up — schemas / examples are
+//! lifted before their containing mediaTypes / parameters / headers,
+//! those before their containing responses / requestBodies.
+//! `links`, `callbacks`, `pathItems` follow in subsequent commits.
 //!
 //! This is the OAS 3.2 implementation; v3.0 / v3.1 / v2 follow in
 //! subsequent PRs.
@@ -35,6 +35,7 @@ use crate::common::reference::{Ref, RefOr};
 use crate::loader::{Loader, LoaderError};
 use crate::v3_2::callback::Callback;
 use crate::v3_2::components::Components;
+use crate::v3_2::example::Example;
 use crate::v3_2::header::Header;
 use crate::v3_2::media_type::MediaType;
 use crate::v3_2::operation::Operation;
@@ -113,6 +114,11 @@ pub(crate) fn collapse_spec(
         .as_mut()
         .and_then(|c| c.media_types.take())
         .unwrap_or_default();
+    let initial_examples = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.examples.take())
+        .unwrap_or_default();
 
     let mut collapser = Collapser {
         schemas: BTreeMap::new(),
@@ -127,6 +133,8 @@ pub(crate) fn collapse_spec(
         headers_seen: HashMap::new(),
         media_types: BTreeMap::new(),
         media_types_seen: HashMap::new(),
+        examples: BTreeMap::new(),
+        examples_seen: HashMap::new(),
         loader,
     };
 
@@ -192,6 +200,16 @@ pub(crate) fn collapse_spec(
                 .or_insert_with(|| name.clone());
         }
         collapser.media_types.insert(name, value);
+    }
+    for (name, value) in initial_examples {
+        if let RefOr::Item(e) = &value {
+            let canonical = serde_json::to_string(e)?;
+            collapser
+                .examples_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.examples.insert(name, value);
     }
 
     // ── Phase 2a: recurse into pre-existing components.schemas ───────
@@ -352,6 +370,11 @@ pub(crate) fn collapse_spec(
             .get_or_insert_with(Default::default)
             .media_types = Some(collapser.media_types);
     }
+    if !collapser.examples.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .examples = Some(collapser.examples);
+    }
 
     Ok(())
 }
@@ -378,6 +401,9 @@ struct Collapser<'a> {
     /// In-progress `components.mediaTypes` bag (v3.2-only).
     media_types: BTreeMap<String, RefOr<MediaType>>,
     media_types_seen: HashMap<String, String>,
+    /// In-progress `components.examples` bag.
+    examples: BTreeMap<String, RefOr<Example>>,
+    examples_seen: HashMap<String, String>,
     /// Optional loader for resolving external `$ref`s.
     loader: Option<&'a mut Loader>,
 }
@@ -581,6 +607,11 @@ impl<'a> Collapser<'a> {
                 self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
             }
         }
+        if let Some(examples) = header.examples.as_mut() {
+            for (name, e) in examples.iter_mut() {
+                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
+            }
+        }
         Ok(())
     }
 
@@ -639,6 +670,11 @@ impl<'a> Collapser<'a> {
         }
         if let Some(s) = mt.item_schema.as_mut() {
             self.lift_ref_or_schema(s, ctx.push("itemSchema"))?;
+        }
+        if let Some(examples) = mt.examples.as_mut() {
+            for (name, e) in examples.iter_mut() {
+                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
+            }
         }
         Ok(())
     }
@@ -701,41 +737,51 @@ impl<'a> Collapser<'a> {
         // out: per OAS 3.2, it carries `content` only and forbids
         // `schema`, so we walk its `content` map directly.
         match param {
-            Parameter::Path(p) => self.walk_param_schema_and_content(
+            Parameter::Path(p) => self.walk_param_slots(
                 ctx.push(p.name.as_str()),
                 p.schema.as_mut(),
                 p.content.as_mut(),
+                p.examples.as_mut(),
             ),
-            Parameter::Query(p) => self.walk_param_schema_and_content(
+            Parameter::Query(p) => self.walk_param_slots(
                 ctx.push(p.name.as_str()),
                 p.schema.as_mut(),
                 p.content.as_mut(),
+                p.examples.as_mut(),
             ),
-            Parameter::Header(p) => self.walk_param_schema_and_content(
+            Parameter::Header(p) => self.walk_param_slots(
                 ctx.push(p.name.as_str()),
                 p.schema.as_mut(),
                 p.content.as_mut(),
+                p.examples.as_mut(),
             ),
-            Parameter::Cookie(p) => self.walk_param_schema_and_content(
+            Parameter::Cookie(p) => self.walk_param_slots(
                 ctx.push(p.name.as_str()),
                 p.schema.as_mut(),
                 p.content.as_mut(),
+                p.examples.as_mut(),
             ),
             Parameter::Querystring(p) => {
                 let ctx = ctx.push(p.name.as_str());
                 for (mime, mt) in p.content.iter_mut() {
                     self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
                 }
+                if let Some(examples) = p.examples.as_mut() {
+                    for (name, e) in examples.iter_mut() {
+                        self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
+                    }
+                }
                 Ok(())
             }
         }
     }
 
-    fn walk_param_schema_and_content(
+    fn walk_param_slots(
         &mut self,
         ctx: NameContext,
         schema: Option<&mut RefOr<Schema>>,
         content: Option<&mut BTreeMap<String, RefOr<MediaType>>>,
+        examples: Option<&mut BTreeMap<String, RefOr<Example>>>,
     ) -> Result<(), CollapseError> {
         if let Some(s) = schema {
             self.lift_ref_or_schema(s, ctx.push("schema"))?;
@@ -743,6 +789,11 @@ impl<'a> Collapser<'a> {
         if let Some(content) = content {
             for (mime, mt) in content.iter_mut() {
                 self.lift_ref_or_media_type(mt, ctx.push(&format!("content.{mime}")))?;
+            }
+        }
+        if let Some(examples) = examples {
+            for (name, e) in examples.iter_mut() {
+                self.lift_ref_or_example(e, ctx.push(&format!("examples.{name}")))?;
             }
         }
         Ok(())
@@ -1102,6 +1153,68 @@ impl<'a> Collapser<'a> {
         self.media_types_seen.insert(canonical, name.clone());
         self.media_types.insert(name.clone(), RefOr::new_item(mt));
         Ok(name)
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Example`.
+    /// `Example` carries no canonical name field — naming is
+    /// context-derived (typically the example key pushed by the
+    /// walker). `Example` has no nested `RefOr<T>` fields, so the
+    /// lift path doesn't need to recurse first.
+    fn intern_example(
+        &mut self,
+        example: Example,
+        ctx: NameContext,
+    ) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&example)?;
+        if let Some(existing) = self.examples_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.examples, &base);
+        self.examples_seen.insert(canonical, name.clone());
+        self.examples.insert(name.clone(), RefOr::new_item(example));
+        Ok(name)
+    }
+
+    /// Lift an inline `RefOr<Example>` into `components.examples`.
+    /// No recursion needed (Example has no nested RefOr slots).
+    fn lift_ref_or_example(
+        &mut self,
+        slot: &mut RefOr<Example>,
+        ctx: NameContext,
+    ) -> Result<(), CollapseError> {
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let fetched: Example =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                let name = self.intern_example(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/examples/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(example) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                let name = self.intern_example(example, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/examples/{name}"));
+                Ok(())
+            }
+        }
     }
 
     fn generate_name(&self, schema: &Schema, ctx: &NameContext) -> String {
@@ -3168,6 +3281,85 @@ mod tests {
         }));
         spec.collapse(Some(&mut loader)).unwrap();
         assert!(!lifted_media_type_names(&spec).is_empty());
+    }
+
+    // ── Examples: lift contract + dedup ────────────────────────────────
+
+    fn lifted_example_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.examples.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_examples_lift_to_components_examples() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [
+                            {"name": "tag", "in": "query", "schema": {"type": "string"}, "examples": {
+                                "Dog": {"summary": "a dog", "value": "dog"},
+                                "Cat": {"summary": "a cat", "value": "cat"}
+                            }}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_example_names(&spec);
+        assert!(names.len() >= 2, "expected 2 examples, got {names:?}");
+    }
+
+    #[test]
+    fn identical_inline_examples_dedupe_to_one_component() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [
+                            {"name": "a", "in": "query", "schema": {"type": "string"}, "examples": {"X": {"value": "v"}}},
+                            {"name": "b", "in": "query", "schema": {"type": "string"}, "examples": {"X": {"value": "v"}}}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert_eq!(lifted_example_names(&spec).len(), 1);
+    }
+
+    #[test]
+    fn loader_resolves_external_example_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("shared.json", serde_json::json!({"Dog": {"value": "dog"}}))
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [
+                            {"name": "tag", "in": "query", "schema": {"type": "string"}, "examples": {"Dog": {"$ref": "shared.json#/Dog"}}}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_example_names(&spec).is_empty());
     }
 
     #[test]
