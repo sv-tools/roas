@@ -43,7 +43,6 @@ use crate::common::bool_or::BoolOr;
 use crate::common::reference::{Ref, RefOr};
 use crate::loader::{Loader, LoaderError};
 use crate::v3_2::callback::Callback;
-use crate::v3_2::components::Components;
 use crate::v3_2::example::Example;
 use crate::v3_2::header::Header;
 use crate::v3_2::link::Link;
@@ -411,14 +410,17 @@ pub(crate) fn collapse_spec(
     }
 
     // Same for components.pathItems — but skip entries that are
-    // already in ref form (reference is Some).
+    // already in ref form (`reference` is Some). PathItem is bare
+    // (not wrapped in `RefOr`), so the "inline vs ref" probe is on
+    // `pi.reference.is_none()` rather than `RefOr::Item(_)`.
     let existing_pi_names: Vec<String> = collapser.path_items.keys().cloned().collect();
     for name in existing_pi_names {
-        let is_inline = collapser
-            .path_items
-            .get(&name)
-            .is_some_and(|pi| pi.reference.is_none());
-        if is_inline && let Some(mut pi) = collapser.path_items.remove(&name) {
+        if let Some(pi) = collapser.path_items.get(&name)
+            && pi.reference.is_none()
+        {
+            let Some(mut pi) = collapser.path_items.remove(&name) else {
+                continue;
+            };
             let ctx = NameContext::new(["components", "pathItems", &name]);
             collapser.walk_path_item(&mut pi, ctx)?;
             let canonical = serde_json::to_string(&pi)?;
@@ -437,9 +439,9 @@ pub(crate) fn collapse_spec(
     if let Some(webhooks) = spec.webhooks.as_mut() {
         collapser.walk_paths(webhooks, NameContext::new(["webhooks"]))?;
     }
-    if let Some(components) = spec.components.as_mut() {
-        collapser.walk_components_non_schemas(components, NameContext::new(["components"]))?;
-    }
+    // Note: there's no phase-2b pass over `spec.components.<bag>`
+    // here — every bag is owned by phase 1+2a (take it out, recurse,
+    // intern back). Writing the bags back happens below.
 
     // Write each lifted bag back to its slot under `components`. The
     // `get_or_insert_with` only creates a `Components` when at least
@@ -1067,21 +1069,6 @@ impl<'a> Collapser<'a> {
         self.callbacks_seen.insert(canonical, name.clone());
         self.callbacks.insert(name.clone(), RefOr::new_item(cb));
         Ok(name)
-    }
-
-    fn walk_components_non_schemas(
-        &mut self,
-        components: &mut Components,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        // Every component bag is now handled by phases 1 + 2a above
-        // (the lift methods walk into a freshly-extracted component
-        // and place it back through `intern_*`). Nothing left for
-        // this method to do — keeping it as a single empty body
-        // makes the call site in `collapse_spec` symmetric with
-        // `walk_paths` / `walk_paths(webhooks)`.
-        let _ = (components, ctx);
-        Ok(())
     }
 
     // ── Lift + dedup core ──────────────────────────────────────────
@@ -3836,7 +3823,10 @@ mod tests {
     fn external_container_refs_left_alone_without_loader() {
         // For every container type that can hold an external `$ref`,
         // verify that without a loader the slot is left untouched
-        // (the early-return branch in each `lift_ref_or_*`).
+        // (the early-return branch in each `lift_ref_or_*`). This
+        // includes the "leaf" container types `Example` and `Link`,
+        // exercised at the parameter / response level where they
+        // naturally appear.
         let mut spec = parse(serde_json::json!({
             "openapi": "3.2.0",
             "info": {"title": "x", "version": "1"},
@@ -3845,8 +3835,32 @@ mod tests {
                     "post": {
                         "parameters": [{"$ref": "shared.json#/PageParam"}],
                         "requestBody": {"$ref": "shared.json#/Body"},
-                        "responses": {"200": {"$ref": "shared.json#/Resp"}},
+                        "responses": {
+                            "200": {"$ref": "shared.json#/Resp"},
+                            // Inline response so we can exercise
+                            // external link / header refs inside it.
+                            "201": {
+                                "description": "created",
+                                "headers": {"X-Rate": {"$ref": "shared.json#/Rate"}},
+                                "content": {"application/json": {"$ref": "shared.json#/Mt"}},
+                                "links": {"GetPet": {"$ref": "shared.json#/Link"}}
+                            }
+                        },
                         "callbacks": {"OnPing": {"$ref": "shared.json#/Cb"}}
+                    },
+                    "get": {
+                        // Inline parameter so we can exercise an
+                        // external example ref inside its `examples`
+                        // map.
+                        "parameters": [
+                            {
+                                "name": "tag",
+                                "in": "query",
+                                "schema": {"type": "string"},
+                                "examples": {"Dog": {"$ref": "shared.json#/Dog"}}
+                            }
+                        ],
+                        "responses": {"200": {"description": "ok"}}
                     }
                 }
             }
@@ -3868,6 +3882,35 @@ mod tests {
         assert_eq!(
             v["paths"]["/x"]["post"]["callbacks"]["OnPing"]["$ref"],
             "shared.json#/Cb"
+        );
+        // 201 response is now lifted; navigate through it to verify
+        // every inner external ref stuck (header, content/mediaType,
+        // link).
+        let resp_ref = v["paths"]["/x"]["post"]["responses"]["201"]["$ref"]
+            .as_str()
+            .expect("201 response was lifted");
+        let resp_name = resp_ref.trim_start_matches("#/components/responses/");
+        assert_eq!(
+            v["components"]["responses"][resp_name]["headers"]["X-Rate"]["$ref"],
+            "shared.json#/Rate"
+        );
+        assert_eq!(
+            v["components"]["responses"][resp_name]["content"]["application/json"]["$ref"],
+            "shared.json#/Mt"
+        );
+        assert_eq!(
+            v["components"]["responses"][resp_name]["links"]["GetPet"]["$ref"],
+            "shared.json#/Link"
+        );
+        // The /x.get parameter is lifted; navigate to confirm the
+        // example ref stuck.
+        let p_ref = v["paths"]["/x"]["get"]["parameters"][0]["$ref"]
+            .as_str()
+            .expect("parameter was lifted");
+        let p_name = p_ref.trim_start_matches("#/components/parameters/");
+        assert_eq!(
+            v["components"]["parameters"][p_name]["examples"]["Dog"]["$ref"],
+            "shared.json#/Dog"
         );
     }
 

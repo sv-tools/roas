@@ -624,10 +624,17 @@ impl Spec {
 
     /// Lift every inline component in the document into its matching
     /// `components.<bag>`, replacing each inline location with a
-    /// `RefOr::Ref` to the new component. Today this covers `schemas`
-    /// and `parameters`; `responses`, `requestBodies`, `headers`,
-    /// `examples`, `links`, `callbacks`, `pathItems`, `mediaTypes`
-    /// follow in subsequent PRs.
+    /// `RefOr::Ref` to the new component. This covers `schemas`,
+    /// `parameters`, `responses`, `requestBodies`, `headers`,
+    /// `mediaTypes`, `examples`, `links`, and `callbacks`.
+    ///
+    /// `pathItems` is *not* lifted out of its primary locations
+    /// (`paths.<path>`, `webhooks.<name>`, `callback.paths.<expr>`)
+    /// because doing so would replace every operation site with a
+    /// `$ref` and add an indirection few callers want. Pre-existing
+    /// `components.pathItems` entries are still seeded into the
+    /// dedup map and their nested inline children (schemas,
+    /// parameters, etc.) are lifted as usual.
     ///
     /// Naming: a `Schema` uses its `title` when present; a
     /// `Parameter` uses a `<name><In>` hint (e.g., `limitQuery`,
