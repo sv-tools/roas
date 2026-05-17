@@ -112,15 +112,28 @@ jobs:
         run: cargo machete
       - name: Deny
         run: cargo deny check all
-  OsvScanner:
-    name: OSV Scanner
-    # Flat scan of the current tree's dep graph — runs on every event
-    # (push, pull_request, workflow_call, schedule) so the Security tab
-    # and AllChecks gate cover every CI invocation.
+  OsvScannerPR:
+    name: OSV Scanner (PR diff)
+    # Comparative scan: diffs base branch deps vs PR head, annotates
+    # newly-introduced vulnerable deps on the PR. Only runs on
+    # `pull_request` — on every other event `OsvScanner` below
+    # performs a flat scan.
+    if: github.event_name == 'pull_request'
     permissions:
       actions: read
       contents: read
-      security-events: write  # for SARIF upload to the Security tab
+      security-events: write  # SARIF upload to the Security tab
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+  OsvScanner:
+    name: OSV Scanner
+    # Flat scan of the current tree. Runs on push (post-merge to
+    # main), workflow_call (publish flow), and schedule. The PR
+    # variant above handles `pull_request`.
+    if: github.event_name != 'pull_request'
+    permissions:
+      actions: read
+      contents: read
+      security-events: write  # SARIF upload to the Security tab
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
   PublishCrateJob:
     name: Test publishing per crate
@@ -159,11 +172,16 @@ jobs:
       - Clippy
       - Tests
       - Deps
+      - OsvScannerPR
       - OsvScanner
       - Publish
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
+      # Exactly one of `OsvScannerPR` / `OsvScanner` is intentionally
+      # skipped per event (PR vs non-PR), so a `skipped` result is
+      # expected here. Every other entry in needs runs unconditionally
+      # and surfaces as `failure` / `cancelled` if anything went wrong.
       - name: Verify all checks succeeded
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: exit 1
