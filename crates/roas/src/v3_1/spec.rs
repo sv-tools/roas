@@ -645,6 +645,55 @@ impl Spec {
             ..Default::default()
         })
     }
+
+    /// Lift every inline component in the document into its matching
+    /// `components.<bag>`, replacing each inline location with a
+    /// `RefOr::Ref` to the new component. This covers `schemas`,
+    /// `parameters`, `responses`, `requestBodies`, `headers`,
+    /// `examples`, `links`, and `callbacks`.
+    ///
+    /// `pathItems` is *not* lifted out of its primary locations
+    /// (`paths.<path>`, `webhooks.<name>`, `callback.paths.<expr>`)
+    /// because doing so would replace every operation site with a
+    /// `$ref` and add an indirection few callers want. Pre-existing
+    /// `components.pathItems` entries are still seeded into the
+    /// dedup map and their nested inline children (schemas,
+    /// parameters, etc.) are lifted as usual.
+    ///
+    /// Naming: a `Schema` uses its `title` when present; a
+    /// `Parameter` uses a `<name><In>` hint (e.g., `limitQuery`,
+    /// `idPath`). Anything without an authoritative name falls back
+    /// to a sanitised path through the spec tree. Structurally
+    /// identical components collapse to a single entry (strict
+    /// canonical-JSON equality); every call site that previously held
+    /// the inline shape gets the same `$ref`.
+    ///
+    /// When `loader` is `Some`, every external `$ref` (anything not
+    /// starting with `#`) is fetched, parsed as the bag's concrete
+    /// type, lifted via the same recursion + dedup pipeline, and
+    /// rewritten as a local `#/components/<bag>/<name>` ref. The
+    /// dedup map spans both inline and external sources.
+    ///
+    /// `info` and `openapi` are untouched. Pre-existing
+    /// `components.<bag>` entries keep their names but their own
+    /// nested inline children (schemas inside parameters, etc.) are
+    /// still lifted.
+    ///
+    /// Errors come from two sources: the loader (fetch / parse /
+    /// pointer-not-found via [`CollapseError::External`]) and serde
+    /// serialisation for the dedup map (in practice infallible for
+    /// every component type in this crate, but exposed via
+    /// [`CollapseError::Serialize`] rather than panicked on).
+    ///
+    /// [`CollapseError`]: crate::v3_1::collapse::CollapseError
+    /// [`CollapseError::External`]: crate::v3_1::collapse::CollapseError::External
+    /// [`CollapseError::Serialize`]: crate::v3_1::collapse::CollapseError::Serialize
+    pub fn collapse(
+        &mut self,
+        loader: Option<&mut Loader>,
+    ) -> Result<(), crate::v3_1::collapse::CollapseError> {
+        crate::v3_1::collapse::collapse_spec(self, loader)
+    }
 }
 
 impl ResolveReference<Response> for Spec {

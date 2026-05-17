@@ -286,6 +286,8 @@ pub trait HasLoader {
 /// The generic [`lift_ref_or`] uses this trait to perform the
 /// uniform inline / internal-ref / external-ref-with-loader logic
 /// against any concrete component type.
+// `Clone` is required transitively by `Loader::resolve_reference_as<T>`,
+// which clones cached values out of its typed cache — see `lift_ref_or`.
 pub trait LiftableBag<C>: Sized + Clone + Serialize + DeserializeOwned + 'static {
     /// The `#/components/<bag>/` prefix. Used to build internal
     /// `$ref` targets.
