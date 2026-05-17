@@ -19,10 +19,11 @@
 //!
 //! Bags lifted in this module today: `schemas`, `parameters`,
 //! `responses`, `requestBodies`, `headers`, `mediaTypes`,
-//! `examples`, `links`. Recursion goes leaf-up — schemas / examples
-//! / links are lifted before their containing mediaTypes /
-//! parameters / headers / responses / requestBodies. `callbacks`,
-//! `pathItems` follow in subsequent commits.
+//! `examples`, `links`, `callbacks`. Recursion goes leaf-up — leaf
+//! types (schemas, examples, links) lift first; container types
+//! (mediaTypes, parameters, headers, responses, requestBodies,
+//! callbacks) lift after their children. `pathItems` follows in a
+//! subsequent commit.
 //!
 //! This is the OAS 3.2 implementation; v3.0 / v3.1 / v2 follow in
 //! subsequent PRs.
@@ -125,6 +126,11 @@ pub(crate) fn collapse_spec(
         .as_mut()
         .and_then(|c| c.links.take())
         .unwrap_or_default();
+    let initial_callbacks = spec
+        .components
+        .as_mut()
+        .and_then(|c| c.callbacks.take())
+        .unwrap_or_default();
 
     let mut collapser = Collapser {
         schemas: BTreeMap::new(),
@@ -143,6 +149,8 @@ pub(crate) fn collapse_spec(
         examples_seen: HashMap::new(),
         links: BTreeMap::new(),
         links_seen: HashMap::new(),
+        callbacks: BTreeMap::new(),
+        callbacks_seen: HashMap::new(),
         loader,
     };
 
@@ -228,6 +236,16 @@ pub(crate) fn collapse_spec(
                 .or_insert_with(|| name.clone());
         }
         collapser.links.insert(name, value);
+    }
+    for (name, value) in initial_callbacks {
+        if let RefOr::Item(c) = &value {
+            let canonical = serde_json::to_string(c)?;
+            collapser
+                .callbacks_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+        }
+        collapser.callbacks.insert(name, value);
     }
 
     // ── Phase 2a: recurse into pre-existing components.schemas ───────
@@ -346,6 +364,24 @@ pub(crate) fn collapse_spec(
         }
     }
 
+    // Same for components.callbacks.
+    let existing_cb_names: Vec<String> = collapser.callbacks.keys().cloned().collect();
+    for name in existing_cb_names {
+        if let Some(RefOr::Item(_)) = collapser.callbacks.get(&name) {
+            let Some(RefOr::Item(mut cb)) = collapser.callbacks.remove(&name) else {
+                continue;
+            };
+            let ctx = NameContext::new(["components", "callbacks", &name]);
+            collapser.walk_callback(&mut cb, ctx)?;
+            let canonical = serde_json::to_string(&cb)?;
+            collapser
+                .callbacks_seen
+                .entry(canonical)
+                .or_insert_with(|| name.clone());
+            collapser.callbacks.insert(name, RefOr::new_item(cb));
+        }
+    }
+
     // ── Phase 2b: walk the rest of the spec ──────────────────────────
     if let Some(paths) = spec.paths.as_mut() {
         collapser.walk_paths(paths, NameContext::new(["paths"]))?;
@@ -396,6 +432,11 @@ pub(crate) fn collapse_spec(
     if !collapser.links.is_empty() {
         spec.components.get_or_insert_with(Default::default).links = Some(collapser.links);
     }
+    if !collapser.callbacks.is_empty() {
+        spec.components
+            .get_or_insert_with(Default::default)
+            .callbacks = Some(collapser.callbacks);
+    }
 
     Ok(())
 }
@@ -428,6 +469,9 @@ struct Collapser<'a> {
     /// In-progress `components.links` bag.
     links: BTreeMap<String, RefOr<Link>>,
     links_seen: HashMap<String, String>,
+    /// In-progress `components.callbacks` bag.
+    callbacks: BTreeMap<String, RefOr<Callback>>,
+    callbacks_seen: HashMap<String, String>,
     /// Optional loader for resolving external `$ref`s.
     loader: Option<&'a mut Loader>,
 }
@@ -491,7 +535,7 @@ impl<'a> Collapser<'a> {
         }
         if let Some(callbacks) = op.callbacks.as_mut() {
             for (name, cb) in callbacks.iter_mut() {
-                self.walk_ref_or_callback(cb, ctx.push(name))?;
+                self.lift_ref_or_callback(cb, ctx.push(name))?;
             }
         }
         Ok(())
@@ -888,17 +932,73 @@ impl<'a> Collapser<'a> {
         }
     }
 
-    fn walk_ref_or_callback(
-        &mut self,
-        item: &mut RefOr<Callback>,
-        ctx: NameContext,
-    ) -> Result<(), CollapseError> {
-        if let RefOr::Item(cb) = item {
-            for (expr, pi) in cb.paths.iter_mut() {
-                self.walk_path_item(pi, ctx.push(expr))?;
-            }
+    /// Walk into a `Callback`: recurse into every `(expression,
+    /// PathItem)` entry so the nested operations / responses /
+    /// requestBodies inside lift first.
+    fn walk_callback(&mut self, cb: &mut Callback, ctx: NameContext) -> Result<(), CollapseError> {
+        for (expr, pi) in cb.paths.iter_mut() {
+            self.walk_path_item(pi, ctx.push(expr))?;
         }
         Ok(())
+    }
+
+    /// Lift an inline `RefOr<Callback>`: recurse first (lift nested
+    /// PathItem contents), intern, rewrite the slot to a
+    /// `#/components/callbacks/<name>` ref.
+    fn lift_ref_or_callback(
+        &mut self,
+        slot: &mut RefOr<Callback>,
+        ctx: NameContext,
+    ) -> Result<(), CollapseError> {
+        match slot {
+            RefOr::Ref(r) => {
+                if is_internal_ref(&r.reference) {
+                    return Ok(());
+                }
+                let Some(loader) = self.loader.as_deref_mut() else {
+                    return Ok(());
+                };
+                let reference = r.reference.clone();
+                let mut fetched: Callback =
+                    loader.resolve_reference_as(&reference).map_err(|source| {
+                        CollapseError::External {
+                            reference: reference.clone(),
+                            source,
+                        }
+                    })?;
+                let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+                self.walk_callback(&mut fetched, derived_ctx.clone())?;
+                let name = self.intern_callback(fetched, derived_ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/callbacks/{name}"));
+                Ok(())
+            }
+            RefOr::Item(_) => {
+                let placeholder = RefOr::Ref(Ref::new(String::new()));
+                let owned = mem::replace(slot, placeholder);
+                let RefOr::Item(mut cb) = owned else {
+                    unreachable!("matched RefOr::Item above");
+                };
+                self.walk_callback(&mut cb, ctx.clone())?;
+                let name = self.intern_callback(cb, ctx)?;
+                *slot = RefOr::new_ref(format!("#/components/callbacks/{name}"));
+                Ok(())
+            }
+        }
+    }
+
+    /// Same shape as [`Self::intern_schema`] but for `Callback`.
+    /// Context-derived naming (typically the callback name pushed
+    /// by the walker).
+    fn intern_callback(&mut self, cb: Callback, ctx: NameContext) -> Result<String, CollapseError> {
+        let canonical = serde_json::to_string(&cb)?;
+        if let Some(existing) = self.callbacks_seen.get(&canonical) {
+            return Ok(existing.clone());
+        }
+        let base = ctx.derive_name();
+        let name = unique_name(&self.callbacks, &base);
+        self.callbacks_seen.insert(canonical, name.clone());
+        self.callbacks.insert(name.clone(), RefOr::new_item(cb));
+        Ok(name)
     }
 
     fn walk_components_non_schemas(
@@ -915,12 +1015,8 @@ impl<'a> Collapser<'a> {
                 self.walk_path_item(pi, ctx.push(&format!("pathItems.{name}")))?;
             }
         }
-        if let Some(map) = components.callbacks.as_mut() {
-            for (name, cb) in map.iter_mut() {
-                self.walk_ref_or_callback(cb, ctx.push(&format!("callbacks.{name}")))?;
-            }
-        }
-        // components.mediaTypes is handled by phases 1 + 2a.
+        // components.callbacks and components.mediaTypes are handled
+        // by phases 1 + 2a.
         Ok(())
     }
 
@@ -3506,6 +3602,74 @@ mod tests {
         }));
         spec.collapse(Some(&mut loader)).unwrap();
         assert!(!lifted_link_names(&spec).is_empty());
+    }
+
+    // ── Callbacks: lift contract + dedup ───────────────────────────────
+
+    fn lifted_callback_names(spec: &Spec) -> Vec<String> {
+        spec.components
+            .as_ref()
+            .and_then(|c| c.callbacks.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inline_callbacks_lift_to_components_callbacks() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "operationId": "createPet",
+                        "callbacks": {
+                            "onPing": {
+                                "{$request.body#/url}": {
+                                    "post": {
+                                        "responses": {"200": {"description": "ack"}}
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(!lifted_callback_names(&spec).is_empty());
+    }
+
+    #[test]
+    fn loader_resolves_external_callback_refs() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({
+                    "OnPing": {
+                        "{$request.body#/url}": {
+                            "post": {"responses": {"200": {"description": "ack"}}}
+                        }
+                    }
+                }),
+            )
+            .unwrap();
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "callbacks": {"onPing": {"$ref": "shared.json#/OnPing"}},
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).unwrap();
+        assert!(!lifted_callback_names(&spec).is_empty());
     }
 
     #[test]
