@@ -731,4 +731,85 @@ mod tests {
         let converted = detected.convert_to_detected(SpecVersion::V3_2).unwrap();
         assert_eq!(converted.version(), SpecVersion::V3_2);
     }
+
+    #[test]
+    fn collapse_with_loader_resolves_external_file_ref() {
+        // Write a fragment to a temp file, then build a spec that
+        // references it via a `file://` `$ref`. With a `Loader` carrying
+        // a `FileFetcher`, `collapse` must fetch the fragment, lift it
+        // into `components.schemas`, and rewrite the call site as a
+        // local `$ref` — proving the loader is actually piped through
+        // the dispatch (not silently ignored).
+        use roas_file_fetcher::FileFetcher;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let frag_path = std::env::temp_dir().join(format!(
+            "roas-cli-collapse-frag-{}-{n}.json",
+            std::process::id(),
+        ));
+        std::fs::write(
+            &frag_path,
+            br#"{"Pet":{"title":"Pet","type":"object","properties":{"id":{"type":"integer"}}}}"#,
+        )
+        .expect("write fragment");
+        // Cleanup helper so the test doesn't leave stray temp files
+        // behind on panic.
+        struct CleanupFile(std::path::PathBuf);
+        impl Drop for CleanupFile {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = CleanupFile(frag_path.clone());
+
+        // Construct the `file://` URL by hand to avoid a dev-dep on
+        // `url`. POSIX absolute paths map directly; the CI runner is
+        // Linux/macOS only.
+        let frag_url = format!("file://{}", frag_path.display());
+        let spec_json = format!(
+            r#"{{
+                "openapi":"3.2.0",
+                "info":{{"title":"x","version":"1"}},
+                "paths":{{
+                    "/pets":{{
+                        "get":{{
+                            "operationId":"x",
+                            "responses":{{
+                                "200":{{
+                                    "description":"ok",
+                                    "content":{{"application/json":{{"schema":{{"$ref":"{frag_url}#/Pet"}}}}}}
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            }}"#
+        );
+        let v: Value = serde_json::from_str(&spec_json).expect("parse spec");
+        let mut detected = detect_or_use(None, v).expect("detect");
+
+        let mut loader = Loader::new();
+        loader.register_fetcher("file://", FileFetcher::new());
+
+        detected.collapse(Some(&mut loader)).expect("collapse ok");
+        let out = detected.into_value().expect("serialize");
+
+        // The load-bearing assertion: `components.schemas.Pet` only
+        // exists if the loader actually fetched the external fragment
+        // and the collapse pipeline lifted it. Without the loader
+        // (`None` path), the `file://` ref would be left untouched.
+        assert!(
+            out.pointer("/components/schemas/Pet").is_some(),
+            "external fragment must lift into components.schemas.Pet: {out:#}",
+        );
+        // And the original `file://` URL must be gone from the spec —
+        // every reachable `$ref` is now internal.
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(
+            !s.contains("file://"),
+            "no `file://` ref should remain after collapse: {s}",
+        );
+    }
 }

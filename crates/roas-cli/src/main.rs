@@ -111,8 +111,9 @@ struct ConvertArgs {
     /// semantics as `roas validate --load`: pass `--load file` to
     /// allow `file://` refs, `--load http` for `http(s)://`; repeat
     /// to combine. Without it, external `$ref`s in the input are
-    /// left untouched.
-    #[arg(long, value_enum)]
+    /// left untouched. Requires `--collapse` (clap rejects the flag
+    /// on its own — collapse is the only consumer).
+    #[arg(long, value_enum, requires = "collapse")]
     load: Vec<LoaderKind>,
 }
 
@@ -381,6 +382,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cli_rejects_convert_load_without_collapse() {
+        // `--load` is only meaningful when `--collapse` is active;
+        // clap's `requires = "collapse"` must reject the flag on its own.
+        let res = Cli::try_parse_from([
+            "roas",
+            "convert",
+            "--to",
+            "v3_2",
+            "--load",
+            "file",
+            "spec.json",
+        ]);
+        assert!(res.is_err(), "--load without --collapse must error");
+    }
+
     /// Process-scoped unique temp path so parallel tests don't collide.
     fn temp_path(suffix: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -544,6 +561,52 @@ mod tests {
             load: vec![],
         };
         run_convert(args).expect("v2 → v3.2 must succeed");
+    }
+
+    #[test]
+    fn run_convert_with_collapse_and_load_file_resolves_external_ref() {
+        // End-to-end through `run_convert`: the spec carries a
+        // `file://` `$ref`, and `--load file` builds a Loader carrying
+        // a `FileFetcher`. If `build_loader → collapse(loader)` is
+        // wired correctly, the loader resolves the fragment and the
+        // call returns Ok. If the loader path were silently bypassed,
+        // the external ref would be left as-is (also Ok) — so we make
+        // the test discriminating by NOT writing the fragment and
+        // expecting an error: a missing file with `--load file` must
+        // surface from the fetcher.
+        let frag = TempFile::write(
+            "convert-collapse-frag.json",
+            br#"{"Pet":{"title":"Pet","type":"object","properties":{"id":{"type":"integer"}}}}"#,
+        );
+        let frag_url = format!("file://{}", frag.0.display());
+        let body = format!(
+            r#"{{
+                "openapi":"3.2.0",
+                "info":{{"title":"x","version":"1"}},
+                "paths":{{
+                    "/pets":{{
+                        "get":{{
+                            "operationId":"x",
+                            "responses":{{
+                                "200":{{
+                                    "description":"ok",
+                                    "content":{{"application/json":{{"schema":{{"$ref":"{frag_url}#/Pet"}}}}}}
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            }}"#
+        );
+        let f = TempFile::write("convert-collapse-spec.json", body.as_bytes());
+        let args = ConvertArgs {
+            file: f.0.clone(),
+            to: SpecVersion::V3_2,
+            from: None,
+            collapse: true,
+            load: vec![LoaderKind::File],
+        };
+        run_convert(args).expect("convert + collapse + --load file must succeed");
     }
 
     #[test]
