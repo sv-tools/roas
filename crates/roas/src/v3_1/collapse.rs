@@ -28,7 +28,7 @@
 //! so `MediaType` instances stay inline at their content[mime] slots;
 //! their nested `schema` / `examples` still lift via the walkers.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::common::bool_or::BoolOr;
 use crate::common::collapse::{Bag, HasLoader, LiftableBag, NameContext, lift_ref_or};
@@ -67,9 +67,8 @@ pub(crate) struct Collapser<'a> {
     /// of `paths.<path>` / `webhooks.<name>` / callback paths — but
     /// pre-existing `components.pathItems` entries are still seeded
     /// here so we can recurse into them and lift their nested
-    /// children.
+    /// children, then put the (now child-lifted) PathItem back.
     path_items: BTreeMap<String, PathItem>,
-    path_items_seen: HashMap<String, String>,
     loader: Option<&'a mut Loader>,
 }
 
@@ -606,7 +605,6 @@ pub(crate) fn collapse_spec(
         links: Bag::default(),
         callbacks: Bag::default(),
         path_items: BTreeMap::new(),
-        path_items_seen: HashMap::new(),
         loader,
     };
 
@@ -621,18 +619,10 @@ pub(crate) fn collapse_spec(
     c.examples.seed(initial_examples)?;
     c.links.seed(initial_links)?;
     c.callbacks.seed(initial_callbacks)?;
-    // PathItems is bare — seed the dedup map and the entry map by
-    // hand. Only inline (reference: None) entries participate in
-    // dedup; ref-form ones are pure pointers.
-    for (name, pi) in initial_path_items {
-        if pi.reference.is_none() {
-            let canonical = serde_json::to_string(&pi)?;
-            c.path_items_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        c.path_items.insert(name, pi);
-    }
+    // PathItems is bare — keep the entry map. v3.1 never lifts
+    // PathItems out of their primary locations, so there's no dedup
+    // map to maintain.
+    c.path_items.extend(initial_path_items);
 
     // Phase 2a: recurse into each pre-existing inline component,
     // lifting its nested children. We compose this from the
@@ -662,10 +652,6 @@ pub(crate) fn collapse_spec(
         };
         let ctx = NameContext::new(["components", "pathItems", &name]);
         walk_path_item(&mut pi, ctx, &mut c)?;
-        let canonical = serde_json::to_string(&pi)?;
-        c.path_items_seen
-            .entry(canonical)
-            .or_insert_with(|| name.clone());
         c.path_items.insert(name, pi);
     }
 
@@ -1303,7 +1289,7 @@ mod tests {
     // ── Walker coverage: every container / location a schema can live in
     //
     // The "kitchen sink" test below stuffs one inline schema into every
-    // schema-bearing slot v3.2 supports, then asserts that every site
+    // schema-bearing slot v3.1 supports, then asserts that every site
     // ended up rewritten to a ref. Driving them through one spec keeps
     // the test compact and exercises the cross-cutting walker
     // machinery (visitor recursion, ctx threading, dedup interplay).

@@ -335,9 +335,19 @@ fn unwrap_bag<T>(m: BTreeMap<String, RefOr<T>>) -> BTreeMap<String, T> {
             RefOr::Item(item) => Some((k, item)),
             // v2 bag entries can't themselves be `$ref` slots — the
             // shared `Bag<T>` only ever stores `Item` variants via
-            // `intern`. A `Ref` here would mean upstream wrote one
-            // by mistake; drop it rather than panic.
-            RefOr::Ref(_) => None,
+            // `seed`/`intern`. A `Ref` here means a future change to
+            // the shared collapse machinery started writing them and
+            // would silently drop entries from the v2 output. Trip
+            // the debug assertion so the regression shows up loudly
+            // in tests rather than as missing definitions.
+            RefOr::Ref(r) => {
+                debug_assert!(
+                    false,
+                    "v2 bag entry `{k}` is a $ref (`{}`) but bare bags can't hold refs",
+                    r.reference,
+                );
+                None
+            }
         })
         .collect()
 }

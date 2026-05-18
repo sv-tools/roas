@@ -1,4 +1,4 @@
-//! `Spec::collapse` for OAS 3.1 — lift every inline component into
+//! `Spec::collapse` for OAS 3.0 — lift every inline component into
 //! `components.<bag>`.
 //!
 //! All of the heavy lifting (dedup, naming, the generic `lift_ref_or`
@@ -14,19 +14,21 @@
 //!   nested component slot.
 //! * A small [`collapse_spec`] entrypoint that owns the Collapser,
 //!   runs phase 1 (seed bags) + phase 2a (recurse into pre-existing
-//!   `components.<bag>` entries) + phase 2b (walk paths / webhooks),
+//!   `components.<bag>` entries) + phase 2b (walk `paths.<path>`),
 //!   then writes each bag back.
 //!
 //! Bags lifted: `schemas`, `parameters`, `responses`,
 //! `requestBodies`, `headers`, `examples`, `links`, `callbacks`.
-//! `pathItems` is *not* lifted out of its primary locations
-//! (`paths.<path>`, `webhooks.<name>`, `callback.paths.<expr>`) —
-//! pre-existing `components.pathItems` entries are still seeded into
-//! the dedup map and their nested children are lifted.
 //!
-//! v3.0 has no `components.mediaTypes` bag (that's a v3.2 addition),
-//! so `MediaType` instances stay inline at their content[mime] slots;
-//! their nested `schema` / `examples` still lift via the walkers.
+//! Notable v3.0 surface trims relative to v3.1/v3.2:
+//!
+//! * `PathItem` is walked in place at every `paths.<path>` and every
+//!   `callback.paths.<expr>` slot; there's no `components.pathItems`
+//!   bag in v3.0, so it's never lifted.
+//! * No `webhooks` map and no top-level `mediaTypes` bag.
+//!   `MediaType` instances stay inline at their `content[mime]`
+//!   slots; their nested `schema` / `examples` still lift through
+//!   the regular walkers.
 
 use std::collections::BTreeMap;
 
@@ -1227,7 +1229,7 @@ mod tests {
     // ── Walker coverage: every container / location a schema can live in
     //
     // The "kitchen sink" test below stuffs one inline schema into every
-    // schema-bearing slot v3.2 supports, then asserts that every site
+    // schema-bearing slot v3.0 supports, then asserts that every site
     // ended up rewritten to a ref. Driving them through one spec keeps
     // the test compact and exercises the cross-cutting walker
     // machinery (visitor recursion, ctx threading, dedup interplay).
