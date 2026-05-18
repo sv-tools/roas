@@ -822,4 +822,268 @@ mod tests {
         let s = serde_json::to_string(&spec).unwrap();
         let _: Spec = serde_json::from_str(&s).expect("re-parses");
     }
+
+    // ── Recursion: top-level Schema::AllOf with typed (non-object)
+    //    children, which is the only shape that escapes the ObjectSchema
+    //    untagged-deserialisation path. Forces the AllOf branch of
+    //    `recurse_schema` to actually run.
+
+    #[test]
+    fn top_level_schema_allof_recurses_through_children() {
+        let mut spec = parse(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "definitions": {
+                // Children with explicit non-object `type` values defeat
+                // ObjectSchema's permissive default and force the parse
+                // through `Schema::AllOf`.
+                "Mixed": {
+                    "allOf": [
+                        {"title": "A", "type": "string"},
+                        {"title": "B", "type": "integer"}
+                    ]
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        for s in ["A", "B"] {
+            assert!(names.contains(&s.to_owned()), "missing `{s}`: {names:?}");
+        }
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["definitions"]["Mixed"]["allOf"][0]["$ref"],
+            "#/definitions/A"
+        );
+        assert_eq!(
+            v["definitions"]["Mixed"]["allOf"][1]["$ref"],
+            "#/definitions/B"
+        );
+    }
+
+    // ── Recursion: ObjectSchema.additionalProperties (Item branch). ──────
+
+    #[test]
+    fn object_additional_properties_with_inline_schema_is_lifted() {
+        let mut spec = parse(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "definitions": {
+                "Map": {
+                    "type": "object",
+                    "additionalProperties": {"title": "Val", "type": "string"}
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(lifted_schema_names(&spec).contains(&"Val".to_owned()));
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["definitions"]["Map"]["additionalProperties"]["$ref"],
+            "#/definitions/Val"
+        );
+    }
+
+    // ── Walker coverage: Responses.default lifting. ───────────────────────
+
+    #[test]
+    fn default_response_is_walked_and_lifted() {
+        let mut spec = parse(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "operationId": "x",
+                        "responses": {
+                            "default": {
+                                "description": "fallback",
+                                "schema": {"title": "Err", "type": "object", "properties": {"msg": {"type": "string"}}}
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(lifted_schema_names(&spec).contains(&"Err".to_owned()));
+        let v = serde_json::to_value(&spec).unwrap();
+        // The default response is itself lifted to `#/responses/<name>`.
+        let resp_ref = v["paths"]["/x"]["get"]["responses"]["default"]["$ref"]
+            .as_str()
+            .expect("default response lifted");
+        let resp_name = resp_ref.trim_start_matches("#/responses/");
+        assert_eq!(
+            v["responses"][resp_name]["schema"]["$ref"],
+            "#/definitions/Err"
+        );
+    }
+
+    // ── Walker coverage: PathItem-level parameters list. ──────────────────
+
+    #[test]
+    fn path_item_level_parameters_are_walked() {
+        let mut spec = parse(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x/{id}": {
+                    // PathItem.parameters — distinct from operation-level
+                    // ones; the walker must hit them too.
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": true, "type": "string"}
+                    ],
+                    "get": {
+                        "operationId": "x",
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        assert!(
+            lifted_parameter_names(&spec).contains(&"idPath".to_owned()),
+            "got {:?}",
+            lifted_parameter_names(&spec),
+        );
+    }
+
+    // ── Walker coverage: Operation.operationId fallback when missing. ─────
+
+    #[test]
+    fn operation_without_operation_id_uses_context_path() {
+        // Without an `operationId`, the walker keeps the inherited
+        // `paths.<path>.<method>` context for derived names instead of
+        // jumping to an operation-id-rooted context.
+        let mut spec = parse(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "parameters": [
+                            {"in": "body", "name": "body", "schema": {"type": "object", "properties": {"v": {"type": "string"}}}}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_parameter_names(&spec);
+        assert!(names.contains(&"bodyBody".to_owned()), "got {names:?}",);
+    }
+
+    // ── parameter_name_hint coverage: every typed variant ── ──────────────
+
+    #[test]
+    fn parameter_name_hint_picks_up_every_typed_variant() {
+        // Lifting one parameter per (`in`, `type`) pair walks each arm
+        // of `parameter_name_hint`'s nested match. The names are picked
+        // so the lifted entries are distinct — otherwise dedup would
+        // hide branches that did execute.
+        let mut spec = parse(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "operationId": "kitchenSink",
+                        "parameters": [
+                            // Header: integer, number, boolean, array.
+                            {"name": "h_int", "in": "header", "type": "integer"},
+                            {"name": "h_num", "in": "header", "type": "number"},
+                            {"name": "h_bool", "in": "header", "type": "boolean"},
+                            {"name": "h_arr", "in": "header", "type": "array", "items": {"type": "string"}},
+                            // Path: every typed variant.
+                            {"name": "p_str", "in": "path", "required": true, "type": "string"},
+                            {"name": "p_int", "in": "path", "required": true, "type": "integer"},
+                            {"name": "p_num", "in": "path", "required": true, "type": "number"},
+                            {"name": "p_bool", "in": "path", "required": true, "type": "boolean"},
+                            {"name": "p_arr", "in": "path", "required": true, "type": "array", "items": {"type": "string"}},
+                            // Query: every typed variant.
+                            {"name": "q_str", "in": "query", "type": "string"},
+                            {"name": "q_int", "in": "query", "type": "integer"},
+                            {"name": "q_num", "in": "query", "type": "number"},
+                            {"name": "q_bool", "in": "query", "type": "boolean"},
+                            {"name": "q_arr", "in": "query", "type": "array", "items": {"type": "string"}},
+                            // FormData: every typed variant including File.
+                            {"name": "f_str", "in": "formData", "type": "string"},
+                            {"name": "f_int", "in": "formData", "type": "integer"},
+                            {"name": "f_num", "in": "formData", "type": "number"},
+                            {"name": "f_bool", "in": "formData", "type": "boolean"},
+                            {"name": "f_arr", "in": "formData", "type": "array", "items": {"type": "string"}},
+                            {"name": "f_file", "in": "formData", "type": "file"}
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_parameter_names(&spec);
+        for expected in [
+            "h_intHeader",
+            "h_numHeader",
+            "h_boolHeader",
+            "h_arrHeader",
+            "p_strPath",
+            "p_intPath",
+            "p_numPath",
+            "p_boolPath",
+            "p_arrPath",
+            "q_strQuery",
+            "q_intQuery",
+            "q_numQuery",
+            "q_boolQuery",
+            "q_arrQuery",
+            "f_strFormData",
+            "f_intFormData",
+            "f_numFormData",
+            "f_boolFormData",
+            "f_arrFormData",
+            "f_fileFormData",
+        ] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "missing `{expected}`: {names:?}",
+            );
+        }
+    }
+
+    // ── schema_title helper: every titled Schema variant. ─────────────────
+
+    #[test]
+    fn schema_title_picks_up_every_titled_variant() {
+        // Each variant's `title` lifts to a `definitions.<title>` entry,
+        // exercising the matching arm of `schema_title`.
+        let mut spec = parse(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "definitions": {
+                // Container with one nested ref slot per variant. Putting
+                // them under `properties` walks each through the lifter.
+                "Holder": {
+                    "type": "object",
+                    "properties": {
+                        "s": {"title": "TStr", "type": "string"},
+                        "i": {"title": "TInt", "type": "integer"},
+                        "n": {"title": "TNum", "type": "number"},
+                        "b": {"title": "TBool", "type": "boolean"},
+                        "a": {"title": "TArr", "type": "array", "items": {"type": "string"}},
+                        "nul": {"title": "TNull", "type": "null"},
+                        "allof": {"title": "TAllOf", "allOf": [{"type": "string"}]}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        for s in ["TStr", "TInt", "TNum", "TBool", "TArr", "TNull", "TAllOf"] {
+            assert!(names.contains(&s.to_owned()), "missing `{s}`: {names:?}");
+        }
+    }
 }

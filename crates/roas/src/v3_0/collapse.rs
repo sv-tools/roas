@@ -1548,6 +1548,90 @@ mod tests {
         );
     }
 
+    // ── Walker coverage: Header.examples and MediaType.examples ──────────
+
+    #[test]
+    fn header_and_media_type_examples_are_lifted() {
+        // Both `Header.examples` and `MediaType.examples` carry
+        // `RefOr<Example>` maps. The corresponding walker loops have
+        // independent coverage from the parameter-level `examples`
+        // loop covered elsewhere.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "operationId": "x",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-Trace": {
+                                        "schema": {"type": "string"},
+                                        "examples": {"Trace": {"summary": "trace", "value": "abc"}}
+                                    }
+                                },
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"type": "object", "properties": {"id": {"type": "integer"}}},
+                                        "examples": {"PetEx": {"summary": "a pet", "value": {"id": 1}}}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let example_names: Vec<String> = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.examples.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        // Both examples lift into `components.examples`.
+        assert!(
+            example_names.len() >= 2,
+            "expected header + media_type examples lifted, got {example_names:?}",
+        );
+    }
+
+    // ── schema_title coverage: every titled SingleSchema variant. ────────
+
+    #[test]
+    fn schema_title_picks_up_every_titled_variant() {
+        // Each variant's `title` lifts to a `components.schemas.<title>`
+        // entry, exercising the matching arm of `single_schema_title`.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Holder": {
+                        "type": "object",
+                        "properties": {
+                            "s": {"title": "TStr", "type": "string"},
+                            "i": {"title": "TInt", "type": "integer"},
+                            "n": {"title": "TNum", "type": "number"},
+                            "b": {"title": "TBool", "type": "boolean"},
+                            "a": {"title": "TArr", "type": "array", "items": {"type": "string"}},
+                            "nul": {"title": "TNull", "type": "null"},
+                            "o": {"title": "TObj", "type": "object", "properties": {"x": {"type": "string"}}}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        for s in ["TStr", "TInt", "TNum", "TBool", "TArr", "TNull", "TObj"] {
+            assert!(names.contains(&s.to_owned()), "missing `{s}`: {names:?}");
+        }
+    }
+
     // ── Recursion coverage: Schema composition variants ──────────────────
 
     #[test]

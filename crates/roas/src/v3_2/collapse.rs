@@ -1771,6 +1771,140 @@ mod tests {
         }
     }
 
+    // ── Walker coverage: Header.examples and MediaType.examples ──────────
+
+    #[test]
+    fn header_and_media_type_examples_are_lifted() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "operationId": "x",
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-Trace": {
+                                        "schema": {"type": "string"},
+                                        "examples": {"Trace": {"summary": "trace", "value": "abc"}}
+                                    }
+                                },
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"type": "object", "properties": {"id": {"type": "integer"}}},
+                                        "examples": {"PetEx": {"summary": "a pet", "value": {"id": 1}}}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let example_names: Vec<String> = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.examples.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        assert!(
+            example_names.len() >= 2,
+            "expected header + media_type examples lifted, got {example_names:?}",
+        );
+    }
+
+    // ── schema_title coverage: every titled Schema variant. ──────────────
+
+    #[test]
+    fn schema_title_picks_up_every_titled_variant() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Holder": {
+                        "type": "object",
+                        "properties": {
+                            "s": {"title": "TStr", "type": "string"},
+                            "i": {"title": "TInt", "type": "integer"},
+                            "n": {"title": "TNum", "type": "number"},
+                            "b": {"title": "TBool", "type": "boolean"},
+                            "a": {"title": "TArr", "type": "array", "items": {"type": "string"}},
+                            "nul": {"title": "TNull", "type": "null"},
+                            "o": {"title": "TObj", "type": "object", "properties": {"x": {"type": "string"}}},
+                            "m": {"title": "TMulti", "type": ["string", "null"]}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        for s in [
+            "TStr", "TInt", "TNum", "TBool", "TArr", "TNull", "TObj", "TMulti",
+        ] {
+            assert!(names.contains(&s.to_owned()), "missing `{s}`: {names:?}");
+        }
+    }
+
+    // ── Walker coverage: MediaType.prefixEncoding + recursive Encoding ────
+
+    #[test]
+    fn media_type_prefix_and_recursive_encoding_headers_are_walked() {
+        // v3.2 adds `prefixEncoding` (a Vec<Encoding>) on MediaType and
+        // makes Encoding itself recursive (`encoding` / `prefixEncoding`
+        // / `itemEncoding`). Each level's `headers` slot must be walked.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "operationId": "upload",
+                        "requestBody": {
+                            "content": {
+                                "multipart/mixed": {
+                                    "schema": {"type": "array", "items": {"type": "object"}},
+                                    "prefixEncoding": [
+                                        {
+                                            "contentType": "text/plain",
+                                            "headers": {
+                                                "X-Prefix": {"schema": {"title": "PrefixSchema", "type": "string"}}
+                                            },
+                                            // Recursive nesting: an Encoding can itself
+                                            // hold further Encoding maps.
+                                            "encoding": {
+                                                "nested": {
+                                                    "contentType": "text/plain",
+                                                    "headers": {
+                                                        "X-Inner": {"schema": {"title": "InnerSchema", "type": "string"}}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let schemas = lifted_schema_names(&spec);
+        for s in ["PrefixSchema", "InnerSchema"] {
+            assert!(
+                schemas.contains(&s.to_owned()),
+                "missing `{s}`: {schemas:?}"
+            );
+        }
+    }
+
     // ── Recursion coverage: Schema composition variants ──────────────────
 
     #[test]
