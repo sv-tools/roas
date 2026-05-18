@@ -13,6 +13,15 @@ permissions: read-all
 
 jobs:
   Checks:
+    # `OsvScanner` (and its PR sibling) inside the reusable workflow need
+    # `security-events: write` to upload SARIF to the Security tab.
+    # Reusable workflows can't escalate beyond what the caller grants, so
+    # the top-level `read-all` default isn't enough — pin the broader
+    # scope here at the call site.
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     uses: ./.github/workflows/checks.yaml
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
