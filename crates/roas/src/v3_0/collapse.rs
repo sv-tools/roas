@@ -40,7 +40,7 @@ use crate::v3_0::callback::Callback;
 use crate::v3_0::example::Example;
 use crate::v3_0::header::Header;
 use crate::v3_0::link::Link;
-use crate::v3_0::media_type::MediaType;
+use crate::v3_0::media_type::{Encoding, MediaType};
 use crate::v3_0::operation::Operation;
 use crate::v3_0::parameter::Parameter;
 use crate::v3_0::path_item::{PathItem, Paths};
@@ -448,6 +448,24 @@ fn walk_media_type(
     if let Some(examples) = mt.examples.as_mut() {
         for (name, e) in examples.iter_mut() {
             lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+        }
+    }
+    if let Some(encoding) = mt.encoding.as_mut() {
+        for (prop, enc) in encoding.iter_mut() {
+            walk_encoding(enc, &ctx.push(&format!("encoding.{prop}")), c)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_encoding(
+    enc: &mut Encoding,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(headers) = enc.headers.as_mut() {
+        for (name, h) in headers.iter_mut() {
+            lift_ref_or::<Header, _>(h, ctx.push(&format!("headers.{name}")), c)?;
         }
     }
     Ok(())
@@ -1477,6 +1495,57 @@ mod tests {
         spec.collapse(None).unwrap();
         let names = lifted_schema_names(&spec);
         assert!(names.contains(&"TraceMime".to_owned()), "got {names:?}");
+    }
+
+    // ── Walker coverage: MediaType.encoding[*].headers ────────────────────
+
+    #[test]
+    fn media_type_encoding_headers_are_walked() {
+        // Inline headers under `encoding[*].headers` must be lifted
+        // into `components.headers` like any other header slot.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "operationId": "upload",
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}}},
+                                    "encoding": {
+                                        "file": {
+                                            "contentType": "application/octet-stream",
+                                            "headers": {
+                                                "X-Rate": {"schema": {"title": "RateSchema", "type": "integer"}}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let header_names: Vec<String> = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.headers.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        assert!(
+            !header_names.is_empty(),
+            "encoding header must lift, got {header_names:?}",
+        );
+        assert!(
+            lifted_schema_names(&spec).contains(&"RateSchema".to_owned()),
+            "nested schema must lift, got {:?}",
+            lifted_schema_names(&spec),
+        );
     }
 
     // ── Recursion coverage: Schema composition variants ──────────────────

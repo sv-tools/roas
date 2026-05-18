@@ -35,7 +35,7 @@ use crate::v3_2::callback::Callback;
 use crate::v3_2::example::Example;
 use crate::v3_2::header::Header;
 use crate::v3_2::link::Link;
-use crate::v3_2::media_type::MediaType;
+use crate::v3_2::media_type::{Encoding, MediaType};
 use crate::v3_2::operation::Operation;
 use crate::v3_2::parameter::Parameter;
 use crate::v3_2::path_item::{PathItem, Paths};
@@ -488,6 +488,49 @@ fn walk_media_type(
         for (name, e) in examples.iter_mut() {
             lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
         }
+    }
+    if let Some(encoding) = mt.encoding.as_mut() {
+        for (prop, enc) in encoding.iter_mut() {
+            walk_encoding(enc, &ctx.push(&format!("encoding.{prop}")), c)?;
+        }
+    }
+    if let Some(prefix) = mt.prefix_encoding.as_mut() {
+        for (i, enc) in prefix.iter_mut().enumerate() {
+            walk_encoding(enc, &ctx.push(&format!("prefixEncoding[{i}]")), c)?;
+        }
+    }
+    if let Some(item) = mt.item_encoding.as_mut() {
+        walk_encoding(item, &ctx.push("itemEncoding"), c)?;
+    }
+    Ok(())
+}
+
+fn walk_encoding(
+    enc: &mut Encoding,
+    ctx: &NameContext,
+    c: &mut Collapser<'_>,
+) -> Result<(), CollapseError> {
+    if let Some(headers) = enc.headers.as_mut() {
+        for (name, h) in headers.iter_mut() {
+            lift_ref_or::<Header, _>(h, ctx.push(&format!("headers.{name}")), c)?;
+        }
+    }
+    // OAS 3.2 makes `Encoding` recursive (for nested multipart parts):
+    // `encoding`, `prefixEncoding`, and `itemEncoding` mirror the
+    // MediaType-level fields and can carry further `RefOr<Header>`
+    // slots inside them.
+    if let Some(encoding) = enc.encoding.as_mut() {
+        for (prop, child) in encoding.iter_mut() {
+            walk_encoding(child, &ctx.push(&format!("encoding.{prop}")), c)?;
+        }
+    }
+    if let Some(prefix) = enc.prefix_encoding.as_mut() {
+        for (i, child) in prefix.iter_mut().enumerate() {
+            walk_encoding(child, &ctx.push(&format!("prefixEncoding[{i}]")), c)?;
+        }
+    }
+    if let Some(item) = enc.item_encoding.as_mut() {
+        walk_encoding(item, &ctx.push("itemEncoding"), c)?;
     }
     Ok(())
 }
@@ -1663,6 +1706,69 @@ mod tests {
         spec.collapse(None).unwrap();
         let names = lifted_schema_names(&spec);
         assert!(names.contains(&"TraceMime".to_owned()), "got {names:?}");
+    }
+
+    // ── Walker coverage: MediaType.encoding[*].headers + recursive 3.2 ───
+
+    #[test]
+    fn media_type_encoding_headers_are_walked() {
+        // Inline headers under `encoding[*].headers` must be lifted
+        // into `components.headers` like any other header slot. v3.2
+        // also exposes `itemEncoding` / `prefixEncoding` (both
+        // recursive), so cover one of those too.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "post": {
+                        "operationId": "upload",
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}}},
+                                    "encoding": {
+                                        "file": {
+                                            "contentType": "application/octet-stream",
+                                            "headers": {
+                                                "X-Rate": {"schema": {"title": "RateSchema", "type": "integer"}}
+                                            }
+                                        }
+                                    },
+                                    // 3.2-only: nested `itemEncoding` whose own
+                                    // `headers` slot also must lift.
+                                    "itemEncoding": {
+                                        "contentType": "text/plain",
+                                        "headers": {
+                                            "X-Item": {"schema": {"title": "ItemSchema", "type": "string"}}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let header_names: Vec<String> = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.headers.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        assert!(
+            header_names.len() >= 2,
+            "both encoding and itemEncoding headers must lift, got {header_names:?}",
+        );
+        let schemas = lifted_schema_names(&spec);
+        for expected in ["RateSchema", "ItemSchema"] {
+            assert!(
+                schemas.contains(&expected.to_owned()),
+                "missing `{expected}`: {schemas:?}",
+            );
+        }
     }
 
     // ── Recursion coverage: Schema composition variants ──────────────────
