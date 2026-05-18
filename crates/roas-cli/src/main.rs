@@ -9,7 +9,12 @@
 //!
 //! - `roas convert --to <VERSION> <FILE>` — chain the existing
 //!   `From<v_X::Spec> for v_Y::Spec` migrations to upconvert a spec.
-//!   Pass `--from` to force the input version.
+//!   Pass `--from` to force the input version. Pass `--collapse` to
+//!   run `Spec::collapse` on the (post-conversion) result, lifting
+//!   every inline component into the matching `components.<bag>` /
+//!   `definitions` / `parameters` / `responses` slot with strict
+//!   dedup. External `$ref`s are skipped by default; use
+//!   `--load file` / `--load http` to opt into the loader.
 //!
 //! - `roas preview <FILE>` — start a local HTTP server on
 //!   `127.0.0.1:<random>` that serves the spec rendered with
@@ -93,6 +98,22 @@ struct ConvertArgs {
     /// Force the input version (auto-detected by default).
     #[arg(long, value_enum)]
     from: Option<SpecVersion>,
+
+    /// Lift every inline component into the matching root bag
+    /// (`components.<bag>` for v3.x, `definitions` / `parameters` /
+    /// `responses` for v2) and replace its call sites with a `$ref`.
+    /// Structurally identical components collapse to a single entry.
+    /// Runs after the version conversion.
+    #[arg(long)]
+    collapse: bool,
+
+    /// Enable external-reference loading during `--collapse`. Same
+    /// semantics as `roas validate --load`: pass `--load file` to
+    /// allow `file://` refs, `--load http` for `http(s)://`; repeat
+    /// to combine. Without it, external `$ref`s in the input are
+    /// left untouched.
+    #[arg(long, value_enum)]
+    load: Vec<LoaderKind>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -180,8 +201,13 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
         );
     }
 
-    let converted = detected.convert_to(target)?;
-    let json = serde_json::to_string_pretty(&converted).context("serializing converted spec")?;
+    let mut converted = detected.convert_to_detected(target)?;
+    if args.collapse {
+        let mut loader = build_loader(&args.load);
+        converted.collapse(loader.as_mut())?;
+    }
+    let value = converted.into_value()?;
+    let json = serde_json::to_string_pretty(&value).context("serializing converted spec")?;
     println!("{json}");
     Ok(())
 }
@@ -319,6 +345,40 @@ mod tests {
     fn cli_rejects_convert_without_to() {
         let res = Cli::try_parse_from(["roas", "convert", "spec.json"]);
         assert!(res.is_err(), "convert without --to must error");
+    }
+
+    #[test]
+    fn cli_parses_convert_with_collapse_and_load_flags() {
+        let cli = Cli::try_parse_from([
+            "roas",
+            "convert",
+            "--to",
+            "v3_2",
+            "--collapse",
+            "--load",
+            "file",
+            "spec.json",
+        ])
+        .expect("convert parse");
+        match cli.command {
+            Command::Convert(args) => {
+                assert_eq!(args.to, SpecVersion::V3_2);
+                assert!(args.collapse, "--collapse must set the flag");
+                assert_eq!(args.load.len(), 1);
+                assert!(matches!(args.load[0], LoaderKind::File));
+            }
+            _ => panic!("expected Convert"),
+        }
+    }
+
+    #[test]
+    fn cli_convert_collapse_defaults_to_false() {
+        let cli = Cli::try_parse_from(["roas", "convert", "--to", "v3_2", "spec.json"])
+            .expect("convert parse");
+        match cli.command {
+            Command::Convert(args) => assert!(!args.collapse, "--collapse defaults to false"),
+            _ => panic!("expected Convert"),
+        }
     }
 
     /// Process-scoped unique temp path so parallel tests don't collide.
@@ -480,8 +540,49 @@ mod tests {
             file: f.0.clone(),
             to: SpecVersion::V3_2,
             from: None,
+            collapse: false,
+            load: vec![],
         };
         run_convert(args).expect("v2 → v3.2 must succeed");
+    }
+
+    #[test]
+    fn run_convert_with_collapse_succeeds_on_titled_inline_schema() {
+        // A v3.2 spec with one inline titled schema. After --collapse,
+        // the inline copy lifts into `components.schemas.Pet` and the
+        // call site holds a `$ref`. `run_convert` prints the result to
+        // stdout; this test only asserts the call succeeds (parser /
+        // converter / collapser chained cleanly).
+        let body = br#"{
+            "openapi":"3.2.0",
+            "info":{"title":"x","version":"1"},
+            "paths":{
+                "/pets":{
+                    "get":{
+                        "operationId":"listPets",
+                        "responses":{
+                            "200":{
+                                "description":"ok",
+                                "content":{
+                                    "application/json":{
+                                        "schema":{"title":"Pet","type":"object","properties":{"id":{"type":"integer"}}}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let f = TempFile::write("collapse.json", body);
+        let args = ConvertArgs {
+            file: f.0.clone(),
+            to: SpecVersion::V3_2,
+            from: None,
+            collapse: true,
+            load: vec![],
+        };
+        run_convert(args).expect("convert + collapse must succeed");
     }
 
     #[test]
@@ -491,6 +592,8 @@ mod tests {
             file: f.0.clone(),
             to: SpecVersion::V2,
             from: None,
+            collapse: false,
+            load: vec![],
         };
         let err = run_convert(args).expect_err("downconversion must error");
         assert!(
@@ -505,6 +608,8 @@ mod tests {
             file: temp_path("missing.json"),
             to: SpecVersion::V3_2,
             from: None,
+            collapse: false,
+            load: vec![],
         };
         let err = run_convert(args).expect_err("missing file must error");
         assert!(

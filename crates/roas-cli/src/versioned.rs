@@ -79,38 +79,40 @@ impl DetectedSpec {
 
     /// Chain the existing `From<v_X::Spec> for v_Y::Spec` migrations
     /// to upconvert this spec to the requested target. Returns the
-    /// converted spec serialised as a [`Value`] for printing.
+    /// converted spec at its new version, still as a typed
+    /// [`DetectedSpec`] so the caller can run further version-specific
+    /// operations (e.g. `Spec::collapse`) before serialising.
     ///
     /// Returns an error if the requested conversion is a downconversion
     /// (the caller's responsibility to reject those before calling).
-    pub fn convert_to(self, target: SpecVersion) -> Result<Value> {
+    pub fn convert_to_detected(self, target: SpecVersion) -> Result<DetectedSpec> {
         match (self, target) {
-            (DetectedSpec::V2(s), SpecVersion::V2) => to_value("v2", &s),
-            (DetectedSpec::V3_0(s), SpecVersion::V3_0) => to_value("v3_0", &s),
-            (DetectedSpec::V3_1(s), SpecVersion::V3_1) => to_value("v3_1", &s),
-            (DetectedSpec::V3_2(s), SpecVersion::V3_2) => to_value("v3_2", &s),
+            (DetectedSpec::V2(s), SpecVersion::V2) => Ok(DetectedSpec::V2(s)),
+            (DetectedSpec::V3_0(s), SpecVersion::V3_0) => Ok(DetectedSpec::V3_0(s)),
+            (DetectedSpec::V3_1(s), SpecVersion::V3_1) => Ok(DetectedSpec::V3_1(s)),
+            (DetectedSpec::V3_2(s), SpecVersion::V3_2) => Ok(DetectedSpec::V3_2(s)),
 
             (DetectedSpec::V2(s), SpecVersion::V3_0) => {
-                to_value("v3_0", &v3_0::spec::Spec::from(s))
+                Ok(DetectedSpec::V3_0(v3_0::spec::Spec::from(s)))
             }
             (DetectedSpec::V2(s), SpecVersion::V3_1) => {
                 let v30 = v3_0::spec::Spec::from(s);
-                to_value("v3_1", &v3_1::spec::Spec::from(v30))
+                Ok(DetectedSpec::V3_1(v3_1::spec::Spec::from(v30)))
             }
             (DetectedSpec::V2(s), SpecVersion::V3_2) => {
                 let v30 = v3_0::spec::Spec::from(s);
                 let v31 = v3_1::spec::Spec::from(v30);
-                to_value("v3_2", &v3_2::spec::Spec::from(v31))
+                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::from(v31)))
             }
             (DetectedSpec::V3_0(s), SpecVersion::V3_1) => {
-                to_value("v3_1", &v3_1::spec::Spec::from(s))
+                Ok(DetectedSpec::V3_1(v3_1::spec::Spec::from(s)))
             }
             (DetectedSpec::V3_0(s), SpecVersion::V3_2) => {
                 let v31 = v3_1::spec::Spec::from(s);
-                to_value("v3_2", &v3_2::spec::Spec::from(v31))
+                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::from(v31)))
             }
             (DetectedSpec::V3_1(s), SpecVersion::V3_2) => {
-                to_value("v3_2", &v3_2::spec::Spec::from(s))
+                Ok(DetectedSpec::V3_2(v3_2::spec::Spec::from(s)))
             }
 
             // Downconversions: rejected here as a safety net; the CLI already
@@ -120,6 +122,41 @@ impl DetectedSpec {
                 DetectedSpec::label_of(&from),
                 to.label(),
             ),
+        }
+    }
+
+    /// Convenience: [`convert_to_detected`](Self::convert_to_detected)
+    /// followed by [`into_value`](Self::into_value). Used by callers
+    /// that don't need the intermediate typed `DetectedSpec` (e.g.
+    /// `preview`, which only needs the final JSON to feed the
+    /// renderer).
+    pub fn convert_to(self, target: SpecVersion) -> Result<Value> {
+        self.convert_to_detected(target)?.into_value()
+    }
+
+    /// Run `Spec::collapse` against this spec, lifting every inline
+    /// component into its matching root bag and replacing the call
+    /// site with a `$ref`. Each version dispatches to its own
+    /// `collapse::collapse_spec` implementation; the underlying
+    /// per-version `CollapseError` is re-wrapped with an `anyhow`
+    /// context tag so users can see which version's pipeline tripped.
+    pub fn collapse(&mut self, loader: Option<&mut Loader>) -> Result<()> {
+        match self {
+            DetectedSpec::V2(s) => s.collapse(loader).context("collapsing OpenAPI 2.0 spec"),
+            DetectedSpec::V3_0(s) => s.collapse(loader).context("collapsing OpenAPI 3.0 spec"),
+            DetectedSpec::V3_1(s) => s.collapse(loader).context("collapsing OpenAPI 3.1 spec"),
+            DetectedSpec::V3_2(s) => s.collapse(loader).context("collapsing OpenAPI 3.2 spec"),
+        }
+    }
+
+    /// Serialise the wrapped spec to a [`serde_json::Value`] for
+    /// printing.
+    pub fn into_value(self) -> Result<Value> {
+        match self {
+            DetectedSpec::V2(s) => to_value("v2", &s),
+            DetectedSpec::V3_0(s) => to_value("v3_0", &s),
+            DetectedSpec::V3_1(s) => to_value("v3_1", &s),
+            DetectedSpec::V3_2(s) => to_value("v3_2", &s),
         }
     }
 
@@ -552,5 +589,146 @@ mod tests {
     fn parse_version_returns_none_when_minor_is_not_parseable_int() {
         // "3.." => minor segment is empty.
         assert_eq!(parse_version("3.."), None);
+    }
+
+    // ── DetectedSpec::collapse — dispatch coverage per version. ──────────
+    //
+    // The collapse machinery itself has dedicated tests in `roas`; here we
+    // only confirm the CLI's `match`-over-variants delegates to the right
+    // version's implementation and pipes any error through `anyhow`.
+
+    /// Build a spec with one inline titled schema in a response and
+    /// run `DetectedSpec::collapse` on it. After collapse, the schema
+    /// must have been lifted into the appropriate root bag
+    /// (`components.schemas` for v3.x, `definitions` for v2).
+    fn collapse_lifts_inline_titled_schema(spec: DetectedSpec, bag_pointer: &str) {
+        let mut spec = spec;
+        spec.collapse(None).expect("collapse ok");
+        let v = spec.into_value().expect("serialize ok");
+        let bag = v
+            .pointer(bag_pointer)
+            .unwrap_or_else(|| panic!("bag `{bag_pointer}` must exist after collapse: {v:#}"));
+        let obj = bag
+            .as_object()
+            .unwrap_or_else(|| panic!("`{bag_pointer}` must be an object: {bag:#}"));
+        assert!(
+            !obj.is_empty(),
+            "collapse must have lifted at least one entry into {bag_pointer}: {bag:#}",
+        );
+    }
+
+    #[test]
+    fn collapse_dispatches_to_v2_definitions() {
+        let v: Value = serde_json::from_str(
+            r#"{
+                "swagger":"2.0",
+                "info":{"title":"x","version":"1"},
+                "paths":{
+                    "/x":{
+                        "post":{
+                            "operationId":"x",
+                            "parameters":[
+                                {"in":"body","name":"body","schema":{"title":"Pet","type":"object","properties":{"id":{"type":"integer"}}}}
+                            ],
+                            "responses":{"200":{"description":"ok"}}
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let spec = detect_or_use(None, v).unwrap();
+        collapse_lifts_inline_titled_schema(spec, "/definitions");
+    }
+
+    #[test]
+    fn collapse_dispatches_to_v3_0_components() {
+        let v: Value = serde_json::from_str(
+            r#"{
+                "openapi":"3.0.4",
+                "info":{"title":"x","version":"1"},
+                "paths":{
+                    "/pets":{
+                        "get":{
+                            "operationId":"x",
+                            "responses":{
+                                "200":{
+                                    "description":"ok",
+                                    "content":{"application/json":{"schema":{"title":"Pet","type":"object","properties":{"id":{"type":"integer"}}}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let spec = detect_or_use(None, v).unwrap();
+        collapse_lifts_inline_titled_schema(spec, "/components/schemas");
+    }
+
+    #[test]
+    fn collapse_dispatches_to_v3_1_components() {
+        let v: Value = serde_json::from_str(
+            r#"{
+                "openapi":"3.1.0",
+                "info":{"title":"x","version":"1"},
+                "paths":{
+                    "/pets":{
+                        "get":{
+                            "operationId":"x",
+                            "responses":{
+                                "200":{
+                                    "description":"ok",
+                                    "content":{"application/json":{"schema":{"title":"Pet","type":"object","properties":{"id":{"type":"integer"}}}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let spec = detect_or_use(None, v).unwrap();
+        collapse_lifts_inline_titled_schema(spec, "/components/schemas");
+    }
+
+    #[test]
+    fn collapse_dispatches_to_v3_2_components() {
+        let v: Value = serde_json::from_str(
+            r#"{
+                "openapi":"3.2.0",
+                "info":{"title":"x","version":"1"},
+                "paths":{
+                    "/pets":{
+                        "get":{
+                            "operationId":"x",
+                            "responses":{
+                                "200":{
+                                    "description":"ok",
+                                    "content":{"application/json":{"schema":{"title":"Pet","type":"object","properties":{"id":{"type":"integer"}}}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let spec = detect_or_use(None, v).unwrap();
+        collapse_lifts_inline_titled_schema(spec, "/components/schemas");
+    }
+
+    #[test]
+    fn convert_to_detected_chains_through_intermediate_versions() {
+        // v2 → v3_2 must walk through v3_0 and v3_1, returning a typed
+        // `DetectedSpec::V3_2` (not just a Value).
+        let v: Value = serde_json::from_str(
+            r#"{"swagger":"2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        )
+        .unwrap();
+        let detected = detect_or_use(None, v).unwrap();
+        let converted = detected.convert_to_detected(SpecVersion::V3_2).unwrap();
+        assert_eq!(converted.version(), SpecVersion::V3_2);
     }
 }
