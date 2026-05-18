@@ -12,6 +12,7 @@
 //!   was added as a real type in 3.1). Kept on purpose so v3.0 specs that
 //!   borrowed the 2020-12 idiom round-trip cleanly.
 pub mod callback;
+pub mod collapse;
 pub mod components;
 pub mod discriminator;
 pub mod example;

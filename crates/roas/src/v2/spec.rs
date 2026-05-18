@@ -455,6 +455,51 @@ impl Spec {
             .insert(name, response);
         Ok(RefOr::new_ref(reference))
     }
+
+    /// Lift every inline component in the document into its matching
+    /// root-level bag (`definitions`, `parameters`, `responses`),
+    /// replacing each inline location with a `RefOr::Ref` to the new
+    /// component.
+    ///
+    /// v2 has no `components` wrapper — bags live at the spec root
+    /// and hold bare values (`BTreeMap<String, T>`, not `RefOr<T>`).
+    /// There are no v3-style `headers` / `examples` / `links` /
+    /// `callbacks` bags. `Header` / `Items` slots inside parameters
+    /// and responses are walked in place but never lifted.
+    ///
+    /// Naming: a `Schema` uses its `title` when present; a
+    /// `Parameter` uses a `<name><In>` hint (e.g., `limitQuery`,
+    /// `petBody`). Anything without an authoritative name falls back
+    /// to a sanitised path through the spec tree. Structurally
+    /// identical components collapse to a single entry (strict
+    /// canonical-JSON equality); every call site that previously held
+    /// the inline shape gets the same `$ref`.
+    ///
+    /// When `loader` is `Some`, every external `$ref` (anything not
+    /// starting with `#`) is fetched, parsed as the bag's concrete
+    /// type, lifted via the same recursion + dedup pipeline, and
+    /// rewritten as a local `#/<bag>/<name>` ref.
+    ///
+    /// `info` and `swagger` are untouched. Pre-existing
+    /// `definitions` / `parameters` / `responses` entries keep their
+    /// names but their own nested inline children (schemas inside
+    /// parameters, etc.) are still lifted.
+    ///
+    /// Errors come from two sources: the loader (fetch / parse /
+    /// pointer-not-found via [`CollapseError::External`]) and serde
+    /// serialisation for the dedup map (in practice infallible for
+    /// every component type in this crate, but exposed via
+    /// [`CollapseError::Serialize`] rather than panicked on).
+    ///
+    /// [`CollapseError`]: crate::v2::collapse::CollapseError
+    /// [`CollapseError::External`]: crate::v2::collapse::CollapseError::External
+    /// [`CollapseError::Serialize`]: crate::v2::collapse::CollapseError::Serialize
+    pub fn collapse(
+        &mut self,
+        loader: Option<&mut Loader>,
+    ) -> Result<(), crate::v2::collapse::CollapseError> {
+        crate::v2::collapse::collapse_spec(self, loader)
+    }
 }
 
 impl ResolveReference<Response> for Spec {

@@ -286,7 +286,7 @@ pub trait HasLoader {
 /// The generic [`lift_ref_or`] uses this trait to perform the
 /// uniform inline / internal-ref / external-ref-with-loader logic
 /// against any concrete component type.
-pub trait LiftableBag<C>: Sized + Clone + Serialize + DeserializeOwned + 'static {
+pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
     /// The `#/components/<bag>/` prefix. Used to build internal
     /// `$ref` targets.
     const PREFIX: &'static str;
@@ -324,7 +324,11 @@ pub fn lift_ref_or<T, C>(
     c: &mut C,
 ) -> Result<(), CollapseError>
 where
-    T: LiftableBag<C>,
+    // `Clone` is required by `Loader::resolve_reference_as<T>` (it
+    // clones cached values out of its typed cache); pinned here at
+    // the call site rather than on the trait so the trait surface
+    // stays minimal.
+    T: LiftableBag<C> + Clone,
     C: HasLoader,
 {
     match slot {

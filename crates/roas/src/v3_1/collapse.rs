@@ -1,9 +1,9 @@
-//! `Spec::collapse` for OAS 3.2 — lift every inline component into
+//! `Spec::collapse` for OAS 3.1 — lift every inline component into
 //! `components.<bag>`.
 //!
 //! All of the heavy lifting (dedup, naming, the generic `lift_ref_or`
 //! routine, the `LiftableBag` trait, the `Bag<T>` storage) lives in
-//! [`crate::common::collapse`]. This module just provides the v3.2
+//! [`crate::common::collapse`]. This module just provides the v3.1
 //! pieces:
 //!
 //! * The concrete [`Collapser`] struct (one `Bag<T>` field per
@@ -18,31 +18,34 @@
 //!   then writes each bag back.
 //!
 //! Bags lifted: `schemas`, `parameters`, `responses`,
-//! `requestBodies`, `headers`, `mediaTypes`, `examples`, `links`,
-//! `callbacks`. `pathItems` is *not* lifted out of its primary
-//! locations (`paths.<path>`, `webhooks.<name>`,
-//! `callback.paths.<expr>`) — pre-existing `components.pathItems`
-//! entries are still seeded into the dedup map and their nested
-//! children are lifted.
+//! `requestBodies`, `headers`, `examples`, `links`, `callbacks`.
+//! `pathItems` is *not* lifted out of its primary locations
+//! (`paths.<path>`, `webhooks.<name>`, `callback.paths.<expr>`) —
+//! pre-existing `components.pathItems` entries are still seeded into
+//! the dedup map and their nested children are lifted.
+//!
+//! v3.1 has no `components.mediaTypes` bag (that's a v3.2 addition),
+//! so `MediaType` instances stay inline at their content[mime] slots;
+//! their nested `schema` / `examples` still lift via the walkers.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::common::bool_or::BoolOr;
 use crate::common::collapse::{Bag, HasLoader, LiftableBag, NameContext, lift_ref_or};
 use crate::common::reference::RefOr;
 use crate::loader::Loader;
-use crate::v3_2::callback::Callback;
-use crate::v3_2::example::Example;
-use crate::v3_2::header::Header;
-use crate::v3_2::link::Link;
-use crate::v3_2::media_type::{Encoding, MediaType};
-use crate::v3_2::operation::Operation;
-use crate::v3_2::parameter::Parameter;
-use crate::v3_2::path_item::{PathItem, Paths};
-use crate::v3_2::request_body::RequestBody;
-use crate::v3_2::response::{Response, Responses};
-use crate::v3_2::schema::{ArraySchema, ObjectSchema, Schema, SingleSchema};
-use crate::v3_2::spec::Spec;
+use crate::v3_1::callback::Callback;
+use crate::v3_1::example::Example;
+use crate::v3_1::header::Header;
+use crate::v3_1::link::Link;
+use crate::v3_1::media_type::{Encoding, MediaType};
+use crate::v3_1::operation::Operation;
+use crate::v3_1::parameter::Parameter;
+use crate::v3_1::path_item::{PathItem, Paths};
+use crate::v3_1::request_body::RequestBody;
+use crate::v3_1::response::{Response, Responses};
+use crate::v3_1::schema::{ArraySchema, ObjectSchema, Schema, SingleSchema};
+use crate::v3_1::spec::Spec;
 
 pub use crate::common::collapse::CollapseError;
 
@@ -54,18 +57,18 @@ pub(crate) struct Collapser<'a> {
     responses: Bag<Response>,
     request_bodies: Bag<RequestBody>,
     headers: Bag<Header>,
-    media_types: Bag<MediaType>,
     examples: Bag<Example>,
     links: Bag<Link>,
     callbacks: Bag<Callback>,
+    // v3.1 has no `components.mediaTypes` bag — `MediaType` is
+    // walked in place at every `content[mime]` slot.
     /// PathItem is bare (not wrapped in `RefOr`); its ref form lives
     /// in `PathItem.reference`. We don't lift inline PathItems out
     /// of `paths.<path>` / `webhooks.<name>` / callback paths — but
     /// pre-existing `components.pathItems` entries are still seeded
     /// here so we can recurse into them and lift their nested
-    /// children.
+    /// children, then put the (now child-lifted) PathItem back.
     path_items: BTreeMap<String, PathItem>,
-    path_items_seen: HashMap<String, String>,
     loader: Option<&'a mut Loader>,
 }
 
@@ -171,21 +174,9 @@ impl<'a> LiftableBag<Collapser<'a>> for Header {
     }
 }
 
-impl<'a> LiftableBag<Collapser<'a>> for MediaType {
-    const PREFIX: &'static str = "#/components/mediaTypes/";
-
-    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
-        &mut c.media_types
-    }
-
-    fn walk(
-        item: &mut Self,
-        ctx: &NameContext,
-        c: &mut Collapser<'a>,
-    ) -> Result<(), CollapseError> {
-        walk_media_type(item, ctx, c)
-    }
-}
+// v3.1 has no `components.mediaTypes` bag — `MediaType` is walked
+// in place at every content[mime] slot but not lifted into its own
+// component.
 
 impl<'a> LiftableBag<Collapser<'a>> for Example {
     const PREFIX: &'static str = "#/components/examples/";
@@ -333,8 +324,7 @@ fn walk_parameter(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     // Push the parameter's `name` into ctx so derived child names
-    // mention it. Querystring is the odd one out: per OAS 3.2 it
-    // carries `content` only and forbids `schema`.
+    // mention it.
     match param {
         Parameter::Path(p) => walk_param_slots(
             ctx.push(p.name.as_str()),
@@ -364,25 +354,13 @@ fn walk_parameter(
             p.examples.as_mut(),
             c,
         ),
-        Parameter::Querystring(p) => {
-            let ctx = ctx.push(p.name.as_str());
-            for (mime, mt) in p.content.iter_mut() {
-                lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
-            }
-            if let Some(examples) = p.examples.as_mut() {
-                for (name, e) in examples.iter_mut() {
-                    lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
-                }
-            }
-            Ok(())
-        }
     }
 }
 
 fn walk_param_slots(
     ctx: NameContext,
     schema: Option<&mut RefOr<Schema>>,
-    content: Option<&mut BTreeMap<String, RefOr<MediaType>>>,
+    content: Option<&mut BTreeMap<String, MediaType>>,
     examples: Option<&mut BTreeMap<String, RefOr<Example>>>,
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
@@ -391,7 +369,7 @@ fn walk_param_slots(
     }
     if let Some(content) = content {
         for (mime, mt) in content.iter_mut() {
-            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+            walk_media_type(mt, &ctx.push(&format!("content.{mime}")), c)?;
         }
     }
     if let Some(examples) = examples {
@@ -414,7 +392,7 @@ fn walk_response(
     }
     if let Some(content) = r.content.as_mut() {
         for (mime, mt) in content.iter_mut() {
-            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+            walk_media_type(mt, &ctx.push(&format!("content.{mime}")), c)?;
         }
     }
     if let Some(links) = r.links.as_mut() {
@@ -447,7 +425,7 @@ fn walk_request_body(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     for (mime, mt) in rb.content.iter_mut() {
-        lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+        walk_media_type(mt, &ctx.push(&format!("content.{mime}")), c)?;
     }
     Ok(())
 }
@@ -462,7 +440,7 @@ fn walk_header(
     }
     if let Some(content) = h.content.as_mut() {
         for (mime, mt) in content.iter_mut() {
-            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+            walk_media_type(mt, &ctx.push(&format!("content.{mime}")), c)?;
         }
     }
     if let Some(examples) = h.examples.as_mut() {
@@ -481,9 +459,6 @@ fn walk_media_type(
     if let Some(s) = mt.schema.as_mut() {
         lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
     }
-    if let Some(s) = mt.item_schema.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("itemSchema"), c)?;
-    }
     if let Some(examples) = mt.examples.as_mut() {
         for (name, e) in examples.iter_mut() {
             lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
@@ -493,14 +468,6 @@ fn walk_media_type(
         for (prop, enc) in encoding.iter_mut() {
             walk_encoding(enc, &ctx.push(&format!("encoding.{prop}")), c)?;
         }
-    }
-    if let Some(prefix) = mt.prefix_encoding.as_mut() {
-        for (i, enc) in prefix.iter_mut().enumerate() {
-            walk_encoding(enc, &ctx.push(&format!("prefixEncoding[{i}]")), c)?;
-        }
-    }
-    if let Some(item) = mt.item_encoding.as_mut() {
-        walk_encoding(item, &ctx.push("itemEncoding"), c)?;
     }
     Ok(())
 }
@@ -514,23 +481,6 @@ fn walk_encoding(
         for (name, h) in headers.iter_mut() {
             lift_ref_or::<Header, _>(h, ctx.push(&format!("headers.{name}")), c)?;
         }
-    }
-    // OAS 3.2 makes `Encoding` recursive (for nested multipart parts):
-    // `encoding`, `prefixEncoding`, and `itemEncoding` mirror the
-    // MediaType-level fields and can carry further `RefOr<Header>`
-    // slots inside them.
-    if let Some(encoding) = enc.encoding.as_mut() {
-        for (prop, child) in encoding.iter_mut() {
-            walk_encoding(child, &ctx.push(&format!("encoding.{prop}")), c)?;
-        }
-    }
-    if let Some(prefix) = enc.prefix_encoding.as_mut() {
-        for (i, child) in prefix.iter_mut().enumerate() {
-            walk_encoding(child, &ctx.push(&format!("prefixEncoding[{i}]")), c)?;
-        }
-    }
-    if let Some(item) = enc.item_encoding.as_mut() {
-        walk_encoding(item, &ctx.push("itemEncoding"), c)?;
     }
     Ok(())
 }
@@ -557,11 +507,6 @@ fn walk_path_item(
         }
     }
     if let Some(ops) = pi.operations.as_mut() {
-        for (method, op) in ops.iter_mut() {
-            walk_operation(op, ctx.push(method), c)?;
-        }
-    }
-    if let Some(ops) = pi.additional_operations.as_mut() {
         for (method, op) in ops.iter_mut() {
             walk_operation(op, ctx.push(method), c)?;
         }
@@ -647,11 +592,6 @@ pub(crate) fn collapse_spec(
         .as_mut()
         .and_then(|c| c.headers.take())
         .unwrap_or_default();
-    let initial_media_types = spec
-        .components
-        .as_mut()
-        .and_then(|c| c.media_types.take())
-        .unwrap_or_default();
     let initial_examples = spec
         .components
         .as_mut()
@@ -679,12 +619,10 @@ pub(crate) fn collapse_spec(
         responses: Bag::default(),
         request_bodies: Bag::default(),
         headers: Bag::default(),
-        media_types: Bag::default(),
         examples: Bag::default(),
         links: Bag::default(),
         callbacks: Bag::default(),
         path_items: BTreeMap::new(),
-        path_items_seen: HashMap::new(),
         loader,
     };
 
@@ -696,22 +634,13 @@ pub(crate) fn collapse_spec(
     c.responses.seed(initial_responses)?;
     c.request_bodies.seed(initial_request_bodies)?;
     c.headers.seed(initial_headers)?;
-    c.media_types.seed(initial_media_types)?;
     c.examples.seed(initial_examples)?;
     c.links.seed(initial_links)?;
     c.callbacks.seed(initial_callbacks)?;
-    // PathItems is bare — seed the dedup map and the entry map by
-    // hand. Only inline (reference: None) entries participate in
-    // dedup; ref-form ones are pure pointers.
-    for (name, pi) in initial_path_items {
-        if pi.reference.is_none() {
-            let canonical = serde_json::to_string(&pi)?;
-            c.path_items_seen
-                .entry(canonical)
-                .or_insert_with(|| name.clone());
-        }
-        c.path_items.insert(name, pi);
-    }
+    // PathItems is bare — keep the entry map. v3.1 never lifts
+    // PathItems out of their primary locations, so there's no dedup
+    // map to maintain.
+    c.path_items.extend(initial_path_items);
 
     // Phase 2a: recurse into each pre-existing inline component,
     // lifting its nested children. We compose this from the
@@ -722,7 +651,6 @@ pub(crate) fn collapse_spec(
     recurse_existing::<Response>(&mut c, &["components", "responses"])?;
     recurse_existing::<RequestBody>(&mut c, &["components", "requestBodies"])?;
     recurse_existing::<Header>(&mut c, &["components", "headers"])?;
-    recurse_existing::<MediaType>(&mut c, &["components", "mediaTypes"])?;
     // Examples and links are leaves — nothing to recurse INTO.
     recurse_existing::<Callback>(&mut c, &["components", "callbacks"])?;
 
@@ -742,10 +670,6 @@ pub(crate) fn collapse_spec(
         };
         let ctx = NameContext::new(["components", "pathItems", &name]);
         walk_path_item(&mut pi, ctx, &mut c)?;
-        let canonical = serde_json::to_string(&pi)?;
-        c.path_items_seen
-            .entry(canonical)
-            .or_insert_with(|| name.clone());
         c.path_items.insert(name, pi);
     }
 
@@ -781,11 +705,6 @@ pub(crate) fn collapse_spec(
     }
     if !c.headers.is_empty() {
         spec.components.get_or_insert_with(Default::default).headers = Some(c.headers.into_map());
-    }
-    if !c.media_types.is_empty() {
-        spec.components
-            .get_or_insert_with(Default::default)
-            .media_types = Some(c.media_types.into_map());
     }
     if !c.examples.is_empty() {
         spec.components
@@ -832,7 +751,7 @@ where
 
 // ── Version-specific helpers ────────────────────────────────────────────
 
-/// `<name><In>` hint for a v3.2 `Parameter` — e.g. `limitQuery`,
+/// `<name><In>` hint for a v3.1 `Parameter` — e.g. `limitQuery`,
 /// `petIdPath`. Returns `""` when the parameter has no usable name,
 /// signalling the intern path to fall back to context-derived
 /// naming.
@@ -840,7 +759,6 @@ fn parameter_name_hint(param: &Parameter) -> String {
     let (name, in_) = match param {
         Parameter::Path(p) => (p.name.as_str(), "Path"),
         Parameter::Query(p) => (p.name.as_str(), "Query"),
-        Parameter::Querystring(p) => (p.name.as_str(), "Querystring"),
         Parameter::Header(p) => (p.name.as_str(), "Header"),
         Parameter::Cookie(p) => (p.name.as_str(), "Cookie"),
     };
@@ -893,10 +811,9 @@ mod tests {
     }
 
     /// Walk through a lifted Response / RequestBody / Parameter /
-    /// Header (or any container whose `content[mime]` slot may itself
-    /// be a lifted MediaType ref) and return the inner `schema` slot.
-    /// Lets tests assert on the schema regardless of whether
-    /// mediaTypes have been lifted.
+    /// Header and return the inner `schema` slot at `content[mime]`.
+    /// v3.1 has no `components.mediaTypes` bag, so MediaType is
+    /// always inline at its content[mime] slot.
     fn schema_in_lifted_content(
         v: &serde_json::Value,
         container_ref: &str,
@@ -906,13 +823,7 @@ mod tests {
         let container = v
             .pointer(pointer)
             .unwrap_or_else(|| panic!("ref `{container_ref}` must resolve in spec"));
-        let mt_slot = &container["content"][mime];
-        if let Some(mt_ref) = mt_slot.get("$ref").and_then(|s| s.as_str()) {
-            let mt_name = mt_ref.trim_start_matches("#/components/mediaTypes/");
-            v["components"]["mediaTypes"][mt_name]["schema"].clone()
-        } else {
-            mt_slot["schema"].clone()
-        }
+        container["content"][mime]["schema"].clone()
     }
 
     fn schema_at(spec: &Spec, name: &str) -> serde_json::Value {
@@ -928,7 +839,7 @@ mod tests {
     #[test]
     fn lift_inline_response_schema_into_components_via_context_name() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -977,7 +888,7 @@ mod tests {
     #[test]
     fn schema_title_drives_the_component_name() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -1020,7 +931,7 @@ mod tests {
     #[test]
     fn nested_object_schemas_are_lifted_recursively() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -1065,7 +976,7 @@ mod tests {
     #[test]
     fn identical_inline_schemas_dedupe_to_one_component() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -1130,7 +1041,7 @@ mod tests {
         // Two different schemas, both untitled, both deriving the same
         // context-path-based name → suffix `_2` on the second one.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "components": {
                 "schemas": {
@@ -1172,7 +1083,7 @@ mod tests {
         // Pre-existing components.schemas entries keep their names but
         // their inline nested schemas still get lifted.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {},
             "components": {
@@ -1217,7 +1128,7 @@ mod tests {
             )
             .expect("preload");
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -1279,7 +1190,7 @@ mod tests {
     #[test]
     fn external_ref_without_loader_is_left_alone() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -1316,7 +1227,7 @@ mod tests {
     #[test]
     fn parameter_schema_is_lifted() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -1358,7 +1269,7 @@ mod tests {
         // Whatever the collapse rewrites, the resulting spec must still
         // parse via serde — i.e., we haven't constructed invalid structures.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -1396,7 +1307,7 @@ mod tests {
     // ── Walker coverage: every container / location a schema can live in
     //
     // The "kitchen sink" test below stuffs one inline schema into every
-    // schema-bearing slot v3.2 supports, then asserts that every site
+    // schema-bearing slot v3.1 supports, then asserts that every site
     // ended up rewritten to a ref. Driving them through one spec keeps
     // the test compact and exercises the cross-cutting walker
     // machinery (visitor recursion, ctx threading, dedup interplay).
@@ -1405,7 +1316,7 @@ mod tests {
     #[test]
     fn walker_covers_every_schema_bearing_slot() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -1420,19 +1331,12 @@ mod tests {
                             {"name": "id", "in": "path", "required": true, "schema": {"title": "Id", "type": "integer"}},
                             {"name": "tag", "in": "query", "schema": {"title": "Tag", "type": "string"}},
                             {"name": "x-trace", "in": "header", "schema": {"title": "Trace", "type": "string"}},
-                            {"name": "sid", "in": "cookie", "schema": {"title": "Sid", "type": "string"}},
-                            // Querystring (v3.2): no `schema`, `content` only.
-                            {"name": "qs", "in": "querystring", "content": {
-                                "application/x-www-form-urlencoded": {
-                                    "schema": {"title": "QsBody", "type": "object", "properties": {"q": {"type": "string"}}}
-                                }
-                            }}
+                            {"name": "sid", "in": "cookie", "schema": {"title": "Sid", "type": "string"}}
                         ],
                         "requestBody": {
                             "content": {
                                 "application/json": {
-                                    "schema": {"title": "PetBody", "type": "object", "properties": {"name": {"type": "string"}}},
-                                    "itemSchema": {"title": "PetItem", "type": "object", "properties": {"id": {"type": "integer"}}}
+                                    "schema": {"title": "PetBody", "type": "object", "properties": {"name": {"type": "string"}}}
                                 }
                             }
                         },
@@ -1472,19 +1376,6 @@ mod tests {
                             }
                         }
                     },
-                    // PathItem.additional_operations (v3.2).
-                    "additionalOperations": {
-                        "QUERY": {
-                            "responses": {
-                                "200": {
-                                    "description": "ok",
-                                    "content": {
-                                        "application/json": {"schema": {"title": "Custom", "type": "object", "properties": {"id": {"type": "integer"}}}}
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             },
             // Webhooks (v3.1+): Paths-shaped, walker hits the same code.
@@ -1555,9 +1446,6 @@ mod tests {
                             }
                         }
                     }
-                },
-                "mediaTypes": {
-                    "Json": {"schema": {"title": "MediaTypeJson", "type": "object", "properties": {"v": {"type": "string"}}}}
                 }
             }
         }));
@@ -1571,19 +1459,14 @@ mod tests {
             "Tag",
             "Trace",
             "Sid",
-            // Querystring -> content -> MediaType.schema.
-            "QsBody",
-            // Operation.requestBody MediaType.schema + item_schema.
+            // Operation.requestBody MediaType.schema.
             "PetBody",
-            "PetItem",
             // Operation.responses default + 200 + 200.headers.
             "Err",
             "Rate",
             "OkBody",
             // Operation.callbacks inline Callback -> PathItem -> response.
             "Ack",
-            // PathItem.additional_operations response.
-            "Custom",
             // Webhooks.
             "WebhookBody",
             // components.* (every bag).
@@ -1594,7 +1477,6 @@ mod tests {
             "Correlation",
             "EchoBody",
             "DelAck",
-            "MediaTypeJson",
         ] {
             assert!(
                 names.contains(&expected.to_owned()),
@@ -1622,7 +1504,7 @@ mod tests {
         // into it — but it also doesn't error. Use that path so the
         // RefOr::Ref arms of every container walker get exercised.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -1646,16 +1528,15 @@ mod tests {
                     "NotFound": {
                         "description": "not found",
                         "headers": {"X-Reason": {"$ref": "#/components/headers/H"}},
-                        "content": {"application/json": {"$ref": "#/components/mediaTypes/J"}}
+                        "content": {"application/json": {"schema": {"title": "J", "type": "string"}}}
                     }
                 },
                 "requestBodies": {
                     "PetCreate": {
-                        "content": {"application/json": {"$ref": "#/components/mediaTypes/J"}}
+                        "content": {"application/json": {"schema": {"title": "J", "type": "string"}}}
                     }
                 },
                 "headers": {"H": {"schema": {"title": "H", "type": "string"}}},
-                "mediaTypes": {"J": {"schema": {"title": "J", "type": "string"}}},
                 "callbacks": {
                     "OnDelete": {
                         "{$request.body#/url}": {
@@ -1680,7 +1561,7 @@ mod tests {
     #[test]
     fn header_with_inline_content_is_walked() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/x": {
@@ -1708,16 +1589,14 @@ mod tests {
         assert!(names.contains(&"TraceMime".to_owned()), "got {names:?}");
     }
 
-    // ── Walker coverage: MediaType.encoding[*].headers + recursive 3.2 ───
+    // ── Walker coverage: MediaType.encoding[*].headers ────────────────────
 
     #[test]
     fn media_type_encoding_headers_are_walked() {
         // Inline headers under `encoding[*].headers` must be lifted
-        // into `components.headers` like any other header slot. v3.2
-        // also exposes `itemEncoding` / `prefixEncoding` (both
-        // recursive), so cover one of those too.
+        // into `components.headers` like any other header slot.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/x": {
@@ -1734,14 +1613,6 @@ mod tests {
                                                 "X-Rate": {"schema": {"title": "RateSchema", "type": "integer"}}
                                             }
                                         }
-                                    },
-                                    // 3.2-only: nested `itemEncoding` whose own
-                                    // `headers` slot also must lift.
-                                    "itemEncoding": {
-                                        "contentType": "text/plain",
-                                        "headers": {
-                                            "X-Item": {"schema": {"title": "ItemSchema", "type": "string"}}
-                                        }
                                     }
                                 }
                             }
@@ -1752,6 +1623,7 @@ mod tests {
             }
         }));
         spec.collapse(None).unwrap();
+        // The encoding header itself is lifted into components.headers.
         let header_names: Vec<String> = spec
             .components
             .as_ref()
@@ -1759,16 +1631,15 @@ mod tests {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
         assert!(
-            header_names.len() >= 2,
-            "both encoding and itemEncoding headers must lift, got {header_names:?}",
+            !header_names.is_empty(),
+            "encoding header must lift, got {header_names:?}",
         );
-        let schemas = lifted_schema_names(&spec);
-        for expected in ["RateSchema", "ItemSchema"] {
-            assert!(
-                schemas.contains(&expected.to_owned()),
-                "missing `{expected}`: {schemas:?}",
-            );
-        }
+        // And its nested schema lifted into components.schemas.
+        assert!(
+            lifted_schema_names(&spec).contains(&"RateSchema".to_owned()),
+            "nested schema must lift, got {:?}",
+            lifted_schema_names(&spec),
+        );
     }
 
     // ── Walker coverage: Header.examples and MediaType.examples ──────────
@@ -1776,7 +1647,7 @@ mod tests {
     #[test]
     fn header_and_media_type_examples_are_lifted() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/x": {
@@ -1820,8 +1691,10 @@ mod tests {
 
     #[test]
     fn schema_title_picks_up_every_titled_variant() {
+        // v3.1 adds `Schema::Multi` (the `type: [...]` array form) on
+        // top of v3.0's 7 `SingleSchema` variants.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {},
             "components": {
@@ -1836,6 +1709,7 @@ mod tests {
                             "a": {"title": "TArr", "type": "array", "items": {"type": "string"}},
                             "nul": {"title": "TNull", "type": "null"},
                             "o": {"title": "TObj", "type": "object", "properties": {"x": {"type": "string"}}},
+                            // v3.1: `type` may be an array → `Schema::Multi`.
                             "m": {"title": "TMulti", "type": ["string", "null"]}
                         }
                     }
@@ -1851,66 +1725,12 @@ mod tests {
         }
     }
 
-    // ── Walker coverage: MediaType.prefixEncoding + recursive Encoding ────
-
-    #[test]
-    fn media_type_prefix_and_recursive_encoding_headers_are_walked() {
-        // v3.2 adds `prefixEncoding` (a Vec<Encoding>) on MediaType and
-        // makes Encoding itself recursive (`encoding` / `prefixEncoding`
-        // / `itemEncoding`). Each level's `headers` slot must be walked.
-        let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
-            "info": {"title": "x", "version": "1"},
-            "paths": {
-                "/x": {
-                    "post": {
-                        "operationId": "upload",
-                        "requestBody": {
-                            "content": {
-                                "multipart/mixed": {
-                                    "schema": {"type": "array", "items": {"type": "object"}},
-                                    "prefixEncoding": [
-                                        {
-                                            "contentType": "text/plain",
-                                            "headers": {
-                                                "X-Prefix": {"schema": {"title": "PrefixSchema", "type": "string"}}
-                                            },
-                                            // Recursive nesting: an Encoding can itself
-                                            // hold further Encoding maps.
-                                            "encoding": {
-                                                "nested": {
-                                                    "contentType": "text/plain",
-                                                    "headers": {
-                                                        "X-Inner": {"schema": {"title": "InnerSchema", "type": "string"}}
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    ]
-                                }
-                            }
-                        },
-                        "responses": {"200": {"description": "ok"}}
-                    }
-                }
-            }
-        }));
-        spec.collapse(None).unwrap();
-        let schemas = lifted_schema_names(&spec);
-        for s in ["PrefixSchema", "InnerSchema"] {
-            assert!(
-                schemas.contains(&s.to_owned()),
-                "missing `{s}`: {schemas:?}"
-            );
-        }
-    }
-
     // ── Recursion coverage: Schema composition variants ──────────────────
 
     #[test]
     fn allof_anyof_oneof_not_children_are_lifted() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "components": {
                 "schemas": {
@@ -1969,7 +1789,7 @@ mod tests {
         // additionalProperties (Item, not Bool) + unevaluatedProperties +
         // propertyNames.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "components": {
                 "schemas": {
@@ -2008,7 +1828,7 @@ mod tests {
     #[test]
     fn array_schema_items_is_lifted() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "components": {
                 "schemas": {
@@ -2035,7 +1855,7 @@ mod tests {
         // JSON Schema 2020-12 sugar. The walker must not try to lift
         // the BoolOr::Bool arm.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "components": {
                 "schemas": {
@@ -2060,7 +1880,7 @@ mod tests {
     #[test]
     fn internal_ref_slots_are_untouched_by_collapse() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -2104,7 +1924,7 @@ mod tests {
         // as two separate components. (Loose dedup that ignores `title`
         // would collapse them; this is documented as out of scope.)
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -2160,7 +1980,7 @@ mod tests {
         // name. With two pre-existing entries `Foo` and `Foo_2`, the
         // newly-lifted untitled schema should land at `Foo_3`.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "components": {
                 "schemas": {
@@ -2207,7 +2027,7 @@ mod tests {
             )
             .unwrap();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -2240,7 +2060,7 @@ mod tests {
         // underlying LoaderError.
         let mut loader = Loader::new();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -2307,7 +2127,7 @@ mod tests {
     #[test]
     fn inline_parameters_lift_to_components_parameters_with_name_in_hint() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -2344,7 +2164,7 @@ mod tests {
         // canonical-JSON dedup collapses them to a single entry under
         // `components.parameters`.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -2385,7 +2205,7 @@ mod tests {
         // schemas — different canonical JSON, two separate
         // components (second gets a `_2` suffix).
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -2413,7 +2233,7 @@ mod tests {
         // Exercises the `match` over every Parameter variant inside
         // `parameter_name_hint`.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/x": {
@@ -2422,10 +2242,7 @@ mod tests {
                             {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}},
                             {"name": "tag", "in": "query", "schema": {"type": "string"}},
                             {"name": "x-trace", "in": "header", "schema": {"type": "string"}},
-                            {"name": "sid", "in": "cookie", "schema": {"type": "string"}},
-                            {"name": "qs", "in": "querystring", "content": {
-                                "application/x-www-form-urlencoded": {"schema": {"type": "object", "properties": {"q": {"type": "string"}}}}
-                            }}
+                            {"name": "sid", "in": "cookie", "schema": {"type": "string"}}
                         ],
                         "responses": {"200": {"description": "ok"}}
                     }
@@ -2436,13 +2253,7 @@ mod tests {
         let names = lifted_parameter_names(&spec);
         // `-` is valid in component names, so `x-trace` is preserved
         // verbatim by the sanitiser.
-        for expected in [
-            "idPath",
-            "tagQuery",
-            "x-traceHeader",
-            "sidCookie",
-            "qsQuerystring",
-        ] {
+        for expected in ["idPath", "tagQuery", "x-traceHeader", "sidCookie"] {
             assert!(
                 names.contains(&expected.to_owned()),
                 "missing `{expected}`: {names:?}"
@@ -2456,7 +2267,7 @@ mod tests {
         // their inline nested schemas are still lifted into
         // components.schemas.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {},
             "components": {
@@ -2495,7 +2306,7 @@ mod tests {
             )
             .unwrap();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {
@@ -2553,7 +2364,7 @@ mod tests {
     #[test]
     fn inline_responses_lift_to_components_responses_via_context() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -2594,7 +2405,7 @@ mod tests {
     #[test]
     fn identical_inline_responses_dedupe_to_one_component() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {"get": {"responses": {"200": {"description": "ok"}}}},
@@ -2614,7 +2425,7 @@ mod tests {
     #[test]
     fn existing_components_responses_are_preserved_and_recursed() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {},
             "components": {
@@ -2655,7 +2466,7 @@ mod tests {
             )
             .unwrap();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {"get": {"responses": {"404": {"$ref": "shared.json#/NotFound"}}}}
@@ -2685,7 +2496,7 @@ mod tests {
     #[test]
     fn inline_request_body_lifts_to_components_request_bodies() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -2718,7 +2529,7 @@ mod tests {
     #[test]
     fn identical_inline_request_bodies_dedupe_to_one_component() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}},
@@ -2746,7 +2557,7 @@ mod tests {
             )
             .unwrap();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {"post": {"requestBody": {"$ref": "shared.json#/PetCreate"}, "responses": {"200": {"description": "ok"}}}}
@@ -2774,7 +2585,7 @@ mod tests {
     #[test]
     fn inline_headers_lift_to_components_headers() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/x": {
@@ -2813,7 +2624,7 @@ mod tests {
     #[test]
     fn identical_inline_headers_dedupe_to_one_component() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/x": {
@@ -2845,7 +2656,7 @@ mod tests {
             )
             .unwrap();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/x": {"get": {"responses": {"200": {"description": "ok", "headers": {"X-Rate": {"$ref": "shared.json#/Rate"}}}}}}
@@ -2853,81 +2664,6 @@ mod tests {
         }));
         spec.collapse(Some(&mut loader)).unwrap();
         assert!(!lifted_header_names(&spec).is_empty());
-    }
-
-    // ── MediaTypes: lift contract + dedup ──────────────────────────────
-
-    fn lifted_media_type_names(spec: &Spec) -> Vec<String> {
-        spec.components
-            .as_ref()
-            .and_then(|c| c.media_types.as_ref())
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn inline_media_types_lift_to_components_media_types() {
-        let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
-            "info": {"title": "x", "version": "1"},
-            "paths": {
-                "/x": {
-                    "post": {
-                        "requestBody": {"content": {"application/json": {"schema": {"title": "Body", "type": "string"}}}},
-                        "responses": {"200": {"description": "ok"}}
-                    }
-                }
-            }
-        }));
-        spec.collapse(None).unwrap();
-        assert!(
-            !lifted_media_type_names(&spec).is_empty(),
-            "mediaType should be lifted, got bag {:?}",
-            lifted_media_type_names(&spec),
-        );
-        // Walk RB -> mediaType -> schema.
-        let v = serde_json::to_value(&spec).unwrap();
-        let rb_ref = v["paths"]["/x"]["post"]["requestBody"]["$ref"]
-            .as_str()
-            .unwrap();
-        assert_eq!(
-            schema_in_lifted_content(&v, rb_ref, "application/json")["$ref"],
-            "#/components/schemas/Body"
-        );
-    }
-
-    #[test]
-    fn identical_inline_media_types_dedupe_to_one_component() {
-        let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
-            "info": {"title": "x", "version": "1"},
-            "paths": {
-                "/a": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}},
-                "/b": {"post": {"requestBody": {"content": {"application/json": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "ok"}}}}
-            }
-        }));
-        spec.collapse(None).unwrap();
-        assert_eq!(lifted_media_type_names(&spec).len(), 1);
-    }
-
-    #[test]
-    fn loader_resolves_external_media_type_refs() {
-        let mut loader = Loader::new();
-        loader
-            .preload_resource(
-                "shared.json",
-                serde_json::json!({"JsonBody": {"schema": {"type": "string"}}}),
-            )
-            .unwrap();
-        let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
-            "info": {"title": "x", "version": "1"},
-            "paths": {
-                "/a": {"post": {"requestBody": {"content": {"application/json": {"$ref": "shared.json#/JsonBody"}}}, "responses": {"200": {"description": "ok"}}}}
-            }
-        }));
-        spec.collapse(Some(&mut loader)).unwrap();
-        assert!(!lifted_media_type_names(&spec).is_empty());
     }
 
     // ── Examples: lift contract + dedup ────────────────────────────────
@@ -2943,7 +2679,7 @@ mod tests {
     #[test]
     fn inline_examples_lift_to_components_examples() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -2967,7 +2703,7 @@ mod tests {
     #[test]
     fn identical_inline_examples_dedupe_to_one_component() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -2992,7 +2728,7 @@ mod tests {
             .preload_resource("shared.json", serde_json::json!({"Dog": {"value": "dog"}}))
             .unwrap();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -3022,7 +2758,7 @@ mod tests {
     #[test]
     fn inline_links_lift_to_components_links() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -3053,7 +2789,7 @@ mod tests {
             )
             .unwrap();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -3085,7 +2821,7 @@ mod tests {
     #[test]
     fn inline_callbacks_lift_to_components_callbacks() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -3125,7 +2861,7 @@ mod tests {
             )
             .unwrap();
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -3157,7 +2893,7 @@ mod tests {
         // still lift. Operations on `paths.<path>` are *not* lifted
         // into `components.pathItems`.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/pets": {
@@ -3204,7 +2940,7 @@ mod tests {
         // `components.schemas`; the bag entries themselves keep
         // their names.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {},
             "components": {
@@ -3214,9 +2950,6 @@ mod tests {
                 "headers": {
                     "MyHeader": {"schema": {"title": "HeaderT", "type": "string"}}
                 },
-                "mediaTypes": {
-                    "MyMt": {"schema": {"title": "MtT", "type": "string"}}
-                },
                 "callbacks": {
                     "MyCb": {"{$request.body#/url}": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"title": "CbT", "type": "string"}}}}}}}}
                 }
@@ -3224,7 +2957,7 @@ mod tests {
         }));
         spec.collapse(None).unwrap();
         let schemas = lifted_schema_names(&spec);
-        for s in ["BodyT", "HeaderT", "MtT", "CbT"] {
+        for s in ["BodyT", "HeaderT", "CbT"] {
             assert!(
                 schemas.contains(&s.to_owned()),
                 "missing `{s}`: {schemas:?}"
@@ -3232,7 +2965,6 @@ mod tests {
         }
         assert!(lifted_request_body_names(&spec).contains(&"MyBody".to_owned()));
         assert!(lifted_header_names(&spec).contains(&"MyHeader".to_owned()));
-        assert!(lifted_media_type_names(&spec).contains(&"MyMt".to_owned()));
         assert!(lifted_callback_names(&spec).contains(&"MyCb".to_owned()));
     }
 
@@ -3245,7 +2977,7 @@ mod tests {
         // exercised at the parameter / response level where they
         // naturally appear.
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/x": {
@@ -3259,7 +2991,6 @@ mod tests {
                             "201": {
                                 "description": "created",
                                 "headers": {"X-Rate": {"$ref": "shared.json#/Rate"}},
-                                "content": {"application/json": {"$ref": "shared.json#/Mt"}},
                                 "links": {"GetPet": {"$ref": "shared.json#/Link"}}
                             }
                         },
@@ -3301,8 +3032,9 @@ mod tests {
             "shared.json#/Cb"
         );
         // 201 response is now lifted; navigate through it to verify
-        // every inner external ref stuck (header, content/mediaType,
-        // link).
+        // every inner external ref stuck (header, link). v3.1's
+        // `content[mime]` is bare `MediaType` (no `RefOr`), so an
+        // external $ref isn't expressible there.
         let resp_ref = v["paths"]["/x"]["post"]["responses"]["201"]["$ref"]
             .as_str()
             .expect("201 response was lifted");
@@ -3310,10 +3042,6 @@ mod tests {
         assert_eq!(
             v["components"]["responses"][resp_name]["headers"]["X-Rate"]["$ref"],
             "shared.json#/Rate"
-        );
-        assert_eq!(
-            v["components"]["responses"][resp_name]["content"]["application/json"]["$ref"],
-            "shared.json#/Mt"
         );
         assert_eq!(
             v["components"]["responses"][resp_name]["links"]["GetPet"]["$ref"],
@@ -3334,7 +3062,7 @@ mod tests {
     #[test]
     fn response_with_internal_ref_is_left_alone() {
         let mut spec = parse(serde_json::json!({
-            "openapi": "3.2.0",
+            "openapi": "3.1.0",
             "info": {"title": "x", "version": "1"},
             "paths": {
                 "/a": {"get": {"responses": {"200": {"$ref": "#/components/responses/Existing"}}}}

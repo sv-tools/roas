@@ -17,6 +17,7 @@
 //! Both deviations are documented at the relevant types and are not
 //! flagged by `validate()`.
 
+pub mod collapse;
 pub mod external_documentation;
 pub mod header;
 pub mod info;

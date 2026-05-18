@@ -2,6 +2,7 @@
 //!
 //! Full specification can be found [here](https://spec.openapis.org/oas/v3.1.2.html).
 pub mod callback;
+pub mod collapse;
 pub mod components;
 pub mod discriminator;
 pub mod example;
