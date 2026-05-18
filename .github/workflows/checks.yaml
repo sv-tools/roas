@@ -18,7 +18,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-permissions: read-all
+# Workflow-level permissions are deliberately narrow: every job here
+# just clones the repo and runs cargo. Jobs that need more (e.g.
+# `OsvScanner*` for SARIF upload) declare it per-job. Listing the
+# workflow-level scopes explicitly also keeps reusable-workflow callers
+# from having to grant more than is actually used — the GITHUB_TOKEN
+# request from `workflow_call` is the union of this block and each
+# job's own `permissions:`.
+permissions:
+  contents: read
 
 jobs:
   RustMeta:
