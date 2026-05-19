@@ -199,7 +199,18 @@ impl Display for SchemaType {
 
 impl Serialize for SchemaType {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.to_string().as_str())
+        // Borrow the name directly — known variants are static strings and
+        // `Custom` borrows its own `String` — so no allocation is needed.
+        serializer.serialize_str(match self {
+            SchemaType::String => "string",
+            SchemaType::Number => "number",
+            SchemaType::Integer => "integer",
+            SchemaType::Object => "object",
+            SchemaType::Array => "array",
+            SchemaType::Boolean => "boolean",
+            SchemaType::Null => "null",
+            SchemaType::Custom(s) => s,
+        })
     }
 }
 
