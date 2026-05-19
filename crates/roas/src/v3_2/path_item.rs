@@ -1045,4 +1045,146 @@ mod tests {
             ctx.errors
         );
     }
+
+    #[test]
+    fn path_item_serialize_with_ref_covers_ref_field() {
+        // line 107: serialize_entry for $ref
+        // lines 136-138: extension key branch — covers both x- (true) and non-x- (false)
+        let mut ext = BTreeMap::new();
+        ext.insert("x-custom".to_owned(), serde_json::json!("v"));
+        // A non-x- key exercises the "condition false" path (line 138 else).
+        ext.insert("non-x-key".to_owned(), serde_json::json!("ignored"));
+        let pi = PathItem {
+            reference: Some("#/components/pathItems/Common".into()),
+            extensions: Some(ext),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&pi).unwrap();
+        assert_eq!(v["$ref"], "#/components/pathItems/Common");
+        assert_eq!(v["x-custom"], "v");
+        assert!(v.get("non-x-key").is_none());
+    }
+
+    #[test]
+    fn path_item_deserialize_visitor_expecting_on_non_map() {
+        // lines 175-177: PathItemVisitor::expecting is invoked when serde
+        // encounters a non-map value.
+        let err = serde_json::from_value::<PathItem>(serde_json::json!("not a map"))
+            .expect_err("expected error");
+        assert!(
+            err.to_string().contains("PathItem"),
+            "expecting message should mention PathItem: {err}"
+        );
+    }
+
+    #[test]
+    fn path_item_deserialize_duplicate_additional_operations_rejected() {
+        // line 214: duplicate additionalOperations field
+        let raw = r#"{"additionalOperations": {}, "additionalOperations": {}}"#;
+        let result = serde_json::from_str::<PathItem>(raw);
+        assert!(
+            result.is_err(),
+            "duplicate additionalOperations should error"
+        );
+    }
+
+    #[test]
+    fn internal_path_item_ref_target_exists_malformed_paths_token() {
+        // line 360: #/paths/<token> where token contains `/` (malformed) returns false
+        let spec = Spec::default();
+        let pi = PathItem {
+            reference: Some("#/paths/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        // The ref target check returns false → reports "not declared"
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not declared")),
+            "malformed paths token should report not declared: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_path_item_ref_target_exists_callbacks_no_slash_returns_false() {
+        // line 387: #/components/callbacks/<token> with no `/` in after returns false
+        // (callback target needs two tokens: <cb_name>/<expr>)
+        let spec = Spec::default();
+        let pi = PathItem {
+            reference: Some("#/components/callbacks/OnlyOnePart".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not declared")),
+            "callback ref with no expression should report not declared: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_path_item_ref_target_exists_callbacks_expr_with_slash_returns_false() {
+        // line 390: #/components/callbacks/<cb>/<expr> where expr_token contains `/`
+        let spec = Spec::default();
+        let pi = PathItem {
+            reference: Some("#/components/callbacks/CB/expr/extra".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not declared")),
+            "callback expr with extra slash should report not declared: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_path_item_ref_unknown_prefix_returns_false() {
+        // line 401: else { false } branch for unknown prefix
+        let spec = Spec::default();
+        let pi = PathItem {
+            reference: Some("#/unknown/foo".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("not declared")),
+            "unknown prefix should report not declared: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn paths_serialize_x_extension_covered() {
+        // line 469: serialize_entry for x- extension in Paths
+        // line 470: closing `}` — both the true branch (x- key) and the
+        // false branch (non-x- key that is silently skipped) must be exercised.
+        let mut ext = BTreeMap::new();
+        ext.insert("x-info".to_owned(), serde_json::json!("yes"));
+        // Add a non-x- key to exercise the "condition false" branch (line 470).
+        ext.insert("not-x".to_owned(), serde_json::json!("ignored"));
+        let paths = Paths {
+            paths: BTreeMap::new(),
+            extensions: Some(ext),
+        };
+        let v = serde_json::to_value(&paths).unwrap();
+        assert_eq!(v["x-info"], "yes");
+        // non-x- key is filtered out by the serializer
+        assert!(v.get("not-x").is_none());
+    }
+
+    #[test]
+    fn paths_deserialize_visitor_expecting_on_non_map() {
+        // lines 486-488: PathsVisitor::expecting is invoked for non-map input
+        let err = serde_json::from_value::<Paths>(serde_json::json!("not a map"))
+            .expect_err("expected error");
+        assert!(
+            err.to_string().contains("Paths") || err.to_string().contains("Webhooks"),
+            "expecting message should mention Paths or Webhooks: {err}"
+        );
+    }
 }

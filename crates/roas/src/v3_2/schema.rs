@@ -3077,4 +3077,47 @@ mod tests {
             "no x- keys expected when extensions is None: {v}"
         );
     }
+
+    #[test]
+    fn schema_deserialize_rejects_non_object_non_boolean() {
+        // lines 159-163: `schema_from_value` returns an error when the JSON
+        // value is neither an object nor a boolean.
+        let err = serde_json::from_value::<Schema>(serde_json::json!("a string"))
+            .expect_err("string should not parse as Schema");
+        assert!(
+            err.to_string().contains("a JSON object or boolean"),
+            "expected 'JSON object or boolean' error: {err}"
+        );
+
+        let err2 = serde_json::from_value::<Schema>(serde_json::json!(42))
+            .expect_err("integer should not parse as Schema");
+        assert!(
+            err2.to_string().contains("a JSON object or boolean"),
+            "expected 'JSON object or boolean' error: {err2}"
+        );
+    }
+
+    #[test]
+    fn single_schema_deserialize_directly() {
+        // lines 207-214: SingleSchema::deserialize impl (separate from Schema::deserialize).
+        let s: SingleSchema =
+            serde_json::from_value(serde_json::json!({"type": "string", "title": "T"}))
+                .expect("must parse as SingleSchema");
+        match s {
+            SingleSchema::String(st) => {
+                assert_eq!(st.title.as_deref(), Some("T"));
+            }
+            other => panic!("expected String, got {other:?}"),
+        }
+
+        // Also cover the integer variant.
+        let s2: SingleSchema = serde_json::from_value(serde_json::json!({"type": "integer"}))
+            .expect("must parse as SingleSchema integer");
+        assert!(matches!(s2, SingleSchema::Integer(_)));
+
+        // And array variant.
+        let s3: SingleSchema = serde_json::from_value(serde_json::json!({"type": "array"}))
+            .expect("must parse as SingleSchema array");
+        assert!(matches!(s3, SingleSchema::Array(_)));
+    }
 }

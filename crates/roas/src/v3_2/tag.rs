@@ -328,4 +328,24 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn parent_empty_string_errors() {
+        use crate::v3_2::spec::Spec;
+        use crate::validation::Context;
+        // line 68: empty parent string must emit an error
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Tag {
+            name: "pets".into(),
+            parent: Some("".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "t".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("must not be empty")),
+            "expected empty-parent error: {:?}",
+            ctx.errors
+        );
+    }
 }

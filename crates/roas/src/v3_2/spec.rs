@@ -2541,6 +2541,156 @@ mod tests {
         );
         assert_eq!(serde_json::to_value(&spec).unwrap(), value);
     }
+
+    #[test]
+    fn walk_op_into_callbacks_covers_seen_cb_block() {
+        // lines 840, 944: the inner for-loop body inside `if let Ok(cb) = ... && seen_cb.insert()`
+        // is exercised when an operation has a callback with path items.
+        // The closing `}` (line 840) is the "false branch" of seen_cb.insert() — i.e.,
+        // when a callback is already in seen_cb. To trigger this we need the SAME
+        // Callback pointer visited twice: once directly and once from a $ref.
+        //
+        // Strategy: put an inline callback on two different operations so that
+        // `walk_op` is called for both. However, each inline callback is a separate
+        // Rust value, so they have different pointers.
+        //
+        // Instead: use components.callbacks with a $ref so the same Callback
+        // object pointer is shared. First from paths, then from components.callbacks.
+        use crate::v3_2::callback::Callback;
+        use crate::v3_2::operation::Operation;
+        use crate::v3_2::path_item::{PathItem, Paths};
+        use crate::v3_2::response::{Response, Responses};
+
+        let make_resp = || Responses {
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: Some("ok".into()),
+                    ..Default::default()
+                }),
+            )])),
+            ..Default::default()
+        };
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert(
+            "expr".to_owned(),
+            PathItem {
+                operations: Some(BTreeMap::from([(
+                    "post".to_owned(),
+                    Operation {
+                        operation_id: Some("cbOp".to_owned()),
+                        responses: Some(make_resp()),
+                        ..Default::default()
+                    },
+                )])),
+                ..Default::default()
+            },
+        );
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        // Put the same callback in components so it's also walked from there
+        let comp = crate::v3_2::components::Components {
+            callbacks: Some(BTreeMap::from([(
+                "SharedCb".to_owned(),
+                RefOr::new_item(cb),
+            )])),
+            ..Default::default()
+        };
+        // Reference the component callback from an inline operation $ref
+        let mut op_callbacks = BTreeMap::new();
+        op_callbacks.insert(
+            "ping".to_owned(),
+            RefOr::new_ref("#/components/callbacks/SharedCb".to_owned()),
+        );
+        let outer_op = Operation {
+            operation_id: Some("outerOp".to_owned()),
+            responses: Some(make_resp()),
+            callbacks: Some(op_callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), outer_op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/sub".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        // Validate: walk_op finds $ref callback, get_item resolves to component,
+        // seen_cb.insert() true (first time from walk_op), loop runs.
+        // Then validate_inner also walks components.callbacks; seen_cb.insert()
+        // returns false (same pointer) → hits line 840/944 "false branch".
+        let res = spec.validate(Options::new(), None);
+        let _ = res;
+    }
+
+    #[test]
+    fn walk_components_callbacks_covers_seen_cb_block() {
+        // line 944: the `if let Ok(cb) = ... && seen_cb.insert()` block in
+        // `validate_inner` for `components.callbacks` — the for-loop body
+        // and its closing `}` run when the callback is inline (get_item succeeds)
+        // and is visited for the first time.
+        use crate::v3_2::callback::Callback;
+        use crate::v3_2::operation::Operation;
+        use crate::v3_2::path_item::PathItem;
+        use crate::v3_2::response::{Response, Responses};
+
+        let make_resp = || Responses {
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: Some("ok".into()),
+                    ..Default::default()
+                }),
+            )])),
+            ..Default::default()
+        };
+        let mut inner_ops = BTreeMap::new();
+        inner_ops.insert(
+            "get".to_owned(),
+            Operation {
+                operation_id: Some("compCbOp".to_owned()),
+                responses: Some(make_resp()),
+                ..Default::default()
+            },
+        );
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert(
+            "expr".to_owned(),
+            PathItem {
+                operations: Some(inner_ops),
+                ..Default::default()
+            },
+        );
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = crate::v3_2::components::Components {
+            callbacks: Some(BTreeMap::from([(
+                "OnEvent".to_owned(),
+                RefOr::new_item(cb),
+            )])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            paths: Some(Default::default()),
+            components: Some(comp),
+            ..Default::default()
+        };
+        // validate_inner walks components.callbacks → enters the if-let block.
+        let res = spec.validate(Options::new(), None);
+        let _ = res; // errors about unused are fine; no panic expected
+    }
 }
 
 //     #[test]

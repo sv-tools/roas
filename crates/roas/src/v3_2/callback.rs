@@ -202,4 +202,56 @@ mod tests {
             ctx.errors
         );
     }
+
+    #[test]
+    fn callback_deserialize_expecting_triggered_by_non_map() {
+        // line 100-102: `CallbackVisitor::expecting` is invoked when serde
+        // encounters a non-map value.
+        let err = serde_json::from_value::<Callback>(serde_json::json!("not a map"))
+            .expect_err("expected error");
+        assert!(
+            err.to_string().contains("Callback"),
+            "expecting message should mention Callback: {err}"
+        );
+    }
+
+    #[test]
+    fn callback_deserialize_duplicate_extension_key_errors() {
+        // line 116: duplicate x- extension key in callback object
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let err = serde_json::from_str::<Callback>(raw).expect_err("duplicate x- must error");
+        assert!(
+            err.to_string().contains("duplicate"),
+            "expected duplicate error: {err}"
+        );
+    }
+
+    #[test]
+    fn callback_deserialize_duplicate_path_key_errors() {
+        // line 121: duplicate path key in callback object
+        let raw = r#"{"expr": {}, "expr": {}}"#;
+        let err = serde_json::from_str::<Callback>(raw).expect_err("duplicate path must error");
+        assert!(
+            err.to_string().contains("duplicate"),
+            "expected duplicate error: {err}"
+        );
+    }
+
+    #[test]
+    fn callback_serialize_x_extension_included() {
+        // lines 78-80: serialize_entry for x- extensions; also exercise
+        // the "false" branch of `if k.starts_with("x-")` (line 80) by
+        // including a non-x- key that is silently skipped.
+        let mut ext = std::collections::BTreeMap::new();
+        ext.insert("x-custom".to_owned(), serde_json::json!("val"));
+        // A non-x- key exercises the false branch (line 80).
+        ext.insert("non-x".to_owned(), serde_json::json!("filtered"));
+        let cb = Callback {
+            paths: std::collections::BTreeMap::new(),
+            extensions: Some(ext),
+        };
+        let v = serde_json::to_value(&cb).unwrap();
+        assert_eq!(v["x-custom"], "val");
+        assert!(v.get("non-x").is_none(), "non-x- key should be filtered");
+    }
 }
