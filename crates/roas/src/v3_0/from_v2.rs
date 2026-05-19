@@ -595,11 +595,14 @@ fn build_body_request_body(body: Option<Value>, consumes: &[String]) -> Option<V
         _ => None,
     });
     let mut content = Map::new();
-    let mime_types = if consumes.is_empty() {
+    let mut mime_types = if consumes.is_empty() {
         vec!["application/json".to_owned()]
     } else {
         consumes.to_vec()
     };
+    // The last media-type entry takes ownership of `schema` / `examples`
+    // instead of cloning; the common single-`consumes` case clones nothing.
+    let last_mime = mime_types.pop();
     for mime in mime_types {
         let mut media = Map::new();
         if let Some(s) = &schema {
@@ -607,6 +610,16 @@ fn build_body_request_body(body: Option<Value>, consumes: &[String]) -> Option<V
         }
         if let Some(ex) = &examples {
             media.insert("examples".into(), ex.clone());
+        }
+        content.insert(mime, Value::Object(media));
+    }
+    if let Some(mime) = last_mime {
+        let mut media = Map::new();
+        if let Some(s) = schema {
+            media.insert("schema".into(), s);
+        }
+        if let Some(ex) = examples {
+            media.insert("examples".into(), ex);
         }
         content.insert(mime, Value::Object(media));
     }
@@ -762,9 +775,17 @@ fn build_form_request_body(form_params: Vec<Value>, consumes: &[String]) -> Opti
     }
 
     let mut content = Map::new();
+    let mut mime_types = mime_types;
+    // Last entry moves `schema` in; the single-`consumes` case clones nothing.
+    let last_mime = mime_types.pop();
     for mime in mime_types {
         let mut media = Map::new();
         media.insert("schema".into(), Value::Object(schema.clone()));
+        content.insert(mime, Value::Object(media));
+    }
+    if let Some(mime) = last_mime {
+        let mut media = Map::new();
+        media.insert("schema".into(), Value::Object(schema));
         content.insert(mime, Value::Object(media));
     }
 
@@ -799,8 +820,8 @@ fn transform_response(resp: &mut Value, produces: &[String]) {
         // v2 examples is a map { mime: value }. We attach each example to
         // its matching media-type entry; for media types that have no
         // example, we still create the entry from the schema if any.
-        let example_map = match &examples {
-            Some(Value::Object(m)) => m.clone(),
+        let example_map = match examples {
+            Some(Value::Object(m)) => m,
             _ => Map::new(),
         };
         for mime in &mime_types {
