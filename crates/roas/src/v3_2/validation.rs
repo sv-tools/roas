@@ -118,7 +118,7 @@ pub fn validate_operation_parameters(
         ignore_external: bool,
         has_unresolved_external: &mut bool,
     ) {
-        let mut seen: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+        let mut seen: HashMap<(String, &'static str), usize> = HashMap::new();
         for (i, raw) in params.iter().enumerate() {
             let r = resolve_parameter(ctx.spec, raw);
             match r {
@@ -174,7 +174,7 @@ pub fn validate_operation_parameters(
             _ => Kind::Other,
         }
     }
-    let mut merged: BTreeMap<(String, &'static str), Kind> = BTreeMap::new();
+    let mut merged: HashMap<(String, &'static str), Kind> = HashMap::new();
     for params in [path_item_params, op_params].into_iter().flatten() {
         for raw in params {
             if let ResolvedParam::Item(p) = resolve_parameter(ctx.spec, raw) {

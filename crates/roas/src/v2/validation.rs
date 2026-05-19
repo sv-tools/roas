@@ -11,7 +11,7 @@
 //! * allowEmptyValue: only meaningful on `query` / `formData` parameters
 
 use lazy_regex::regex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::common::helpers::validate_unique_by;
 use crate::common::reference::RefOr;
@@ -117,7 +117,7 @@ pub fn validate_operation_parameters(
 
     // Within-level duplicate detection: report once per (name, in) per layer.
     let mut emit_within_level_dups = |params: &[RefOr<Parameter>], origin: &str| {
-        let mut seen: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+        let mut seen: HashMap<(String, &'static str), usize> = HashMap::new();
         for (i, raw) in params.iter().enumerate() {
             let Some(p) = resolve_parameter(ctx.spec, raw) else {
                 continue;
@@ -162,7 +162,7 @@ pub fn validate_operation_parameters(
             _ => Kind::Other,
         }
     }
-    let mut merged: BTreeMap<(String, &'static str), Kind> = BTreeMap::new();
+    let mut merged: HashMap<(String, &'static str), Kind> = HashMap::new();
     if let Some(params) = path_item_params {
         for raw in params {
             if let Some(p) = resolve_parameter(ctx.spec, raw) {
