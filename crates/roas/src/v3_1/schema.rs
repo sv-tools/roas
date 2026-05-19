@@ -41,6 +41,13 @@ pub enum Schema {
     Single(Box<SingleSchema>), // must be last
 }
 
+// Every variant is boxed, so a `Schema` value stays pointer-sized and
+// cheap to move — the component data lives behind one `Box`.
+const _: () = assert!(
+    std::mem::size_of::<Schema>() <= 16,
+    "Schema variants must stay boxed",
+);
+
 /// Marker for the empty schema `{}`. Round-trips to `{}` and rejects
 /// any non-empty object on deserialization, so a schema with even one
 /// field stays a typed `Single` / composition variant.

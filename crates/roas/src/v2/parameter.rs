@@ -29,6 +29,13 @@ pub enum Parameter {
     FormData(Box<InFormData>),
 }
 
+// Every variant is boxed, so a `Parameter` value stays pointer-sized
+// instead of being sized for the largest `In*` struct.
+const _: () = assert!(
+    std::mem::size_of::<Parameter>() <= 16,
+    "Parameter variants must stay boxed",
+);
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct InBody {
     /// ***Required*** The name of the parameter.

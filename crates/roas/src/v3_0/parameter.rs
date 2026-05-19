@@ -38,6 +38,13 @@ pub enum Parameter {
     Cookie(Box<InCookie>),
 }
 
+// Every variant is boxed, so a `Parameter` value stays pointer-sized
+// instead of being sized for the largest `In*` struct.
+const _: () = assert!(
+    std::mem::size_of::<Parameter>() <= 16,
+    "Parameter variants must stay boxed",
+);
+
 /// Holds a parameter with `in: path` property.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct InPath {

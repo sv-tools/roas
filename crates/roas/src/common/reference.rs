@@ -257,6 +257,14 @@ pub struct Ref {
     pub description: Option<String>,
 }
 
+// The `Ref` variant is boxed so a `RefOr` slot stays pointer-sized
+// instead of growing to the full `Ref` struct. If this fails, the
+// `Box` was dropped from `RefOr::Ref`.
+const _: () = assert!(
+    std::mem::size_of::<RefOr<u8>>() < std::mem::size_of::<Ref>(),
+    "RefOr::Ref must stay boxed",
+);
+
 impl<D> RefOr<D> {
     /// Validate this `RefOr<D>` in the surrounding context.
     ///

@@ -26,6 +26,13 @@ pub enum Schema {
     Single(Box<SingleSchema>), // must be last
 }
 
+// Every variant is boxed, so a `Schema` value stays pointer-sized and
+// cheap to move — the component data lives behind one `Box`.
+const _: () = assert!(
+    std::mem::size_of::<Schema>() <= 16,
+    "Schema variants must stay boxed",
+);
+
 impl Default for Schema {
     fn default() -> Self {
         Schema::Single(Box::default())
