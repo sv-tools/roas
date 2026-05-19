@@ -142,6 +142,31 @@ mod tests {
     }
 
     #[test]
+    fn extensions_visitor_expecting_via_type_mismatch() {
+        // ExtensionsVisitor::expecting is called by serde when the input type
+        // is not a map. We call `super::deserialize` directly with a serde_json
+        // deserializer backed by a JSON string, which will try `deserialize_map`
+        // and fail with an error that uses `expecting`.
+        let mut de = serde_json::Deserializer::from_str(r#""not-a-map""#);
+        let err = super::deserialize(&mut de).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("map") || msg.contains("expected") || msg.contains("extensions"),
+            "expected a serde type-mismatch error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extensions_serialize_none_branch() {
+        // Exercises the `else` branch of `super::serialize` (extensions = None)
+        // by calling `serialize` directly with a JSON serializer.
+        let none: Option<BTreeMap<String, serde_json::Value>> = None;
+        let serializer = serde_json::value::Serializer;
+        let result = super::serialize(&none, serializer).unwrap();
+        assert_eq!(result, serde_json::Value::Null);
+    }
+
+    #[test]
     fn test_extensions_serialize() {
         assert_eq!(
             serde_json::to_value(TestExtensions {

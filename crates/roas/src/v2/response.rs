@@ -783,4 +783,70 @@ mod tests {
         assert_eq!(response.x_summary, Some("Created".to_owned()));
         assert_eq!(serde_json::to_value(response).unwrap(), value);
     }
+
+    #[test]
+    fn responses_deserialize_duplicate_default_is_rejected() {
+        // Exercises the `if res.default.is_some()` branch at line 128.
+        let err = serde_json::from_str::<Responses>(
+            r#"{"default":{"description":"a"},"default":{"description":"b"}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate field `default`"),
+            "expected duplicate-default error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn responses_deserialize_duplicate_extension_is_rejected() {
+        // Exercises the `if extensions.contains_key` branch at line 133.
+        let err = serde_json::from_str::<Responses>(r#"{"x-foo":1,"x-foo":2}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate field `x-foo`"),
+            "expected duplicate-extension error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn responses_visitor_expecting_via_type_mismatch() {
+        // Exercises ResponsesVisitor::expecting by passing a non-map input.
+        let err = serde_json::from_str::<Responses>(r#""not-a-map""#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Responses") || msg.contains("expected") || msg.contains("map"),
+            "expected a type-mismatch serde error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn responses_validate_out_of_range_status_code() {
+        // Exercises lines 199-206: validation flags a response whose key
+        // is outside the 100..=599 range. Since the deserializer rejects
+        // such keys, we build the Responses struct manually.
+        use crate::common::reference::RefOr;
+        use crate::v2::spec::Spec;
+        use std::collections::BTreeMap;
+
+        let mut responses_map: BTreeMap<String, RefOr<Response>> = BTreeMap::new();
+        responses_map.insert(
+            "600".to_owned(), // outside the valid 100-599 range
+            RefOr::new_item(Response {
+                description: "out-of-range".to_owned(),
+                ..Default::default()
+            }),
+        );
+        let responses = Responses {
+            responses: Some(responses_map),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        responses.validate_with_context(&mut ctx, "#.paths./foo.get.responses".to_owned());
+        assert!(
+            ctx.errors
+                .mentions("name must be an integer within [100..599] range"),
+            "expected out-of-range status code error, got: {:?}",
+            ctx.errors
+        );
+    }
 }

@@ -478,4 +478,151 @@ mod tests {
         assert!(obj.contains_key("/p"));
         assert!(obj.contains_key("x-good"));
     }
+
+    /// PathItem with `$ref` serializes and deserializes the $ref field.
+    #[test]
+    fn path_item_ref_field_round_trips() {
+        let v = json!({
+            "$ref": "#/components/pathItems/Pets"
+        });
+        let pi: PathItem = serde_json::from_value(v).unwrap();
+        assert_eq!(pi.reference.as_deref(), Some("#/components/pathItems/Pets"));
+        let back = serde_json::to_value(&pi).unwrap();
+        assert_eq!(back["$ref"], "#/components/pathItems/Pets");
+    }
+
+    /// Duplicate `$ref` key in PathItem deserialization returns an error.
+    #[test]
+    fn path_item_dup_ref_errors() {
+        let raw = r#"{"$ref": "a.yaml", "$ref": "b.yaml"}"#;
+        let res: Result<PathItem, _> = serde_json::from_str(raw);
+        assert!(res.is_err(), "expected duplicate $ref error");
+    }
+
+    /// Duplicate `summary` key in PathItem deserialization returns an error.
+    #[test]
+    fn path_item_dup_summary_errors() {
+        let raw = r#"{"summary": "a", "summary": "b"}"#;
+        let res: Result<PathItem, _> = serde_json::from_str(raw);
+        assert!(res.is_err(), "expected duplicate `summary` error");
+    }
+
+    /// Duplicate `description` key in PathItem deserialization returns an error.
+    #[test]
+    fn path_item_dup_description_errors() {
+        let raw = r#"{"description": "a", "description": "b"}"#;
+        let res: Result<PathItem, _> = serde_json::from_str(raw);
+        assert!(res.is_err(), "expected duplicate `description` error");
+    }
+
+    /// Duplicate `servers` key in PathItem deserialization returns an error.
+    #[test]
+    fn path_item_dup_servers_errors() {
+        let raw = r#"{"servers": [], "servers": []}"#;
+        let res: Result<PathItem, _> = serde_json::from_str(raw);
+        assert!(res.is_err(), "expected duplicate `servers` error");
+    }
+
+    /// PathItem::validate_with_context: empty $ref produces an error.
+    #[test]
+    fn path_item_validate_empty_ref_errors() {
+        use crate::v3_0::spec::Spec;
+        use crate::validation::Context;
+        use crate::validation::Options;
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let pi = PathItem {
+            reference: Some(String::new()),
+            ..Default::default()
+        };
+        pi.validate_with_context(&mut ctx, "#.paths[/x]".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".$ref: must not be empty")),
+            "expected empty $ref error: {:?}",
+            ctx.errors
+        );
+    }
+
+    /// PathItem::validate_with_context walks operations and servers.
+    #[test]
+    fn path_item_validate_walks_operations_and_servers_and_parameters() {
+        use crate::v3_0::spec::Spec;
+        use crate::validation::{Context, Options};
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+
+        // A PathItem with an operation that has a bad server URL, a
+        // path-level server with a bad URL, and a parameter $ref.
+        let pi: PathItem = serde_json::from_value(json!({
+            "get": {
+                "responses": {"200": {"description": "ok"}},
+                "servers": [{"url": ""}]
+            },
+            "servers": [{"url": ""}],
+            "parameters": [
+                {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+            ]
+        }))
+        .unwrap();
+        pi.validate_with_context(&mut ctx, "#.paths[/x]".to_owned());
+        // Both empty-URL server errors should surface.
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("servers")),
+            "expected server URL errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    /// Serializing a PathItem with an extension key exercises the `serialize_entry`
+    /// branch at line 125 (`k.starts_with("x-")`).
+    #[test]
+    fn path_item_with_extension_serializes_extension_key() {
+        let pi: PathItem = serde_json::from_value(json!({
+            "get": {
+                "responses": {"200": {"description": "ok"}}
+            },
+            "x-internal": true
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&pi).unwrap();
+        assert_eq!(v["x-internal"], true);
+        assert!(v["get"].is_object());
+    }
+
+    /// Passing a non-map value to PathItem deserializer triggers the `expecting`
+    /// fn (lines 161-163 in `PathItemVisitor::expecting`).
+    #[test]
+    fn path_item_non_map_value_errors() {
+        let res: Result<PathItem, _> = serde_json::from_str(r#"[]"#);
+        assert!(res.is_err(), "expected wrong-type error for PathItem");
+    }
+
+    /// Passing a non-map value to Paths deserializer triggers the `expecting`
+    /// fn (lines 330-332 in `PathsVisitor::expecting`).
+    #[test]
+    fn paths_non_map_value_errors() {
+        let res: Result<Paths, _> = serde_json::from_str(r#""a string""#);
+        assert!(res.is_err(), "expected wrong-type error for Paths");
+    }
+
+    /// Serialize a `PathItem` whose `extensions` map contains a key that does
+    /// NOT start with `x-`.  The serializer skips such keys — exercises the
+    /// false-branch of `if k.starts_with("x-")` at line 125.
+    #[test]
+    fn path_item_extension_without_x_prefix_is_skipped_in_serialization() {
+        let mut ext = BTreeMap::new();
+        ext.insert("non-x-key".to_owned(), serde_json::json!("skip-me"));
+        let pi = PathItem {
+            extensions: Some(ext),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&pi).unwrap();
+        assert!(
+            v.get("non-x-key").is_none(),
+            "non-x- key must be absent from output: {v}"
+        );
+    }
 }

@@ -252,7 +252,7 @@ mod tests {
             responses: Some(map_with("R", Response::default())),
             parameters: Some(map_with(
                 "P",
-                Parameter::Query(InQuery {
+                Parameter::Query(Box::new(InQuery {
                     name: "q".into(),
                     description: None,
                     required: None,
@@ -266,7 +266,7 @@ mod tests {
                     examples: None,
                     content: None,
                     extensions: None,
-                }),
+                })),
             )),
             examples: Some(map_with("E", Example::default())),
             request_bodies: Some(map_with("RB", RequestBody::default())),
@@ -359,7 +359,7 @@ mod tests {
             responses: Some(map_with("R", Response::default())),
             parameters: Some(map_with(
                 "P",
-                Parameter::Query(InQuery {
+                Parameter::Query(Box::new(InQuery {
                     name: "q".into(),
                     description: None,
                     required: None,
@@ -373,7 +373,7 @@ mod tests {
                     examples: None,
                     content: None,
                     extensions: None,
-                }),
+                })),
             )),
             examples: Some(map_with("E", Example::default())),
             request_bodies: Some(map_with("RB", RequestBody::default())),
@@ -428,5 +428,17 @@ mod tests {
             "expected pattern error: {:?}",
             ctx.errors
         );
+    }
+
+    /// Validating an empty Components (all None) exercises the `schemas: None`
+    /// branch (line 83 closing brace) without entering any of the `for` loops.
+    #[test]
+    fn components_default_validates_ok() {
+        let comp = Components::default();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        comp.validate_with_context(&mut ctx, "#.components".into());
+        // No schemas/responses/etc. means nothing to error on.
+        assert!(ctx.errors.is_empty(), "unexpected errors: {:?}", ctx.errors);
     }
 }

@@ -268,6 +268,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_optional_uri_ignore_invalid_urls_suppresses_errors() {
+        // Exercises the early-return path when IgnoreInvalidUrls is set.
+        let mut ctx = Context::new(&(), Options::IgnoreInvalidUrls.only());
+        validate_optional_uri(
+            &Some("not a valid uri\t".to_owned()),
+            &mut ctx,
+            "u".to_owned(),
+        );
+        assert!(
+            ctx.errors.is_empty(),
+            "IgnoreInvalidUrls must suppress URI errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn validate_optional_uri_rejects_control_chars_and_whitespace() {
         // Tab, newline, DEL, and other C0 / DEL controls each fail.
         for s in ["bad\turi", "with\nnewline", "with\x01ctl", "with\x7fdel"] {

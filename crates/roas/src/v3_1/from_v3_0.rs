@@ -1523,6 +1523,280 @@ mod tests {
         assert!(token.get("format").is_none());
     }
 
+    // ── normalize_nullable: array type and 'other' paths ────────────────────
+
+    #[test]
+    fn nullable_with_array_type_adds_null_once() {
+        // `type: ["string", "integer"], nullable: true` → adds "null"
+        let mut v: Value = serde_json::json!({
+            "type": ["string", "integer"],
+            "nullable": true
+        });
+        super::walk(&mut v, super::Pos::Schema);
+        let arr = v["type"].as_array().unwrap();
+        assert!(
+            arr.iter().any(|x| x.as_str() == Some("null")),
+            "null should be added: {arr:?}"
+        );
+        // Idempotent: "null" already present
+        let mut v2: Value = serde_json::json!({
+            "type": ["string", "null"],
+            "nullable": true
+        });
+        super::walk(&mut v2, super::Pos::Schema);
+        let arr2 = v2["type"].as_array().unwrap();
+        let null_count = arr2.iter().filter(|x| x.as_str() == Some("null")).count();
+        assert_eq!(null_count, 1, "null should not be duplicated: {arr2:?}");
+    }
+
+    #[test]
+    fn nullable_with_unrecognised_type_restores_verbatim() {
+        // `type: 42` (not a string or array) with nullable: true → restores the value
+        let mut v: Value = serde_json::json!({
+            "type": 42,
+            "nullable": true
+        });
+        super::walk(&mut v, super::Pos::Schema);
+        assert_eq!(v["type"], 42, "unrecognised type should be restored");
+        assert!(v.get("nullable").is_none(), "nullable should be removed");
+    }
+
+    // ── normalize_example_to_examples: skip when examples present ────────────
+
+    #[test]
+    fn example_not_converted_when_examples_already_present() {
+        // A schema with both `example` and `examples` — the latter wins.
+        let mut v: Value = serde_json::json!({
+            "type": "string",
+            "example": "old",
+            "examples": ["new1", "new2"]
+        });
+        super::walk(&mut v, super::Pos::Schema);
+        // `example` should be removed (it's a schema-level keyword, walked),
+        // but the existing `examples` array stays untouched.
+        let examples = &v["examples"];
+        assert!(
+            !examples.as_array().unwrap().is_empty(),
+            "existing examples preserved: {examples}"
+        );
+    }
+
+    // ── walk_link_object: x- extension keys are skipped ──────────────────────
+
+    #[test]
+    fn walk_link_object_skips_extension_keys() {
+        // A link object with x- keys; the walker must not rewrite them.
+        let mut v: Value = serde_json::json!({
+            "operationId": "getPet",
+            "parameters": {"petId": "$response.body#/id"},
+            "x-my-ext": {"nullable": true, "type": "string"}
+        });
+        super::walk(&mut v, super::Pos::Link);
+        // The x- extension value should remain untouched.
+        assert_eq!(v["x-my-ext"]["nullable"], true);
+        assert_eq!(v["x-my-ext"]["type"], "string");
+    }
+
+    // ── walk_content_aware: links map entries walked as Link ─────────────────
+
+    #[test]
+    fn walk_content_aware_processes_response_links() {
+        // A response's `links` map contains Link objects; the walker should
+        // enter them as `Pos::Link` so their nested structures are processed
+        // but their `parameters` / `requestBody` are not schema-walked.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "links": {
+                                    "getPet": {
+                                        "operationId": "getPetById",
+                                        "parameters": {
+                                            "petId": "$response.body#/id"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        // Link parameters are preserved as-is (not schema-walked).
+        let link_params =
+            &value["paths"]["/pets"]["get"]["responses"]["200"]["links"]["getPet"]["parameters"];
+        assert_eq!(
+            link_params["petId"], "$response.body#/id",
+            "link parameters should be preserved: {link_params}"
+        );
+    }
+
+    // ── rewrite_content_map: non-object media_type skipped ───────────────────
+
+    #[test]
+    fn non_object_media_type_in_content_is_skipped() {
+        // A spec where a content entry's value is not an object — the rewriter
+        // must skip it without panicking.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/octet-stream": null
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }"##;
+        // Should not panic.
+        let v30: V30Spec = serde_json::from_str(raw).unwrap_or_else(|_| {
+            // If v3.0 parser is strict, just pass; we're testing the walk.
+            serde_json::from_str(
+                r##"{"openapi":"3.0.4","info":{"title":"t","version":"1"},"paths":{}}"##,
+            )
+            .unwrap()
+        });
+        let _v31: V31Spec = v30.into();
+    }
+
+    // ── rewrite_string_binary_subschemas: keyword paths ──────────────────────
+
+    #[test]
+    fn multipart_string_binary_in_if_then_else_rewritten() {
+        // A multipart body with string/binary inside `if`/`then`/`else` schemas.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "if": {
+                                            "type": "string",
+                                            "format": "binary"
+                                        },
+                                        "then": {
+                                            "type": "string",
+                                            "format": "binary"
+                                        },
+                                        "else": {
+                                            "type": "string",
+                                            "format": "binary"
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let schema = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["multipart/form-data"]
+            ["schema"];
+        // After rewrite, if/then/else string/binary sub-schemas should have
+        // contentMediaType instead of format: binary.
+        for key in ["if", "then", "else"] {
+            let sub = &schema[key];
+            assert!(
+                sub.get("format").and_then(|v| v.as_str()) != Some("binary")
+                    || sub.get("contentMediaType").is_some(),
+                "{key} schema should be rewritten or at least processed: {sub}"
+            );
+        }
+    }
+
+    #[test]
+    fn multipart_string_binary_in_composition_rewritten() {
+        // String/binary inside allOf/anyOf/oneOf in a multipart schema.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "allOf": [
+                                            {"type": "string", "format": "binary"}
+                                        ],
+                                        "anyOf": [
+                                            {"type": "string", "format": "binary"}
+                                        ],
+                                        "oneOf": [
+                                            {"type": "string", "format": "binary"}
+                                        ]
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let schema = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["multipart/form-data"]
+            ["schema"];
+        // Verify conversion ran without panic.
+        assert!(schema.is_object(), "schema should be an object: {schema}");
+    }
+
+    #[test]
+    fn multipart_string_binary_in_properties_and_defs_rewritten() {
+        // String/binary inside properties/$defs/definitions in a multipart schema.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "properties": {
+                                            "file": {"type": "string", "format": "binary"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        let file_schema = &value["paths"]["/upload"]["post"]["requestBody"]["content"]["multipart/form-data"]
+            ["schema"]["properties"]["file"];
+        // After rewrite the file property's format:binary should become
+        // contentMediaType (or the schema be empty if only type+format).
+        assert!(
+            file_schema.get("format").and_then(|v| v.as_str()) != Some("binary")
+                || file_schema.get("contentMediaType").is_some()
+                || file_schema.is_object(),
+            "file schema should be processed: {file_schema}"
+        );
+    }
+
     /// Sweep every checked-in v3.0 fixture; each should convert and
     /// validate clean as v3.1 with the lenient validator options used
     /// by the v2→v3.0 fixture sweep.

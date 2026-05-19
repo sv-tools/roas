@@ -118,7 +118,7 @@ pub fn validate_operation_parameters(
         ignore_external: bool,
         has_unresolved_external: &mut bool,
     ) {
-        let mut seen: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+        let mut seen: HashMap<(String, &'static str), usize> = HashMap::new();
         for (i, raw) in params.iter().enumerate() {
             let r = resolve_parameter(ctx.spec, raw);
             match r {
@@ -174,7 +174,7 @@ pub fn validate_operation_parameters(
             _ => Kind::Other,
         }
     }
-    let mut merged: BTreeMap<(String, &'static str), Kind> = BTreeMap::new();
+    let mut merged: HashMap<(String, &'static str), Kind> = HashMap::new();
     for params in [path_item_params, op_params].into_iter().flatten() {
         for raw in params {
             if let ResolvedParam::Item(p) = resolve_parameter(ctx.spec, raw) {
@@ -509,7 +509,7 @@ mod tests {
     use crate::validation::ValidationErrorsExt;
 
     fn path_param(name: &str) -> RefOr<Parameter> {
-        RefOr::new_item(Parameter::Path(InPath {
+        RefOr::new_item(Parameter::Path(Box::new(InPath {
             name: name.into(),
             description: None,
             required: true,
@@ -521,11 +521,11 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        }))
+        })))
     }
 
     fn query_param(name: &str) -> RefOr<Parameter> {
-        RefOr::new_item(Parameter::Query(InQuery {
+        RefOr::new_item(Parameter::Query(Box::new(InQuery {
             name: name.into(),
             description: None,
             required: None,
@@ -539,11 +539,11 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        }))
+        })))
     }
 
     fn header_param(name: &str) -> RefOr<Parameter> {
-        RefOr::new_item(Parameter::Header(InHeader {
+        RefOr::new_item(Parameter::Header(Box::new(InHeader {
             name: name.into(),
             description: None,
             required: None,
@@ -555,11 +555,11 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        }))
+        })))
     }
 
     fn cookie_param(name: &str) -> RefOr<Parameter> {
-        RefOr::new_item(Parameter::Cookie(InCookie {
+        RefOr::new_item(Parameter::Cookie(Box::new(InCookie {
             name: name.into(),
             description: None,
             required: None,
@@ -571,7 +571,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        }))
+        })))
     }
 
     fn spec_with_components(c: Components) -> Spec {
@@ -843,7 +843,7 @@ mod tests {
             operations: Some(BTreeMap::from([(
                 "get".to_owned(),
                 Operation {
-                    parameters: Some(vec![RefOr::new_item(Parameter::Path(InPath {
+                    parameters: Some(vec![RefOr::new_item(Parameter::Path(Box::new(InPath {
                         name: "wrong".into(),
                         description: None,
                         required: true,
@@ -858,7 +858,7 @@ mod tests {
                             RefOr::new_item(crate::v3_2::media_type::MediaType::default()),
                         )])),
                         extensions: None,
-                    }))]),
+                    })))]),
                     responses: Some(Responses {
                         responses: Some(BTreeMap::from([(
                             "200".to_owned(),
@@ -913,5 +913,450 @@ mod tests {
             scopes: BTreeMap::new(),
             extensions: None,
         };
+    }
+
+    #[test]
+    fn querystring_xor_query_errors() {
+        // in: querystring and in: query must not coexist (lines 233-253).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let qs_param = RefOr::new_item(Parameter::Querystring(Box::new(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q".into(),
+                content: BTreeMap::new(), // will error for empty, but mutation is tested below
+                ..Default::default()
+            },
+        )));
+        let q_param = query_param("filter");
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs_param, q_param]));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`in: querystring` is mutually exclusive")),
+            "querystring + query must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn multiple_querystring_params_errors() {
+        // More than one in: querystring must error (line 240-246).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let qs1 = RefOr::new_item(Parameter::Querystring(Box::new(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q1".into(),
+                content: BTreeMap::new(),
+                ..Default::default()
+            },
+        )));
+        let qs2 = RefOr::new_item(Parameter::Querystring(Box::new(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q2".into(),
+                content: BTreeMap::new(),
+                ..Default::default()
+            },
+        )));
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs1, qs2]));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("at most one `in: querystring` parameter")),
+            "two querystring params must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn parameter_identity_querystring_variant() {
+        // Exercises the `Parameter::Querystring` arm in `parameter_identity` (line 64).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        // Two querystring params with the same name — should trigger
+        // duplicate detection which requires parameter_identity to be called.
+        let qs1 = RefOr::new_item(Parameter::Querystring(Box::new(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q".into(),
+                content: BTreeMap::new(),
+                ..Default::default()
+            },
+        )));
+        let qs2 = RefOr::new_item(Parameter::Querystring(Box::new(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q".into(),
+                content: BTreeMap::new(),
+                ..Default::default()
+            },
+        )));
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs1, qs2]));
+        // Both "duplicate" AND "multiple querystring" errors expected.
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("duplicate parameter `q`")),
+            "duplicate querystring must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn security_no_components_reports_no_schemes() {
+        // When spec has no components at all, security requirement should error.
+        // (Line 280-287: the `let Some(map) = schemes_map else { ... }` branch.)
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        req.insert("myScheme".to_owned(), vec![]);
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("no `components.securitySchemes`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn path_template_uniqueness_skips_extension_keys() {
+        // x- prefixed keys are skipped (line 386: continue).
+        let mut paths: BTreeMap<String, PathItem> = BTreeMap::new();
+        paths.insert("/pets/{id}".into(), PathItem::default());
+        paths.insert("x-custom".into(), PathItem::default()); // should be ignored
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_template_uniqueness(&mut ctx, "#.paths", &paths);
+        assert!(
+            ctx.errors.is_empty(),
+            "x- keys must be skipped: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_path_item_no_ops_skips_param_check() {
+        // A path item with no operations does not invoke param checking.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem::default();
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/pets", "#.paths[/pets]", &item);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn internal_unresolved_ref_in_dup_pass() {
+        // A `$ref` to an existing `#/components/parameters/...` path that
+        // isn't in the spec results in `UnresolvedInternal` (line 51).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let dangling = RefOr::new_ref("#/components/parameters/Missing".to_owned());
+        // Should not panic; dangling internal refs are silently skipped.
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[dangling]));
+    }
+
+    #[test]
+    fn find_path_item_by_ref_malformed_tokens_return_none() {
+        // Paths with extra `/` after single-token segment return None.
+        // This exercises the `if after.contains('/') { return None; }` guards
+        // in find_path_item_by_ref (lines 457-468).
+        use crate::v3_2::path_item::{PathItem, Paths};
+        let mut paths = Paths::default();
+        paths.paths.insert("/pets".to_owned(), PathItem::default());
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            paths: Some(paths),
+            ..Default::default()
+        }));
+        // A ref like `#/paths/~1pets/extra` has an extra token: the
+        // `after` contains `/` after the first segment, so it returns None.
+        let item = PathItem {
+            reference: Some("#/paths/~1pets/extra".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/pets", "#.paths[/pets]", &item);
+        // The chain-follow gracefully returns the item as-is.
+        assert!(
+            ctx.errors.is_empty(),
+            "no validation errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn security_scheme_ref_that_fails_to_resolve_is_silently_skipped() {
+        // line 297: `let Ok(scheme) = scheme_or.get_item(ctx.spec) else { continue; }`
+        // Hit when the security scheme entry is a `$ref` that doesn't resolve.
+        use crate::common::reference::RefOr;
+        let mut schemes = BTreeMap::new();
+        // Insert a $ref that points to a non-existent component.
+        schemes.insert(
+            "dangling".to_owned(),
+            RefOr::new_ref("#/components/securitySchemes/DoesNotExist".to_owned()),
+        );
+        let comp = Components {
+            security_schemes: Some(schemes),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(spec_with_components(comp)));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        req.insert("dangling".to_owned(), vec![]);
+        // Should not panic; the unresolvable $ref is silently skipped.
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+        // No error about scope or scheme type — just the ref that can't be resolved.
+        // (The "not declared" error fires because the scheme itself maps to a
+        //  dangling $ref — but get_item fails, so we hit the `continue` branch.)
+    }
+
+    #[test]
+    fn resolve_path_item_chain_empty_ref_stops_chain() {
+        // line 444: `if r.is_empty() || !seen.insert(r.to_owned()) { return current; }`
+        // Hit when the PathItem's $ref is an empty string.
+        use crate::v3_2::path_item::PathItem;
+        let target = PathItem {
+            reference: Some("".into()), // empty ref stops the chain
+            ..Default::default()
+        };
+        let mut paths = crate::v3_2::path_item::Paths::default();
+        paths.paths.insert("/stop".to_owned(), target);
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            paths: Some(paths),
+            ..Default::default()
+        }));
+        // The ref-chain follower should stop gracefully on an empty $ref.
+        let item = PathItem {
+            reference: Some("#/paths/~1stop".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/stop", "#.paths[/stop]", &item);
+        // Chain follow stops; no crash expected.
+    }
+
+    #[test]
+    fn resolve_path_item_chain_cycle_stops_chain() {
+        // line 444: cycle detection returns the current item without infinite loop
+        use crate::v3_2::path_item::PathItem;
+        let mut paths = crate::v3_2::path_item::Paths::default();
+        // /a → #/paths/~1b → #/paths/~1a (cycle)
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1b".into()),
+                ..Default::default()
+            },
+        );
+        paths.paths.insert(
+            "/b".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1a".into()),
+                ..Default::default()
+            },
+        );
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            paths: Some(paths),
+            ..Default::default()
+        }));
+        // Calling validate_path_item on the ref-only item — chain follow detects cycle.
+        let item = PathItem {
+            reference: Some("#/paths/~1a".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        // Should not loop forever; cycle detection fires and returns current item.
+        validate_path_item(&mut ctx, "/a", "#.paths[/a]", &item);
+    }
+
+    #[test]
+    fn find_path_item_by_ref_webhooks_malformed_token_returns_none() {
+        // line 462: #/webhooks/<token> where after contains `/` returns None
+        use crate::v3_2::path_item::{PathItem, Paths};
+        let mut webhooks = Paths::default();
+        webhooks
+            .paths
+            .insert("event".to_owned(), PathItem::default());
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        }));
+        let item = PathItem {
+            reference: Some("#/webhooks/event/extra".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/p", "#.paths[/p]", &item);
+        // Chain follow returns item without crash (malformed → None).
+        assert!(
+            ctx.errors.is_empty(),
+            "no validation errors for malformed webhook ref: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn find_path_item_by_ref_webhooks_valid_resolves() {
+        // line 464-465: successful #/webhooks/<name> lookup returns the PathItem
+        use crate::common::reference::RefOr;
+        use crate::v3_2::operation::Operation;
+        use crate::v3_2::path_item::{PathItem, Paths};
+        use crate::v3_2::response::{Response, Responses};
+        let mut ops = BTreeMap::new();
+        ops.insert(
+            "get".to_owned(),
+            Operation {
+                parameters: Some(vec![path_param("id")]),
+                responses: Some(Responses {
+                    responses: Some(BTreeMap::from([(
+                        "200".to_owned(),
+                        RefOr::new_item(Response {
+                            description: Some("ok".into()),
+                            ..Default::default()
+                        }),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let target = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert("myEvent".to_owned(), target);
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        }));
+        // item has $ref into webhooks; chain follow resolves and then
+        // validate_path_item checks params against the template `/{id}`.
+        let item = PathItem {
+            reference: Some("#/webhooks/myEvent".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/{id}", "#.webhooks[myEvent]", &item);
+        // "id" param declared in resolved target matches template var {id}.
+        assert!(
+            ctx.errors.is_empty(),
+            "valid webhook ref chain should resolve cleanly: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn find_path_item_by_ref_components_path_items_malformed_token() {
+        // line 467-468: #/components/pathItems/<token> where token contains `/`
+        use crate::v3_2::path_item::PathItem;
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem {
+            reference: Some("#/components/pathItems/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/p", "#.paths[/p]", &item);
+        // Malformed token → None → chain stops without crash.
+        assert!(
+            ctx.errors.is_empty(),
+            "malformed pathItems token should stop chain: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn find_path_item_by_ref_callbacks_branch_covered() {
+        // lines 475-492: #/components/callbacks/<cb>/<expr> branch in find_path_item_by_ref
+        use crate::v3_2::callback::Callback;
+        use crate::v3_2::path_item::PathItem;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("e".to_owned(), PathItem::default());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let mut cbs = BTreeMap::new();
+        cbs.insert(
+            "CB".to_owned(),
+            crate::common::reference::RefOr::new_item(cb),
+        );
+        let comp = Components {
+            callbacks: Some(cbs),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            components: Some(comp),
+            ..Default::default()
+        }));
+        // item has $ref into components.callbacks — resolves to the PathItem
+        let item = PathItem {
+            reference: Some("#/components/callbacks/CB/e".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/p", "#.paths[/p]", &item);
+        assert!(
+            ctx.errors.is_empty(),
+            "callbacks ref chain should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn find_path_item_by_ref_callbacks_no_slash_returns_none() {
+        // line 478: callback ref with no `/` in after → split gives None → returns None
+        use crate::v3_2::path_item::PathItem;
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem {
+            reference: Some("#/components/callbacks/OnlyOnePart".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/p", "#.paths[/p]", &item);
+        // Missing expression token → chain returns None → stops.
+        assert!(
+            ctx.errors.is_empty(),
+            "callback ref with missing expr should stop chain: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn find_path_item_by_ref_callbacks_expr_token_with_slash_returns_none() {
+        // line 480-481: expr_token contains `/` → returns None
+        use crate::v3_2::path_item::PathItem;
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem {
+            reference: Some("#/components/callbacks/CB/expr/extra".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/p", "#.paths[/p]", &item);
+        // expr_token has `/` → chain returns None → stops.
+        assert!(
+            ctx.errors.is_empty(),
+            "callback expr with extra slash should stop chain: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn find_path_item_by_ref_unknown_prefix_else_branch() {
+        // line 494: else { None } — reference doesn't match any known prefix
+        use crate::v3_2::path_item::PathItem;
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        // A $ref that doesn't start with any of the four supported prefixes
+        // hits the final `else { None }` in find_path_item_by_ref.
+        let item = PathItem {
+            reference: Some("#/completely/unknown/prefix".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/p", "#.paths[/p]", &item);
+        // find_path_item_by_ref returns None → chain stops gracefully.
+        assert!(
+            ctx.errors.is_empty(),
+            "unknown prefix ref should stop chain without error: {:?}",
+            ctx.errors
+        );
     }
 }

@@ -792,4 +792,82 @@ mod tests {
             ctx.errors
         );
     }
+
+    /// An operationRef that has no `/` after `#/paths/` (missing method) errors
+    /// with the "must point to" message (lines 49-51).
+    #[test]
+    fn operation_ref_missing_slash_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        // `#/paths/~1pets` has zero slashes after the path token — no method.
+        Link {
+            operation_ref: Some("#/paths/~1pets".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(".operationRef") && e.contains("must point to")),
+            "expected missing-method error: {:?}",
+            ctx.errors
+        );
+    }
+
+    /// A PathItem with an empty `$ref` errors with "carries an empty `$ref`"
+    /// (lines 97-99).
+    #[test]
+    fn operation_ref_path_item_empty_ref_errors() {
+        use crate::v3_0::path_item::{PathItem, Paths};
+        let item = PathItem {
+            reference: Some("".into()),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("/pets".to_owned(), item);
+        let spec = Spec {
+            paths,
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions("empty `$ref`"),
+            "expected empty-ref error: {:?}",
+            ctx.errors
+        );
+    }
+
+    /// A PathItem `$ref` whose value contains a literal `/` in the path token
+    /// (should be `~1`) is rejected as malformed (lines 107-109).
+    #[test]
+    fn operation_ref_path_item_ref_with_unescaped_slash_errors() {
+        use crate::v3_0::path_item::{PathItem, Paths};
+        let item = PathItem {
+            // `#/paths//pets` — the slash before `pets` is unescaped
+            reference: Some("#/paths//pets".into()),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("/alias".to_owned(), item);
+        let spec = Spec {
+            paths,
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1alias/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions("malformed JSON Pointer"),
+            "expected malformed-pointer error: {:?}",
+            ctx.errors
+        );
+    }
 }

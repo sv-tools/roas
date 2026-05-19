@@ -11,7 +11,7 @@
 //! * allowEmptyValue: only meaningful on `query` / `formData` parameters
 
 use lazy_regex::regex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::common::helpers::validate_unique_by;
 use crate::common::reference::RefOr;
@@ -117,7 +117,7 @@ pub fn validate_operation_parameters(
 
     // Within-level duplicate detection: report once per (name, in) per layer.
     let mut emit_within_level_dups = |params: &[RefOr<Parameter>], origin: &str| {
-        let mut seen: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+        let mut seen: HashMap<(String, &'static str), usize> = HashMap::new();
         for (i, raw) in params.iter().enumerate() {
             let Some(p) = resolve_parameter(ctx.spec, raw) else {
                 continue;
@@ -162,7 +162,7 @@ pub fn validate_operation_parameters(
             _ => Kind::Other,
         }
     }
-    let mut merged: BTreeMap<(String, &'static str), Kind> = BTreeMap::new();
+    let mut merged: HashMap<(String, &'static str), Kind> = HashMap::new();
     if let Some(params) = path_item_params {
         for raw in params {
             if let Some(p) = resolve_parameter(ctx.spec, raw) {
@@ -392,7 +392,11 @@ fn validate_operation_security(ctx: &mut Context<Spec>, op_path: &str, op: &Oper
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::parameter::{InBody, InFormData, InPath, InQuery, Parameter, StringParameter};
+    use crate::v2::items::Items;
+    use crate::v2::parameter::{
+        ArrayParameter, BooleanParameter, InBody, InFormData, InHeader, InPath, InQuery,
+        IntegerParameter, NumberParameter, Parameter, StringParameter,
+    };
     use crate::v2::path_item::PathItem;
     use crate::v2::response::{Response, Responses};
     use crate::v2::schema::{Schema, StringSchema};
@@ -955,6 +959,292 @@ mod tests {
             "errors: {:?}",
             ctx.errors
         );
+    }
+
+    // Helpers for non-String parameter variants used to exercise in_header_name,
+    // in_query_name, in_path_name, and in_formdata_name for all branches.
+
+    fn header_integer_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Header(Box::new(InHeader::Integer(
+            IntegerParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn header_number_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Header(Box::new(InHeader::Number(
+            NumberParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn header_boolean_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Header(Box::new(InHeader::Boolean(
+            BooleanParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn header_array_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Header(Box::new(InHeader::Array(
+            ArrayParameter {
+                name: name.into(),
+                items: Items::default(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn query_integer_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Query(Box::new(InQuery::Integer(
+            IntegerParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn query_number_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Query(Box::new(InQuery::Number(
+            NumberParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn query_boolean_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Query(Box::new(InQuery::Boolean(
+            BooleanParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn query_array_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Query(Box::new(InQuery::Array(ArrayParameter {
+            name: name.into(),
+            items: Items::default(),
+            ..Default::default()
+        }))))
+    }
+
+    fn path_integer_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Path(Box::new(InPath::Integer(
+            IntegerParameter {
+                name: name.into(),
+                required: Some(true),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn path_number_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Path(Box::new(InPath::Number(NumberParameter {
+            name: name.into(),
+            required: Some(true),
+            ..Default::default()
+        }))))
+    }
+
+    fn path_boolean_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Path(Box::new(InPath::Boolean(
+            BooleanParameter {
+                name: name.into(),
+                required: Some(true),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn path_array_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Path(Box::new(InPath::Array(ArrayParameter {
+            name: name.into(),
+            required: Some(true),
+            items: Items::default(),
+            ..Default::default()
+        }))))
+    }
+
+    fn formdata_integer_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::FormData(Box::new(InFormData::Integer(
+            IntegerParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn formdata_number_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::FormData(Box::new(InFormData::Number(
+            NumberParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn formdata_boolean_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::FormData(Box::new(InFormData::Boolean(
+            BooleanParameter {
+                name: name.into(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    fn formdata_array_param(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::FormData(Box::new(InFormData::Array(
+            ArrayParameter {
+                name: name.into(),
+                items: Items::default(),
+                ..Default::default()
+            },
+        ))))
+    }
+
+    #[test]
+    fn duplicate_detection_covers_all_header_variants() {
+        // Exercises in_header_name for Integer, Number, Boolean, and Array
+        // variants by triggering the duplicate-detection code path.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+
+        for (make, label) in [
+            (
+                header_integer_param as fn(&str) -> RefOr<Parameter>,
+                "integer",
+            ),
+            (header_number_param, "number"),
+            (header_boolean_param, "boolean"),
+            (header_array_param, "array"),
+        ] {
+            let params = vec![make("h"), make("h")];
+            let mut ctx = Context::new(spec, Options::new());
+            validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&params));
+            assert!(
+                ctx.errors.mentions("duplicate parameter `h`"),
+                "{label} header duplicate not detected: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_detection_covers_all_query_variants() {
+        // Exercises in_query_name for Integer, Number, Boolean, and Array.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+
+        for (make, label) in [
+            (
+                query_integer_param as fn(&str) -> RefOr<Parameter>,
+                "integer",
+            ),
+            (query_number_param, "number"),
+            (query_boolean_param, "boolean"),
+            (query_array_param, "array"),
+        ] {
+            let params = vec![make("q"), make("q")];
+            let mut ctx = Context::new(spec, Options::new());
+            validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&params));
+            assert!(
+                ctx.errors.mentions("duplicate parameter `q`"),
+                "{label} query duplicate not detected: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_detection_covers_all_path_variants() {
+        // Exercises in_path_name for Integer, Number, Boolean, and Array.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+
+        for (make, label) in [
+            (
+                path_integer_param as fn(&str) -> RefOr<Parameter>,
+                "integer",
+            ),
+            (path_number_param, "number"),
+            (path_boolean_param, "boolean"),
+            (path_array_param, "array"),
+        ] {
+            let params = vec![make("id"), make("id")];
+            let mut ctx = Context::new(spec, Options::new());
+            validate_operation_parameters(&mut ctx, "op", "/{id}", None, Some(&params));
+            assert!(
+                ctx.errors.mentions("duplicate parameter `id`"),
+                "{label} path duplicate not detected: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_detection_covers_all_formdata_variants() {
+        // Exercises in_formdata_name for Integer, Number, Boolean, Array, and File.
+        use crate::v2::parameter::FileParameter;
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+
+        for (make, label) in [
+            (
+                formdata_integer_param as fn(&str) -> RefOr<Parameter>,
+                "integer",
+            ),
+            (formdata_number_param, "number"),
+            (formdata_boolean_param, "boolean"),
+            (formdata_array_param, "array"),
+        ] {
+            let params = vec![make("f"), make("f")];
+            let mut ctx = Context::new(spec, Options::new());
+            validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&params));
+            assert!(
+                ctx.errors.mentions("duplicate parameter `f`"),
+                "{label} formdata duplicate not detected: {:?}",
+                ctx.errors
+            );
+        }
+
+        // File variant
+        let file_param = |name: &str| {
+            RefOr::new_item(Parameter::FormData(Box::new(InFormData::File(
+                FileParameter {
+                    name: name.into(),
+                    ..Default::default()
+                },
+            ))))
+        };
+        let params = vec![file_param("upload"), file_param("upload")];
+        let mut ctx = Context::new(spec, Options::new());
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&params));
+        assert!(
+            ctx.errors.mentions("duplicate parameter `upload`"),
+            "file formdata duplicate not detected: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_path_item_with_no_operations_does_not_panic() {
+        // Exercises the `if let Some(ops) = &item.operations` else branch
+        // (path item that has no operations — the `}` at line 383 is only
+        // hit when operations is None).
+        let item = PathItem {
+            reference: None,
+            operations: None,
+            parameters: None,
+            extensions: None,
+        };
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/p", "#.paths[/p]", &item);
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
     }
 
     #[test]

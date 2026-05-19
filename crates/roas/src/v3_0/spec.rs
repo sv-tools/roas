@@ -1183,7 +1183,7 @@ mod tests {
         let r = spec
             .define_parameter(
                 "Q",
-                Parameter::Query(InQuery {
+                Parameter::Query(Box::new(InQuery {
                     name: "q".into(),
                     description: None,
                     required: None,
@@ -1197,7 +1197,7 @@ mod tests {
                     examples: None,
                     content: None,
                     extensions: None,
-                }),
+                })),
             )
             .unwrap();
         assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/parameters/Q"));
@@ -1302,7 +1302,7 @@ mod tests {
         spec.define_response("R", Response::default()).unwrap();
         spec.define_parameter(
             "P",
-            Parameter::Query(InQuery {
+            Parameter::Query(Box::new(InQuery {
                 name: "q".into(),
                 description: None,
                 required: None,
@@ -1316,7 +1316,7 @@ mod tests {
                 examples: None,
                 content: None,
                 extensions: None,
-            }),
+            })),
         )
         .unwrap();
         spec.define_request_body("RB", RequestBody::default())
@@ -1622,6 +1622,101 @@ mod tests {
         assert!(
             leftover.iter().all(|s| !s.contains("already in use")),
             "IgnoreNonUniqOperationIDs must suppress the duplicate, got: {leftover:?}",
+        );
+    }
+
+    /// Spec::validate reports an error for paths not starting with `/`.
+    #[test]
+    fn validate_path_must_start_with_slash() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "noslash": {
+                    "get": {
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }))
+        .expect("spec must parse");
+
+        let err = spec.validate(IGNORE_UNUSED, None).expect_err("must fail");
+        assert!(
+            err.errors.iter().any(|e| e.contains("must start with `/`")),
+            "expected must-start-with-slash error: {:?}",
+            err.errors
+        );
+    }
+
+    /// Spec::validate runs validate_security_requirements for spec-level security.
+    #[test]
+    fn validate_spec_level_security_requirement_missing_scheme_errors() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "security": [{"nonexistent": []}]
+        }))
+        .expect("spec must parse");
+
+        let err = spec.validate(IGNORE_UNUSED, None).expect_err("must fail");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("nonexistent") || e.contains("securitySchemes")),
+            "expected missing scheme error: {:?}",
+            err.errors
+        );
+    }
+
+    /// Validate a spec where a path item has no operations (operations == None).
+    /// This exercises the `if let Some(operations)` check (line 780 / false branch).
+    #[test]
+    fn validate_path_item_without_operations_does_not_panic() {
+        // A PathItem with only a $ref and no HTTP methods — `operations` is None.
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/ref-only": {
+                    "$ref": "#/paths/~1other",
+                    "summary": "just a ref"
+                },
+                "/other": {
+                    "get": {
+                        "operationId": "getOther",
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .expect("spec must parse");
+        // Must not panic even when a path item has no operations.
+        let _ = spec.validate(IGNORE_UNUSED, None);
+    }
+
+    /// Spec::validate walks x_tag_groups and emits errors for empty names/tags.
+    #[test]
+    fn validate_x_tag_groups_empty_name_and_tag_errors() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "x-tagGroups": [
+                {"name": "", "tags": [""]},
+                {"name": "Good", "tags": []}
+            ]
+        }))
+        .expect("spec must parse");
+
+        let err = spec.validate(IGNORE_UNUSED, None).expect_err("must fail");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("x-tagGroups") && e.contains("name")),
+            "expected empty name error: {:?}",
+            err.errors
         );
     }
 }

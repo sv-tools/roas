@@ -1470,4 +1470,142 @@ mod tests {
         s.validate_with_context(&mut ctx, "mtls".into());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
+
+    #[test]
+    fn security_scheme_display_all_variants() {
+        // Exercises the Display impl for all SecurityScheme variants (lines 77-85).
+        assert_eq!(
+            format!(
+                "{}",
+                SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                    scheme: "Bearer".into(),
+                    ..Default::default()
+                }))
+            ),
+            "http"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
+                    name: "k".into(),
+                    ..Default::default()
+                }))
+            ),
+            "apiKey"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+                    flows: OAuth2Flows::default(),
+                    ..Default::default()
+                }))
+            ),
+            "oauth2"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                SecurityScheme::OpenIdConnect(Box::new(OpenIdConnectSecurityScheme {
+                    open_id_connect_url: "https://x".into(),
+                    ..Default::default()
+                }))
+            ),
+            "openIdConnect"
+        );
+        assert_eq!(
+            format!("{}", SecurityScheme::MutualTLS(Box::default())),
+            "mutualTLS"
+        );
+    }
+
+    #[test]
+    fn api_key_location_display() {
+        // Exercises the Display impl for ApiKeyLocation (lines 209-215).
+        assert_eq!(format!("{}", ApiKeyLocation::Query), "query");
+        assert_eq!(format!("{}", ApiKeyLocation::Header), "header");
+        assert_eq!(format!("{}", ApiKeyLocation::Cookie), "cookie");
+    }
+
+    #[test]
+    fn oauth2_device_authorization_flow_validates() {
+        // Exercises DeviceAuthorizationOAuth2Flow.validate_with_context (lines 574-582).
+        use crate::v3_2::spec::Spec;
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+            flows: OAuth2Flows {
+                device_authorization: Some(DeviceAuthorizationOAuth2Flow {
+                    device_authorization_url: "https://example.com/device".into(),
+                    token_url: "https://example.com/token".into(),
+                    refresh_url: None,
+                    scopes: BTreeMap::new(),
+                    extensions: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "valid device auth: {:?}", ctx.errors);
+
+        // Missing device_authorization_url reports.
+        let mut ctx = Context::new(&spec, Options::new());
+        SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+            flows: OAuth2Flows {
+                device_authorization: Some(DeviceAuthorizationOAuth2Flow {
+                    device_authorization_url: "".into(), // empty — must error
+                    token_url: "".into(),                // also empty
+                    refresh_url: None,
+                    scopes: BTreeMap::new(),
+                    extensions: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("deviceAuthorizationUrl")),
+            "empty deviceAuthorizationUrl must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn oauth2_flows_validate_password_and_client_credentials() {
+        // Exercises the password and clientCredentials validate branches (line 521-526).
+        use crate::v3_2::spec::Spec;
+
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+            flows: OAuth2Flows {
+                password: Some(PasswordOAuth2Flow {
+                    token_url: "".into(), // empty — must error
+                    refresh_url: None,
+                    scopes: BTreeMap::new(),
+                    extensions: None,
+                }),
+                client_credentials: Some(ClientCredentialsOAuth2Flow {
+                    token_url: "https://example.com/token".into(),
+                    refresh_url: None,
+                    scopes: BTreeMap::new(),
+                    extensions: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("password.tokenUrl")),
+            "empty tokenUrl must error: {:?}",
+            ctx.errors
+        );
+    }
 }

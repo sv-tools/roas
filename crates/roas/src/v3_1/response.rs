@@ -781,4 +781,149 @@ mod tests {
             ctx.errors
         );
     }
+
+    // ── Responses serializer: branch coverage ────────────────────────────────
+
+    #[test]
+    fn responses_serialize_no_responses_map() {
+        // Serialize a Responses where `responses` is None but `default` is set.
+        // This exercises the "else" region of the `if let Some(ref responses)` branch
+        // (line 135 in the serializer).
+        let responses = Responses {
+            default: Some(RefOr::new_item(Response {
+                description: "ok".into(),
+                ..Default::default()
+            })),
+            responses: None,
+            extensions: None,
+        };
+        let v = serde_json::to_value(&responses).unwrap();
+        assert!(v.get("default").is_some());
+        assert!(v.get("200").is_none());
+    }
+
+    #[test]
+    fn responses_serialize_extension_non_x_key_filtered() {
+        // Build a Responses manually with an extension key that does NOT start with
+        // "x-" — the serializer filters it out (line 141: the false branch of the
+        // `if k.starts_with("x-")` guard).
+        let mut ext = BTreeMap::new();
+        ext.insert("not-an-extension".to_owned(), serde_json::json!(1));
+        ext.insert("x-ok".to_owned(), serde_json::json!(2));
+        let responses = Responses {
+            default: Some(RefOr::new_item(Response {
+                description: "ok".into(),
+                ..Default::default()
+            })),
+            responses: None,
+            extensions: Some(ext),
+        };
+        let v = serde_json::to_value(&responses).unwrap();
+        // "x-ok" must be present; "not-an-extension" must be filtered out.
+        assert_eq!(v["x-ok"], 2);
+        assert!(v.get("not-an-extension").is_none());
+    }
+
+    // ── is_response_code_key: range tokens ───────────────────────────────────
+
+    #[test]
+    fn wildcard_range_codes_are_valid_keys() {
+        // 1XX-5XX (uppercase X) must be accepted as response keys.
+        let json = serde_json::json!({
+            "1XX": {"description": "info"},
+            "2XX": {"description": "success"},
+            "3XX": {"description": "redirect"},
+            "4XX": {"description": "client error"},
+            "5XX": {"description": "server error"},
+        });
+        let responses: Responses = serde_json::from_value(json).expect("must parse");
+        assert_eq!(responses.responses.as_ref().unwrap().len(), 5);
+    }
+
+    // ── Responses serializer: extensions ────────────────────────────────────
+
+    #[test]
+    fn responses_with_extensions_round_trips() {
+        let mut ext = BTreeMap::new();
+        ext.insert("x-internal".to_owned(), serde_json::Value::Bool(true));
+        let responses = Responses {
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                }),
+            )])),
+            extensions: Some(ext),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&responses).unwrap();
+        assert_eq!(v["x-internal"], true);
+        let back: Responses = serde_json::from_value(v).unwrap();
+        assert_eq!(back, responses);
+    }
+
+    // ── Responses deserializer: error paths ──────────────────────────────────
+
+    #[test]
+    fn responses_duplicate_default_rejected() {
+        let raw = r#"{"default": {"description": "a"}, "default": {"description": "b"}}"#;
+        let res = serde_json::from_str::<Responses>(raw);
+        assert!(res.is_err(), "duplicate default should fail");
+    }
+
+    #[test]
+    fn responses_duplicate_extension_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let res = serde_json::from_str::<Responses>(raw);
+        assert!(res.is_err(), "duplicate extension key should fail");
+    }
+
+    #[test]
+    fn responses_duplicate_status_code_rejected() {
+        let raw = r#"{"200": {"description": "a"}, "200": {"description": "b"}}"#;
+        let res = serde_json::from_str::<Responses>(raw);
+        assert!(res.is_err(), "duplicate status code should fail");
+    }
+
+    #[test]
+    fn responses_unknown_field_rejected() {
+        let raw = r#"{"not_a_code": {"description": "a"}}"#;
+        let res = serde_json::from_str::<Responses>(raw);
+        assert!(res.is_err(), "unknown non-code key should fail: {:?}", res);
+    }
+
+    // ── Responses validate: invalid key in map ────────────────────────────────
+
+    #[test]
+    fn responses_validate_invalid_key_errors() {
+        // A Responses object with a non-standard key in the `responses` map
+        // (constructed programmatically, since the deserializer already rejects
+        // unknown keys) should be flagged at validate time.
+        use crate::v3_1::spec::Spec;
+        use crate::validation::Context;
+
+        let mut r = BTreeMap::new();
+        r.insert(
+            "bad-key".to_owned(),
+            RefOr::new_item(Response {
+                description: "desc".into(),
+                ..Default::default()
+            }),
+        );
+        let responses = Responses {
+            responses: Some(r),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        responses.validate_with_context(&mut ctx, "responses".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("key must be a 3-digit status code")),
+            "invalid key errors: {:?}",
+            ctx.errors
+        );
+    }
 }

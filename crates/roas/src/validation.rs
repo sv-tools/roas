@@ -917,4 +917,45 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn validation_error_display_dot_prefix_form() {
+        // When message starts with `.`, Display renders as "<path><message>"
+        // (no colon-space separator). This is the defensive fallback for
+        // directly-constructed ValidationError values that bypass the pusher.
+        let e = ValidationError::new("#.x".into(), ".foo: bad".into());
+        assert_eq!(e.to_string(), "#.x.foo: bad");
+
+        // The non-dot form still renders as "<path>: <message>".
+        let e2 = ValidationError::new("#.x".into(), "plain".into());
+        assert_eq!(e2.to_string(), "#.x: plain");
+    }
+
+    #[test]
+    fn validation_errors_ext_for_error_delegates_to_inner_vec() {
+        // Exercises ValidationErrorsExt impls on the `Error` wrapper type
+        // (lines 200-210): mentions, mentions_all, and has_exact must all
+        // delegate to the inner `errors` vec.
+        let err = Error {
+            errors: vec![
+                ValidationError::new("#.a".into(), "first error".into()),
+                ValidationError::new("#.b".into(), "second error".into()),
+            ],
+        };
+
+        // mentions
+        assert!(err.mentions("first"));
+        assert!(err.mentions("second"));
+        assert!(!err.mentions("missing"));
+
+        // mentions_all — both substrings must appear in the same error
+        assert!(err.mentions_all(&["#.a", "first"]));
+        assert!(!err.mentions_all(&["#.a", "second"])); // different errors
+        assert!(!err.mentions_all(&["nope", "also-nope"]));
+
+        // has_exact — matches the Display form exactly
+        assert!(err.has_exact("#.a: first error"));
+        assert!(err.has_exact("#.b: second error"));
+        assert!(!err.has_exact("#.a: other"));
+    }
 }

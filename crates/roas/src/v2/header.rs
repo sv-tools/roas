@@ -616,4 +616,31 @@ mod tests {
             ctx.errors
         );
     }
+
+    #[test]
+    fn integer_number_boolean_header_validate_without_errors() {
+        // Exercises ValidateWithContext for Header::Integer (line 249),
+        // Header::Number (line 250), and the empty validate bodies for
+        // NumberHeader (line 269) and BooleanHeader (line 273).
+        let spec = Spec::default();
+
+        for header in [
+            Header::Integer(IntegerHeader {
+                description: Some("count".to_owned()),
+                ..Default::default()
+            }),
+            Header::Number(NumberHeader {
+                description: Some("ratio".to_owned()),
+                ..Default::default()
+            }),
+            Header::Boolean(BooleanHeader {
+                description: Some("flag".to_owned()),
+                ..Default::default()
+            }),
+        ] {
+            let mut ctx = Context::new(&spec, crate::validation::Options::new());
+            header.validate_with_context(&mut ctx, "h".into());
+            assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+        }
+    }
 }

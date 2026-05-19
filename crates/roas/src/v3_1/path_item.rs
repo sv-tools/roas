@@ -750,6 +750,133 @@ mod tests {
     }
 
     #[test]
+    fn paths_is_empty_when_no_paths() {
+        let p = Paths::default();
+        assert!(p.is_empty());
+        let p: Paths = [("/a", PathItem::default())].into();
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn duplicate_ref_field_rejected() {
+        let raw = r##"{"$ref": "#/a", "$ref": "#/b"}"##;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate $ref should fail");
+    }
+
+    #[test]
+    fn duplicate_summary_field_rejected() {
+        let raw = r#"{"summary": "A", "summary": "B"}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate summary should fail");
+    }
+
+    #[test]
+    fn duplicate_description_field_rejected() {
+        let raw = r#"{"description": "A", "description": "B"}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate description should fail");
+    }
+
+    #[test]
+    fn duplicate_parameters_field_rejected() {
+        let raw = r#"{"parameters": [], "parameters": []}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate parameters should fail");
+    }
+
+    #[test]
+    fn duplicate_servers_field_rejected() {
+        let raw = r#"{"servers": [], "servers": []}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate servers should fail");
+    }
+
+    #[test]
+    fn duplicate_extension_field_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate extension should fail");
+    }
+
+    #[test]
+    fn duplicate_operation_method_rejected() {
+        let raw = r#"{"get": {}, "get": {}}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate method should fail");
+    }
+
+    #[test]
+    fn internal_ref_to_paths_resolves() {
+        // Verify that $ref to #/paths/<name> is accepted as a valid path item ref
+        let mut paths = Paths::default();
+        paths
+            .paths
+            .insert("/target".to_owned(), PathItem::default());
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let pi = PathItem {
+            reference: Some("#/paths/~1target".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            !ctx.errors.mentions("not declared"),
+            "paths ref should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_ref_with_slash_in_token_rejected() {
+        // #/components/callbacks/CB/e/x — extra token with '/' inside not valid
+        let spec = Spec::default();
+        let pi = PathItem {
+            reference: Some("#/paths/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.mentions("not declared"),
+            "multi-token paths ref should fail: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn paths_duplicate_extension_key_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let res = serde_json::from_str::<Paths>(raw);
+        assert!(res.is_err(), "duplicate extension key in Paths should fail");
+    }
+
+    #[test]
+    fn paths_duplicate_path_key_rejected() {
+        let raw = r#"{"/a": {}, "/a": {}}"#;
+        let res = serde_json::from_str::<Paths>(raw);
+        assert!(res.is_err(), "duplicate path key in Paths should fail");
+    }
+
+    #[test]
+    fn paths_serialize_with_extensions() {
+        let mut ext = std::collections::BTreeMap::new();
+        ext.insert(
+            "x-foo".to_owned(),
+            serde_json::Value::String("bar".to_owned()),
+        );
+        let mut p = Paths::default();
+        p.paths.insert("/pets".to_owned(), PathItem::default());
+        p.extensions = Some(ext);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["x-foo"], "bar");
+        assert!(v.get("/pets").is_some());
+    }
+
+    #[test]
     fn uppercase_method_rejected() {
         let raw = r#"{"GET": {"responses": {"200": {"description": "ok"}}}}"#;
         let err = serde_json::from_str::<PathItem>(raw)
@@ -757,6 +884,122 @@ mod tests {
         assert!(
             err.to_string().contains("unknown field") && err.to_string().contains("GET"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn path_item_with_servers_validates_them() {
+        // PathItem with a servers list exercises the `if let Some(servers)` branch
+        // at lines 273-276 of the validate_with_context impl.
+        use crate::v3_1::server::Server;
+        let pi = PathItem {
+            servers: Some(vec![Server {
+                url: "".into(), // empty URL triggers validation error
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("servers")),
+            "expected server validation error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn path_item_serialize_extension_non_x_key_filtered() {
+        // PathItem serializer filters out extension keys that do not start with "x-".
+        // This exercises line 128 (closing brace of the `if k.starts_with("x-")` guard).
+        let mut ext = BTreeMap::new();
+        ext.insert("not-an-ext".to_owned(), serde_json::Value::Bool(true));
+        ext.insert("x-real".to_owned(), serde_json::Value::Bool(false));
+        let pi = PathItem {
+            extensions: Some(ext),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&pi).unwrap();
+        // "x-real" must be present; "not-an-ext" must be filtered out.
+        assert!(
+            v.get("x-real").is_some(),
+            "x- key should be serialized: {v}"
+        );
+        assert!(
+            v.get("not-an-ext").is_none(),
+            "non-x- key should be filtered: {v}"
+        );
+    }
+
+    #[test]
+    fn internal_ref_to_callbacks_with_only_one_token_is_dangling() {
+        // `#/components/callbacks/CB` (no expression token) — the `splitn(2,'/')`
+        // produces only one element, hitting the `return false` at line 345.
+        let spec = Spec::default();
+        let pi = PathItem {
+            reference: Some("#/components/callbacks/CB".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in this document")),
+            "single-token callbacks ref should be dangling: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_ref_to_callbacks_with_slash_in_expr_token_is_dangling() {
+        // `#/components/callbacks/CB/a/b` — `expr_token` contains `/`,
+        // hitting `return false` at line 348.
+        let cb = crate::v3_1::callback::Callback {
+            paths: BTreeMap::from([("e".to_owned(), PathItem::default())]),
+            ..Default::default()
+        };
+        let comp = crate::v3_1::components::Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let pi = PathItem {
+            reference: Some("#/components/callbacks/CB/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in this document")),
+            "multi-slash callbacks ref should be dangling: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_ref_to_unknown_prefix_is_dangling() {
+        // A `$ref` that doesn't match any of the four known container prefixes
+        // falls through to `else { false }` at line 359.
+        let spec = Spec::default();
+        let pi = PathItem {
+            reference: Some("#/definitions/Foo".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in this document")),
+            "unknown prefix ref should be dangling: {:?}",
+            ctx.errors
         );
     }
 }

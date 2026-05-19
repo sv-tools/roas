@@ -2914,4 +2914,185 @@ mod tests {
             "#/components/responses/Existing"
         );
     }
+
+    // ── Walker branch coverage: None-path for optional fields ───────────────
+
+    /// An array schema with NO `items` field exercises the None branch of
+    /// `if let Some(s) = a.items.as_mut()` in `recurse_array_schema` (line 303).
+    #[test]
+    fn array_schema_without_items_collapses_cleanly() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "components": {
+                "schemas": {
+                    "Tags": {"type": "array"}
+                }
+            },
+            "paths": {}
+        }));
+        spec.collapse(None).unwrap();
+        let v = serde_json::to_value(&spec).unwrap();
+        // Schema is untouched — no items to lift.
+        assert_eq!(v["components"]["schemas"]["Tags"]["type"], "array");
+    }
+
+    /// A parameter using `content` (no `schema`) exercises the None branch of
+    /// `if let Some(s) = schema` in `walk_param_slots` (line 355) AND the
+    /// content loop at lines 357–358.
+    #[test]
+    fn parameter_with_content_map_collapses_cleanly() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "parameters": [{
+                            "name": "filter",
+                            "in": "query",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "title": "FilterSchema",
+                                        "type": "object",
+                                        "properties": {"q": {"type": "string"}}
+                                    }
+                                }
+                            }
+                        }],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let names = lifted_schema_names(&spec);
+        // The schema nested inside the content map is lifted.
+        assert!(
+            names.contains(&"FilterSchema".to_owned()),
+            "schema inside parameter.content must be lifted; got {names:?}"
+        );
+    }
+
+    /// A `responses` object with only a `default` entry (no numeric status map)
+    /// exercises the None branch of `if let Some(map) = responses.responses.as_mut()`
+    /// in `walk_responses` (line 404).
+    #[test]
+    fn responses_with_only_default_collapses_cleanly() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": {
+                            "default": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "title": "DefaultResp",
+                                            "type": "object"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        // Schema inside default response content is lifted.
+        let names = lifted_schema_names(&spec);
+        assert!(
+            names.contains(&"DefaultResp".to_owned()),
+            "schema inside default response must be lifted; got {names:?}"
+        );
+    }
+
+    /// A media type with NO `schema` exercises the None branch of
+    /// `if let Some(s) = mt.schema.as_mut()` in `walk_media_type` (line 447).
+    #[test]
+    fn media_type_without_schema_collapses_cleanly() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/octet-stream": {}
+                            }
+                        },
+                        "responses": {"204": {"description": "uploaded"}}
+                    }
+                }
+            }
+        }));
+        // Must not panic; a schema-less media type passes through cleanly.
+        // The requestBody is lifted into components.requestBodies.
+        spec.collapse(None).unwrap();
+        let v = serde_json::to_value(&spec).unwrap();
+        // After collapse the request body is either lifted (ref) or inline — either
+        // way the path value must exist and not be null.
+        let rb = &v["paths"]["/upload"]["post"]["requestBody"];
+        assert!(!rb.is_null(), "requestBody must exist after collapse: {rb}");
+    }
+
+    /// A media type `encoding` entry with NO `headers` exercises the None branch
+    /// of `if let Some(headers) = enc.headers.as_mut()` in `walk_encoding` (line 470).
+    #[test]
+    fn encoding_without_headers_collapses_cleanly() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/form": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}}},
+                                    "encoding": {
+                                        "file": {"contentType": "application/octet-stream"}
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        // Must not panic; encoding without headers passes through.
+        spec.collapse(None).unwrap();
+    }
+
+    /// A path item with parameters but NO operations exercises the None branch
+    /// of `if let Some(ops) = pi.operations.as_mut()` in `walk_path_item` (line 499).
+    #[test]
+    fn path_item_without_operations_collapses_cleanly() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/things/{id}": {
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": true,
+                         "schema": {"title": "ThingId", "type": "integer"}}
+                    ]
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        // The schema inside the path-level parameter is lifted.
+        let names = lifted_schema_names(&spec);
+        assert!(
+            names.contains(&"ThingId".to_owned()),
+            "path-level parameter schema must be lifted; got {names:?}"
+        );
+    }
 }

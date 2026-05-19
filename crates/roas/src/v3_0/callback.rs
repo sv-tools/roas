@@ -239,4 +239,42 @@ mod tests {
         assert!(cb.extensions.is_none());
         assert_eq!(serde_json::to_value(&cb).unwrap(), json!({}));
     }
+
+    /// Serialize a Callback with an x- extension — exercises line 76
+    /// (`map.serialize_entry` inside the extensions for-loop).
+    #[test]
+    fn callback_with_extension_serializes_extension_key() {
+        let mut ext = std::collections::BTreeMap::new();
+        ext.insert("x-custom".to_owned(), serde_json::json!("val"));
+        let cb = Callback {
+            paths: std::collections::BTreeMap::new(),
+            extensions: Some(ext),
+        };
+        let v = serde_json::to_value(&cb).unwrap();
+        assert_eq!(v["x-custom"], "val");
+    }
+
+    /// Passing a non-map value to Callback deserializer triggers `expecting`
+    /// (lines 96-98 in `CallbackVisitor::expecting`).
+    #[test]
+    fn callback_non_map_value_errors() {
+        let res: Result<Callback, _> = serde_json::from_str(r#""not a map""#);
+        assert!(res.is_err(), "expected wrong-type error");
+    }
+
+    /// Serialize a Callback whose `extensions` map contains a key that does
+    /// NOT start with `x-`.  The serializer silently skips such keys, which
+    /// exercises the false-branch of `if k.starts_with("x-")` (line 76).
+    #[test]
+    fn callback_extension_without_x_prefix_is_skipped_in_serialization() {
+        let mut ext = std::collections::BTreeMap::new();
+        ext.insert("no-prefix".to_owned(), serde_json::json!(42));
+        let cb = Callback {
+            paths: std::collections::BTreeMap::new(),
+            extensions: Some(ext),
+        };
+        let v = serde_json::to_value(&cb).unwrap();
+        // The non-x- key must not appear in the output.
+        assert!(v.get("no-prefix").is_none(), "unexpected key in: {v}");
+    }
 }

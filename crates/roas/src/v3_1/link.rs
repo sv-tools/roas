@@ -1337,4 +1337,1184 @@ mod tests {
             ctx.errors
         );
     }
+
+    // ── Malformed operationRefs with too-few tokens ───────────────────────────
+
+    #[test]
+    fn operation_ref_paths_only_one_token_malformed() {
+        // `#/paths/~1pets` has only one token after the prefix; needs >= 2.
+        let spec = spec_with_pets_get();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions("malformed JSON Pointer"),
+            "expected malformed-pointer error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_webhooks_only_one_token_malformed() {
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert("pet".to_owned(), pi_with_get());
+        let spec = Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/webhooks/pet".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions("malformed JSON Pointer"),
+            "expected malformed-pointer error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_components_path_items_only_one_token_malformed() {
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            path_items: Some(BTreeMap::from([("Reusable".to_owned(), pi_with_get())])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/pathItems/Reusable".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions("malformed JSON Pointer"),
+            "expected malformed-pointer error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_components_callbacks_fewer_than_three_tokens_malformed() {
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "CB".to_owned(),
+                RefOr::new_item(Callback::default()),
+            )])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        // Only two tokens: CB/e — need at least three (name/expr/method).
+        Link {
+            operation_ref: Some("#/components/callbacks/CB/e".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions("malformed JSON Pointer"),
+            "expected malformed-pointer error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_webhooks_unknown_webhook_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/webhooks/nonexistent/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("webhook `nonexistent` not declared")),
+            "expected unknown-webhook error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_to_webhooks_target() {
+        // A PathItem in `paths` that `$ref`s to `#/webhooks/<name>` should
+        // be followed by the path-item ref chain resolver.
+        let mut webhooks = Paths::default();
+        webhooks
+            .paths
+            .insert("petCreated".to_owned(), pi_with_get());
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/webhooks/petCreated".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            !ctx.errors.mentions(".operationRef"),
+            "webhook-chain target should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_to_components_path_items_dangling() {
+        // A PathItem.reference pointing at `#/components/pathItems/Missing`
+        // (target doesn't exist) hits the "not declared" error path.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/pathItems/Missing".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in `#/components/pathItems`")),
+            "expected dangling components.pathItems error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_token_with_slash_malformed() {
+        // A PathItem.reference of `#/paths/a/b` has a token with '/' — the
+        // resolver should report a malformed pointer.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/paths/a/b".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for malformed path token: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_webhooks_token_with_slash_malformed() {
+        // A PathItem.reference of `#/webhooks/a/b` has extra token.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/webhooks/a/b".into()),
+                ..Default::default()
+            },
+        );
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert("a".to_owned(), PathItem::default());
+        let spec = Spec {
+            paths: Some(paths),
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for extra webhook token: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_components_callbacks_malformed_missing_expr() {
+        // A PathItem.reference of `#/components/callbacks/CB` has no expr part.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/callbacks/CB".into()),
+                ..Default::default()
+            },
+        );
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "CB".to_owned(),
+                RefOr::new_item(Callback::default()),
+            )])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for callbacks ref with no expr: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_components_callbacks_dangling_cb() {
+        // A PathItem.reference of `#/components/callbacks/Missing/expr` where
+        // the callback is not declared.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/callbacks/Missing/expr".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for dangling callback ref: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_components_callbacks_dangling_expr() {
+        // A PathItem.reference of `#/components/callbacks/CB/missing` where
+        // the expression is not declared in the callback.
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let cb = Callback {
+            paths: BTreeMap::from([("expr".to_owned(), PathItem::default())]),
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/callbacks/CB/missing".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for dangling callback expression: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_external_is_error_without_ignore() {
+        // A PathItem.reference pointing at an external doc triggers
+        // `ExternalPathItemRef`. Without `IgnoreExternalReferences` this
+        // must be reported as an error.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("https://other.example/spec.yaml#/paths/~1pets".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "external path-item ref should be reported: {:?}",
+            ctx.errors
+        );
+
+        // With IgnoreExternalReferences: no error.
+        let mut paths2 = Paths::default();
+        paths2.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("https://other.example/spec.yaml#/paths/~1pets".into()),
+                ..Default::default()
+            },
+        );
+        let spec2 = Spec {
+            paths: Some(paths2),
+            ..Default::default()
+        };
+        let mut ctx2 = Context::new(&spec2, Options::IgnoreExternalReferences.only());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx2, "l".into());
+        assert!(
+            !ctx2.errors.mentions(".operationRef"),
+            "with ignore-external: {:?}",
+            ctx2.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_inline_callback_method_missing() {
+        // An operationRef that traverses into a callback but the method
+        // is not declared on the path item — exercising the `method not
+        // declared on path` error for inline callback deep pointers.
+        use crate::v3_1::callback::Callback;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("expr".to_owned(), pi_with_get());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert("myCb".to_owned(), RefOr::new_item(cb));
+        let op = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/subscribe".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1subscribe/post/callbacks/myCb/expr/delete".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions("method `delete` not declared"),
+            "expected missing-method error: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── components/pathItems name not declared ────────────────────────────────
+
+    #[test]
+    fn operation_ref_into_components_path_items_missing_name() {
+        // `#/components/pathItems/Missing/get` — the name "Missing" is not
+        // in components.pathItems, so the "not declared" branch fires.
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            path_items: Some(BTreeMap::from([("Reusable".to_owned(), pi_with_get())])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/pathItems/Missing/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("path item `Missing` not declared in `#/components/pathItems`")),
+            "expected not-declared error: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── components/callbacks cb_ref is an external $ref ───────────────────────
+
+    #[test]
+    fn operation_ref_into_components_callbacks_external_ref_errors() {
+        // The callback entry is itself a `$ref` to an external document.
+        // `cb_ref.get_item(spec)` returns `ExternalUnsupported`.
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "CB".to_owned(),
+                RefOr::new_ref(
+                    "https://other.example/spec.yaml#/components/callbacks/CB".to_owned(),
+                ),
+            )])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/callbacks/CB/expr/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        // Without IgnoreExternalReferences the external path-item ref must surface.
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for external callback ref: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_into_components_callbacks_notfound_ref_errors() {
+        // The callback entry is an internal `$ref` to a non-existent key.
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "CB".to_owned(),
+                RefOr::new_ref("#/components/callbacks/NonExistent".to_owned()),
+            )])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/components/callbacks/CB/expr/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for not-found callback ref: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── consumed >= parts.len() (malformed pointer) ───────────────────────────
+
+    #[test]
+    fn operation_ref_webhooks_consumed_equals_parts_len_malformed() {
+        // After consuming the webhook entry, consumed == parts.len() (no
+        // method token left) → malformed_pointer is returned.
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert("pet".to_owned(), pi_with_get());
+        // The ref points at a webhook path item (1 token) that itself
+        // has no further method token because the ref ends at `pet`:
+        // Note: `#/webhooks/pet` alone has parts.len()==1 which is
+        // caught by the < 2 check. To hit `consumed >= parts.len()`
+        // we need the chain follower to eat exactly the right number —
+        // trigger via a path item `$ref` that resolves to webhooks and
+        // then the outer ref has exactly one remaining part (the method)
+        // but the chain consumed it all. Easiest: use a single-part
+        // `#/webhooks/...` where len >= 2 but consumed==parts.len()
+        // after resolving the entry. That requires parts.len()==1 after
+        // initial consumption of the webhook name but that's blocked by
+        // the "< 2" guard above.  Instead use a ref that starts at
+        // `#/paths/...` where the path item `$ref` itself points into
+        // `#/webhooks` and the outer path ref's trailing token count
+        // equals consumed. The simplest reproducible path:
+        // `#/components/pathItems/X/` (trailing slash) yields an empty
+        // token that triggers the "empty token" guard, which is a
+        // different branch. Let's use the "no `paths`" branch instead:
+        // a path item $ref to `#/paths/x` when spec.paths is None.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1b".into()),
+                ..Default::default()
+            },
+        );
+        // spec has paths but /b is missing → fires "not declared in #/paths"
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1a/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for dangling chain ref: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── deep pointer — method not declared in while-loop ─────────────────────
+
+    #[test]
+    fn operation_ref_deep_method_not_declared_in_loop() {
+        // In the deep-pointer while loop, `item.operations` does not
+        // contain `method` → fires lines 193-195.
+        //
+        // Strategy: two levels of callback hopping.
+        //   ref: #/paths/~1pets/post/callbacks/cb/expr/delete/callbacks/inner/x/post
+        //   First hop: /pets.post.callbacks["cb"]["expr"] → pi_with_get()
+        //   method becomes "delete", consumed = 6
+        //   Second loop iteration: item = pi_with_get(), method = "delete"
+        //   pi_with_get() only has "get", NOT "delete" → 193-195 fires.
+        use crate::v3_1::callback::Callback;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("expr".to_owned(), pi_with_get());
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert("cb".to_owned(), RefOr::new_item(cb));
+        let outer = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), outer);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        // After first callback hop, item=pi_with_get(), method="delete".
+        // Second while-loop iteration: item.operations.get("delete") fails.
+        Link {
+            operation_ref: Some(
+                "#/paths/~1pets/post/callbacks/cb/expr/delete/callbacks/inner/x/post".into(),
+            ),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions("method `delete` not declared"),
+            "expected method-not-declared error in loop: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── deep pointer — inline cb is a $ref into components/callbacks ──────────
+
+    #[test]
+    fn operation_ref_deep_pointer_cb_ref_into_components_marks_visited() {
+        // When an inline callback slot is a `$ref` into
+        // `#/components/callbacks/...`, the deep-pointer resolver marks
+        // the component as visited (lines 209-212).
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("expr".to_owned(), pi_with_get());
+        let comp_cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "SharedCB".to_owned(),
+                RefOr::new_item(comp_cb),
+            )])),
+            ..Default::default()
+        };
+        // The path's operation has a callback that is a $ref into
+        // #/components/callbacks/SharedCB.
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert(
+            "myCb".to_owned(),
+            RefOr::new_ref("#/components/callbacks/SharedCB".to_owned()),
+        );
+        let op = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/sub".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::empty());
+        Link {
+            operation_ref: Some("#/paths/~1sub/post/callbacks/myCb/expr/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            !ctx.errors.mentions(".operationRef"),
+            "should resolve via components callback ref: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.is_visited("#/components/callbacks/SharedCB"),
+            "SharedCB should be marked visited"
+        );
+    }
+
+    // ── deep pointer — inline callback External or NotFound ───────────────────
+
+    #[test]
+    fn operation_ref_deep_pointer_inline_cb_external_ref_errors() {
+        // Inline callback slot is a `$ref` to an external document:
+        // `cb_ref.get_item(spec)` returns ExternalUnsupported → 217-222.
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert(
+            "myCb".to_owned(),
+            RefOr::new_ref("https://other.example/spec.yaml#/components/callbacks/CB".to_owned()),
+        );
+        let op = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/sub".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1sub/post/callbacks/myCb/expr/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for external inline callback: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_deep_pointer_inline_cb_notfound_ref_errors() {
+        // Inline callback slot is an internal `$ref` to a non-existent key:
+        // `cb_ref.get_item(spec)` returns NotFound → 224-227.
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert(
+            "myCb".to_owned(),
+            RefOr::new_ref("#/components/callbacks/NonExistent".to_owned()),
+        );
+        let op = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/sub".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1sub/post/callbacks/myCb/expr/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for not-found inline callback: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── deep pointer — expression not declared on callback ────────────────────
+
+    #[test]
+    fn operation_ref_deep_pointer_inline_cb_missing_expression() {
+        // In the deep-pointer loop, the expression is not declared on the
+        // resolved callback → 231-233.
+        use crate::v3_1::callback::Callback;
+        let cb = Callback {
+            paths: BTreeMap::from([("declared".to_owned(), pi_with_get())]),
+            ..Default::default()
+        };
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert("myCb".to_owned(), RefOr::new_item(cb));
+        let op = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/sub".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        // "undeclared" expression does not exist in the callback
+        Link {
+            operation_ref: Some("#/paths/~1sub/post/callbacks/myCb/undeclared/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("expression `undeclared`") && e.contains("myCb")),
+            "expected missing-expression error: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── deep pointer — resolve_path_item_ref_chain fails in loop ─────────────
+
+    #[test]
+    fn operation_ref_deep_pointer_chain_fails_in_loop() {
+        // After resolving into an inline callback, the callback's path item
+        // itself has a `$ref` that fails (dangling) → line 247 fires.
+        use crate::v3_1::callback::Callback;
+        // The callback's path item has a dangling `$ref`.
+        let dangling_pi = PathItem {
+            reference: Some("#/paths/~1nonexistent".into()),
+            ..Default::default()
+        };
+        let cb = Callback {
+            paths: BTreeMap::from([("expr".to_owned(), dangling_pi)]),
+            ..Default::default()
+        };
+        let mut callbacks = BTreeMap::new();
+        callbacks.insert("myCb".to_owned(), RefOr::new_item(cb));
+        let op = Operation {
+            responses: Some(ok_responses()),
+            callbacks: Some(callbacks),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("post".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/sub".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1sub/post/callbacks/myCb/expr/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error when chain fails inside deep pointer loop: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── resolve_path_item_ref_chain — empty $ref ──────────────────────────────
+
+    #[test]
+    fn operation_ref_path_item_ref_empty_errors() {
+        // A PathItem with `$ref: ""` triggers the empty-ref branch (283-285).
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for empty path-item $ref: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── resolve_path_item_ref_chain — no paths in spec ────────────────────────
+
+    #[test]
+    fn operation_ref_path_item_ref_to_paths_when_spec_has_no_paths() {
+        // A PathItem.reference of `#/paths/~1foo` when the spec has no
+        // `paths` field at all → lines 306-308.
+        // We need to enter resolve_path_item_ref_chain via a different
+        // container (webhooks) so that spec.paths == None.
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert(
+            "event".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1foo".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/webhooks/event/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error when chained ref targets missing paths: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── resolve_path_item_ref_chain — path not declared in #/paths ───────────
+
+    #[test]
+    fn operation_ref_path_item_ref_to_missing_path_entry() {
+        // A PathItem.reference of `#/paths/~1missing` where `/missing`
+        // is not in paths → lines 311-313.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/source".to_owned(),
+            PathItem {
+                reference: Some("#/paths/~1missing".into()),
+                ..Default::default()
+            },
+        );
+        // /missing is not in paths
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1source/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in `#/paths`")),
+            "expected not-declared-in-paths error: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── resolve_path_item_ref_chain — webhook not declared ────────────────────
+
+    #[test]
+    fn operation_ref_path_item_ref_to_missing_webhook_entry() {
+        // A PathItem.reference of `#/webhooks/missing` → lines 324-326.
+        let mut webhooks = Paths::default();
+        webhooks.paths.insert(
+            "event".to_owned(),
+            PathItem {
+                reference: Some("#/webhooks/missing".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/webhooks/event/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not declared in `#/webhooks`")),
+            "expected not-declared-in-webhooks error: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── resolve_path_item_ref_chain — #/components/pathItems/ with slash ──────
+
+    #[test]
+    fn operation_ref_path_item_ref_components_path_items_slash_in_token() {
+        // A PathItem.reference of `#/components/pathItems/a/b` has a '/'
+        // in the token → lines 331-333.
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/pathItems/a/b".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for components/pathItems/ with slash: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── resolve_path_item_ref_chain — callbacks expr_token contains '/' ───────
+
+    #[test]
+    fn operation_ref_path_item_ref_components_callbacks_expr_with_slash() {
+        // A PathItem.reference of `#/components/callbacks/CB/a/b` where
+        // expr_token is `a/b` (contains '/') → lines 356-358.
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        let cb = Callback {
+            paths: BTreeMap::from([("a".to_owned(), pi_with_get())]),
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                // expr_token is "a/b" which contains '/'
+                reference: Some("#/components/callbacks/CB/a/b".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for callbacks ref with slash in expr: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── resolve_path_item_ref_chain — callbacks cb_ref External / NotFound ────
+
+    #[test]
+    fn operation_ref_path_item_ref_components_callbacks_external_cb_ref() {
+        // A PathItem.reference targets `#/components/callbacks/CB/expr`
+        // where CB is itself an external `$ref` → ExternalUnsupported (376-381).
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "CB".to_owned(),
+                RefOr::new_ref(
+                    "https://other.example/spec.yaml#/components/callbacks/CB".to_owned(),
+                ),
+            )])),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/callbacks/CB/expr".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        // The ExternalPathItemRef propagates; without IgnoreExternalReferences
+        // it must result in an error.
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for external cb $ref in path-item chain: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn operation_ref_path_item_ref_components_callbacks_notfound_cb_ref() {
+        // A PathItem.reference targets `#/components/callbacks/CB/expr`
+        // where CB is an internal `$ref` to a non-existent key → NotFound (383-386).
+        use crate::v3_1::components::Components;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "CB".to_owned(),
+                RefOr::new_ref("#/components/callbacks/NonExistent".to_owned()),
+            )])),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/pets".to_owned(),
+            PathItem {
+                reference: Some("#/components/callbacks/CB/expr".into()),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        Link {
+            operation_ref: Some("#/paths/~1pets/get".into()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "l".into());
+        assert!(
+            ctx.errors.mentions(".operationRef"),
+            "expected error for not-found cb $ref in path-item chain: {:?}",
+            ctx.errors
+        );
+    }
 }

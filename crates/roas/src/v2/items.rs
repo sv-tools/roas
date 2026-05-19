@@ -628,6 +628,92 @@ mod tests {
     }
 
     #[test]
+    fn items_from_impls() {
+        // Exercise all From<XxxItem> for Items conversions.
+        let _: Items = StringItem::default().into();
+        let _: Items = IntegerItem::default().into();
+        let _: Items = NumberItem::default().into();
+        let _: Items = BooleanItem::default().into();
+        let _: Items = ArrayItem {
+            items: Items::String(Box::default()),
+            default: None,
+            collection_format: None,
+            max_items: None,
+            min_items: None,
+            unique_items: None,
+            extensions: None,
+        }
+        .into();
+
+        // Verify each produces the expected variant.
+        assert!(matches!(
+            Items::from(StringItem::default()),
+            Items::String(_)
+        ));
+        assert!(matches!(
+            Items::from(IntegerItem::default()),
+            Items::Integer(_)
+        ));
+        assert!(matches!(
+            Items::from(NumberItem::default()),
+            Items::Number(_)
+        ));
+        assert!(matches!(
+            Items::from(BooleanItem::default()),
+            Items::Boolean(_)
+        ));
+    }
+
+    #[test]
+    fn items_validate_dispatch_all_variants() {
+        let spec = Spec::default();
+
+        // Integer item: validate_with_context is a no-op so must produce no errors.
+        let item = Items::Integer(Box::default());
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.is_empty(), "Integer: {:?}", ctx.errors);
+
+        // Number item: same.
+        let item = Items::Number(Box::default());
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.is_empty(), "Number: {:?}", ctx.errors);
+
+        // Boolean item: same.
+        let item = Items::Boolean(Box::default());
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.is_empty(), "Boolean: {:?}", ctx.errors);
+
+        // String item with valid pattern: no errors.
+        let item = Items::String(Box::new(StringItem {
+            pattern: Some("[a-z]+".into()),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "String valid pattern: {:?}",
+            ctx.errors
+        );
+
+        // String item with invalid pattern: must error.
+        let item = Items::String(Box::new(StringItem {
+            pattern: Some("[".into()),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        item.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("pattern")),
+            "String invalid pattern: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn array_item_rejects_multi_collection_format() {
         // `multi` is reserved for top-level query/formData parameters; nested
         // items must use csv/ssv/tsv/pipes only.

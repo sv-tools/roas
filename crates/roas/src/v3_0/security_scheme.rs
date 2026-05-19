@@ -1381,4 +1381,40 @@ mod tests {
             ctx.errors
         );
     }
+
+    /// SecurityScheme::Display shows the type name for each variant.
+    #[test]
+    fn security_scheme_display() {
+        assert_eq!(SecurityScheme::HTTP(Box::default()).to_string(), "http");
+        assert_eq!(SecurityScheme::ApiKey(Box::default()).to_string(), "apiKey");
+        assert_eq!(SecurityScheme::OAuth2(Box::default()).to_string(), "oauth2");
+        assert_eq!(
+            SecurityScheme::OpenIdConnect(Box::default()).to_string(),
+            "openIdConnect"
+        );
+    }
+
+    /// HttpScheme::Display shows the canonical IANA name for each variant.
+    #[test]
+    fn http_scheme_display_all_variants() {
+        assert_eq!(HttpScheme::Basic.to_string(), "Basic");
+        assert_eq!(HttpScheme::Bearer.to_string(), "Bearer");
+        assert_eq!(HttpScheme::Digest.to_string(), "Digest");
+        assert_eq!(HttpScheme::DPoP.to_string(), "DPoP");
+        assert_eq!(HttpScheme::HOBA.to_string(), "HOBA");
+        assert_eq!(HttpScheme::Mutual.to_string(), "Mutual");
+        assert_eq!(HttpScheme::Negotiate.to_string(), "Negotiate");
+        assert_eq!(HttpScheme::OAuth.to_string(), "OAuth");
+        assert_eq!(HttpScheme::SCRAMSHA1.to_string(), "SCRAM-SHA-1");
+        assert_eq!(HttpScheme::SCRAMSHA256.to_string(), "SCRAM-SHA-256");
+        assert_eq!(HttpScheme::Vapid.to_string(), "vapid");
+    }
+
+    /// ApiKeyLocation::Display shows the location name for each variant.
+    #[test]
+    fn api_key_location_display_all_variants() {
+        assert_eq!(ApiKeyLocation::Query.to_string(), "query");
+        assert_eq!(ApiKeyLocation::Header.to_string(), "header");
+        assert_eq!(ApiKeyLocation::Cookie.to_string(), "cookie");
+    }
 }

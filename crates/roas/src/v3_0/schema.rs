@@ -16,7 +16,7 @@ use crate::v3_0::spec::Spec;
 use crate::v3_0::xml::XML;
 use crate::validation::{Context, PushError, ValidateWithContext};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
     AllOf(Box<AllOfSchema>),
@@ -25,6 +25,13 @@ pub enum Schema {
     Not(Box<NotSchema>),
     Single(Box<SingleSchema>), // must be last
 }
+
+// Every variant is boxed, so a `Schema` value stays pointer-sized and
+// cheap to move — the component data lives behind one `Box`.
+const _: () = assert!(
+    std::mem::size_of::<Schema>() <= 16,
+    "Schema variants must stay boxed",
+);
 
 impl Default for Schema {
     fn default() -> Self {
@@ -101,6 +108,86 @@ impl From<NullSchema> for SingleSchema {
 impl From<ObjectSchema> for SingleSchema {
     fn from(s: ObjectSchema) -> Self {
         SingleSchema::Object(s)
+    }
+}
+
+/// Routes a buffered JSON value to the right [`Schema`] variant.
+///
+/// Hand-written in place of `#[serde(untagged)]`: a single
+/// `serde_json::Value` is buffered and the variant is chosen by key
+/// inspection, instead of buffering a serde `Content` tree, re-trying
+/// every variant in turn, and having `SingleSchema` buffer once more on
+/// top.
+fn schema_from_value(value: serde_json::Value) -> Result<Schema, serde_json::Error> {
+    enum Route {
+        AllOf,
+        AnyOf,
+        OneOf,
+        Not,
+        Single,
+    }
+    let route = match &value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("allOf") {
+                Route::AllOf
+            } else if map.contains_key("anyOf") {
+                Route::AnyOf
+            } else if map.contains_key("oneOf") {
+                Route::OneOf
+            } else if map.contains_key("not") {
+                Route::Not
+            } else {
+                Route::Single
+            }
+        }
+        _ => return Err(serde::de::Error::custom("a Schema must be a JSON object")),
+    };
+    Ok(match route {
+        Route::AllOf => Schema::AllOf(Box::new(AllOfSchema::deserialize(value)?)),
+        Route::AnyOf => Schema::AnyOf(Box::new(AnyOfSchema::deserialize(value)?)),
+        Route::OneOf => Schema::OneOf(Box::new(OneOfSchema::deserialize(value)?)),
+        Route::Not => Schema::Not(Box::new(NotSchema::deserialize(value)?)),
+        Route::Single => Schema::Single(Box::new(single_schema_from_value(value)?)),
+    })
+}
+
+/// Routes a buffered JSON value to the right [`SingleSchema`] variant by
+/// its `type`. A missing or unrecognized `type` falls to `Object`,
+/// whose `MustBe!("object")` tag then accepts the default or rejects a
+/// bad value.
+fn single_schema_from_value(value: serde_json::Value) -> Result<SingleSchema, serde_json::Error> {
+    let schema_type = value
+        .as_object()
+        .and_then(|map| map.get("type"))
+        .and_then(|t| t.as_str());
+    Ok(match schema_type {
+        Some("string") => SingleSchema::String(StringSchema::deserialize(value)?),
+        Some("integer") => SingleSchema::Integer(IntegerSchema::deserialize(value)?),
+        Some("number") => SingleSchema::Number(NumberSchema::deserialize(value)?),
+        Some("boolean") => SingleSchema::Boolean(BooleanSchema::deserialize(value)?),
+        Some("array") => SingleSchema::Array(ArraySchema::deserialize(value)?),
+        Some("null") => SingleSchema::Null(NullSchema::deserialize(value)?),
+        _ => SingleSchema::Object(ObjectSchema::deserialize(value)?),
+    })
+}
+
+impl<'de> Deserialize<'de> for Schema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        schema_from_value(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for SingleSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        single_schema_from_value(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -184,7 +271,7 @@ pub struct NotSchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SingleSchema {
     #[serde(rename = "string")]
@@ -1259,6 +1346,27 @@ mod tests {
     }
 
     #[test]
+    fn composition_keyword_beside_sibling_still_routes_to_allof() {
+        // `allOf` next to a sibling keyword that `AllOfSchema` does not
+        // model (`type`, `anyOf`) must still parse: the composition
+        // structs tolerate — and drop — unmodeled keys, so key-routing
+        // produces the same `AllOf` the old untagged fallthrough did.
+        let s: Schema = serde_json::from_value(serde_json::json!({
+            "allOf": [{"$ref": "#/components/schemas/Base"}],
+            "type": "object",
+        }))
+        .unwrap();
+        assert!(matches!(s, Schema::AllOf(_)), "got {s:?}");
+
+        let s: Schema = serde_json::from_value(serde_json::json!({
+            "allOf": [{"$ref": "#/components/schemas/Base"}],
+            "anyOf": [{"$ref": "#/components/schemas/Other"}],
+        }))
+        .unwrap();
+        assert!(matches!(s, Schema::AllOf(_)), "got {s:?}");
+    }
+
+    #[test]
     fn test_all_of_serialize() {
         assert_eq!(
             serde_json::to_value(Schema::from(AllOfSchema {
@@ -1757,5 +1865,108 @@ mod tests {
         });
         let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    /// AnyOf and OneOf validate dispatch walks into member schemas and
+    /// discriminators. Line coverage for Schema::AnyOf / Schema::OneOf
+    /// validate arms (lines 938-956).
+    #[test]
+    fn anyof_oneof_not_validate_dispatch() {
+        let spec = Spec::default();
+
+        // AnyOf with a bad member and a discriminator with empty propertyName.
+        let anyof: Schema = serde_json::from_value(serde_json::json!({
+            "anyOf": [
+                {"type": "string", "pattern": "["}
+            ],
+            "discriminator": {"propertyName": ""}
+        }))
+        .unwrap();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        anyof.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("pattern"),
+            "anyOf: expected pattern error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.mentions("propertyName"),
+            "anyOf: expected empty propertyName error: {:?}",
+            ctx.errors
+        );
+
+        // OneOf with a bad member and a discriminator with empty propertyName.
+        let oneof: Schema = serde_json::from_value(serde_json::json!({
+            "oneOf": [
+                {"type": "string", "pattern": "["}
+            ],
+            "discriminator": {"propertyName": ""}
+        }))
+        .unwrap();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        oneof.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("pattern"),
+            "oneOf: expected pattern error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.mentions("propertyName"),
+            "oneOf: expected empty propertyName error: {:?}",
+            ctx.errors
+        );
+
+        // Not with a bad inner schema.
+        let not_schema: Schema = serde_json::from_value(serde_json::json!({
+            "not": {"type": "string", "pattern": "["}
+        }))
+        .unwrap();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        not_schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("not"),
+            "not: expected nested pattern error: {:?}",
+            ctx.errors
+        );
+    }
+
+    /// Deserializing a non-object JSON value as a Schema should fail with
+    /// the "a Schema must be a JSON object" message (line 143).
+    #[test]
+    fn schema_from_non_object_errors() {
+        let res: Result<Schema, _> = serde_json::from_value(serde_json::json!("a string"));
+        assert!(res.is_err(), "expected error, got Ok");
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("a Schema must be a JSON object"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    /// `SingleSchema::deserialize` is its own `impl` (lines 185-191).
+    #[test]
+    fn single_schema_deserialize_impl_is_exercised() {
+        let parsed: SingleSchema =
+            serde_json::from_value(serde_json::json!({"type": "integer"})).unwrap();
+        assert!(
+            matches!(parsed, SingleSchema::Integer(_)),
+            "expected Integer variant"
+        );
+    }
+
+    /// Object schema with `additionalProperties: false` (Bool form) hits
+    /// `BoolOr::Bool(_) => {}` in `ObjectSchema::validate_with_context`
+    /// (line 1159).
+    #[test]
+    fn object_schema_additional_properties_bool_false_validates_ok() {
+        let json = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        });
+        let parsed: Schema = serde_json::from_value(json).unwrap();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        parsed.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "unexpected errors: {:?}", ctx.errors);
     }
 }

@@ -159,6 +159,98 @@ impl<'de> Deserialize<'de> for StringFormat {
     }
 }
 
+/// A JSON Schema instance type, used in the `type` array of a
+/// multi-type schema (OpenAPI 3.1+).
+///
+/// Known type names deserialize to a unit variant, so a `Vec<SchemaType>`
+/// holds no per-element heap allocation in the common case (unlike a
+/// `Vec<String>`). An unrecognized name is preserved verbatim in
+/// `Custom` so it round-trips and surfaces as a validation error rather
+/// than a hard parse failure — matching how [`StringFormat`] treats
+/// custom formats.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SchemaType {
+    String,
+    Number,
+    Integer,
+    Object,
+    Array,
+    Boolean,
+    Null,
+
+    /// An unrecognized type name, kept verbatim.
+    Custom(String),
+}
+
+impl Display for SchemaType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SchemaType::String => write!(f, "string"),
+            SchemaType::Number => write!(f, "number"),
+            SchemaType::Integer => write!(f, "integer"),
+            SchemaType::Object => write!(f, "object"),
+            SchemaType::Array => write!(f, "array"),
+            SchemaType::Boolean => write!(f, "boolean"),
+            SchemaType::Null => write!(f, "null"),
+            SchemaType::Custom(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl Serialize for SchemaType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Borrow the name directly — known variants are static strings and
+        // `Custom` borrows its own `String` — so no allocation is needed.
+        serializer.serialize_str(match self {
+            SchemaType::String => "string",
+            SchemaType::Number => "number",
+            SchemaType::Integer => "integer",
+            SchemaType::Object => "object",
+            SchemaType::Array => "array",
+            SchemaType::Boolean => "boolean",
+            SchemaType::Null => "null",
+            SchemaType::Custom(s) => s,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaType {
+    fn deserialize<D>(deserializer: D) -> Result<SchemaType, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SchemaTypeVisitor;
+
+        impl Visitor<'_> for SchemaTypeVisitor {
+            type Value = SchemaType;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str(
+                    "one of `string`, `number`, `integer`, `object`, `array`, `boolean`, `null` or a custom string",
+                )
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                Ok(match value {
+                    "string" => SchemaType::String,
+                    "number" => SchemaType::Number,
+                    "integer" => SchemaType::Integer,
+                    "object" => SchemaType::Object,
+                    "array" => SchemaType::Array,
+                    "boolean" => SchemaType::Boolean,
+                    "null" => SchemaType::Null,
+                    _ => SchemaType::Custom(String::from(value)),
+                })
+            }
+        }
+
+        deserializer.deserialize_str(SchemaTypeVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +437,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_schema_type_round_trip() {
+        for (json, value) in [
+            (r#""string""#, SchemaType::String),
+            (r#""number""#, SchemaType::Number),
+            (r#""integer""#, SchemaType::Integer),
+            (r#""object""#, SchemaType::Object),
+            (r#""array""#, SchemaType::Array),
+            (r#""boolean""#, SchemaType::Boolean),
+            (r#""null""#, SchemaType::Null),
+            (r#""bogus""#, SchemaType::Custom("bogus".to_owned())),
+        ] {
+            assert_eq!(serde_json::from_str::<SchemaType>(json).unwrap(), value);
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+        }
+    }
+
     #[derive(Debug, Deserialize, Serialize, PartialEq, Default)]
     struct Test {
         foo: String,
@@ -380,6 +489,85 @@ mod tests {
                 "format": "csv"
             }),
             "serialize csv",
+        );
+    }
+
+    #[test]
+    fn integer_format_display() {
+        assert_eq!(IntegerFormat::Int32.to_string(), "int32");
+        assert_eq!(IntegerFormat::Int64.to_string(), "int64");
+    }
+
+    #[test]
+    fn number_format_display() {
+        assert_eq!(NumberFormat::Float.to_string(), "float");
+        assert_eq!(NumberFormat::Double.to_string(), "double");
+    }
+
+    #[test]
+    fn collection_format_display() {
+        assert_eq!(CollectionFormat::CSV.to_string(), "csv");
+        assert_eq!(CollectionFormat::SSV.to_string(), "ssv");
+        assert_eq!(CollectionFormat::TSV.to_string(), "tsv");
+        assert_eq!(CollectionFormat::PIPES.to_string(), "pipes");
+        assert_eq!(CollectionFormat::Multi.to_string(), "multi");
+    }
+
+    #[test]
+    fn collection_format_multi_roundtrip() {
+        // Tests both Multi serialize and deserialize (previously untested).
+        assert_eq!(
+            serde_json::to_string(&CollectionFormat::Multi).unwrap(),
+            r#""multi""#,
+            "serialize multi",
+        );
+        assert_eq!(
+            serde_json::from_str::<CollectionFormat>(r#""multi""#).unwrap(),
+            CollectionFormat::Multi,
+            "deserialize multi",
+        );
+    }
+
+    #[test]
+    fn schema_type_display() {
+        // Exercises Display for all SchemaType variants — these are distinct
+        // from Serialize (which is used by serde_json::to_string).
+        assert_eq!(SchemaType::String.to_string(), "string");
+        assert_eq!(SchemaType::Number.to_string(), "number");
+        assert_eq!(SchemaType::Integer.to_string(), "integer");
+        assert_eq!(SchemaType::Object.to_string(), "object");
+        assert_eq!(SchemaType::Array.to_string(), "array");
+        assert_eq!(SchemaType::Boolean.to_string(), "boolean");
+        assert_eq!(SchemaType::Null.to_string(), "null");
+        assert_eq!(
+            SchemaType::Custom("my-type".to_owned()).to_string(),
+            "my-type"
+        );
+    }
+
+    #[test]
+    fn schema_type_visitor_expecting_via_type_mismatch() {
+        // `SchemaTypeVisitor::expecting` is invoked when the input type is not
+        // a string. Feed a JSON integer to trigger the error path.
+        let err = serde_json::from_str::<SchemaType>("42").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("string") || msg.contains("expected"),
+            "expected a serde error mentioning 'string', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn string_format_visitor_expecting_message_via_invalid_type() {
+        // `StringFormatVisitor::expecting` is invoked by serde when the input
+        // type doesn't match (e.g. an integer instead of a string). We trigger
+        // it by feeding a JSON number to the `StringFormat` deserializer.
+        let err = serde_json::from_str::<StringFormat>("42").unwrap_err();
+        // The error message must contain the text produced by `expecting`.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("byte") || msg.contains("string") || msg.contains("expected"),
+            "expected a meaningful serde error referencing string formats, got: {msg}"
         );
     }
 }

@@ -1627,6 +1627,100 @@ mod tests {
     }
 
     #[test]
+    fn version_as_str_returns_version_string() {
+        let v = Version::V2_0();
+        assert_eq!(v.as_str(), "2.0");
+        // Default also returns "2.0".
+        assert_eq!(Version::default().as_str(), "2.0");
+    }
+
+    #[test]
+    fn validate_walks_top_level_parameters_and_responses() {
+        // Exercises the `if let Some(parameters)` and `if let Some(responses)` branches
+        // inside `Spec::validate_inner` (lines 630-641).
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {},
+            "parameters": {
+                "QueryLimit": {
+                    "in": "query",
+                    "name": "limit",
+                    "type": "integer"
+                }
+            },
+            "responses": {
+                "NotFound": {
+                    "description": "not found"
+                }
+            }
+        }))
+        .expect("spec must parse");
+
+        // With IgnoreUnused both top-level items must validate without errors.
+        spec.validate(IGNORE_UNUSED, None)
+            .expect("valid top-level parameters and responses must not error");
+    }
+
+    #[test]
+    fn validate_x_servers_and_x_tag_groups() {
+        // Exercises the `x_servers` and `x_tag_groups` validation branches.
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {},
+            "x-servers": [{"url": "https://api.example.com"}],
+            "x-tagGroups": [
+                {"name": "Core", "tags": ["pets"]}
+            ]
+        }))
+        .expect("spec must parse");
+
+        spec.validate(IGNORE_UNUSED, None)
+            .expect("valid x-servers and x-tagGroups must not error");
+    }
+
+    #[test]
+    fn validate_x_servers_empty_url_errors() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {},
+            "x-servers": [{"url": ""}],
+        }))
+        .expect("spec must parse");
+
+        let err = spec
+            .validate(IGNORE_UNUSED, None)
+            .expect_err("empty x-servers url must error");
+        assert!(
+            err.errors.iter().any(|e| e.contains("must not be empty")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn validate_x_tag_groups_empty_name_errors() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "swagger": "2.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {},
+            "x-tagGroups": [{"name": "", "tags": []}],
+        }))
+        .expect("spec must parse");
+
+        let err = spec
+            .validate(IGNORE_UNUSED, None)
+            .expect_err("empty x-tagGroups name must error");
+        assert!(
+            err.errors.iter().any(|e| e.contains("must not be empty")),
+            "errors: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
     fn ignore_non_uniq_operation_ids_suppresses_duplicate_error() {
         let spec: Spec = serde_json::from_value(serde_json::json!({
             "swagger": "2.0",

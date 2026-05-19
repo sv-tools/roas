@@ -123,6 +123,33 @@ mod tests {
     }
 
     #[test]
+    fn mapping_uri_ref_used_directly() {
+        // When a mapping value contains '/', '#', or ':', it is treated as a
+        // URI reference and used as-is (line 48 of the production code).
+        let mut spec = Spec::default();
+        spec.define_schema(
+            "Cat",
+            Schema::Single(Box::new(SingleSchema::Object(ObjectSchema::default()))),
+        )
+        .unwrap();
+        let d = Discriminator {
+            property_name: "type".into(),
+            mapping: Some(BTreeMap::from([
+                // A value with "/" is treated as a URI ref, not a component name
+                ("cat".to_owned(), "#/components/schemas/Cat".to_owned()),
+            ])),
+            default_mapping: None,
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        d.validate_with_context(&mut ctx, "d".to_owned());
+        assert!(
+            ctx.errors.is_empty(),
+            "URI ref in mapping should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn default_mapping_round_trip_and_resolution() {
         // OAS 3.2: defaultMapping resolves like mapping values.
         let v = serde_json::json!({

@@ -341,4 +341,90 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn validate_node_type_valid_values() {
+        let spec = Spec::default();
+        // Each allowed nodeType value must validate without errors.
+        for nt in ["element", "attribute", "text", "cdata", "none"] {
+            let mut ctx = Context::new(&spec, Options::new());
+            XML {
+                node_type: Some(nt.to_owned()),
+                ..Default::default()
+            }
+            .validate_with_context(&mut ctx, "xml".to_owned());
+            assert!(
+                ctx.errors.is_empty(),
+                "nodeType `{nt}` should be valid: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn validate_node_type_invalid_value() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        XML {
+            node_type: Some("invalid".to_owned()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "xml".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must be one of") && e.contains("invalid")),
+            "invalid nodeType should error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_node_type_exclusive_with_attribute_and_wrapped() {
+        let spec = Spec::default();
+
+        // nodeType + attribute: must error
+        let mut ctx = Context::new(&spec, Options::new());
+        XML {
+            node_type: Some("element".to_owned()),
+            attribute: Some(true),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "xml".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`attribute` MUST NOT be present when `nodeType` is set")),
+            "attribute + nodeType should error: {:?}",
+            ctx.errors
+        );
+
+        // nodeType + wrapped: must error
+        let mut ctx = Context::new(&spec, Options::new());
+        XML {
+            node_type: Some("element".to_owned()),
+            wrapped: Some(true),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "xml".to_owned());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`wrapped` MUST NOT be present when `nodeType` is set")),
+            "wrapped + nodeType should error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn serialize_deserialize_node_type() {
+        let xml = XML {
+            node_type: Some("text".to_owned()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&xml).unwrap();
+        assert_eq!(v["nodeType"], "text");
+        let back: XML = serde_json::from_value(v).unwrap();
+        assert_eq!(back, xml);
+    }
 }
