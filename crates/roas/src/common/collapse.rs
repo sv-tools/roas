@@ -21,6 +21,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::mem;
+use std::rc::Rc;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -216,9 +217,19 @@ pub fn unique_name<V>(bag: &BTreeMap<String, V>, base: &str) -> String {
 /// "application/json", "schema"]`) so `derive_name` can flatten it
 /// into a valid component name when no [`LiftableBag::name_hint`]
 /// fires.
+///
+/// Stored as a shared leaf-to-root cons-list so [`Self::push`] — called
+/// once per node on a traversal-heavy collapse — is O(1) (one small
+/// allocation plus a refcount bump) instead of cloning the whole
+/// segment vector at every descent.
 #[derive(Clone)]
 pub struct NameContext {
-    parts: Vec<String>,
+    node: Option<Rc<NameNode>>,
+}
+
+struct NameNode {
+    part: String,
+    parent: Option<Rc<NameNode>>,
 }
 
 impl NameContext {
@@ -227,19 +238,40 @@ impl NameContext {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        Self {
-            parts: parts.into_iter().map(Into::into).collect(),
+        let mut ctx = NameContext { node: None };
+        for part in parts {
+            ctx = ctx.push_owned(part.into());
+        }
+        ctx
+    }
+
+    fn push_owned(&self, part: String) -> Self {
+        NameContext {
+            node: Some(Rc::new(NameNode {
+                part,
+                parent: self.node.clone(),
+            })),
         }
     }
 
     pub fn push(&self, part: &str) -> Self {
-        let mut next = self.clone();
-        next.parts.push(part.to_owned());
-        next
+        self.push_owned(part.to_owned())
+    }
+
+    /// Collect the path segments in root-to-leaf order.
+    fn segments(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut cur = self.node.as_deref();
+        while let Some(node) = cur {
+            out.push(node.part.as_str());
+            cur = node.parent.as_deref();
+        }
+        out.reverse();
+        out
     }
 
     pub fn derive_name(&self) -> String {
-        sanitize_component_name(self.parts.join("_"))
+        sanitize_component_name(self.segments().join("_"))
     }
 
     /// Derive a name for a component fetched via an external
