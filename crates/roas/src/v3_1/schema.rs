@@ -3319,6 +3319,36 @@ mod tests {
         );
     }
 
+    // ── extensions: duplicate key rejection ──────────────────────────────────
+
+    #[test]
+    fn schema_duplicate_extension_key_rejected() {
+        // A JSON object with two identical `x-*` keys must be rejected when
+        // deserialised directly into an AllOfSchema (not buffered through
+        // `Schema::deserialize` which goes via serde_json::Value).
+        // The custom `extensions::deserialize` visitor sees both keys via
+        // MapAccess and returns an error on the second (line 1611).
+        let raw = r#"{"allOf": [], "x-foo": 1, "x-foo": 2}"#;
+        let res = serde_json::from_str::<AllOfSchema>(raw);
+        assert!(
+            res.is_err(),
+            "duplicate x- extension key must be rejected: {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn multi_schema_duplicate_extension_key_rejected() {
+        // Same check for a MultiSchema deserialised directly (not via Schema).
+        let raw = r#"{"type": ["string", "null"], "x-dup": 1, "x-dup": 2}"#;
+        let res = serde_json::from_str::<MultiSchema>(raw);
+        assert!(
+            res.is_err(),
+            "duplicate x- extension key in MultiSchema must be rejected: {:?}",
+            res
+        );
+    }
+
     // ── impl Deserialize for SingleSchema ─────────────────────────────────────
 
     #[test]

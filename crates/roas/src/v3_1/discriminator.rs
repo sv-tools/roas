@@ -88,6 +88,35 @@ mod tests {
     }
 
     #[test]
+    fn mapping_uri_ref_used_as_is() {
+        // When a mapping value contains '/', '#', or ':' it is treated as a
+        // URI reference and used verbatim (not wrapped in "#/components/schemas/").
+        // This exercises the `is_uri_ref = true` branch at discriminator.rs:45.
+        let spec = Spec::default();
+        let d = Discriminator {
+            property_name: "type".into(),
+            mapping: Some(BTreeMap::from([
+                // URI with '/': used verbatim → resolves against spec (missing → error)
+                ("cat".to_owned(), "#/components/schemas/Cat".to_owned()),
+                // URI with ':': used verbatim
+                (
+                    "dog".to_owned(),
+                    "https://example.com/schemas/Dog".to_owned(),
+                ),
+            ])),
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        d.validate_with_context(&mut ctx, "d".to_owned());
+        // Both are URI refs → validated as-is; Cat is missing from spec so error expected.
+        // The key thing is this exercises the v.clone() branch.
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("Cat")),
+            "expected missing Cat error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn mapping_resolves_against_components() {
         let mut spec = Spec::default();
         spec.define_schema(

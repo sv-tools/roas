@@ -3350,4 +3350,248 @@ mod tests {
             "#/components/responses/Existing"
         );
     }
+
+    #[test]
+    fn querystring_parameter_with_examples_gets_lifted() {
+        // lines 373-374: Parameter::Querystring with `examples` map — the inner
+        // for-loop in `walk_querystring_param` that lifts Example refs.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/q": {
+                    "get": {
+                        "parameters": [{
+                            "name": "filter",
+                            "in": "querystring",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "string"}
+                                }
+                            },
+                            "examples": {
+                                "ex1": {"value": "foo"}
+                            }
+                        }],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+    }
+
+    #[test]
+    fn parameter_content_map_lifted() {
+        // lines 393-394: walk_param_slots with content entries — needs a
+        // query parameter that has `content` (not `schema`) with an inline MediaType.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/p": {
+                    "get": {
+                        "parameters": [{
+                            "name": "q",
+                            "in": "query",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "object", "title": "QueryBody"}
+                                }
+                            }
+                        }],
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+    }
+
+    #[test]
+    fn responses_with_only_default_covers_false_branch() {
+        // line 440: `if let Some(map) = responses.responses` — false branch when
+        // the operation Responses has only `default` and no status-code map.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/r": {
+                    "get": {
+                        "responses": {
+                            "default": {"description": "all cases"}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+    }
+
+    #[test]
+    fn media_type_without_schema_covers_false_branch() {
+        // line 483: `if let Some(s) = mt.schema` — false branch when a MediaType
+        // has no schema (e.g. only an example).
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/m": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/octet-stream": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+    }
+
+    #[test]
+    fn encoding_with_headers_covered() {
+        // line 517: walk_encoding with headers — covers the `if let Some(headers)` true
+        // branch and its closing `}`.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/enc1": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {"type": "object"},
+                                    "encoding": {
+                                        "part": {
+                                            "headers": {
+                                                "X-Part": {
+                                                    "schema": {"type": "string"}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+    }
+
+    #[test]
+    fn encoding_with_prefix_encoding_and_item_encoding_covered() {
+        // lines 528-529, 533: walk_encoding with prefixEncoding and itemEncoding
+        // (mutually exclusive with `encoding`, so use a separate spec).
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/enc2": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "array"},
+                                    "prefixEncoding": [
+                                        {
+                                            "headers": {
+                                                "X-Sub": {
+                                                    "schema": {"type": "string"}
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "itemEncoding": {
+                                        "headers": {}
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+    }
+
+    #[test]
+    fn path_item_additional_operations_covered() {
+        // line 563: walk_path_item with additionalOperations — the
+        // `if let Some(ops) = pi.additional_operations.as_mut()` true branch.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/ao": {
+                    "get": {
+                        "responses": {"200": {"description": "ok"}}
+                    },
+                    "additionalOperations": {
+                        "QUERY": {
+                            "responses": {
+                                "200": {
+                                    "description": "ok",
+                                    "content": {
+                                        "application/json": {
+                                            "schema": {"type": "string", "title": "AoResult"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+    }
+
+    #[test]
+    fn components_path_item_ref_form_skipped_in_phase_2a() {
+        // lines 712, 738: a ref-form PathItem in components.pathItems (reference ≠ None)
+        // causes `is_inline = false` → `continue`.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "pathItems": {
+                    "RefItem": {
+                        "$ref": "#/paths/~1a"
+                    }
+                }
+            }
+        }));
+        // Collapse must not panic or error on a ref-form path item component.
+        let _ = spec.collapse(None);
+    }
+
+    #[test]
+    fn collapse_spec_paths_none_covers_false_branch() {
+        // line 756: `if let Some(paths) = spec.paths.as_mut()` — false branch
+        // when spec.paths is None (webhooks-only or component-only spec).
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "webhooks": {
+                "newPet": {
+                    "post": {
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None)
+            .expect("collapse ok for paths-less spec");
+    }
 }

@@ -782,6 +782,48 @@ mod tests {
         );
     }
 
+    // ── Responses serializer: branch coverage ────────────────────────────────
+
+    #[test]
+    fn responses_serialize_no_responses_map() {
+        // Serialize a Responses where `responses` is None but `default` is set.
+        // This exercises the "else" region of the `if let Some(ref responses)` branch
+        // (line 135 in the serializer).
+        let responses = Responses {
+            default: Some(RefOr::new_item(Response {
+                description: "ok".into(),
+                ..Default::default()
+            })),
+            responses: None,
+            extensions: None,
+        };
+        let v = serde_json::to_value(&responses).unwrap();
+        assert!(v.get("default").is_some());
+        assert!(v.get("200").is_none());
+    }
+
+    #[test]
+    fn responses_serialize_extension_non_x_key_filtered() {
+        // Build a Responses manually with an extension key that does NOT start with
+        // "x-" — the serializer filters it out (line 141: the false branch of the
+        // `if k.starts_with("x-")` guard).
+        let mut ext = BTreeMap::new();
+        ext.insert("not-an-extension".to_owned(), serde_json::json!(1));
+        ext.insert("x-ok".to_owned(), serde_json::json!(2));
+        let responses = Responses {
+            default: Some(RefOr::new_item(Response {
+                description: "ok".into(),
+                ..Default::default()
+            })),
+            responses: None,
+            extensions: Some(ext),
+        };
+        let v = serde_json::to_value(&responses).unwrap();
+        // "x-ok" must be present; "not-an-extension" must be filtered out.
+        assert_eq!(v["x-ok"], 2);
+        assert!(v.get("not-an-extension").is_none());
+    }
+
     // ── is_response_code_key: range tokens ───────────────────────────────────
 
     #[test]

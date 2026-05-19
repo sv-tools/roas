@@ -235,4 +235,29 @@ mod tests {
             ctx.errors
         );
     }
+
+    #[test]
+    fn header_schema_and_content_mutually_exclusive() {
+        // line 90: (true, true) arm — both schema and content are set
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let mut content = BTreeMap::new();
+        content.insert(
+            "application/json".to_owned(),
+            RefOr::new_item(MediaType::default()),
+        );
+        Header {
+            schema: Some(RefOr::new_item(Schema::default())),
+            content: Some(content),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("schema and content are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
 }

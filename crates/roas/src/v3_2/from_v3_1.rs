@@ -488,4 +488,74 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn transform_spec_non_object_value_returns_early() {
+        // line 51: `let Value::Object(obj) = spec else { return; }`
+        // When `transform_spec` is called with a non-Object value it must not panic.
+        let mut v = Value::String("not-an-object".into());
+        super::transform_spec(&mut v);
+        // Value is unchanged (the function returned early).
+        assert_eq!(v, Value::String("not-an-object".into()));
+    }
+
+    #[test]
+    fn apply_tag_groups_skips_non_object_group() {
+        // line 106: `let Value::Object(mut g) = group else { continue; }`
+        // A group that is not an Object is silently skipped.
+        let mut spec = serde_json::json!({});
+        let groups = vec![
+            Value::String("not-an-object".into()),           // skipped
+            serde_json::json!({"name": "Real", "tags": []}), // processed
+        ];
+        super::apply_tag_groups(spec.as_object_mut().unwrap(), groups);
+        let tags = spec["tags"].as_array().unwrap();
+        // Only the "Real" group tag was synthesised.
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["name"], "Real");
+    }
+
+    #[test]
+    fn apply_tag_groups_skips_group_without_name() {
+        // line 109: `let Some(group_name) = g.remove("name").and_then(string) else { continue; }`
+        // A group with no `name` key (or with a non-string name) is skipped.
+        let mut spec = serde_json::json!({});
+        let groups = vec![
+            serde_json::json!({"tags": ["books"]}), // no name → skipped
+        ];
+        super::apply_tag_groups(spec.as_object_mut().unwrap(), groups);
+        // No tags were produced because the group was skipped.
+        assert!(
+            spec.get("tags").is_none() || spec["tags"].as_array().map_or(true, |a| a.is_empty()),
+            "expected no tags, got: {:?}",
+            spec.get("tags")
+        );
+    }
+
+    #[test]
+    fn apply_tag_groups_handles_non_array_tags_field() {
+        // line 115: the `_ => None` arm in the members filter_map for non-Array tags
+        // An object-shaped `tags` value on the group is treated as empty members.
+        let mut spec = serde_json::json!({});
+        let groups = vec![serde_json::json!({"name": "Products", "tags": {"not": "an-array"}})];
+        super::apply_tag_groups(spec.as_object_mut().unwrap(), groups);
+        let tags = spec["tags"].as_array().unwrap();
+        // Only the group tag itself should exist; no member tags.
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["name"], "Products");
+        assert_eq!(tags[0]["kind"], "nav");
+    }
+
+    #[test]
+    fn string_helper_returns_none_for_non_string() {
+        // line 175: `_ => None` arm in the `string` helper function
+        assert_eq!(super::string(Value::Bool(true)), None);
+        assert_eq!(super::string(Value::Null), None);
+        assert_eq!(super::string(Value::Number(42.into())), None);
+        // Positive case: string returns Some
+        assert_eq!(
+            super::string(Value::String("hello".into())),
+            Some("hello".to_owned())
+        );
+    }
 }

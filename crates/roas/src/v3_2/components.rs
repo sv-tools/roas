@@ -560,6 +560,72 @@ mod tests {
     }
 
     #[test]
+    fn unused_device_authorization_flow_scope_reported() {
+        // line 183: device_authorization flow scope unused-detection
+        use crate::v3_2::security_scheme::{
+            DeviceAuthorizationOAuth2Flow, OAuth2Flows, OAuth2SecurityScheme,
+        };
+        let comp = Components {
+            security_schemes: Some(map_with(
+                "SS",
+                SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+                    flows: OAuth2Flows {
+                        device_authorization: Some(DeviceAuthorizationOAuth2Flow {
+                            device_authorization_url: "https://x.example/device".into(),
+                            token_url: "https://x.example/token".into(),
+                            scopes: BTreeMap::from([("device:read".to_owned(), "Read".to_owned())]),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })),
+            )),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp.clone()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::empty());
+        comp.validate_with_context(&mut ctx, "#.components".into());
+        let scope_path = "#/components/securitySchemes/SS/device:read";
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains(scope_path) && e.contains("unused")),
+            "expected unused device_authorization scope: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn unused_media_types_component_reported() {
+        // line 229: media_types entry unused-detection
+        use crate::v3_2::media_type::MediaType;
+        let comp = Components {
+            media_types: Some(BTreeMap::from([(
+                "JsonOk".to_owned(),
+                RefOr::new_item(MediaType::default()),
+            )])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp.clone()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, Options::empty());
+        comp.validate_with_context(&mut ctx, "#.components".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("#/components/mediaTypes/JsonOk") && e.contains("unused")),
+            "expected unused media_types/JsonOk: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn invalid_component_name_reported() {
         let mut schemas: BTreeMap<String, RefOr<Schema>> = BTreeMap::new();
         schemas.insert(

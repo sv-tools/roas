@@ -874,4 +874,34 @@ mod tests {
         .validate_with_context(&mut ctx, "response".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
+
+    #[test]
+    fn responses_visitor_expecting_on_non_map() {
+        // lines 173-175: ResponsesVisitor::expecting triggered by non-map input
+        let err = serde_json::from_str::<Responses>(r#""not-a-map""#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Responses") || msg.contains("expected") || msg.contains("map"),
+            "expected a type-mismatch serde error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn responses_extensions_serialize() {
+        // line 144: the closing `}` of `if k.starts_with("x-")` — the false branch
+        // is hit when an extension key does NOT start with "x-" and is filtered out.
+        let mut extensions = std::collections::BTreeMap::new();
+        extensions.insert("x-custom".to_owned(), serde_json::json!("value"));
+        extensions.insert("not-x-prefix".to_owned(), serde_json::json!("filtered")); // false branch
+        let resp = Responses {
+            extensions: Some(extensions),
+            ..Default::default()
+        };
+        let val = serde_json::to_value(&resp).unwrap();
+        // The "x-" key should be present; the non-"x-" key filtered out.
+        assert_eq!(val["x-custom"], "value");
+        let obj = val.as_object().unwrap();
+        assert!(obj.contains_key("x-custom"));
+        assert!(!obj.contains_key("not-x-prefix"));
+    }
 }

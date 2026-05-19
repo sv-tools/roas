@@ -2691,6 +2691,69 @@ mod tests {
         let res = spec.validate(Options::new(), None);
         let _ = res; // errors about unused are fine; no panic expected
     }
+
+    #[test]
+    fn walk_op_seen_cb_insert_false_branch_covered() {
+        // line 840: the "false branch" of `seen_cb.insert(cb as *const Callback)`
+        // is hit when the SAME Callback pointer appears in two different operations'
+        // callback maps — the second walk_op call finds it already in seen_cb.
+        use crate::v3_2::callback::Callback;
+        use crate::v3_2::operation::Operation;
+        use crate::v3_2::path_item::{PathItem, Paths};
+        use crate::v3_2::response::{Response, Responses};
+
+        let make_resp = || Responses {
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: Some("ok".into()),
+                    ..Default::default()
+                }),
+            )])),
+            ..Default::default()
+        };
+        let cb = Callback {
+            paths: BTreeMap::new(), // no inner paths needed
+            ..Default::default()
+        };
+        let comp = crate::v3_2::components::Components {
+            callbacks: Some(BTreeMap::from([("Shared".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        // Two operations both $ref the same shared callback.
+        // walk_op is called for op1 → seen_cb.insert returns true (block runs).
+        // walk_op is called for op2 → seen_cb.insert returns false (block skipped → line 840).
+        let make_op_with_shared_cb = || {
+            let mut cbs = BTreeMap::new();
+            cbs.insert(
+                "ping".to_owned(),
+                RefOr::new_ref("#/components/callbacks/Shared".to_owned()),
+            );
+            Operation {
+                responses: Some(make_resp()),
+                callbacks: Some(cbs),
+                ..Default::default()
+            }
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), make_op_with_shared_cb());
+        ops.insert("post".to_owned(), make_op_with_shared_cb());
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let res = spec.validate(Options::new(), None);
+        let _ = res;
+    }
 }
 
 //     #[test]
