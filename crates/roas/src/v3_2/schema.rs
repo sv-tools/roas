@@ -1,7 +1,7 @@
 //! Schema Object
 
 use crate::common::bool_or::BoolOr;
-use crate::common::formats::{IntegerFormat, NumberFormat, StringFormat};
+use crate::common::formats::{IntegerFormat, NumberFormat, SchemaType, StringFormat};
 use crate::common::helpers::validate_pattern;
 use crate::common::reference::RefOr;
 use crate::v3_2::discriminator::Discriminator;
@@ -1068,7 +1068,7 @@ pub struct NullSchema {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct MultiSchema {
     #[serde(rename = "type")]
-    pub schema_types: Vec<String>,
+    pub schema_types: Vec<SchemaType>,
 
     /// A title to explain the purpose of the schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1379,24 +1379,16 @@ impl ValidateWithContext<Spec> for MultiSchema {
         if self.schema_types.is_empty() {
             ctx.error(format!("{path}.type"), "must contain at least one element");
         }
-        let allowed_types: HashSet<String> = HashSet::from_iter(vec![
-            "string".into(),
-            "number".into(),
-            "integer".into(),
-            "object".into(),
-            "array".into(),
-            "boolean".into(),
-            "null".into(),
-        ]);
-        let mut unique_types: HashSet<String> = HashSet::with_capacity(self.schema_types.len());
+        let mut unique_types: HashSet<&SchemaType> =
+            HashSet::with_capacity(self.schema_types.len());
         self.schema_types.iter().for_each(|t| {
-            if !allowed_types.contains(t) {
+            if let SchemaType::Custom(name) = t {
                 ctx.error(
                     format!("{path}.type"),
-                    format_args!("type `{t}` is not supported"),
+                    format_args!("type `{name}` is not supported"),
                 );
             }
-            if !unique_types.insert(t.clone()) {
+            if !unique_types.insert(t) {
                 ctx.error(
                     format!("{path}.type"),
                     format_args!("type `{t}` is not unique"),
@@ -1938,7 +1930,7 @@ mod tests {
     #[test]
     fn test_multi_serialize_deserialize() {
         let spec = Schema::Multi(Box::new(MultiSchema {
-            schema_types: vec!["string".into(), "integer".into()],
+            schema_types: vec![SchemaType::String, SchemaType::Integer],
             title: Some("foo".to_string()),
             examples: Some(vec![serde_json::json!("bar"), serde_json::json!(42)]),
             ..Default::default()
@@ -1957,13 +1949,13 @@ mod tests {
         let mut ctx = Context::new(&spec_owner, crate::validation::Options::empty());
         let multi = MultiSchema {
             schema_types: vec![
-                "string".into(),
-                "integer".into(),
-                "number".into(),
-                "boolean".into(),
-                "object".into(),
-                "array".into(),
-                "null".into(),
+                SchemaType::String,
+                SchemaType::Integer,
+                SchemaType::Number,
+                SchemaType::Boolean,
+                SchemaType::Object,
+                SchemaType::Array,
+                SchemaType::Null,
             ],
             ..Default::default()
         };

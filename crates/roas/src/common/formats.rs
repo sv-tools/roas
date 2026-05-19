@@ -159,6 +159,87 @@ impl<'de> Deserialize<'de> for StringFormat {
     }
 }
 
+/// A JSON Schema instance type, used in the `type` array of a
+/// multi-type schema (OpenAPI 3.1+).
+///
+/// Known type names deserialize to a unit variant, so a `Vec<SchemaType>`
+/// holds no per-element heap allocation in the common case (unlike a
+/// `Vec<String>`). An unrecognized name is preserved verbatim in
+/// `Custom` so it round-trips and surfaces as a validation error rather
+/// than a hard parse failure — matching how [`StringFormat`] treats
+/// custom formats.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SchemaType {
+    String,
+    Number,
+    Integer,
+    Object,
+    Array,
+    Boolean,
+    Null,
+
+    /// An unrecognized type name, kept verbatim.
+    Custom(String),
+}
+
+impl Display for SchemaType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SchemaType::String => write!(f, "string"),
+            SchemaType::Number => write!(f, "number"),
+            SchemaType::Integer => write!(f, "integer"),
+            SchemaType::Object => write!(f, "object"),
+            SchemaType::Array => write!(f, "array"),
+            SchemaType::Boolean => write!(f, "boolean"),
+            SchemaType::Null => write!(f, "null"),
+            SchemaType::Custom(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl Serialize for SchemaType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.to_string().as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaType {
+    fn deserialize<D>(deserializer: D) -> Result<SchemaType, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SchemaTypeVisitor;
+
+        impl Visitor<'_> for SchemaTypeVisitor {
+            type Value = SchemaType;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str(
+                    "one of `string`, `number`, `integer`, `object`, `array`, `boolean`, `null` or a custom string",
+                )
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                Ok(match value {
+                    "string" => SchemaType::String,
+                    "number" => SchemaType::Number,
+                    "integer" => SchemaType::Integer,
+                    "object" => SchemaType::Object,
+                    "array" => SchemaType::Array,
+                    "boolean" => SchemaType::Boolean,
+                    "null" => SchemaType::Null,
+                    _ => SchemaType::Custom(String::from(value)),
+                })
+            }
+        }
+
+        deserializer.deserialize_str(SchemaTypeVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +424,23 @@ mod tests {
             r#""pipes""#,
             "serialize pipes",
         );
+    }
+
+    #[test]
+    fn test_schema_type_round_trip() {
+        for (json, value) in [
+            (r#""string""#, SchemaType::String),
+            (r#""number""#, SchemaType::Number),
+            (r#""integer""#, SchemaType::Integer),
+            (r#""object""#, SchemaType::Object),
+            (r#""array""#, SchemaType::Array),
+            (r#""boolean""#, SchemaType::Boolean),
+            (r#""null""#, SchemaType::Null),
+            (r#""bogus""#, SchemaType::Custom("bogus".to_owned())),
+        ] {
+            assert_eq!(serde_json::from_str::<SchemaType>(json).unwrap(), value);
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+        }
     }
 
     #[derive(Debug, Deserialize, Serialize, PartialEq, Default)]
