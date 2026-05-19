@@ -1,0 +1,146 @@
+name: Release stage
+
+# Tag-push half of the release flow: run full Checks, build the
+# `roas-cli` per-target binaries, and mint a *draft* GitHub Release
+# with everything attached. Nothing ships externally here — the
+# crates.io / GHCR / Homebrew steps live in `publish.yaml` and fire
+# when the user reviews the draft and clicks Publish.
+#
+# Why split: the tag push is automatic (a `git push origin <crate>/v<x>`),
+# but external distribution should be a deliberate manual step so a
+# botched tag doesn't propagate. Failed Checks here just block the
+# draft from being filled in; no clean-up is needed on the registry.
+
+on:
+  push:
+    # GitHub tag filters are globs, not regexes — `+` is literal here, so the
+    # quantifier-style pattern would never match. Use globs.
+    tags: [ "**/v[0-9]*.[0-9]*.[0-9]*" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions: read-all
+
+jobs:
+  Checks:
+    # `OsvScanner` (and its PR sibling) inside the reusable workflow
+    # request `security-events: write` to upload SARIF. Reusable
+    # workflows can't escalate beyond what the caller grants, so pin
+    # the broader scope here at the call site.
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/checks.yaml
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  DraftRelease:
+    needs: Checks
+    runs-on: ubuntu-latest
+    permissions:
+      # `softprops/action-gh-release` calls the Releases API and needs
+      # `contents: write`. Nothing else in this job uses `GITHUB_TOKEN`,
+      # so the workflow-level `read-all` default applies for everything
+      # else.
+      contents: write
+    steps:
+      # Mint (or update) a draft GitHub Release for the tag that
+      # triggered this run. For `roas-cli`, `AttachRoasCliBinaries`
+      # below appends the prebuilt tarballs to this same draft.
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          draft: true
+          # The repo carries multiple crates with their own tags; don't
+          # let any one release hijack the repo-wide "Latest" badge.
+          make_latest: false
+
+  # ────────────────────────────────────────────────────────────────────────
+  # roas-cli pre-build matrix. Fires only when the tag is `roas-cli/v…`.
+  # Per-target native runners keep `cargo build` off QEMU, which would
+  # otherwise rebuild the whole rust dep tree per architecture.
+  # ────────────────────────────────────────────────────────────────────────
+  RoasCliBuild:
+    needs: Checks
+    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          # macOS is arm64-only. macos-13 (Intel) is being phased out by
+          # GitHub and queues for hours; cross-building x86_64 via
+          # cargo-zigbuild failed at link time because notify / reqwest
+          # pull in CoreServices / CoreFoundation / Security and zig
+          # doesn't bundle those frameworks. Intel macOS users can
+          # `cargo install roas-cli` or use the Docker image.
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: ${{ matrix.target }}
+      - name: Extract roas-cli version from tag
+        id: v
+        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: Build release binary
+        run: cargo build --release --package roas-cli --target ${{ matrix.target }} --locked
+      - name: Pack tarball
+        id: pack
+        run: |
+          set -euo pipefail
+          archive="roas-${{ steps.v.outputs.version }}-${{ matrix.target }}.tar.gz"
+          # `tar -C` so the archive contains just `roas`, not a path
+          # prefix — Homebrew's `bin.install "roas"` expects the binary
+          # at archive root.
+          tar -C "target/${{ matrix.target }}/release" -czf "$archive" roas
+          # `shasum -a 256` is portable across the macOS / linux
+          # runners; `sha256sum` isn't installed by default on macOS.
+          shasum -a 256 "$archive" > "${archive}.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: roas-cli-${{ matrix.target }}
+          path: |
+            ${{ steps.pack.outputs.archive }}
+            ${{ steps.pack.outputs.archive }}.sha256
+
+  AttachRoasCliBinaries:
+    needs:
+      - Checks
+      - DraftRelease
+      - RoasCliBuild
+    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # upload assets to the draft GitHub Release
+    steps:
+      - name: Extract roas-cli version from tag
+        id: v
+        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          pattern: roas-cli-*
+          merge-multiple: true
+
+      - name: Attach prebuilt binaries to draft Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          files: |
+            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
+            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sha256
+          # Look up the existing draft minted by `DraftRelease` and
+          # append rather than create a second release.
+          draft: true
+          make_latest: false
