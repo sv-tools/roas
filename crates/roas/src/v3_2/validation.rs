@@ -509,7 +509,7 @@ mod tests {
     use crate::validation::ValidationErrorsExt;
 
     fn path_param(name: &str) -> RefOr<Parameter> {
-        RefOr::new_item(Parameter::Path(InPath {
+        RefOr::new_item(Parameter::Path(Box::new(InPath {
             name: name.into(),
             description: None,
             required: true,
@@ -521,11 +521,11 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        }))
+        })))
     }
 
     fn query_param(name: &str) -> RefOr<Parameter> {
-        RefOr::new_item(Parameter::Query(InQuery {
+        RefOr::new_item(Parameter::Query(Box::new(InQuery {
             name: name.into(),
             description: None,
             required: None,
@@ -539,11 +539,11 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        }))
+        })))
     }
 
     fn header_param(name: &str) -> RefOr<Parameter> {
-        RefOr::new_item(Parameter::Header(InHeader {
+        RefOr::new_item(Parameter::Header(Box::new(InHeader {
             name: name.into(),
             description: None,
             required: None,
@@ -555,11 +555,11 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        }))
+        })))
     }
 
     fn cookie_param(name: &str) -> RefOr<Parameter> {
-        RefOr::new_item(Parameter::Cookie(InCookie {
+        RefOr::new_item(Parameter::Cookie(Box::new(InCookie {
             name: name.into(),
             description: None,
             required: None,
@@ -571,7 +571,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        }))
+        })))
     }
 
     fn spec_with_components(c: Components) -> Spec {
@@ -843,7 +843,7 @@ mod tests {
             operations: Some(BTreeMap::from([(
                 "get".to_owned(),
                 Operation {
-                    parameters: Some(vec![RefOr::new_item(Parameter::Path(InPath {
+                    parameters: Some(vec![RefOr::new_item(Parameter::Path(Box::new(InPath {
                         name: "wrong".into(),
                         description: None,
                         required: true,
@@ -858,7 +858,7 @@ mod tests {
                             RefOr::new_item(crate::v3_2::media_type::MediaType::default()),
                         )])),
                         extensions: None,
-                    }))]),
+                    })))]),
                     responses: Some(Responses {
                         responses: Some(BTreeMap::from([(
                             "200".to_owned(),

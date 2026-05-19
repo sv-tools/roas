@@ -21,21 +21,21 @@ pub enum Parameter {
     /// This does not include the host or base path of the API.
     /// For example, in `/items/{itemId}`, the path parameter is `itemId`.
     #[serde(rename = "path")]
-    Path(InPath),
+    Path(Box<InPath>),
 
     /// Parameters that are appended to the URL.
     /// For example, in `/items?id=###`, the query parameter is `id`.
     #[serde(rename = "query")]
-    Query(InQuery),
+    Query(Box<InQuery>),
 
     /// Custom headers that are expected as part of the request.
     /// Note that [RFC7230](https://www.rfc-editor.org/rfc/rfc7230) states header names are case insensitive.
     #[serde(rename = "header")]
-    Header(InHeader),
+    Header(Box<InHeader>),
 
     /// Used to pass a specific cookie value to the API.
     #[serde(rename = "cookie")]
-    Cookie(InCookie),
+    Cookie(Box<InCookie>),
 }
 
 /// Holds a parameter with `in: path` property.
@@ -540,7 +540,7 @@ mod tests {
     fn validate_path_param_must_be_required() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Path(InPath {
+        let p = Parameter::Path(Box::new(InPath {
             name: "id".into(),
             description: None,
             required: false,
@@ -552,7 +552,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors.mentions("must be required"),
@@ -565,7 +565,7 @@ mod tests {
     fn validate_example_examples_xor_each_location() {
         let spec = Spec::default();
 
-        let p = Parameter::Query(InQuery {
+        let p = Parameter::Query(Box::new(InQuery {
             name: "q".into(),
             description: None,
             required: None,
@@ -582,7 +582,7 @@ mod tests {
             )])),
             content: None,
             extensions: None,
-        });
+        }));
         let mut ctx = Context::new(&spec, Options::new());
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
@@ -593,7 +593,7 @@ mod tests {
             ctx.errors
         );
 
-        let p = Parameter::Header(InHeader {
+        let p = Parameter::Header(Box::new(InHeader {
             name: "X".into(),
             description: None,
             required: None,
@@ -608,7 +608,7 @@ mod tests {
             )])),
             content: None,
             extensions: None,
-        });
+        }));
         let mut ctx = Context::new(&spec, Options::new());
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
@@ -617,7 +617,7 @@ mod tests {
                 .any(|e| e.contains("example and examples"))
         );
 
-        let p = Parameter::Cookie(InCookie {
+        let p = Parameter::Cookie(Box::new(InCookie {
             name: "c".into(),
             description: None,
             required: None,
@@ -632,7 +632,7 @@ mod tests {
             )])),
             content: None,
             extensions: None,
-        });
+        }));
         let mut ctx = Context::new(&spec, Options::new());
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
@@ -649,7 +649,7 @@ mod tests {
         let mut content = BTreeMap::new();
         content.insert("application/json".to_owned(), MediaType::default());
         content.insert("text/plain".to_owned(), MediaType::default());
-        let p = Parameter::Query(InQuery {
+        let p = Parameter::Query(Box::new(InQuery {
             name: "q".into(),
             description: None,
             required: None,
@@ -663,7 +663,7 @@ mod tests {
             examples: None,
             content: Some(content),
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -679,7 +679,7 @@ mod tests {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
         // Query parameter with neither schema nor content.
-        let p = Parameter::Query(InQuery {
+        let p = Parameter::Query(Box::new(InQuery {
             name: "q".into(),
             description: None,
             required: None,
@@ -693,7 +693,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -704,7 +704,7 @@ mod tests {
         );
 
         // Path parameter with neither schema nor content also surfaces the error.
-        let p = Parameter::Path(InPath {
+        let p = Parameter::Path(Box::new(InPath {
             name: "id".into(),
             description: None,
             required: true,
@@ -716,7 +716,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        });
+        }));
         let mut ctx = Context::new(&spec, Options::new());
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
@@ -732,7 +732,7 @@ mod tests {
     fn empty_name_is_required() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Query(InQuery {
+        let p = Parameter::Query(Box::new(InQuery {
             name: "".into(),
             description: None,
             required: None,
@@ -746,7 +746,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors

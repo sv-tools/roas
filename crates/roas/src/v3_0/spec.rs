@@ -1183,7 +1183,7 @@ mod tests {
         let r = spec
             .define_parameter(
                 "Q",
-                Parameter::Query(InQuery {
+                Parameter::Query(Box::new(InQuery {
                     name: "q".into(),
                     description: None,
                     required: None,
@@ -1197,7 +1197,7 @@ mod tests {
                     examples: None,
                     content: None,
                     extensions: None,
-                }),
+                })),
             )
             .unwrap();
         assert!(matches!(r, RefOr::Ref(ref rr) if rr.reference == "#/components/parameters/Q"));
@@ -1302,7 +1302,7 @@ mod tests {
         spec.define_response("R", Response::default()).unwrap();
         spec.define_parameter(
             "P",
-            Parameter::Query(InQuery {
+            Parameter::Query(Box::new(InQuery {
                 name: "q".into(),
                 description: None,
                 required: None,
@@ -1316,7 +1316,7 @@ mod tests {
                 examples: None,
                 content: None,
                 extensions: None,
-            }),
+            })),
         )
         .unwrap();
         spec.define_request_body("RB", RequestBody::default())

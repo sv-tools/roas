@@ -252,7 +252,7 @@ mod tests {
             responses: Some(map_with("R", Response::default())),
             parameters: Some(map_with(
                 "P",
-                Parameter::Query(InQuery {
+                Parameter::Query(Box::new(InQuery {
                     name: "q".into(),
                     description: None,
                     required: None,
@@ -266,7 +266,7 @@ mod tests {
                     examples: None,
                     content: None,
                     extensions: None,
-                }),
+                })),
             )),
             examples: Some(map_with("E", Example::default())),
             request_bodies: Some(map_with("RB", RequestBody::default())),
@@ -359,7 +359,7 @@ mod tests {
             responses: Some(map_with("R", Response::default())),
             parameters: Some(map_with(
                 "P",
-                Parameter::Query(InQuery {
+                Parameter::Query(Box::new(InQuery {
                     name: "q".into(),
                     description: None,
                     required: None,
@@ -373,7 +373,7 @@ mod tests {
                     examples: None,
                     content: None,
                     extensions: None,
-                }),
+                })),
             )),
             examples: Some(map_with("E", Example::default())),
             request_bodies: Some(map_with("RB", RequestBody::default())),
