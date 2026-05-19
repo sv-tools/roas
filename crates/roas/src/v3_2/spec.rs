@@ -1831,6 +1831,213 @@ mod tests {
     }
 
     #[test]
+    fn self_uri_with_fragment_errors() {
+        // OAS 3.2: $self MUST NOT contain a fragment (`#`). Lines 878-881.
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            self_uri: Some("https://example.com/api.openapi#section".into()),
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("$self") && e.contains("MUST NOT contain a fragment")),
+            "expected fragment error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn paths_must_start_with_slash() {
+        // OAS: path keys must start with `/` (line 978).
+        let mut paths = Paths::default();
+        paths.paths.insert("pets".to_owned(), PathItem::default()); // no leading /
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.errors.iter().any(|e| e.contains("must start with `/`")),
+            "expected slash error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn additional_operations_op_id_uniqueness() {
+        // additionalOperations operationIds must participate in uniqueness
+        // (lines 805-815 in walk_path_item_ops).
+        use crate::v3_2::operation::Operation;
+        use crate::v3_2::response::{Response, Responses};
+
+        let make_op = |id: &str| Operation {
+            operation_id: Some(id.to_owned()),
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: Some("ok".into()),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut additional_ops = BTreeMap::new();
+        additional_ops.insert("SEARCH".to_owned(), make_op("dup"));
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                operations: Some(BTreeMap::from([("get".to_owned(), make_op("dup"))])),
+                additional_operations: Some(additional_ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("operationId") && e.contains("`dup`")),
+            "expected duplicate operationId via additionalOperations: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn top_level_security_validated() {
+        // Spec.security is validated (line 967).
+        use crate::v3_2::security_scheme::{ApiKeyLocation, ApiKeySecurityScheme, SecurityScheme};
+
+        let mut schemes = BTreeMap::new();
+        schemes.insert(
+            "apiKey".to_owned(),
+            RefOr::new_item(SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
+                name: "X-API-Key".into(),
+                location: ApiKeyLocation::Header,
+                ..Default::default()
+            }))),
+        );
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            security: Some(vec![BTreeMap::from([(
+                "missing-scheme".to_owned(),
+                vec![],
+            )])]),
+            components: Some(crate::v3_2::components::Components {
+                security_schemes: Some(schemes),
+                ..Default::default()
+            }),
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("missing-scheme") && e.contains("not declared")),
+            "expected security error: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
+    fn components_callbacks_op_ids_walked() {
+        // Operation IDs inside components.callbacks must be gathered for
+        // uniqueness (lines 931-944).
+        use crate::v3_2::callback::Callback;
+        use crate::v3_2::components::Components;
+        use crate::v3_2::operation::Operation;
+        use crate::v3_2::response::{Response, Responses};
+
+        let make_op = |id: &str| Operation {
+            operation_id: Some(id.to_owned()),
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: Some("ok".into()),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert(
+            "expr".to_owned(),
+            PathItem {
+                operations: Some(BTreeMap::from([("post".to_owned(), make_op("cbOp"))])),
+                ..Default::default()
+            },
+        );
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "MyCb".to_owned(),
+                RefOr::new_item(Callback {
+                    paths: cb_paths,
+                    ..Default::default()
+                }),
+            )])),
+            ..Default::default()
+        };
+        // Duplicate: cbOp is also declared in paths
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                operations: Some(BTreeMap::from([("get".to_owned(), make_op("cbOp"))])),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            info: Info {
+                title: "x".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("operationId") && e.contains("`cbOp`")),
+            "expected dup-id via components.callbacks: {:?}",
+            err.errors
+        );
+    }
+
+    #[test]
     fn self_uri_round_trip_and_validated() {
         // OAS 3.2: $self is a URI; round-trips and is URI-validated.
         let v = serde_json::json!({

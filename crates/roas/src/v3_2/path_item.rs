@@ -801,4 +801,246 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    #[test]
+    fn path_item_serialize_with_operations_and_extensions() {
+        // Exercises the serialize branches for operations, additional_operations, and extensions.
+        let mut ops = BTreeMap::new();
+        ops.insert(
+            "get".to_owned(),
+            crate::v3_2::operation::Operation {
+                responses: Some(crate::v3_2::response::Responses {
+                    responses: Some(BTreeMap::from([(
+                        "200".to_owned(),
+                        RefOr::new_item(crate::v3_2::response::Response {
+                            description: Some("ok".into()),
+                            ..Default::default()
+                        }),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let mut additional_ops = BTreeMap::new();
+        additional_ops.insert(
+            "SEARCH".to_owned(),
+            crate::v3_2::operation::Operation {
+                responses: Some(crate::v3_2::response::Responses {
+                    responses: Some(BTreeMap::from([(
+                        "200".to_owned(),
+                        RefOr::new_item(crate::v3_2::response::Response {
+                            description: Some("ok".into()),
+                            ..Default::default()
+                        }),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let mut ext = BTreeMap::new();
+        ext.insert("x-custom".to_owned(), serde_json::json!("val"));
+        let pi = PathItem {
+            operations: Some(ops),
+            additional_operations: Some(additional_ops),
+            extensions: Some(ext),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&pi).unwrap();
+        assert!(v["get"].is_object(), "get operation should be serialized");
+        assert!(v["additionalOperations"].is_object());
+        assert_eq!(v["x-custom"], "val");
+    }
+
+    #[test]
+    fn path_item_deserialize_duplicate_fields_rejected() {
+        // Duplicate $ref, summary, description, parameters, servers, additionalOperations
+        for raw in [
+            r##"{"$ref": "#/a", "$ref": "#/b"}"##,
+            r#"{"summary": "a", "summary": "b"}"#,
+            r#"{"description": "a", "description": "b"}"#,
+            r#"{"parameters": [], "parameters": []}"#,
+            r#"{"servers": [], "servers": []}"#,
+        ] {
+            let result = serde_json::from_str::<PathItem>(raw);
+            assert!(result.is_err(), "duplicate field should error for: {raw}");
+        }
+    }
+
+    #[test]
+    fn path_item_deserialize_duplicate_x_field_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let result = serde_json::from_str::<PathItem>(raw);
+        assert!(result.is_err(), "duplicate x- field should error");
+    }
+
+    #[test]
+    fn path_item_deserialize_duplicate_method_rejected() {
+        let raw = r#"{"get": {"responses": {"200": {"description": "ok"}}}, "get": {"responses": {"200": {"description": "ok"}}}}"#;
+        let result = serde_json::from_str::<PathItem>(raw);
+        assert!(result.is_err(), "duplicate method should error");
+    }
+
+    #[test]
+    fn additional_operations_validates_standard_method_error() {
+        // additionalOperations must not use standard HTTP method names.
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "get".to_owned(),
+            crate::v3_2::operation::Operation {
+                responses: Some(crate::v3_2::response::Responses {
+                    responses: Some(BTreeMap::from([(
+                        "200".to_owned(),
+                        RefOr::new_item(crate::v3_2::response::Response {
+                            description: Some("ok".into()),
+                            ..Default::default()
+                        }),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let pi = PathItem {
+            additional_operations: Some(extra),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("standard HTTP method")),
+            "standard method in additionalOperations must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn additional_operations_validates_empty_method_error() {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "".to_owned(),
+            crate::v3_2::operation::Operation {
+                responses: Some(crate::v3_2::response::Responses {
+                    responses: Some(BTreeMap::from([(
+                        "200".to_owned(),
+                        RefOr::new_item(crate::v3_2::response::Response {
+                            description: Some("ok".into()),
+                            ..Default::default()
+                        }),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let pi = PathItem {
+            additional_operations: Some(extra),
+            ..Default::default()
+        };
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("method name must not be empty")),
+            "empty method name must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn path_item_parameters_and_servers_walk() {
+        // Exercises the servers and parameters validate branches.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let pi = PathItem {
+            servers: Some(vec![crate::v3_2::server::Server {
+                url: "".into(), // empty url — will error
+                ..Default::default()
+            }]),
+            parameters: Some(vec![RefOr::new_item(
+                crate::v3_2::parameter::Parameter::Query(crate::v3_2::parameter::InQuery {
+                    name: "q".into(),
+                    description: None,
+                    required: None,
+                    deprecated: None,
+                    allow_empty_value: None,
+                    style: None,
+                    explode: None,
+                    allow_reserved: None,
+                    schema: Some(RefOr::new_item(crate::v3_2::schema::Schema::Single(
+                        Box::new(crate::v3_2::schema::SingleSchema::String(
+                            crate::v3_2::schema::StringSchema::default(),
+                        )),
+                    ))),
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                }),
+            )]),
+            ..Default::default()
+        };
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.mentions("servers[0]"),
+            "expected server url error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn paths_struct_from_iter_of_str_tuples() {
+        // Exercises the From<S> impl where K: Into<String>.
+        let p: Paths = vec![
+            ("/a".to_owned(), PathItem::default()),
+            ("/b".to_owned(), PathItem::default()),
+        ]
+        .into();
+        assert_eq!(p.len(), 2);
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn paths_struct_deserialize_duplicate_path_rejected() {
+        let raw = r#"{"/a": {}, "/a": {}}"#;
+        let result = serde_json::from_str::<Paths>(raw);
+        assert!(result.is_err(), "duplicate path should error");
+    }
+
+    #[test]
+    fn paths_struct_deserialize_duplicate_extension_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let result = serde_json::from_str::<Paths>(raw);
+        assert!(result.is_err(), "duplicate x- extension should error");
+    }
+
+    #[test]
+    fn path_item_ref_to_webhooks_resolves() {
+        use crate::v3_2::path_item::Paths;
+        let mut webhooks = Paths::default();
+        webhooks
+            .paths
+            .insert("petCreated".to_owned(), PathItem::default());
+        let spec = Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        };
+        let pi = PathItem {
+            reference: Some("#/webhooks/petCreated".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            !ctx.errors.mentions("not declared"),
+            "webhooks ref should resolve: {:?}",
+            ctx.errors
+        );
+    }
 }

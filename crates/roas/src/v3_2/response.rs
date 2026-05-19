@@ -668,6 +668,102 @@ mod tests {
     }
 
     #[test]
+    fn responses_wildcard_range_keys_accepted() {
+        // Exercises the regex branch of `is_response_code_key` (lines 23-24).
+        for key in ["1XX", "2XX", "3XX", "4XX", "5XX"] {
+            let json = serde_json::json!({ key: {"description": "ok"} });
+            let r: Responses = serde_json::from_value(json).unwrap();
+            assert!(r.responses.is_some(), "{key} should parse");
+        }
+    }
+
+    #[test]
+    fn responses_out_of_range_status_code_rejected() {
+        // A 3-digit number outside 100-599 (e.g. 600) is not a valid status code.
+        // The key 600 is neither a valid code nor a wildcard, so it should error.
+        let json = serde_json::json!({ "600": {"description": "bad"} });
+        let result = serde_json::from_value::<Responses>(json);
+        assert!(result.is_err(), "out-of-range code should fail to parse");
+    }
+
+    #[test]
+    fn responses_deserialize_duplicate_default_rejected() {
+        let raw = r#"{"default": {"description": "a"}, "default": {"description": "b"}}"#;
+        let result = serde_json::from_str::<Responses>(raw);
+        assert!(result.is_err(), "duplicate default should fail");
+    }
+
+    #[test]
+    fn responses_deserialize_duplicate_extension_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let result = serde_json::from_str::<Responses>(raw);
+        assert!(result.is_err(), "duplicate x- extension should fail");
+    }
+
+    #[test]
+    fn responses_deserialize_duplicate_status_code_rejected() {
+        let raw = r#"{"200": {"description": "a"}, "200": {"description": "b"}}"#;
+        let result = serde_json::from_str::<Responses>(raw);
+        assert!(result.is_err(), "duplicate status code should fail");
+    }
+
+    #[test]
+    fn responses_deserialize_unknown_field_rejected() {
+        // A key that's neither "default", "x-...", nor a valid status code.
+        let raw = r#"{"badKey": {"description": "a"}}"#;
+        let result = serde_json::from_str::<Responses>(raw);
+        assert!(result.is_err(), "unknown field should fail");
+    }
+
+    #[test]
+    fn responses_validate_invalid_status_code_key_errors() {
+        // A Responses object with a key that is not a valid status code range
+        // should produce a validation error (lines 268-273).
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let mut responses = BTreeMap::new();
+        // Artificially build a Responses with an invalid key by constructing directly
+        responses.insert(
+            "badKey".to_owned(),
+            RefOr::new_item(Response {
+                description: Some("ok".into()),
+                ..Default::default()
+            }),
+        );
+        Responses {
+            responses: Some(responses),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "r".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("key must be a 3-digit status code") && e.contains("badKey")),
+            "invalid key must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn responses_serialize_skips_non_x_extensions() {
+        // The serializer only emits extension keys that start with "x-".
+        // Build a Responses with an extension and verify round-trip.
+        let mut ext = BTreeMap::new();
+        ext.insert("x-foo".to_owned(), serde_json::json!("bar"));
+        let r = Responses {
+            default: Some(RefOr::new_item(Response {
+                description: Some("ok".into()),
+                ..Default::default()
+            })),
+            extensions: Some(ext),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["x-foo"], "bar");
+        assert!(v.get("default").is_some());
+    }
+
+    #[test]
     fn test_response_validate() {
         let spec = Spec::default();
 

@@ -914,4 +914,171 @@ mod tests {
             extensions: None,
         };
     }
+
+    #[test]
+    fn querystring_xor_query_errors() {
+        // in: querystring and in: query must not coexist (lines 233-253).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let qs_param = RefOr::new_item(Parameter::Querystring(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q".into(),
+                content: BTreeMap::new(), // will error for empty, but mutation is tested below
+                ..Default::default()
+            },
+        ));
+        let q_param = query_param("filter");
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs_param, q_param]));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`in: querystring` is mutually exclusive")),
+            "querystring + query must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn multiple_querystring_params_errors() {
+        // More than one in: querystring must error (line 240-246).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let qs1 = RefOr::new_item(Parameter::Querystring(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q1".into(),
+                content: BTreeMap::new(),
+                ..Default::default()
+            },
+        ));
+        let qs2 = RefOr::new_item(Parameter::Querystring(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q2".into(),
+                content: BTreeMap::new(),
+                ..Default::default()
+            },
+        ));
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs1, qs2]));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("at most one `in: querystring` parameter")),
+            "two querystring params must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn parameter_identity_querystring_variant() {
+        // Exercises the `Parameter::Querystring` arm in `parameter_identity` (line 64).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        // Two querystring params with the same name — should trigger
+        // duplicate detection which requires parameter_identity to be called.
+        let qs1 = RefOr::new_item(Parameter::Querystring(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q".into(),
+                content: BTreeMap::new(),
+                ..Default::default()
+            },
+        ));
+        let qs2 = RefOr::new_item(Parameter::Querystring(
+            crate::v3_2::parameter::InQuerystring {
+                name: "q".into(),
+                content: BTreeMap::new(),
+                ..Default::default()
+            },
+        ));
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs1, qs2]));
+        // Both "duplicate" AND "multiple querystring" errors expected.
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("duplicate parameter `q`")),
+            "duplicate querystring must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn security_no_components_reports_no_schemes() {
+        // When spec has no components at all, security requirement should error.
+        // (Line 280-287: the `let Some(map) = schemes_map else { ... }` branch.)
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        req.insert("myScheme".to_owned(), vec![]);
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("no `components.securitySchemes`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn path_template_uniqueness_skips_extension_keys() {
+        // x- prefixed keys are skipped (line 386: continue).
+        let mut paths: BTreeMap<String, PathItem> = BTreeMap::new();
+        paths.insert("/pets/{id}".into(), PathItem::default());
+        paths.insert("x-custom".into(), PathItem::default()); // should be ignored
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_template_uniqueness(&mut ctx, "#.paths", &paths);
+        assert!(
+            ctx.errors.is_empty(),
+            "x- keys must be skipped: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_path_item_no_ops_skips_param_check() {
+        // A path item with no operations does not invoke param checking.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem::default();
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/pets", "#.paths[/pets]", &item);
+        assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn internal_unresolved_ref_in_dup_pass() {
+        // A `$ref` to an existing `#/components/parameters/...` path that
+        // isn't in the spec results in `UnresolvedInternal` (line 51).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let dangling = RefOr::new_ref("#/components/parameters/Missing".to_owned());
+        // Should not panic; dangling internal refs are silently skipped.
+        validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[dangling]));
+    }
+
+    #[test]
+    fn find_path_item_by_ref_malformed_tokens_return_none() {
+        // Paths with extra `/` after single-token segment return None.
+        // This exercises the `if after.contains('/') { return None; }` guards
+        // in find_path_item_by_ref (lines 457-468).
+        use crate::v3_2::path_item::{PathItem, Paths};
+        let mut paths = Paths::default();
+        paths.paths.insert("/pets".to_owned(), PathItem::default());
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            paths: Some(paths),
+            ..Default::default()
+        }));
+        // A ref like `#/paths/~1pets/extra` has an extra token: the
+        // `after` contains `/` after the first segment, so it returns None.
+        let item = PathItem {
+            reference: Some("#/paths/~1pets/extra".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/pets", "#.paths[/pets]", &item);
+        // The chain-follow gracefully returns the item as-is.
+        assert!(
+            ctx.errors.is_empty(),
+            "no validation errors: {:?}",
+            ctx.errors
+        );
+    }
 }

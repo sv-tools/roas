@@ -2614,4 +2614,464 @@ mod tests {
         assert_eq!(empty_schema, Schema::Empty(EmptySchema));
         assert_ne!(bool_schema, empty_schema);
     }
+
+    // ── lines 1162-1163: AnyOf iteration (each element validated) ──────────
+
+    #[test]
+    fn any_of_iterates_and_validates_each_element() {
+        // AnyOf with two inline items — the `for` loop on lines 1161-1163
+        // must walk each RefOr, triggering validate_with_context on inner schemas.
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(), // invalid — triggers an error when walked
+            description: None,
+            extensions: None,
+        };
+        let s = Schema::AnyOf(Box::new(AnyOfSchema {
+            any_of: vec![
+                RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(
+                    StringSchema {
+                        external_docs: Some(bad_docs.clone()),
+                        ..Default::default()
+                    },
+                )))),
+                RefOr::new_item(Schema::Single(Box::new(SingleSchema::Integer(
+                    IntegerSchema {
+                        external_docs: Some(bad_docs.clone()),
+                        ..Default::default()
+                    },
+                )))),
+            ],
+            ..Default::default()
+        }));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        // Two errors — one per inline child
+        assert!(
+            ctx.errors.len() >= 2,
+            "expected at least 2 errors from AnyOf child iteration: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.mentions("anyOf[0]") && ctx.errors.mentions("anyOf[1]"),
+            "errors should mention both indices: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── lines 1173-1174: OneOf iteration ──────────────────────────────────
+
+    #[test]
+    fn one_of_iterates_and_validates_each_element() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let s = Schema::OneOf(Box::new(OneOfSchema {
+            one_of: vec![RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::Number(NumberSchema {
+                    external_docs: Some(bad_docs.clone()),
+                    ..Default::default()
+                }),
+            )))],
+            ..Default::default()
+        }));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("oneOf[0]"),
+            "error should mention oneOf[0]: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── lines 1179-1181: Schema::Not ──────────────────────────────────────
+
+    #[test]
+    fn not_schema_validates_inner_schema() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let s = Schema::Not(Box::new(NotSchema {
+            not: RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(
+                StringSchema {
+                    external_docs: Some(bad_docs),
+                    ..Default::default()
+                },
+            )))),
+            external_docs: None,
+            example: None,
+            examples: None,
+            extensions: None,
+        }));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("not"),
+            "error should mention not path: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── lines 1221, 1223-1224: StringSchema externalDocs + xml validation ─
+
+    #[test]
+    fn string_schema_external_docs_and_xml_are_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        // Use nodeType=invalid to trigger an xml error (attribute+wrapped alone
+        // does not produce an error unless nodeType is also present).
+        let bad_xml = crate::v3_2::xml::XML {
+            node_type: Some("badtype".into()),
+            ..Default::default()
+        };
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        StringSchema {
+            external_docs: Some(bad_docs),
+            xml: Some(bad_xml),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("externalDocs"),
+            "missing externalDocs error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.mentions("xml"),
+            "missing xml error: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── lines 1241, 1243-1244: IntegerSchema externalDocs + xml ──────────
+
+    #[test]
+    fn integer_schema_external_docs_and_xml_are_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let bad_xml = crate::v3_2::xml::XML {
+            node_type: Some("badtype".into()),
+            ..Default::default()
+        };
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        IntegerSchema {
+            external_docs: Some(bad_docs),
+            xml: Some(bad_xml),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.mentions("externalDocs"), "{:?}", ctx.errors);
+        assert!(ctx.errors.mentions("xml"), "{:?}", ctx.errors);
+    }
+
+    // ── lines 1257-1261: NumberSchema externalDocs + xml ──────────────────
+
+    #[test]
+    fn number_schema_external_docs_and_xml_are_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let bad_xml = crate::v3_2::xml::XML {
+            node_type: Some("badtype".into()),
+            ..Default::default()
+        };
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        NumberSchema {
+            external_docs: Some(bad_docs),
+            xml: Some(bad_xml),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.mentions("externalDocs"), "{:?}", ctx.errors);
+        assert!(ctx.errors.mentions("xml"), "{:?}", ctx.errors);
+    }
+
+    // ── line 1277: BooleanSchema xml ──────────────────────────────────────
+
+    #[test]
+    fn boolean_schema_xml_is_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_xml = crate::v3_2::xml::XML {
+            node_type: Some("badtype".into()),
+            ..Default::default()
+        };
+        let s = Schema::Single(Box::new(SingleSchema::Boolean(BooleanSchema {
+            xml: Some(bad_xml),
+            ..Default::default()
+        })));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.mentions("xml"), "{:?}", ctx.errors);
+    }
+
+    // ── line 1285: ArraySchema externalDocs ───────────────────────────────
+
+    #[test]
+    fn array_schema_external_docs_and_xml_are_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let bad_xml = crate::v3_2::xml::XML {
+            node_type: Some("badtype".into()),
+            ..Default::default()
+        };
+        let s = Schema::Single(Box::new(SingleSchema::Array(ArraySchema {
+            external_docs: Some(bad_docs),
+            xml: Some(bad_xml),
+            ..Default::default()
+        })));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.mentions("externalDocs"), "{:?}", ctx.errors);
+        assert!(ctx.errors.mentions("xml"), "{:?}", ctx.errors);
+    }
+
+    // ── line 1310: ObjectSchema externalDocs ─────────────────────────────
+
+    #[test]
+    fn object_schema_external_docs_and_xml_are_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let bad_xml = crate::v3_2::xml::XML {
+            node_type: Some("badtype".into()),
+            ..Default::default()
+        };
+        let s = Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+            external_docs: Some(bad_docs),
+            xml: Some(bad_xml),
+            ..Default::default()
+        })));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.mentions("externalDocs"), "{:?}", ctx.errors);
+        assert!(ctx.errors.mentions("xml"), "{:?}", ctx.errors);
+    }
+
+    // ── lines 1333-1337: ObjectSchema pattern_properties ─────────────────
+
+    #[test]
+    fn object_schema_pattern_properties_are_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let s = Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+            pattern_properties: Some(BTreeMap::from([(
+                "^S_".to_owned(),
+                RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(
+                    StringSchema {
+                        external_docs: Some(bad_docs),
+                        ..Default::default()
+                    },
+                )))),
+            )])),
+            ..Default::default()
+        })));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("pattern_properties"),
+            "error should mention pattern_properties path: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── line 1351: unevaluated_properties BoolOr::Bool (no-op arm) ───────
+
+    #[test]
+    fn object_schema_unevaluated_properties_bool_is_no_op() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let s = Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+            unevaluated_properties: Some(BoolOr::Bool(false)),
+            ..Default::default()
+        })));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "Bool(false) unevaluatedProperties should produce no errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── lines 1350-1354: unevaluated_properties BoolOr::Item ─────────────
+
+    #[test]
+    fn object_schema_unevaluated_properties_item_is_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let s = Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+            unevaluated_properties: Some(BoolOr::Item(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::String(StringSchema {
+                    external_docs: Some(bad_docs),
+                    ..Default::default()
+                }),
+            ))))),
+            ..Default::default()
+        })));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("unevaluatedProperties"),
+            "error should mention unevaluatedProperties: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── line 1359: property_names ─────────────────────────────────────────
+
+    #[test]
+    fn object_schema_property_names_is_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let s = Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+            property_names: Some(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::String(StringSchema {
+                    external_docs: Some(bad_docs),
+                    ..Default::default()
+                }),
+            )))),
+            ..Default::default()
+        })));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("propertyNames"),
+            "error should mention propertyNames: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── line 1370: NullSchema xml ─────────────────────────────────────────
+
+    #[test]
+    fn null_schema_xml_is_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_xml = crate::v3_2::xml::XML {
+            node_type: Some("badtype".into()),
+            ..Default::default()
+        };
+        let s = Schema::Single(Box::new(SingleSchema::Null(NullSchema {
+            xml: Some(bad_xml),
+            ..Default::default()
+        })));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.mentions("xml"), "{:?}", ctx.errors);
+    }
+
+    // ── lines 1394-1403: MultiSchema invalid / duplicate type ────────────
+
+    #[test]
+    fn multi_schema_invalid_type_reported() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        let m = MultiSchema {
+            schema_types: vec!["string".into(), "badtype".into(), "string".into()],
+            ..Default::default()
+        };
+        Schema::Multi(Box::new(m)).validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not supported") && e.contains("badtype")),
+            "expected 'not supported' error for unknown type: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("not unique") && e.contains("string")),
+            "expected 'not unique' error for duplicate type: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── line 1407: MultiSchema externalDocs ───────────────────────────────
+
+    #[test]
+    fn multi_schema_external_docs_is_walked() {
+        let spec = crate::v3_2::spec::Spec::default();
+        let bad_docs = crate::v3_2::external_documentation::ExternalDocumentation {
+            url: "".into(),
+            description: None,
+            extensions: None,
+        };
+        let m = MultiSchema {
+            schema_types: vec!["string".into()],
+            external_docs: Some(bad_docs),
+            ..Default::default()
+        };
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        Schema::Multi(Box::new(m)).validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("externalDocs"),
+            "externalDocs should be walked on MultiSchema: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── lines 1430-1432: extensions deserialize `expecting` impl ─────────
+    // ── line 1444: extensions duplicate key error ─────────────────────────
+    // ── line 1471: extensions serialize None branch ───────────────────────
+
+    #[test]
+    fn extensions_deserialize_duplicate_key_is_rejected() {
+        // Exercises the duplicate-key branch (line 1444) inside the custom
+        // extensions `Visitor::visit_map` implementation.
+        let raw = r#"{"type":"string","x-foo":1,"x-foo":2}"#;
+        let result = serde_json::from_str::<Schema>(raw);
+        assert!(result.is_err(), "duplicate extension key must be rejected");
+    }
+
+    #[test]
+    fn extensions_serialize_none_branch() {
+        // When extensions is None the custom serialize writes a null map
+        // (line 1471). Round-trip a schema that has no extensions and ensure
+        // the serialized JSON contains no x- keys.
+        let s = Schema::Single(Box::new(SingleSchema::String(StringSchema {
+            title: Some("no-ext".into()),
+            extensions: None,
+            ..Default::default()
+        })));
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(
+            !v.as_object().unwrap().keys().any(|k| k.starts_with("x-")),
+            "no x- keys expected when extensions is None: {v}"
+        );
+    }
 }

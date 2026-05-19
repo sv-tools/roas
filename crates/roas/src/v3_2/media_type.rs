@@ -424,4 +424,221 @@ mod tests {
             ctx.errors
         );
     }
+
+    #[test]
+    fn validate_encoding_mutex_with_prefix_and_item_encoding() {
+        // `encoding` MUST NOT coexist with `prefixEncoding`/`itemEncoding`.
+        let spec = Spec::default();
+        let encoding_entry = Encoding {
+            content_type: Some("application/json".into()),
+            headers: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            encoding: None,
+            prefix_encoding: None,
+            item_encoding: None,
+            extensions: None,
+        };
+        let mut encoding_map = BTreeMap::new();
+        encoding_map.insert("field".to_owned(), encoding_entry.clone());
+
+        // encoding + prefixEncoding on MediaType
+        let mut ctx = Context::new(&spec, Options::new());
+        MediaType {
+            encoding: Some(encoding_map.clone()),
+            prefix_encoding: Some(vec![encoding_entry.clone()]),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "mt".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`encoding` is mutually exclusive")),
+            "encoding + prefixEncoding must error: {:?}",
+            ctx.errors
+        );
+
+        // encoding + itemEncoding on MediaType
+        let mut ctx = Context::new(&spec, Options::new());
+        MediaType {
+            encoding: Some(encoding_map.clone()),
+            item_encoding: Some(encoding_entry.clone()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "mt".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`encoding` is mutually exclusive")),
+            "encoding + itemEncoding must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_media_type_prefix_and_item_encoding_branches() {
+        // Validate prefixEncoding and itemEncoding branches on MediaType.
+        let spec = Spec::default();
+        let encoding_entry = Encoding {
+            content_type: Some("application/json".into()),
+            headers: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            encoding: None,
+            prefix_encoding: None,
+            item_encoding: None,
+            extensions: None,
+        };
+
+        // prefixEncoding branch
+        let mut ctx = Context::new(&spec, Options::new());
+        MediaType {
+            prefix_encoding: Some(vec![encoding_entry.clone()]),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "mt".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "prefixEncoding errors: {:?}",
+            ctx.errors
+        );
+
+        // itemEncoding branch
+        let mut ctx = Context::new(&spec, Options::new());
+        MediaType {
+            item_encoding: Some(encoding_entry.clone()),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "mt".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "itemEncoding errors: {:?}",
+            ctx.errors
+        );
+
+        // item_schema branch
+        let mut ctx = Context::new(&spec, Options::new());
+        MediaType {
+            item_schema: Some(RefOr::new_item(crate::v3_2::schema::Schema::Single(
+                Box::new(crate::v3_2::schema::SingleSchema::Object(
+                    crate::v3_2::schema::ObjectSchema::default(),
+                )),
+            ))),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "mt".into());
+        assert!(ctx.errors.is_empty(), "itemSchema errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn validate_encoding_nested_mutex() {
+        // Encoding.encoding must not coexist with Encoding.prefix_encoding or item_encoding.
+        let spec = Spec::default();
+        let leaf = Encoding {
+            content_type: None,
+            headers: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            encoding: None,
+            prefix_encoding: None,
+            item_encoding: None,
+            extensions: None,
+        };
+        let mut nested_map = BTreeMap::new();
+        nested_map.insert("field".to_owned(), leaf.clone());
+
+        // Encoding with encoding + prefixEncoding
+        let enc = Encoding {
+            encoding: Some(nested_map.clone()),
+            prefix_encoding: Some(vec![leaf.clone()]),
+            ..leaf.clone()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        enc.validate_with_context(&mut ctx, "enc".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`encoding` is mutually exclusive")),
+            "nested encoding mutex must error: {:?}",
+            ctx.errors
+        );
+
+        // Encoding with encoding + itemEncoding
+        let enc2 = Encoding {
+            encoding: Some(nested_map.clone()),
+            item_encoding: Some(Box::new(leaf.clone())),
+            ..leaf.clone()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        enc2.validate_with_context(&mut ctx, "enc".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`encoding` is mutually exclusive")),
+            "nested encoding+itemEncoding mutex must error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_encoding_prefix_and_item_encoding_nested_branches() {
+        // Exercise the prefixEncoding and itemEncoding nested branches on Encoding.
+        let spec = Spec::default();
+        let leaf = Encoding {
+            content_type: None,
+            headers: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            encoding: None,
+            prefix_encoding: None,
+            item_encoding: None,
+            extensions: None,
+        };
+
+        // prefixEncoding on Encoding
+        let enc = Encoding {
+            prefix_encoding: Some(vec![leaf.clone()]),
+            ..leaf.clone()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        enc.validate_with_context(&mut ctx, "enc".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "prefixEncoding in Encoding errors: {:?}",
+            ctx.errors
+        );
+
+        // itemEncoding on Encoding
+        let enc2 = Encoding {
+            item_encoding: Some(Box::new(leaf.clone())),
+            ..leaf.clone()
+        };
+        let mut ctx = Context::new(&spec, Options::new());
+        enc2.validate_with_context(&mut ctx, "enc".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "itemEncoding in Encoding errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn media_type_round_trip_sequential_fields() {
+        // OAS 3.2: itemSchema, prefixEncoding, itemEncoding in MediaType
+        let v = serde_json::json!({
+            "itemSchema": {"type": "string"},
+            "prefixEncoding": [{"contentType": "text/plain"}],
+            "itemEncoding": {"contentType": "application/json"}
+        });
+        let mt: MediaType = serde_json::from_value(v.clone()).unwrap();
+        assert!(mt.item_schema.is_some());
+        assert!(mt.prefix_encoding.is_some());
+        assert!(mt.item_encoding.is_some());
+        let back = serde_json::to_value(&mt).unwrap();
+        assert_eq!(back, v);
+    }
 }
