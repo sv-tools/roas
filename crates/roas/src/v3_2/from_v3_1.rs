@@ -526,7 +526,7 @@ mod tests {
         super::apply_tag_groups(spec.as_object_mut().unwrap(), groups);
         // No tags were produced because the group was skipped.
         assert!(
-            spec.get("tags").is_none() || spec["tags"].as_array().map_or(true, |a| a.is_empty()),
+            spec.get("tags").is_none() || spec["tags"].as_array().is_none_or(|a| a.is_empty()),
             "expected no tags, got: {:?}",
             spec.get("tags")
         );

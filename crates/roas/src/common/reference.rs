@@ -986,11 +986,11 @@ mod tests {
         assert_eq!(r, RefOr::Item(Value::Number((-1_i64).into())));
 
         // visit_f64 — float
-        let r: RefOr<Value> = serde_json::from_str("3.14").unwrap();
+        let r: RefOr<Value> = serde_json::from_str("2.5").unwrap();
         match r {
             RefOr::Item(Value::Number(n)) => {
                 let v = n.as_f64().unwrap();
-                assert!((v - 3.14).abs() < 1e-10, "expected ~3.14, got {v}");
+                assert!((v - 2.5).abs() < 1e-10, "expected ~2.5, got {v}");
             }
             other => panic!("expected Item(Number), got {other:?}"),
         }

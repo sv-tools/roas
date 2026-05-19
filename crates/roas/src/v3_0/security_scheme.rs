@@ -1385,26 +1385,11 @@ mod tests {
     /// SecurityScheme::Display shows the type name for each variant.
     #[test]
     fn security_scheme_display() {
+        assert_eq!(SecurityScheme::HTTP(Box::default()).to_string(), "http");
+        assert_eq!(SecurityScheme::ApiKey(Box::default()).to_string(), "apiKey");
+        assert_eq!(SecurityScheme::OAuth2(Box::default()).to_string(), "oauth2");
         assert_eq!(
-            SecurityScheme::HTTP(Box::new(HttpSecurityScheme::default())).to_string(),
-            "http"
-        );
-        assert_eq!(
-            SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme::default())).to_string(),
-            "apiKey"
-        );
-        assert_eq!(
-            SecurityScheme::OAuth2(Box::new(
-                crate::v3_0::security_scheme::OAuth2SecurityScheme::default()
-            ))
-            .to_string(),
-            "oauth2"
-        );
-        assert_eq!(
-            SecurityScheme::OpenIdConnect(Box::new(
-                crate::v3_0::security_scheme::OpenIdConnectSecurityScheme::default()
-            ))
-            .to_string(),
+            SecurityScheme::OpenIdConnect(Box::default()).to_string(),
             "openIdConnect"
         );
     }

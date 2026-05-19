@@ -669,19 +669,19 @@ mod tests {
         let spec = Spec::default();
 
         // Integer item: validate_with_context is a no-op so must produce no errors.
-        let item = Items::Integer(Box::new(IntegerItem::default()));
+        let item = Items::Integer(Box::default());
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         item.validate_with_context(&mut ctx, "p".into());
         assert!(ctx.errors.is_empty(), "Integer: {:?}", ctx.errors);
 
         // Number item: same.
-        let item = Items::Number(Box::new(NumberItem::default()));
+        let item = Items::Number(Box::default());
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         item.validate_with_context(&mut ctx, "p".into());
         assert!(ctx.errors.is_empty(), "Number: {:?}", ctx.errors);
 
         // Boolean item: same.
-        let item = Items::Boolean(Box::new(BooleanItem::default()));
+        let item = Items::Boolean(Box::default());
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         item.validate_with_context(&mut ctx, "p".into());
         assert!(ctx.errors.is_empty(), "Boolean: {:?}", ctx.errors);

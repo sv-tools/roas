@@ -1404,10 +1404,7 @@ mod tests {
             "apiKey"
         );
         assert_eq!(
-            format!(
-                "{}",
-                SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme::default()))
-            ),
+            format!("{}", SecurityScheme::OAuth2(Box::default())),
             "oauth2"
         );
         assert_eq!(

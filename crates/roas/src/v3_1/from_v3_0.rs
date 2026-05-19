@@ -1576,7 +1576,7 @@ mod tests {
         // but the existing `examples` array stays untouched.
         let examples = &v["examples"];
         assert!(
-            examples.as_array().unwrap().len() >= 1,
+            !examples.as_array().unwrap().is_empty(),
             "existing examples preserved: {examples}"
         );
     }
@@ -1662,10 +1662,10 @@ mod tests {
         // Should not panic.
         let v30: V30Spec = serde_json::from_str(raw).unwrap_or_else(|_| {
             // If v3.0 parser is strict, just pass; we're testing the walk.
-            return serde_json::from_str(
+            serde_json::from_str(
                 r##"{"openapi":"3.0.4","info":{"title":"t","version":"1"},"paths":{}}"##,
             )
-            .unwrap();
+            .unwrap()
         });
         let _v31: V31Spec = v30.into();
     }
