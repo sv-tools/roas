@@ -575,4 +575,54 @@ mod tests {
             ctx.errors
         );
     }
+
+    /// Serializing a PathItem with an extension key exercises the `serialize_entry`
+    /// branch at line 125 (`k.starts_with("x-")`).
+    #[test]
+    fn path_item_with_extension_serializes_extension_key() {
+        let pi: PathItem = serde_json::from_value(json!({
+            "get": {
+                "responses": {"200": {"description": "ok"}}
+            },
+            "x-internal": true
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&pi).unwrap();
+        assert_eq!(v["x-internal"], true);
+        assert!(v["get"].is_object());
+    }
+
+    /// Passing a non-map value to PathItem deserializer triggers the `expecting`
+    /// fn (lines 161-163 in `PathItemVisitor::expecting`).
+    #[test]
+    fn path_item_non_map_value_errors() {
+        let res: Result<PathItem, _> = serde_json::from_str(r#"[]"#);
+        assert!(res.is_err(), "expected wrong-type error for PathItem");
+    }
+
+    /// Passing a non-map value to Paths deserializer triggers the `expecting`
+    /// fn (lines 330-332 in `PathsVisitor::expecting`).
+    #[test]
+    fn paths_non_map_value_errors() {
+        let res: Result<Paths, _> = serde_json::from_str(r#""a string""#);
+        assert!(res.is_err(), "expected wrong-type error for Paths");
+    }
+
+    /// Serialize a `PathItem` whose `extensions` map contains a key that does
+    /// NOT start with `x-`.  The serializer skips such keys — exercises the
+    /// false-branch of `if k.starts_with("x-")` at line 125.
+    #[test]
+    fn path_item_extension_without_x_prefix_is_skipped_in_serialization() {
+        let mut ext = BTreeMap::new();
+        ext.insert("non-x-key".to_owned(), serde_json::json!("skip-me"));
+        let pi = PathItem {
+            extensions: Some(ext),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&pi).unwrap();
+        assert!(
+            v.get("non-x-key").is_none(),
+            "non-x- key must be absent from output: {v}"
+        );
+    }
 }

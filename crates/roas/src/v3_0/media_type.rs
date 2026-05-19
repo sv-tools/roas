@@ -318,4 +318,22 @@ mod tests {
             ctx.errors
         );
     }
+
+    /// Encoding with no headers calls `validate_with_context` and exits cleanly
+    /// (exercises the `None` branch for `self.headers`, line 203).
+    #[test]
+    fn encoding_with_no_headers_validates_ok() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        Encoding {
+            content_type: None,
+            headers: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            extensions: None,
+        }
+        .validate_with_context(&mut ctx, "enc".into());
+        assert!(ctx.errors.is_empty(), "unexpected errors: {:?}", ctx.errors);
+    }
 }

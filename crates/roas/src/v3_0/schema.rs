@@ -1929,4 +1929,44 @@ mod tests {
             ctx.errors
         );
     }
+
+    /// Deserializing a non-object JSON value as a Schema should fail with
+    /// the "a Schema must be a JSON object" message (line 143).
+    #[test]
+    fn schema_from_non_object_errors() {
+        let res: Result<Schema, _> = serde_json::from_value(serde_json::json!("a string"));
+        assert!(res.is_err(), "expected error, got Ok");
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("a Schema must be a JSON object"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    /// `SingleSchema::deserialize` is its own `impl` (lines 185-191).
+    #[test]
+    fn single_schema_deserialize_impl_is_exercised() {
+        let parsed: SingleSchema =
+            serde_json::from_value(serde_json::json!({"type": "integer"})).unwrap();
+        assert!(
+            matches!(parsed, SingleSchema::Integer(_)),
+            "expected Integer variant"
+        );
+    }
+
+    /// Object schema with `additionalProperties: false` (Bool form) hits
+    /// `BoolOr::Bool(_) => {}` in `ObjectSchema::validate_with_context`
+    /// (line 1159).
+    #[test]
+    fn object_schema_additional_properties_bool_false_validates_ok() {
+        let json = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        });
+        let parsed: Schema = serde_json::from_value(json).unwrap();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        parsed.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "unexpected errors: {:?}", ctx.errors);
+    }
 }

@@ -429,4 +429,16 @@ mod tests {
             ctx.errors
         );
     }
+
+    /// Validating an empty Components (all None) exercises the `schemas: None`
+    /// branch (line 83 closing brace) without entering any of the `for` loops.
+    #[test]
+    fn components_default_validates_ok() {
+        let comp = Components::default();
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        comp.validate_with_context(&mut ctx, "#.components".into());
+        // No schemas/responses/etc. means nothing to error on.
+        assert!(ctx.errors.is_empty(), "unexpected errors: {:?}", ctx.errors);
+    }
 }

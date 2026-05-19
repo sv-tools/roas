@@ -2701,4 +2701,358 @@ mod tests {
         let p = &value["paths"]["/x"]["get"]["parameters"][0];
         assert_eq!(p["allowEmptyValue"], true);
     }
+
+    /// `transform_spec` on a non-Object value is a no-op (line 72: early return).
+    #[test]
+    fn transform_spec_on_non_object_is_noop() {
+        let mut v: Value = Value::String("not-an-object".into());
+        super::transform_spec(&mut v);
+        // The string value must be unchanged.
+        assert_eq!(v, Value::String("not-an-object".into()));
+    }
+
+    /// Path items that are not JSON Objects (e.g. `null`) are skipped (line 274).
+    #[test]
+    fn non_object_path_item_is_skipped() {
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/real": {
+                    "get": { "responses": { "200": { "description": "ok" } } }
+                }
+            }
+        });
+        // Inject a non-Object path entry directly into the JSON before transforming.
+        v["paths"]["__bad__"] = Value::Null;
+        super::transform_spec(&mut v);
+        // The real path is transformed and the null entry is left alone.
+        assert!(v["paths"]["/real"]["get"].is_object());
+    }
+
+    /// `collectionFormat: tsv` has no v3.0 equivalent and returns `None`
+    /// from `collection_format_to_style` (line 551).
+    #[test]
+    fn collection_format_tsv_is_dropped() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query",
+                            "name": "tags",
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "collectionFormat": "tsv"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/items"]["get"]["parameters"][0];
+        // No style/explode emitted for tsv.
+        assert!(p.get("style").is_none(), "style must not be set for tsv");
+        assert!(
+            p.get("explode").is_none(),
+            "explode must not be set for tsv"
+        );
+    }
+
+    /// Top-level body parameter that IS itself a `$ref` object passes through
+    /// `build_body_request_body` and returns `Some(body)` (line 580).
+    #[test]
+    fn top_level_body_param_that_is_ref_passes_through_build_body() {
+        // We exercise `build_body_request_body` via the raw JSON path so we
+        // can inject a `{"$ref": "..."}` as the parameter value directly.
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "parameters": {
+                "PetBody": {
+                    "in": "body",
+                    "name": "pet",
+                    "$ref": "#/definitions/Pet"
+                }
+            },
+            "definitions": { "Pet": { "type": "object" } }
+        });
+        super::transform_spec(&mut v);
+        // The `$ref`-body lands in requestBodies after the ref-body fast path.
+        let rb = &v["components"]["requestBodies"]["PetBody"];
+        assert!(rb.is_object(), "requestBody component must exist: {rb}");
+    }
+
+    /// `x-examples` whose value is not a JSON Object is treated as absent
+    /// (returns `None` from the `and_then`) — line 595.
+    #[test]
+    fn body_param_x_examples_non_object_is_ignored() {
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "parameters": [{
+                            "in": "body",
+                            "name": "pet",
+                            "schema": {"type": "object"},
+                            "x-examples": "not-an-object"
+                        }],
+                        "responses": { "201": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        super::transform_spec(&mut v);
+        // No `examples` key in the content map because x-examples was not an Object.
+        let media = &v["paths"]["/pets"]["post"]["requestBody"]["content"]["application/json"];
+        assert!(media.get("examples").is_none(), "examples must be absent");
+    }
+
+    /// When a body param has multiple consumes the non-last entries clone
+    /// `schema` (lines 612, 625) — the multi-consumes body path.
+    /// Use raw JSON transform to ensure x-examples survives (v2 typed model
+    /// may drop unknown fields on the parameter object).
+    #[test]
+    fn body_param_with_multiple_consumes_clones_schema() {
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "consumes": ["application/json", "application/xml"],
+                        "parameters": [{
+                            "in": "body",
+                            "name": "pet",
+                            "required": true,
+                            "schema": { "type": "object" },
+                            "x-examples": {
+                                "cat": { "name": "Whiskers" }
+                            }
+                        }],
+                        "responses": { "201": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        super::transform_spec(&mut v);
+        let content = &v["paths"]["/pets"]["post"]["requestBody"]["content"];
+        // Both MIME entries must have the schema cloned into them.
+        assert_eq!(content["application/json"]["schema"]["type"], "object");
+        assert_eq!(content["application/xml"]["schema"]["type"], "object");
+        // Examples (as wrapped Example Objects) are cloned into the non-last entry too.
+        assert!(
+            content["application/json"]["examples"]["cat"]["value"]["name"].is_string()
+                || content["application/json"]["examples"].is_object(),
+            "examples must appear in non-last mime entry: {content}"
+        );
+    }
+
+    /// form param that is not an Object is skipped (line 743: `continue`).
+    #[test]
+    fn non_object_form_param_is_skipped() {
+        // Inject a non-Object element into the form_params list directly via
+        // the raw JSON transform.
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/login": {
+                    "post": {
+                        "parameters": [
+                            {"in": "formData", "name": "username", "type": "string"},
+                            "not-an-object"
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        super::transform_spec(&mut v);
+        // Only the real param survives; the string is silently skipped.
+        let props = &v["paths"]["/login"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]
+            ["schema"]["properties"];
+        assert!(props["username"].is_object());
+    }
+
+    /// form param without a `name` field is skipped (line 747: `None => continue`).
+    #[test]
+    fn form_param_without_name_is_skipped() {
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/login": {
+                    "post": {
+                        "parameters": [
+                            {"in": "formData", "name": "username", "type": "string"},
+                            {"in": "formData", "type": "string"}
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+        super::transform_spec(&mut v);
+        // Only `username` survived; the nameless param was skipped.
+        let props = &v["paths"]["/login"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]
+            ["schema"]["properties"];
+        assert!(props["username"].is_object());
+        // No additional properties from the nameless param.
+        assert_eq!(
+            props.as_object().map(|m| m.len()),
+            Some(1),
+            "only username must appear, got: {props}"
+        );
+    }
+
+    /// Form body with multiple consumes entries clones `schema` for all but
+    /// the last MIME type (lines 782-785).
+    #[test]
+    fn form_body_with_multiple_consumes_clones_schema() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/login": {
+                    "post": {
+                        "consumes": ["multipart/form-data", "application/x-www-form-urlencoded"],
+                        "parameters": [
+                            {"in": "formData", "name": "username", "type": "string"},
+                            {"in": "formData", "name": "password", "type": "string"}
+                        ],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let content = &value["paths"]["/login"]["post"]["requestBody"]["content"];
+        // Both MIME entries must have the schema.
+        assert_eq!(content["multipart/form-data"]["schema"]["type"], "object");
+        assert_eq!(
+            content["application/x-www-form-urlencoded"]["schema"]["type"],
+            "object"
+        );
+    }
+
+    /// `string()` called on a non-String Value returns `None` (line 1130).
+    /// Exercised via `take_string_array` when one element of the array is not a string.
+    #[test]
+    fn take_string_array_skips_non_string_elements() {
+        // `consumes` / `produces` arrays may contain heterogeneous entries when
+        // using the raw JSON transform. Non-string elements are filtered out.
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "produces": ["application/json", 42, null],
+                        "responses": { "200": {
+                            "description": "ok",
+                            "schema": { "type": "string" }
+                        }}
+                    }
+                }
+            }
+        });
+        super::transform_spec(&mut v);
+        // Only the string mime type survives; the non-strings are dropped.
+        let content = &v["paths"]["/x"]["get"]["responses"]["200"]["content"];
+        assert!(content["application/json"]["schema"].is_object());
+        // No entries for the integer or null.
+        assert!(
+            content.as_object().map(|m| m.len()) == Some(1),
+            "only application/json expected, got {content}"
+        );
+    }
+
+    /// A Link object with an `x-` extension key goes through `walk_link_object`
+    /// and the extension key is skipped by `is_extension_key` (line 1076).
+    #[test]
+    fn link_object_x_extension_is_skipped_in_walker() {
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "produces": ["application/json"],
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "schema": { "type": "object" },
+                                "links": {
+                                    "GetPetById": {
+                                        "operationId": "getPet",
+                                        "x-internal": {
+                                            "$ref": "#/definitions/ShouldBeOpaque",
+                                            "x-nullable": true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        super::transform_spec(&mut v);
+        // The x-internal extension payload must be untouched by the walker.
+        let ext =
+            &v["paths"]["/pets"]["get"]["responses"]["200"]["links"]["GetPetById"]["x-internal"];
+        assert_eq!(
+            ext["$ref"], "#/definitions/ShouldBeOpaque",
+            "x- payload must not be remapped"
+        );
+        assert_eq!(ext["x-nullable"], true, "x- payload must be verbatim");
+    }
+
+    /// When an operation has a `responses` value that is NOT an Object (e.g. an
+    /// array), the `transform_response` loop inside `transform_operation` is
+    /// skipped — exercises the false-branch of the `if let … && let` chain at
+    /// line 445.
+    #[test]
+    fn operation_with_non_object_responses_does_not_panic() {
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": ["not", "an", "object"]
+                    }
+                }
+            }
+        });
+        // Must not panic; the non-Object responses are left as-is.
+        super::transform_spec(&mut v);
+        assert_eq!(v["paths"]["/x"]["get"]["responses"][0], "not");
+    }
+
+    /// When the top-level `responses` component is not an Object, the per-entry
+    /// `transform_response` loop is skipped — exercises the false-branch of
+    /// `if let Value::Object(map) = &mut r` at line 192.
+    #[test]
+    fn spec_level_non_object_responses_component_does_not_panic() {
+        let mut v: Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "responses": ["array", "not", "object"],
+            "paths": {}
+        });
+        // Must not panic; the array is left untransformed inside components.
+        super::transform_spec(&mut v);
+        // The array was moved into components.responses.
+        assert_eq!(v["components"]["responses"][0], "array");
+    }
 }
