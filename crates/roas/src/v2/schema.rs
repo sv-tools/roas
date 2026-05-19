@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
     #[serde(rename = "string")]
@@ -99,6 +99,61 @@ impl From<ObjectSchema> for Schema {
 impl From<AllOfSchema> for Schema {
     fn from(s: AllOfSchema) -> Self {
         Schema::AllOf(Box::new(s))
+    }
+}
+
+/// Routes a buffered JSON value to the right [`Schema`] variant.
+///
+/// Hand-written in place of `#[serde(untagged)]`: a single
+/// `serde_json::Value` is buffered and the variant is chosen by its
+/// `type`, instead of buffering a serde `Content` tree and re-trying
+/// every variant in turn.
+///
+/// The typed variants take precedence over `AllOf` (matching the
+/// historical untagged declaration order): `ObjectSchema` carries its
+/// own `all_of` field and a defaulted `type`, so a `{"allOf": [...]}`
+/// input parses as `Object`. The top-level `AllOf` variant is only
+/// produced when an `allOf`-bearing, type-less input fails to parse as
+/// an `ObjectSchema`.
+fn schema_from_value(value: serde_json::Value) -> Result<Schema, serde_json::Error> {
+    let schema_type = value
+        .as_object()
+        .and_then(|map| map.get("type"))
+        .and_then(|t| t.as_str());
+    Ok(match schema_type {
+        Some("string") => Schema::String(Box::new(StringSchema::deserialize(value)?)),
+        Some("integer") => Schema::Integer(Box::new(IntegerSchema::deserialize(value)?)),
+        Some("number") => Schema::Number(Box::new(NumberSchema::deserialize(value)?)),
+        Some("boolean") => Schema::Boolean(Box::new(BooleanSchema::deserialize(value)?)),
+        Some("array") => Schema::Array(Box::new(ArraySchema::deserialize(value)?)),
+        Some("null") => Schema::Null(Box::new(NullSchema::deserialize(value)?)),
+        Some("object") => Schema::Object(Box::new(ObjectSchema::deserialize(value)?)),
+        _ => {
+            let has_all_of = value
+                .as_object()
+                .is_some_and(|map| map.contains_key("allOf"));
+            if has_all_of {
+                match ObjectSchema::deserialize(value.clone()) {
+                    Ok(object) => Schema::Object(Box::new(object)),
+                    Err(object_err) => match AllOfSchema::deserialize(value) {
+                        Ok(all_of) => Schema::AllOf(Box::new(all_of)),
+                        Err(_) => return Err(object_err),
+                    },
+                }
+            } else {
+                Schema::Object(Box::new(ObjectSchema::deserialize(value)?))
+            }
+        }
+    })
+}
+
+impl<'de> Deserialize<'de> for Schema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        schema_from_value(value).map_err(serde::de::Error::custom)
     }
 }
 

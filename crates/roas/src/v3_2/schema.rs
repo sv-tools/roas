@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::{Display, Formatter};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
     /// JSON Schema 2020-12 boolean schema: `true` matches anything,
@@ -110,6 +110,100 @@ impl From<SingleSchema> for Schema {
 impl From<MultiSchema> for Schema {
     fn from(s: MultiSchema) -> Self {
         Schema::Multi(Box::new(s))
+    }
+}
+
+/// Routes a buffered JSON value to the right [`Schema`] variant.
+///
+/// Hand-written in place of `#[serde(untagged)]`: a single
+/// `serde_json::Value` is buffered and the variant is chosen by key
+/// inspection, instead of buffering a serde `Content` tree, re-trying
+/// every variant in turn, and having `SingleSchema` buffer once more on
+/// top.
+fn schema_from_value(value: serde_json::Value) -> Result<Schema, serde_json::Error> {
+    enum Route {
+        Bool(bool),
+        Empty,
+        AllOf,
+        AnyOf,
+        OneOf,
+        Not,
+        Multi,
+        Single,
+    }
+    let route = match &value {
+        serde_json::Value::Bool(b) => Route::Bool(*b),
+        serde_json::Value::Object(map) if map.is_empty() => Route::Empty,
+        serde_json::Value::Object(map) => {
+            if map.contains_key("allOf") {
+                Route::AllOf
+            } else if map.contains_key("anyOf") {
+                Route::AnyOf
+            } else if map.contains_key("oneOf") {
+                Route::OneOf
+            } else if map.contains_key("not") {
+                Route::Not
+            } else if matches!(map.get("type"), Some(serde_json::Value::Array(_))) {
+                Route::Multi
+            } else {
+                Route::Single
+            }
+        }
+        _ => {
+            return Err(serde::de::Error::custom(
+                "a Schema must be a JSON object or boolean",
+            ));
+        }
+    };
+    Ok(match route {
+        Route::Bool(b) => Schema::Bool(b),
+        Route::Empty => Schema::Empty(EmptySchema),
+        Route::AllOf => Schema::AllOf(Box::new(AllOfSchema::deserialize(value)?)),
+        Route::AnyOf => Schema::AnyOf(Box::new(AnyOfSchema::deserialize(value)?)),
+        Route::OneOf => Schema::OneOf(Box::new(OneOfSchema::deserialize(value)?)),
+        Route::Not => Schema::Not(Box::new(NotSchema::deserialize(value)?)),
+        Route::Multi => Schema::Multi(Box::new(MultiSchema::deserialize(value)?)),
+        Route::Single => Schema::Single(Box::new(single_schema_from_value(value)?)),
+    })
+}
+
+/// Routes a buffered JSON value to the right [`SingleSchema`] variant by
+/// its `type`. A missing or unrecognized `type` falls to `Object`,
+/// whose `MustBe!("object")` tag then accepts the default or rejects a
+/// bad value.
+fn single_schema_from_value(value: serde_json::Value) -> Result<SingleSchema, serde_json::Error> {
+    let schema_type = value
+        .as_object()
+        .and_then(|map| map.get("type"))
+        .and_then(|t| t.as_str());
+    Ok(match schema_type {
+        Some("string") => SingleSchema::String(StringSchema::deserialize(value)?),
+        Some("integer") => SingleSchema::Integer(IntegerSchema::deserialize(value)?),
+        Some("number") => SingleSchema::Number(NumberSchema::deserialize(value)?),
+        Some("boolean") => SingleSchema::Boolean(BooleanSchema::deserialize(value)?),
+        Some("array") => SingleSchema::Array(ArraySchema::deserialize(value)?),
+        Some("null") => SingleSchema::Null(NullSchema::deserialize(value)?),
+        _ => SingleSchema::Object(ObjectSchema::deserialize(value)?),
+    })
+}
+
+impl<'de> Deserialize<'de> for Schema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        schema_from_value(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for SingleSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        single_schema_from_value(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -326,7 +420,7 @@ pub struct NotSchema {
 // SingleSchema is always heap-allocated via `Schema::Single(Box<SingleSchema>)`,
 // so the size variance between variants is intentional and harmless.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SingleSchema {
     #[serde(rename = "string")]

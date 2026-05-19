@@ -16,7 +16,7 @@ use crate::v3_0::spec::Spec;
 use crate::v3_0::xml::XML;
 use crate::validation::{Context, PushError, ValidateWithContext};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum Schema {
     AllOf(Box<AllOfSchema>),
@@ -104,6 +104,86 @@ impl From<ObjectSchema> for SingleSchema {
     }
 }
 
+/// Routes a buffered JSON value to the right [`Schema`] variant.
+///
+/// Hand-written in place of `#[serde(untagged)]`: a single
+/// `serde_json::Value` is buffered and the variant is chosen by key
+/// inspection, instead of buffering a serde `Content` tree, re-trying
+/// every variant in turn, and having `SingleSchema` buffer once more on
+/// top.
+fn schema_from_value(value: serde_json::Value) -> Result<Schema, serde_json::Error> {
+    enum Route {
+        AllOf,
+        AnyOf,
+        OneOf,
+        Not,
+        Single,
+    }
+    let route = match &value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("allOf") {
+                Route::AllOf
+            } else if map.contains_key("anyOf") {
+                Route::AnyOf
+            } else if map.contains_key("oneOf") {
+                Route::OneOf
+            } else if map.contains_key("not") {
+                Route::Not
+            } else {
+                Route::Single
+            }
+        }
+        _ => return Err(serde::de::Error::custom("a Schema must be a JSON object")),
+    };
+    Ok(match route {
+        Route::AllOf => Schema::AllOf(Box::new(AllOfSchema::deserialize(value)?)),
+        Route::AnyOf => Schema::AnyOf(Box::new(AnyOfSchema::deserialize(value)?)),
+        Route::OneOf => Schema::OneOf(Box::new(OneOfSchema::deserialize(value)?)),
+        Route::Not => Schema::Not(Box::new(NotSchema::deserialize(value)?)),
+        Route::Single => Schema::Single(Box::new(single_schema_from_value(value)?)),
+    })
+}
+
+/// Routes a buffered JSON value to the right [`SingleSchema`] variant by
+/// its `type`. A missing or unrecognized `type` falls to `Object`,
+/// whose `MustBe!("object")` tag then accepts the default or rejects a
+/// bad value.
+fn single_schema_from_value(value: serde_json::Value) -> Result<SingleSchema, serde_json::Error> {
+    let schema_type = value
+        .as_object()
+        .and_then(|map| map.get("type"))
+        .and_then(|t| t.as_str());
+    Ok(match schema_type {
+        Some("string") => SingleSchema::String(StringSchema::deserialize(value)?),
+        Some("integer") => SingleSchema::Integer(IntegerSchema::deserialize(value)?),
+        Some("number") => SingleSchema::Number(NumberSchema::deserialize(value)?),
+        Some("boolean") => SingleSchema::Boolean(BooleanSchema::deserialize(value)?),
+        Some("array") => SingleSchema::Array(ArraySchema::deserialize(value)?),
+        Some("null") => SingleSchema::Null(NullSchema::deserialize(value)?),
+        _ => SingleSchema::Object(ObjectSchema::deserialize(value)?),
+    })
+}
+
+impl<'de> Deserialize<'de> for Schema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        schema_from_value(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for SingleSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        single_schema_from_value(value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct AllOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
@@ -184,7 +264,7 @@ pub struct NotSchema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SingleSchema {
     #[serde(rename = "string")]
