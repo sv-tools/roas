@@ -19,6 +19,7 @@
 //! hint.
 
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::mem;
 
 use serde::Serialize;
@@ -62,10 +63,22 @@ pub enum CollapseError {
 /// `bag` method so the generic [`lift_ref_or`] can intern into it.
 pub struct Bag<T> {
     entries: BTreeMap<String, RefOr<T>>,
-    /// Canonical-JSON-of-component → component name. Used so two
-    /// structurally identical inline values collapse to the same
-    /// component.
-    seen: HashMap<String, String>,
+    /// Digest of a component's canonical JSON → candidate component
+    /// names. Storing a 64-bit digest instead of the full canonical
+    /// JSON keeps the dedup map small regardless of component size;
+    /// the (astronomically rare) digest collision is resolved by
+    /// re-serialising each candidate and comparing bytes, so two
+    /// structurally identical inline values still collapse to the
+    /// same component without ever trusting the digest alone.
+    seen: HashMap<u64, Vec<String>>,
+}
+
+/// 64-bit digest of a component's canonical JSON, used as the dedup
+/// key in [`Bag::seen`].
+fn digest(canonical: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl<T> Default for Bag<T> {
@@ -100,8 +113,8 @@ impl<T: Serialize> Bag<T> {
     pub fn seed(&mut self, initial: BTreeMap<String, RefOr<T>>) -> Result<(), CollapseError> {
         for (name, value) in initial {
             if let RefOr::Item(item) = &value {
-                let canonical = serde_json::to_string(item)?;
-                self.seen.entry(canonical).or_insert_with(|| name.clone());
+                let d = digest(&serde_json::to_string(item)?);
+                self.seen.entry(d).or_default().push(name.clone());
             }
             self.entries.insert(name, value);
         }
@@ -115,11 +128,21 @@ impl<T: Serialize> Bag<T> {
     /// insert.
     pub fn intern(&mut self, item: T, base: &str) -> Result<String, CollapseError> {
         let canonical = serde_json::to_string(&item)?;
-        if let Some(existing) = self.seen.get(&canonical) {
-            return Ok(existing.clone());
+        let d = digest(&canonical);
+        if let Some(candidates) = self.seen.get(&d) {
+            // A digest hit is almost always a real match; confirm by
+            // re-serialising the candidate so a digest collision can
+            // never silently merge two distinct components.
+            for name in candidates {
+                if let Some(RefOr::Item(existing)) = self.entries.get(name)
+                    && serde_json::to_string(existing)? == canonical
+                {
+                    return Ok(name.clone());
+                }
+            }
         }
         let name = unique_name(&self.entries, base);
-        self.seen.insert(canonical, name.clone());
+        self.seen.entry(d).or_default().push(name.clone());
         self.entries.insert(name.clone(), RefOr::new_item(item));
         Ok(name)
     }
@@ -162,8 +185,11 @@ impl<T: Serialize> Bag<T> {
     /// dedup map with its current canonical form (children may have
     /// been lifted, changing the canonical JSON).
     pub fn put_inline(&mut self, name: String, item: T) -> Result<(), CollapseError> {
-        let canonical = serde_json::to_string(&item)?;
-        self.seen.entry(canonical).or_insert_with(|| name.clone());
+        let d = digest(&serde_json::to_string(&item)?);
+        let candidates = self.seen.entry(d).or_default();
+        if !candidates.contains(&name) {
+            candidates.push(name.clone());
+        }
         self.entries.insert(name, RefOr::new_item(item));
         Ok(())
     }
