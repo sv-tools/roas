@@ -8,10 +8,12 @@
 //! their presence if a build wants v2 / v3.0 strictness at the
 //! validation layer.
 
-use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeOwned, IntoDeserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::marker::PhantomData;
 use thiserror::Error;
 
 use crate::loader::{Loader, LoaderError};
@@ -90,6 +92,126 @@ pub enum RefOr<T> {
     Item(T),
 }
 
+/// The field set a `Ref` accepts, mirroring `Ref`'s `deny_unknown_fields`.
+const REF_FIELDS: &[&str] = &["$ref", "summary", "description"];
+
+/// Visitor backing [`RefOr`]'s `Deserialize`.
+///
+/// * A scalar / sequence input can never be a `$ref`, so it is streamed
+///   straight into `T`.
+/// * A map whose **first** key is `$ref` is streamed straight into a
+///   `Ref` — no intermediate `serde_json::Value` is built.
+/// * Any other map is buffered into a `serde_json::Value` so a `$ref`
+///   appearing at a non-first position can still be detected (the
+///   OpenAPI Reference Object permits sibling keys in any order). This
+///   leg matches the historical behaviour; only the fast paths above
+///   avoid the throwaway DOM.
+struct RefOrVisitor<T>(PhantomData<fn() -> T>);
+
+impl<'de, T> Visitor<'de> for RefOrVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = RefOr<T>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a Reference Object or an inline component")
+    }
+
+    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+        T::deserialize(v.into_deserializer()).map(RefOr::Item)
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        T::deserialize(v.into_deserializer()).map(RefOr::Item)
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        T::deserialize(v.into_deserializer()).map(RefOr::Item)
+    }
+
+    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        T::deserialize(v.into_deserializer()).map(RefOr::Item)
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        T::deserialize(v.into_deserializer()).map(RefOr::Item)
+    }
+
+    fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+        T::deserialize(v.into_deserializer()).map(RefOr::Item)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        T::deserialize(().into_deserializer()).map(RefOr::Item)
+    }
+
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        T::deserialize(de::value::SeqAccessDeserializer::new(seq)).map(RefOr::Item)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let Some(first_key) = map.next_key::<String>()? else {
+            // Empty map `{}` — an inline component (e.g. `Schema::Empty`).
+            return T::deserialize(de::value::MapAccessDeserializer::new(map)).map(RefOr::Item);
+        };
+
+        if first_key == "$ref" {
+            // Fast path: stream the Reference Object directly into `Ref`.
+            let reference: String = map.next_value()?;
+            let mut summary: Option<String> = None;
+            let mut description: Option<String> = None;
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "$ref" => return Err(de::Error::duplicate_field("$ref")),
+                    "summary" => {
+                        if summary.is_some() {
+                            return Err(de::Error::duplicate_field("summary"));
+                        }
+                        summary = Some(map.next_value()?);
+                    }
+                    "description" => {
+                        if description.is_some() {
+                            return Err(de::Error::duplicate_field("description"));
+                        }
+                        description = Some(map.next_value()?);
+                    }
+                    _ => return Err(de::Error::unknown_field(key.as_str(), REF_FIELDS)),
+                }
+            }
+            return Ok(RefOr::Ref(Box::new(Ref {
+                reference,
+                summary,
+                description,
+            })));
+        }
+
+        // Slow path: buffer so a `$ref` at a non-first position is still
+        // detected, then route on its presence.
+        let mut entries = serde_json::Map::new();
+        entries.insert(first_key, map.next_value()?);
+        while let Some(key) = map.next_key::<String>()? {
+            entries.insert(key, map.next_value()?);
+        }
+        let value = serde_json::Value::Object(entries);
+        if value.as_object().is_some_and(|m| m.contains_key("$ref")) {
+            Ref::deserialize(value)
+                .map(|r| RefOr::Ref(Box::new(r)))
+                .map_err(de::Error::custom)
+        } else {
+            T::deserialize(value)
+                .map(RefOr::Item)
+                .map_err(de::Error::custom)
+        }
+    }
+}
+
 impl<'de, T> Deserialize<'de> for RefOr<T>
 where
     T: Deserialize<'de>,
@@ -98,21 +220,7 @@ where
     where
         D: serde::Deserializer<'de>,
     {
-        // Materialise the input as JSON Value so we can peek for `$ref`
-        // and then route to the appropriate variant. The single
-        // allocation is acceptable for the deserialization path (and
-        // matches what other OAS parsers do internally).
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let has_ref = matches!(&value, serde_json::Value::Object(m) if m.contains_key("$ref"));
-        if has_ref {
-            Ref::deserialize(value)
-                .map(|r| RefOr::Ref(Box::new(r)))
-                .map_err(serde::de::Error::custom)
-        } else {
-            T::deserialize(value)
-                .map(RefOr::Item)
-                .map_err(serde::de::Error::custom)
-        }
+        deserializer.deserialize_any(RefOrVisitor(PhantomData))
     }
 }
 
@@ -459,6 +567,23 @@ mod tests {
             r.is_err(),
             "$ref form must fail strictly when unknown siblings are present"
         );
+    }
+
+    #[test]
+    fn ref_detected_when_not_the_first_key() {
+        // `$ref` after a sibling key exercises the buffered slow path.
+        let r: RefOr<Foo> = serde_json::from_value(serde_json::json!({
+            "description": "d",
+            "$ref": "#/components/schemas/Foo",
+        }))
+        .unwrap();
+        match r {
+            RefOr::Ref(rr) => {
+                assert_eq!(rr.reference, "#/components/schemas/Foo");
+                assert_eq!(rr.description.as_deref(), Some("d"));
+            }
+            RefOr::Item(_) => panic!("expected Ref variant"),
+        }
     }
 
     #[test]
