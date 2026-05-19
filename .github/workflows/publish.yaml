@@ -1,10 +1,23 @@
 name: Publish
 
+# External-distribution half of the release flow: cargo publish to
+# crates.io, push the multi-arch container image to GHCR, and update
+# the Homebrew tap. Fires when a GitHub Release transitions from
+# draft → published (i.e. the user reviewed the draft minted by
+# `release-stage.yaml` and clicked Publish).
+#
+# Also exposed via `workflow_dispatch` so a partial failure (crates.io
+# rate-limit, ghcr.io 5xx, etc.) can be retried without re-tagging.
+
 on:
-  push:
-    # GitHub tag filters are globs, not regexes — `+` is literal here, so the
-    # quantifier-style pattern would never match. Use globs.
-    tags: [ "**/v[0-9]*.[0-9]*.[0-9]*" ]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)publish (e.g. roas-cli/v0.3.1)"
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,167 +25,104 @@ env:
 permissions: read-all
 
 jobs:
-  Checks:
-    # `OsvScanner` (and its PR sibling) inside the reusable workflow need
-    # `security-events: write` to upload SARIF to the Security tab.
-    # Reusable workflows can't escalate beyond what the caller grants, so
-    # the top-level `read-all` default isn't enough — pin the broader
-    # scope here at the call site.
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    uses: ./.github/workflows/checks.yaml
-    secrets:
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  # ────────────────────────────────────────────────────────────────────────
+  # Parse the triggering tag into `<package>` + `<version>` so downstream
+  # jobs don't have to re-derive them. Tags are `<crate>/v<x.y.z>`; both
+  # event triggers (`release` and manual dispatch) feed into the same
+  # parse step.
+  # ────────────────────────────────────────────────────────────────────────
+  Resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.parse.outputs.tag }}
+      package: ${{ steps.parse.outputs.package }}
+      version: ${{ steps.parse.outputs.version }}
+      is_roas_cli: ${{ steps.parse.outputs.is_roas_cli }}
+    steps:
+      - id: parse
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$TAG" != */v* ]]; then
+            echo "::error::tag '$TAG' must be in the form <package>/v<version>"
+            exit 1
+          fi
+          PACKAGE="${TAG%/v*}"
+          VERSION="${TAG##*/v}"
+          {
+            echo "tag=$TAG"
+            echo "package=$PACKAGE"
+            echo "version=$VERSION"
+            if [[ "$PACKAGE" = "roas-cli" ]]; then
+              echo "is_roas_cli=true"
+            else
+              echo "is_roas_cli=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
   Publish:
-    needs: Checks
-    strategy:
-      matrix:
-        package: ${{ fromJSON(needs.Checks.outputs.publish) }}
-      fail-fast: false
+    needs: Resolve
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       # `rust-lang/crates-io-auth-action` exchanges the workflow's OIDC
       # token for a short-lived crates.io publish token; that exchange
-      # requires `id-token: write`. The default `read-all` doesn't
-      # cover it, so grant it explicitly on the publishing job only.
-      contents: read
+      # requires `id-token: write`. Granted on this job only.
       id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.Resolve.outputs.tag }}
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
       - uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
         id: auth
-      - run: cargo publish --all-features --package ${{ matrix.package }} --verbose
+      - run: cargo publish --all-features --package ${{ needs.Resolve.outputs.package }} --verbose
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-  DraftRelease:
-    needs: Publish
-    runs-on: ubuntu-latest
-    permissions:
-      # `softprops/action-gh-release` calls the Releases API and needs
-      # `contents: write`. Nothing else in this job uses `GITHUB_TOKEN`,
-      # so the workflow-level `read-all` default applies for everything
-      # else.
-      contents: write
-    steps:
-      # Mint (or update) a draft GitHub Release for the tag that triggered
-      # this run. Same flow for every published crate so a single
-      # `git push origin <package>/v<version>` is all it takes to mint
-      # both the crates.io release and the GitHub Release.
-      #
-      # For `roas-cli`, `PublishRoasCli` below later calls
-      # `softprops/action-gh-release` again with `files: …` — that call
-      # finds the existing draft (lookup is by tag) and appends the
-      # prebuilt binaries instead of creating a second release.
-      - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          draft: true
-          # The repo carries multiple crates with their own tags; don't
-          # let any one release hijack the repo-wide "Latest" badge.
-          make_latest: false
 
   # ────────────────────────────────────────────────────────────────────────
-  # roas-cli release pipeline. Only fires when `roas-cli` is in the publish
-  # set — i.e. on a `roas-cli/v…` tag where the version bump made the matrix.
-  # Cross-cuts the standard `Publish` job because it needs a per-target build
-  # matrix on native runners (no QEMU rebuilds of the rust dep tree).
+  # roas-cli distribution beyond crates.io: container image + Homebrew
+  # formula. The prebuilt tarballs were attached to the release by
+  # `release-stage.yaml#AttachRoasCliBinaries`; we download them from the
+  # release (rather than rebuilding) so the bits in the registry, the
+  # GitHub Release, and Homebrew bottles are byte-identical.
   # ────────────────────────────────────────────────────────────────────────
-  RoasCliBuild:
-    needs: Checks
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-          # macOS is arm64-only. macos-13 (Intel) is being phased out by
-          # GitHub and queues for hours; cross-building x86_64 via
-          # cargo-zigbuild failed at link time because notify / reqwest pull
-          # in CoreServices / CoreFoundation / Security and zig doesn't
-          # bundle those frameworks. Intel macOS users can `cargo install
-          # roas-cli` or use the Docker image.
-          - target: aarch64-apple-darwin
-            runner: macos-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-        with:
-          target: ${{ matrix.target }}
-      - name: Extract roas-cli version from tag
-        id: v
-        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
-        shell: bash
-      - name: Build release binary
-        run: cargo build --release --package roas-cli --target ${{ matrix.target }} --locked
-      - name: Pack tarball
-        id: pack
-        run: |
-          set -euo pipefail
-          archive="roas-${{ steps.v.outputs.version }}-${{ matrix.target }}.tar.gz"
-          # `tar -C` so the archive contains just `roas`, not a path prefix —
-          # Homebrew's `bin.install "roas"` expects the binary at archive root.
-          tar -C "target/${{ matrix.target }}/release" -czf "$archive" roas
-          # `shasum -a 256` is portable across the macOS / linux runners;
-          # `sha256sum` isn't installed by default on macOS.
-          shasum -a 256 "$archive" > "${archive}.sha256"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-        shell: bash
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: roas-cli-${{ matrix.target }}
-          path: |
-            ${{ steps.pack.outputs.archive }}
-            ${{ steps.pack.outputs.archive }}.sha256
-
   PublishRoasCli:
     needs:
-      - Checks
-      - DraftRelease
-      - RoasCliBuild
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+      - Resolve
+      - Publish
+    if: ${{ needs.Resolve.outputs.is_roas_cli == 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # upload assets to the draft GitHub Release `DraftRelease` minted
+      contents: read   # checkout + `gh release download`
       packages: write  # push the container image to ghcr.io
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Extract roas-cli version from tag
-        id: v
-        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: artifacts
-          pattern: roas-cli-*
-          merge-multiple: true
+          ref: ${{ needs.Resolve.outputs.tag }}
 
-      - name: Upload prebuilt binaries to GitHub Release
-        id: release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          files: |
-            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
-            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sha256
-          # The repo carries other crates (e.g. `roas`) with their own tags;
-          # don't mark this roas-cli release as the repo-wide "Latest".
-          draft: true
-
-      # ── Container image ──────────────────────────────────────────────────
-      # Stage the linux binaries into a tiny build context so the multi-arch
-      # `docker build` just COPYs them in. No QEMU rebuild of the rust dep
-      # tree — multi-arch image lands in a couple of minutes.
-      - name: Stage linux binaries for docker build
+      - name: Download release tarballs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.Resolve.outputs.tag }}
         run: |
           set -euo pipefail
-          V="${{ steps.v.outputs.version }}"
+          mkdir -p artifacts
+          gh release download "$TAG" \
+            --dir artifacts \
+            --pattern 'roas-*.tar.gz' \
+            --pattern 'roas-*.tar.gz.sha256'
+
+      # ── Container image ──────────────────────────────────────────────────
+      # Stage the linux binaries into a tiny build context so the
+      # multi-arch `docker build` just COPYs them in. No QEMU rebuild
+      # of the rust dep tree.
+      - name: Stage linux binaries for docker build
+        env:
+          V: ${{ needs.Resolve.outputs.version }}
+        run: |
+          set -euo pipefail
           mkdir -p ctx/linux/amd64 ctx/linux/arm64
           tar -xzf "artifacts/roas-${V}-x86_64-unknown-linux-gnu.tar.gz" -C ctx/linux/amd64
           tar -xzf "artifacts/roas-${V}-aarch64-unknown-linux-gnu.tar.gz" -C ctx/linux/arm64
@@ -202,25 +152,27 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/sv-tools/roas:${{ steps.v.outputs.version }}
+            ghcr.io/sv-tools/roas:${{ needs.Resolve.outputs.version }}
             ghcr.io/sv-tools/roas:latest
           labels: |
             org.opencontainers.image.source=https://github.com/sv-tools/roas
             org.opencontainers.image.description=Command-line front-end for the roas OpenAPI library
             org.opencontainers.image.licenses=MIT OR Apache-2.0
-            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+            org.opencontainers.image.version=${{ needs.Resolve.outputs.version }}
 
       # ── Homebrew formula ─────────────────────────────────────────────────
-      # Source the release-asset SHAs from the tarballs we just uploaded.
-      # `softprops/action-gh-release` published them to the canonical URL
+      # Source the release-asset SHAs from the tarballs we downloaded.
+      # The canonical asset URL is
       # `https://github.com/${repo}/releases/download/${tag}/${asset}`.
       - name: Collect Homebrew asset SHAs
         id: sha
+        env:
+          V: ${{ needs.Resolve.outputs.version }}
         run: |
           set -euo pipefail
           read_sha() {
             # `.tar.gz.sha256` is `<sha>  <archive>` — keep the first field.
-            awk '{print $1}' "artifacts/roas-${{ steps.v.outputs.version }}-$1.tar.gz.sha256"
+            awk '{print $1}' "artifacts/roas-${V}-$1.tar.gz.sha256"
           }
           {
             echo "darwin_arm64=$(read_sha aarch64-apple-darwin)"
@@ -232,18 +184,18 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: sv-tools/homebrew-apps
-          # Fine-grained PAT (Contents: read+write on sv-tools/homebrew-apps)
-          # stored as a secret in this repo. The default GITHUB_TOKEN is
-          # scoped to sv-tools/roas only.
+          # Fine-grained PAT (Contents: read+write on
+          # sv-tools/homebrew-apps) stored as a secret in this repo.
+          # The default GITHUB_TOKEN is scoped to sv-tools/roas only.
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-apps
 
       - name: Render and commit Homebrew formula
         working-directory: homebrew-apps
         env:
-          VERSION: ${{ steps.v.outputs.version }}
+          VERSION: ${{ needs.Resolve.outputs.version }}
           REPO_URL: https://github.com/${{ github.repository }}
-          TAG: roas-cli/v${{ steps.v.outputs.version }}
+          TAG: ${{ needs.Resolve.outputs.tag }}
           DARWIN_ARM64_SHA: ${{ steps.sha.outputs.darwin_arm64 }}
           LINUX_ARM64_SHA: ${{ steps.sha.outputs.linux_arm64 }}
           LINUX_AMD64_SHA: ${{ steps.sha.outputs.linux_amd64 }}
