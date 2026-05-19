@@ -1267,7 +1267,7 @@ mod tests {
     fn find_path_item_by_ref_callbacks_branch_covered() {
         // lines 475-492: #/components/callbacks/<cb>/<expr> branch in find_path_item_by_ref
         use crate::v3_2::callback::Callback;
-        use crate::v3_2::path_item::{PathItem, Paths};
+        use crate::v3_2::path_item::PathItem;
         let mut cb_paths = BTreeMap::new();
         cb_paths.insert("e".to_owned(), PathItem::default());
         let cb = Callback {

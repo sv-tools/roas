@@ -164,7 +164,7 @@ fn schema_from_value(value: serde_json::Value) -> Result<Schema, serde_json::Err
     };
     Ok(match route {
         Route::Bool(b) => Schema::Bool(b),
-        Route::Empty => Schema::Empty(EmptySchema),
+        Route::Empty => Schema::Empty(EmptySchema::deserialize(value)?),
         Route::AllOf => Schema::AllOf(Box::new(AllOfSchema::deserialize(value)?)),
         Route::AnyOf => Schema::AnyOf(Box::new(AnyOfSchema::deserialize(value)?)),
         Route::OneOf => Schema::OneOf(Box::new(OneOfSchema::deserialize(value)?)),

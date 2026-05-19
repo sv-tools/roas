@@ -1912,7 +1912,6 @@ mod tests {
     #[test]
     fn operation_ref_path_item_ref_callbacks_cb_external_errors() {
         // lines 373-381: callback $ref resolves to ExternalUnsupported
-        use crate::v3_2::callback::Callback;
         use crate::v3_2::components::Components;
         let comp = Components {
             path_items: Some(BTreeMap::from([(
@@ -2104,7 +2103,6 @@ mod tests {
     fn operation_ref_inline_callback_external_cb_ref_suppressed() {
         // lines 217-222 / 209-213 in the deep-callback branch:
         // callback resolved from inline op.callbacks is an external $ref.
-        use crate::v3_2::callback::Callback;
         let mut callbacks = BTreeMap::new();
         callbacks.insert(
             "ext_cb".to_owned(),
