@@ -3290,4 +3290,71 @@ mod tests {
             ctx.errors
         );
     }
+
+    // ── schema_from_value — non-object / non-boolean value errors ─────────────
+
+    #[test]
+    fn schema_from_non_object_non_bool_errors() {
+        // Passing a JSON number, string, array or null as a Schema should
+        // return an error ("a Schema must be a JSON object or boolean").
+        let err = serde_json::from_value::<Schema>(serde_json::json!(42)).unwrap_err();
+        assert!(
+            err.to_string().contains("a Schema must be"),
+            "expected schema-type error: {err}"
+        );
+        let err = serde_json::from_value::<Schema>(serde_json::json!("string")).unwrap_err();
+        assert!(
+            err.to_string().contains("a Schema must be"),
+            "expected schema-type error for string: {err}"
+        );
+        let err = serde_json::from_value::<Schema>(serde_json::json!([1, 2, 3])).unwrap_err();
+        assert!(
+            err.to_string().contains("a Schema must be"),
+            "expected schema-type error for array: {err}"
+        );
+        let err = serde_json::from_value::<Schema>(serde_json::json!(null)).unwrap_err();
+        assert!(
+            err.to_string().contains("a Schema must be"),
+            "expected schema-type error for null: {err}"
+        );
+    }
+
+    // ── impl Deserialize for SingleSchema ─────────────────────────────────────
+
+    #[test]
+    fn single_schema_deserializes_directly() {
+        // `SingleSchema` has its own `Deserialize` impl; exercise it directly.
+        let parsed: SingleSchema =
+            serde_json::from_value(serde_json::json!({"type": "string", "title": "T"}))
+                .expect("SingleSchema must parse");
+        match parsed {
+            SingleSchema::String(s) => assert_eq!(s.title.as_deref(), Some("T")),
+            other => panic!("expected String, got {other:?}"),
+        }
+
+        let parsed: SingleSchema = serde_json::from_value(serde_json::json!({"type": "integer"}))
+            .expect("SingleSchema integer must parse");
+        assert!(matches!(parsed, SingleSchema::Integer(_)));
+
+        let parsed: SingleSchema = serde_json::from_value(serde_json::json!({"type": "number"}))
+            .expect("SingleSchema number must parse");
+        assert!(matches!(parsed, SingleSchema::Number(_)));
+
+        let parsed: SingleSchema = serde_json::from_value(serde_json::json!({"type": "boolean"}))
+            .expect("SingleSchema boolean must parse");
+        assert!(matches!(parsed, SingleSchema::Boolean(_)));
+
+        let parsed: SingleSchema = serde_json::from_value(serde_json::json!({"type": "array"}))
+            .expect("SingleSchema array must parse");
+        assert!(matches!(parsed, SingleSchema::Array(_)));
+
+        let parsed: SingleSchema = serde_json::from_value(serde_json::json!({"type": "null"}))
+            .expect("SingleSchema null must parse");
+        assert!(matches!(parsed, SingleSchema::Null(_)));
+
+        // No type → Object
+        let parsed: SingleSchema = serde_json::from_value(serde_json::json!({"title": "Obj"}))
+            .expect("SingleSchema object must parse");
+        assert!(matches!(parsed, SingleSchema::Object(_)));
+    }
 }

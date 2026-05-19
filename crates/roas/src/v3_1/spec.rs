@@ -2446,6 +2446,145 @@ mod tests {
         let _ = spec.validate(Options::new(), None);
         // Just verifying no panic.
     }
+
+    // ── walk_path_item_ops: same callback ref'd from two operations (line 833)
+
+    #[test]
+    fn walk_path_item_ops_same_callback_ref_dedup() {
+        // Two operations that both `$ref` the SAME callback (same *const ptr).
+        // On the first operation the callback is new → walk fires.
+        // On the second the pointer is already in seen_cb → the `if` block
+        // at line 821-833 is skipped (line 833 covers the else branch in
+        // LLVM's counting scheme).
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::{PathItem, Paths};
+        use crate::v3_1::response::{Response, Responses};
+
+        let ok_resp = || Responses {
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                }),
+            )])),
+            ..Default::default()
+        };
+
+        // Shared callback in components.callbacks, referenced via $ref.
+        let cb = Callback {
+            paths: BTreeMap::from([("{$url}".to_owned(), PathItem::default())]),
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("Shared".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+
+        // Two operations both $ref the same callback.
+        let make_op = || {
+            let mut cbs = BTreeMap::new();
+            cbs.insert(
+                "onEvent".to_owned(),
+                RefOr::new_ref("#/components/callbacks/Shared".to_owned()),
+            );
+            Operation {
+                responses: Some(ok_resp()),
+                callbacks: Some(cbs),
+                ..Default::default()
+            }
+        };
+
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), make_op());
+        ops.insert("post".to_owned(), make_op());
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/multi".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        // validate_inner walks both operations; the second $ref resolves to
+        // the same *const Callback → seen_cb.insert returns false → line 833
+        // (the else/skip arm) is exercised.
+        let _ = spec.validate(Options::new(), None);
+    }
+
+    // ── validate_inner: components.callbacks dedup (line 925) ────────────────
+
+    #[test]
+    fn validate_inner_components_callbacks_same_ptr_dedup() {
+        // A callback in components.callbacks that is also $ref'd from a path
+        // operation — when spec.validate_inner walks components.callbacks after
+        // already seeing the callback via the path, `seen_cb.insert` returns
+        // false → line 925 (closing `}` of the guard) is exercised.
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::{PathItem, Paths};
+        use crate::v3_1::response::{Response, Responses};
+
+        let ok_resp = || Responses {
+            responses: Some(BTreeMap::from([(
+                "200".to_owned(),
+                RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                }),
+            )])),
+            ..Default::default()
+        };
+
+        // Shared callback in components.
+        let cb = Callback {
+            paths: BTreeMap::from([("{$url}".to_owned(), PathItem::default())]),
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("Shared".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+
+        // Path operation $refs the same callback.
+        let mut cbs = BTreeMap::new();
+        cbs.insert(
+            "onEvent".to_owned(),
+            RefOr::new_ref("#/components/callbacks/Shared".to_owned()),
+        );
+        let op = Operation {
+            responses: Some(ok_resp()),
+            callbacks: Some(cbs),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op);
+        let mut paths = Paths::default();
+        paths.paths.insert(
+            "/a".to_owned(),
+            PathItem {
+                operations: Some(ops),
+                ..Default::default()
+            },
+        );
+        let spec = Spec {
+            paths: Some(paths),
+            components: Some(comp),
+            ..Default::default()
+        };
+        // The path walk sees the Shared callback first, inserting its pointer.
+        // The components.callbacks walk then tries to insert the same pointer
+        // again → returns false → line 925 is exercised.
+        let _ = spec.validate(Options::new(), None);
+    }
 }
 
 //     #[test]

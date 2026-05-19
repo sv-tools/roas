@@ -464,6 +464,7 @@ mod tests {
     use super::*;
     use crate::v3_1::components::Components;
     use crate::v3_1::parameter::{InCookie, InHeader, InPath, InQuery};
+    use crate::v3_1::path_item::Paths;
     use crate::v3_1::security_scheme::{
         AuthorizationCodeOAuth2Flow, ImplicitOAuth2Flow, OAuth2Flows, OAuth2SecurityScheme,
         OpenIdConnectSecurityScheme, SecurityScheme,
@@ -1146,5 +1147,208 @@ mod tests {
         req.insert("o".to_owned(), vec!["read".to_owned(), "write".to_owned()]);
         validate_security_requirements(&mut ctx, "#.security", &[req]);
         assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    // ── security: scheme_or.get_item fails (line 265) ────────────────────────
+
+    #[test]
+    fn security_scheme_ref_not_found_is_silently_skipped() {
+        // A securitySchemes entry that is itself a `$ref` to a non-existent
+        // key causes `scheme_or.get_item(ctx.spec)` to return Err(NotFound).
+        // The code silently `continue`s (line 265) — no crash, no error.
+        let mut schemes = BTreeMap::new();
+        // CB points at a $ref that doesn't exist anywhere in the spec.
+        schemes.insert(
+            "phantom".to_owned(),
+            RefOr::new_ref("#/components/securitySchemes/NonExistent".to_owned()),
+        );
+        let comp = Components {
+            security_schemes: Some(schemes),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(spec_with_components(comp)));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        req.insert("phantom".to_owned(), vec!["read".to_owned()]);
+        // This must not panic; the unresolvable ref is silently skipped.
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+        // No scope-not-found error expected since the scheme itself wasn't resolved.
+        assert!(
+            !ctx.errors
+                .iter()
+                .any(|e| e.contains("scope `read` not declared")),
+            "unexpected scope error for unresolvable scheme: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── find_path_item_by_ref — paths no-slash token (lines 423-424) ─────────
+
+    #[test]
+    fn validate_path_item_ref_to_paths_no_slash_in_token() {
+        // A PathItem.reference of `#/paths/~1foo` (encoded, after = "~1foo",
+        // no raw '/' in after) reaches lines 423-424 in find_path_item_by_ref.
+        // The entry is missing from paths.paths → returns None → chain stops.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem {
+            reference: Some("#/paths/~1foo".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/x", "#.paths[/x]", &item);
+        // No panic; chain returns the original item (no paths map in spec).
+    }
+
+    #[test]
+    fn validate_path_item_ref_to_existing_paths_entry() {
+        // A PathItem.reference of `#/paths/~1foo` where `/foo` IS in paths.
+        // This covers the Some(...) return path of line 424.
+        let mut paths = Paths::default();
+        // The target is a plain path item with no ref
+        let target = PathItem {
+            operations: Some(BTreeMap::from([(
+                "get".to_owned(),
+                crate::v3_1::operation::Operation::default(),
+            )])),
+            ..Default::default()
+        };
+        paths.paths.insert("/foo".to_owned(), target);
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            paths: Some(paths),
+            ..Default::default()
+        }));
+        // item has reference to #/paths/~1foo; no inline operations so
+        // resolve_path_item_chain will be called and will follow the ref.
+        let item = PathItem {
+            reference: Some("#/paths/~1foo".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/x", "#.paths[/x]", &item);
+        // No crash.
+    }
+
+    // ── find_path_item_by_ref — paths with slash in token (line 422) ─────────
+
+    #[test]
+    fn validate_path_item_ref_to_paths_slash_in_token_returns_original() {
+        // A PathItem.reference of `#/paths/a/b` (a/b contains '/') means
+        // find_path_item_by_ref returns None (line 422).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item_no_ops = PathItem {
+            reference: Some("#/paths/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/pets", "#.paths[/pets]", &item_no_ops);
+        // Just verifying no panic; the chain stops gracefully.
+    }
+
+    // ── find_path_item_by_ref — webhooks slash in token (line 427) ───────────
+
+    #[test]
+    fn validate_path_item_ref_to_webhooks_slash_in_token() {
+        // A PathItem.reference of `#/webhooks/a/b` hits the slash-in-token
+        // guard for webhooks (line 427).
+        let mut webhooks = Paths::default();
+        webhooks
+            .paths
+            .insert("event".to_owned(), PathItem::default());
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        }));
+        let item = PathItem {
+            reference: Some("#/webhooks/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/w", "#.paths[/w]", &item);
+        // No panic; chain returns the original item.
+    }
+
+    // ── find_path_item_by_ref — components/pathItems slash in token (line 432)
+
+    #[test]
+    fn validate_path_item_ref_to_components_path_items_slash_in_token() {
+        // A PathItem.reference of `#/components/pathItems/a/b` hits line 432.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem {
+            reference: Some("#/components/pathItems/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/x", "#.paths[/x]", &item);
+        // No panic.
+    }
+
+    // ── find_path_item_by_ref — callbacks no expr segment (line 442) ─────────
+
+    #[test]
+    fn validate_path_item_ref_to_callbacks_no_expr_segment() {
+        // A PathItem.reference of `#/components/callbacks/CB` (no expr part)
+        // hits the splitn/None branch (line 442).
+        use crate::v3_1::callback::Callback;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "CB".to_owned(),
+                RefOr::new_item(Callback::default()),
+            )])),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            components: Some(comp),
+            ..Default::default()
+        }));
+        let item = PathItem {
+            reference: Some("#/components/callbacks/CB".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/x", "#.paths[/x]", &item);
+        // No panic; chain stops gracefully.
+    }
+
+    // ── find_path_item_by_ref — callbacks expr_token with slash (line 445) ───
+
+    #[test]
+    fn validate_path_item_ref_to_callbacks_expr_with_slash() {
+        // A PathItem.reference of `#/components/callbacks/CB/a/b` where
+        // expr_token `a/b` contains '/' → line 445.
+        use crate::v3_1::callback::Callback;
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([(
+                "CB".to_owned(),
+                RefOr::new_item(Callback::default()),
+            )])),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            components: Some(comp),
+            ..Default::default()
+        }));
+        let item = PathItem {
+            reference: Some("#/components/callbacks/CB/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/x", "#.paths[/x]", &item);
+        // No panic; chain stops gracefully.
+    }
+
+    // ── find_path_item_by_ref — unknown prefix (line 458) ────────────────────
+
+    #[test]
+    fn validate_path_item_ref_unknown_prefix_returns_none() {
+        // A PathItem.reference of `#/unknown/foo` doesn't match any known
+        // prefix → None branch (line 458).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem {
+            reference: Some("#/unknown/foo".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/x", "#.paths[/x]", &item);
+        // No panic; returns the current item.
     }
 }
