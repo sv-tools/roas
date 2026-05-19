@@ -1557,6 +1557,279 @@ mod tests {
     }
 
     #[test]
+    fn schema_xml_validation_all_typed_variants() {
+        // Cover the `xml.validate_with_context` branch in Integer, Number,
+        // Boolean, Array, Null, and String schemas.  An empty xml.name triggers
+        // an error so we can confirm the validation branch was executed.
+        use crate::v2::xml::XML;
+        let spec = Spec::default();
+        let bad_xml = XML {
+            name: Some(String::new()), // empty name triggers "must not be empty" error
+            ..Default::default()
+        };
+
+        for s in [
+            Schema::String(Box::new(StringSchema {
+                xml: Some(bad_xml.clone()),
+                ..Default::default()
+            })),
+            Schema::Integer(Box::new(IntegerSchema {
+                xml: Some(bad_xml.clone()),
+                ..Default::default()
+            })),
+            Schema::Number(Box::new(NumberSchema {
+                xml: Some(bad_xml.clone()),
+                ..Default::default()
+            })),
+            Schema::Boolean(Box::new(BooleanSchema {
+                xml: Some(bad_xml.clone()),
+                ..Default::default()
+            })),
+            Schema::Array(Box::new(ArraySchema {
+                xml: Some(bad_xml.clone()),
+                items: Some(RefOr::new_item(Schema::from(StringSchema::default()))),
+                ..Default::default()
+            })),
+            Schema::Null(Box::new(NullSchema {
+                xml: Some(bad_xml.clone()),
+                ..Default::default()
+            })),
+        ] {
+            let mut ctx = Context::new(&spec, crate::validation::Options::new());
+            s.validate_with_context(&mut ctx, "p".into());
+            assert!(
+                ctx.errors.iter().any(|e| e.contains("must not be empty")),
+                "expected xml.name error, got: {:?}",
+                ctx.errors
+            );
+        }
+    }
+
+    #[test]
+    fn is_schema_read_only_all_variants() {
+        // Cover every arm of `is_schema_read_only`.
+        // Integer
+        let schema = Schema::Integer(Box::new(IntegerSchema {
+            read_only: Some(true),
+            ..Default::default()
+        }));
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert("x".into(), RefOr::new_item(schema));
+                m
+            }),
+            required: Some(vec!["x".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("SHOULD NOT")),
+            "Integer readOnly: {:?}",
+            ctx.errors
+        );
+
+        // Number
+        let schema = Schema::Number(Box::new(NumberSchema {
+            read_only: Some(true),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert("x".into(), RefOr::new_item(schema));
+                m
+            }),
+            required: Some(vec!["x".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("SHOULD NOT")),
+            "Number readOnly: {:?}",
+            ctx.errors
+        );
+
+        // Boolean
+        let schema = Schema::Boolean(Box::new(BooleanSchema {
+            read_only: Some(true),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert("x".into(), RefOr::new_item(schema));
+                m
+            }),
+            required: Some(vec!["x".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("SHOULD NOT")),
+            "Boolean readOnly: {:?}",
+            ctx.errors
+        );
+
+        // Array
+        let schema = Schema::Array(Box::new(ArraySchema {
+            read_only: Some(true),
+            items: Some(RefOr::new_item(Schema::from(StringSchema::default()))),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert("x".into(), RefOr::new_item(schema));
+                m
+            }),
+            required: Some(vec!["x".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("SHOULD NOT")),
+            "Array readOnly: {:?}",
+            ctx.errors
+        );
+
+        // Null
+        let schema = Schema::Null(Box::new(NullSchema {
+            read_only: Some(true),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert("x".into(), RefOr::new_item(schema));
+                m
+            }),
+            required: Some(vec!["x".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("SHOULD NOT")),
+            "Null readOnly: {:?}",
+            ctx.errors
+        );
+
+        // AllOf — not read-only by definition; must NOT produce a SHOULD NOT error.
+        let schema = Schema::AllOf(Box::new(AllOfSchema {
+            all_of: vec![RefOr::new_item(Schema::from(StringSchema::default()))],
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert("x".into(), RefOr::new_item(schema));
+                m
+            }),
+            required: Some(vec!["x".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "p".into());
+        assert!(
+            !ctx.errors.iter().any(|e| e.contains("SHOULD NOT")),
+            "AllOf should not flag readOnly: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn schema_default_is_object() {
+        // `Schema::default()` must return the Object variant.
+        assert!(matches!(Schema::default(), Schema::Object(_)));
+    }
+
+    #[test]
+    fn required_property_not_in_properties_skips_read_only_check() {
+        // Covers the `let Some(prop) = props.get(name) else { continue; }` branch:
+        // a `required` entry naming a property absent from `properties` is silently
+        // skipped by the readOnly check (it's caught by other validators).
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "name".into(),
+                    RefOr::new_item(Schema::from(StringSchema::default())),
+                );
+                m
+            }),
+            // "missing" is not in properties — the loop must continue without error.
+            required: Some(vec!["missing".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        // No SHOULD NOT error must appear for the skipped entry.
+        assert!(
+            !ctx.errors.iter().any(|e| e.contains("SHOULD NOT")),
+            "skipped required entry must not trigger readOnly error: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn object_schema_read_only_property_in_required_warns() {
+        // Covers `Schema::Object(s) => s.read_only == Some(true)` in
+        // `is_schema_read_only` (Object variant).
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        Schema::Object(Box::new(ObjectSchema {
+            properties: Some({
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "inner".into(),
+                    RefOr::new_item(Schema::Object(Box::new(ObjectSchema {
+                        read_only: Some(true),
+                        ..Default::default()
+                    }))),
+                );
+                m
+            }),
+            required: Some(vec!["inner".into()]),
+            ..Default::default()
+        }))
+        .validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("SHOULD NOT")),
+            "Object readOnly must trigger warning: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn string_schema_external_docs_validation() {
+        // Covers the `external_docs` branch inside `StringSchema::validate_with_context`
+        // (the existing test only sets external_docs on IntegerSchema).
+        let spec = Spec::default();
+        let ed = crate::v2::external_documentation::ExternalDocumentation {
+            url: "not-a-url".into(),
+            ..Default::default()
+        };
+        let s = Schema::String(Box::new(StringSchema {
+            external_docs: Some(ed),
+            ..Default::default()
+        }));
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        s.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.mentions("must be a valid URL"),
+            "expected external_docs URL error for StringSchema, got: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
     fn x_nullable_round_trip() {
         let value = serde_json::json!({
             "type": "string",

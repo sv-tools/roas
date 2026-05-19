@@ -870,4 +870,120 @@ mod tests {
             ctx.errors,
         );
     }
+
+    #[test]
+    fn get_item_external_unsupported_returns_error() {
+        // `get_item` (without loader) cannot resolve external refs.
+        let spec = PetSpec;
+        let r = RefOr::<Foo>::new_ref("https://example.test/foo.json#/Foo");
+        let err = r.get_item(&spec).unwrap_err();
+        assert!(
+            matches!(err, ResolveError::ExternalUnsupported(_)),
+            "expected ExternalUnsupported, got {err:?}"
+        );
+        // The Display impl includes the reference string.
+        assert!(err.to_string().contains("external reference"));
+    }
+
+    #[test]
+    fn get_item_internal_not_found_returns_error() {
+        // Internal ref that the spec can't resolve.
+        let spec = PetSpec; // always returns None
+        let r = RefOr::<Foo>::new_ref("#/components/schemas/Missing");
+        let err = r.get_item(&spec).unwrap_err();
+        assert!(matches!(err, ResolveError::NotFound(_)));
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn resolve_in_map_cross_map_ref_delegates_to_spec_resolver() {
+        use std::collections::BTreeMap;
+
+        // A spec that can resolve "#/components/schemas/Concrete" directly.
+        struct ConcreteSpec(Foo);
+        impl ResolveReference<Foo> for ConcreteSpec {
+            fn resolve_reference(&self, reference: &str) -> Option<&Foo> {
+                if reference == "#/components/schemas/Concrete" {
+                    Some(&self.0)
+                } else {
+                    None
+                }
+            }
+        }
+
+        let concrete_foo = Foo {
+            foo: "concrete".into(),
+        };
+        let spec = ConcreteSpec(concrete_foo);
+
+        // Build a map where an entry refs a key outside `prefix` — this
+        // exercises the "Cross-map ref" branch that calls `get_item(spec)`.
+        let mut map: BTreeMap<String, RefOr<Foo>> = BTreeMap::new();
+        map.insert(
+            "Alias".into(),
+            RefOr::new_ref("#/components/schemas/Concrete"),
+        );
+        let map_opt = Some(map);
+
+        let result = crate::common::reference::resolve_in_map(
+            &spec,
+            "#/things/Alias",
+            "#/things/",
+            &map_opt,
+        );
+        // The cross-map ref resolves to the concrete item via spec.
+        assert_eq!(result.map(|f| f.foo.as_str()), Some("concrete"));
+    }
+
+    #[test]
+    fn resolve_in_map_cycle_returns_none() {
+        use std::collections::BTreeMap;
+
+        // A spec that never resolves anything.
+        struct EmptySpec;
+        impl ResolveReference<Foo> for EmptySpec {
+            fn resolve_reference(&self, _reference: &str) -> Option<&Foo> {
+                None
+            }
+        }
+
+        // Build a cycle: A -> B -> A (both within the same prefix)
+        let mut map: BTreeMap<String, RefOr<Foo>> = BTreeMap::new();
+        map.insert("A".into(), RefOr::new_ref("#/things/B"));
+        map.insert("B".into(), RefOr::new_ref("#/things/A"));
+        let map_opt = Some(map);
+
+        let result = crate::common::reference::resolve_in_map(
+            &EmptySpec,
+            "#/things/A",
+            "#/things/",
+            &map_opt,
+        );
+        assert!(result.is_none(), "cycle detection must return None");
+    }
+
+    #[test]
+    fn resolve_error_display_messages() {
+        // Cover Display impls for all ResolveError variants.
+        let e = ResolveError::NotFound("my-ref".into());
+        assert!(e.to_string().contains("not found"));
+
+        let e = ResolveError::ExternalUnsupported("http://x".into());
+        assert!(e.to_string().contains("not supported"));
+
+        use crate::loader::LoaderError;
+        let e = ResolveError::External {
+            reference: "http://x/y".into(),
+            source: LoaderError::NoFetcherRegistered {
+                uri: "http://x/y".into(),
+            },
+        };
+        assert!(
+            e.to_string()
+                .contains("failed to resolve external reference")
+        );
+        // Source is accessible via std::error::Error::source.
+        let src = std::error::Error::source(&e).expect("External must have a source");
+        assert!(src.to_string().contains("no fetcher"));
+    }
 }

@@ -491,4 +491,54 @@ mod tests {
             "serialize csv",
         );
     }
+
+    #[test]
+    fn integer_format_display() {
+        assert_eq!(IntegerFormat::Int32.to_string(), "int32");
+        assert_eq!(IntegerFormat::Int64.to_string(), "int64");
+    }
+
+    #[test]
+    fn number_format_display() {
+        assert_eq!(NumberFormat::Float.to_string(), "float");
+        assert_eq!(NumberFormat::Double.to_string(), "double");
+    }
+
+    #[test]
+    fn collection_format_display() {
+        assert_eq!(CollectionFormat::CSV.to_string(), "csv");
+        assert_eq!(CollectionFormat::SSV.to_string(), "ssv");
+        assert_eq!(CollectionFormat::TSV.to_string(), "tsv");
+        assert_eq!(CollectionFormat::PIPES.to_string(), "pipes");
+        assert_eq!(CollectionFormat::Multi.to_string(), "multi");
+    }
+
+    #[test]
+    fn collection_format_multi_roundtrip() {
+        // Tests both Multi serialize and deserialize (previously untested).
+        assert_eq!(
+            serde_json::to_string(&CollectionFormat::Multi).unwrap(),
+            r#""multi""#,
+            "serialize multi",
+        );
+        assert_eq!(
+            serde_json::from_str::<CollectionFormat>(r#""multi""#).unwrap(),
+            CollectionFormat::Multi,
+            "deserialize multi",
+        );
+    }
+
+    #[test]
+    fn string_format_visitor_expecting_message_via_invalid_type() {
+        // `StringFormatVisitor::expecting` is invoked by serde when the input
+        // type doesn't match (e.g. an integer instead of a string). We trigger
+        // it by feeding a JSON number to the `StringFormat` deserializer.
+        let err = serde_json::from_str::<StringFormat>("42").unwrap_err();
+        // The error message must contain the text produced by `expecting`.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("byte") || msg.contains("string") || msg.contains("expected"),
+            "expected a meaningful serde error referencing string formats, got: {msg}"
+        );
+    }
 }
