@@ -920,13 +920,13 @@ mod tests {
         // in: querystring and in: query must not coexist (lines 233-253).
         let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
         let mut ctx = Context::new(spec, Options::new());
-        let qs_param = RefOr::new_item(Parameter::Querystring(
+        let qs_param = RefOr::new_item(Parameter::Querystring(Box::new(
             crate::v3_2::parameter::InQuerystring {
                 name: "q".into(),
                 content: BTreeMap::new(), // will error for empty, but mutation is tested below
                 ..Default::default()
             },
-        ));
+        )));
         let q_param = query_param("filter");
         validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs_param, q_param]));
         assert!(
@@ -943,20 +943,20 @@ mod tests {
         // More than one in: querystring must error (line 240-246).
         let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
         let mut ctx = Context::new(spec, Options::new());
-        let qs1 = RefOr::new_item(Parameter::Querystring(
+        let qs1 = RefOr::new_item(Parameter::Querystring(Box::new(
             crate::v3_2::parameter::InQuerystring {
                 name: "q1".into(),
                 content: BTreeMap::new(),
                 ..Default::default()
             },
-        ));
-        let qs2 = RefOr::new_item(Parameter::Querystring(
+        )));
+        let qs2 = RefOr::new_item(Parameter::Querystring(Box::new(
             crate::v3_2::parameter::InQuerystring {
                 name: "q2".into(),
                 content: BTreeMap::new(),
                 ..Default::default()
             },
-        ));
+        )));
         validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs1, qs2]));
         assert!(
             ctx.errors
@@ -974,20 +974,20 @@ mod tests {
         let mut ctx = Context::new(spec, Options::new());
         // Two querystring params with the same name — should trigger
         // duplicate detection which requires parameter_identity to be called.
-        let qs1 = RefOr::new_item(Parameter::Querystring(
+        let qs1 = RefOr::new_item(Parameter::Querystring(Box::new(
             crate::v3_2::parameter::InQuerystring {
                 name: "q".into(),
                 content: BTreeMap::new(),
                 ..Default::default()
             },
-        ));
-        let qs2 = RefOr::new_item(Parameter::Querystring(
+        )));
+        let qs2 = RefOr::new_item(Parameter::Querystring(Box::new(
             crate::v3_2::parameter::InQuerystring {
                 name: "q".into(),
                 content: BTreeMap::new(),
                 ..Default::default()
             },
-        ));
+        )));
         validate_operation_parameters(&mut ctx, "op", "/p", None, Some(&[qs1, qs2]));
         // Both "duplicate" AND "multiple querystring" errors expected.
         assert!(

@@ -964,25 +964,27 @@ mod tests {
                 ..Default::default()
             }]),
             parameters: Some(vec![RefOr::new_item(
-                crate::v3_2::parameter::Parameter::Query(crate::v3_2::parameter::InQuery {
-                    name: "q".into(),
-                    description: None,
-                    required: None,
-                    deprecated: None,
-                    allow_empty_value: None,
-                    style: None,
-                    explode: None,
-                    allow_reserved: None,
-                    schema: Some(RefOr::new_item(crate::v3_2::schema::Schema::Single(
-                        Box::new(crate::v3_2::schema::SingleSchema::String(
-                            crate::v3_2::schema::StringSchema::default(),
-                        )),
-                    ))),
-                    example: None,
-                    examples: None,
-                    content: None,
-                    extensions: None,
-                }),
+                crate::v3_2::parameter::Parameter::Query(Box::new(
+                    crate::v3_2::parameter::InQuery {
+                        name: "q".into(),
+                        description: None,
+                        required: None,
+                        deprecated: None,
+                        allow_empty_value: None,
+                        style: None,
+                        explode: None,
+                        allow_reserved: None,
+                        schema: Some(RefOr::new_item(crate::v3_2::schema::Schema::Single(
+                            Box::new(crate::v3_2::schema::SingleSchema::String(
+                                crate::v3_2::schema::StringSchema::default(),
+                            )),
+                        ))),
+                        example: None,
+                        examples: None,
+                        content: None,
+                        extensions: None,
+                    },
+                )),
             )]),
             ..Default::default()
         };

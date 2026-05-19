@@ -772,7 +772,7 @@ mod tests {
         let mut ctx = Context::new(&spec, Options::new());
         let mut content = BTreeMap::new();
         content.insert("application/json".to_owned(), MediaType::default());
-        let p = Parameter::Query(InQuery {
+        let p = Parameter::Query(Box::new(InQuery {
             name: "q".into(),
             description: None,
             required: None,
@@ -786,7 +786,7 @@ mod tests {
             examples: None,
             content: Some(content),
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors

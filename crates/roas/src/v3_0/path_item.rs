@@ -548,8 +548,6 @@ mod tests {
     /// PathItem::validate_with_context walks operations and servers.
     #[test]
     fn path_item_validate_walks_operations_and_servers_and_parameters() {
-        use crate::common::reference::RefOr;
-        use crate::v3_0::parameter::{InPath, Parameter};
         use crate::v3_0::spec::Spec;
         use crate::validation::{Context, Options};
 

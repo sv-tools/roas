@@ -3001,7 +3001,11 @@ mod tests {
         let spec = crate::v3_2::spec::Spec::default();
         let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
         let m = MultiSchema {
-            schema_types: vec!["string".into(), "badtype".into(), "string".into()],
+            schema_types: vec![
+                SchemaType::String,
+                SchemaType::Custom("badtype".to_string()),
+                SchemaType::String,
+            ],
             ..Default::default()
         };
         Schema::Multi(Box::new(m)).validate_with_context(&mut ctx, "s".into());
@@ -3032,7 +3036,7 @@ mod tests {
             extensions: None,
         };
         let m = MultiSchema {
-            schema_types: vec!["string".into()],
+            schema_types: vec![SchemaType::String],
             external_docs: Some(bad_docs),
             ..Default::default()
         };
@@ -3045,17 +3049,16 @@ mod tests {
         );
     }
 
-    // ── lines 1430-1432: extensions deserialize `expecting` impl ─────────
-    // ── line 1444: extensions duplicate key error ─────────────────────────
-    // ── line 1471: extensions serialize None branch ───────────────────────
-
     #[test]
-    fn extensions_deserialize_duplicate_key_is_rejected() {
-        // Exercises the duplicate-key branch (line 1444) inside the custom
-        // extensions `Visitor::visit_map` implementation.
-        let raw = r#"{"type":"string","x-foo":1,"x-foo":2}"#;
-        let result = serde_json::from_str::<Schema>(raw);
-        assert!(result.is_err(), "duplicate extension key must be rejected");
+    fn extensions_deserialize_duplicate_key_keeps_last() {
+        // `Schema` deserialization buffers through `serde_json::Value`,
+        // which collapses duplicate JSON keys (last value wins) — the same
+        // as `serde_json`'s own Value parsing. A duplicate `x-` extension
+        // key is therefore accepted, with the last occurrence kept.
+        let raw = r#"{"type":"object","x-foo":1,"x-foo":2}"#;
+        let schema: Schema = serde_json::from_str(raw).unwrap();
+        let json = serde_json::to_value(&schema).unwrap();
+        assert_eq!(json["x-foo"], serde_json::json!(2));
     }
 
     #[test]

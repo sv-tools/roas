@@ -754,7 +754,7 @@ mod tests {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
         // Header with schema (valid)
-        let p = Parameter::Header(InHeader {
+        let p = Parameter::Header(Box::new(InHeader {
             name: "X-Token".into(),
             description: None,
             required: None,
@@ -770,7 +770,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(ctx.errors.is_empty(), "header errors: {:?}", ctx.errors);
     }
@@ -779,7 +779,7 @@ mod tests {
     fn cookie_parameter_validates() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Cookie(InCookie {
+        let p = Parameter::Cookie(Box::new(InCookie {
             name: "session".into(),
             description: None,
             required: None,
@@ -795,7 +795,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(ctx.errors.is_empty(), "cookie errors: {:?}", ctx.errors);
     }
@@ -804,11 +804,11 @@ mod tests {
     fn querystring_parameter_empty_content_errors() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Querystring(InQuerystring {
+        let p = Parameter::Querystring(Box::new(InQuerystring {
             name: "q".into(),
             content: BTreeMap::new(), // empty — must error
             ..Default::default()
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -832,11 +832,11 @@ mod tests {
             "text/plain".to_owned(),
             RefOr::new_item(MediaType::default()),
         );
-        let p = Parameter::Querystring(InQuerystring {
+        let p = Parameter::Querystring(Box::new(InQuerystring {
             name: "q".into(),
             content,
             ..Default::default()
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -861,13 +861,13 @@ mod tests {
             "ex".to_owned(),
             RefOr::new_item(crate::v3_2::example::Example::default()),
         );
-        let p = Parameter::Querystring(InQuerystring {
+        let p = Parameter::Querystring(Box::new(InQuerystring {
             name: "q".into(),
             content,
             example: Some(serde_json::json!("val")),
             examples: Some(examples),
             ..Default::default()
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -897,12 +897,12 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let p = Parameter::Querystring(InQuerystring {
+        let p = Parameter::Querystring(Box::new(InQuerystring {
             name: "q".into(),
             content,
             examples: Some(examples),
             ..Default::default()
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors.mentions("examples[ex1]"),
@@ -920,7 +920,7 @@ mod tests {
             "ex".to_owned(),
             RefOr::new_item(crate::v3_2::example::Example::default()),
         );
-        let p = Parameter::Header(InHeader {
+        let p = Parameter::Header(Box::new(InHeader {
             name: "X-Foo".into(),
             description: None,
             required: None,
@@ -936,7 +936,7 @@ mod tests {
             examples: Some(examples),
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -957,7 +957,7 @@ mod tests {
             RefOr::new_item(MediaType::default()),
         );
         // Both schema and content set — must error
-        let p = Parameter::Cookie(InCookie {
+        let p = Parameter::Cookie(Box::new(InCookie {
             name: "c".into(),
             description: None,
             required: None,
@@ -973,7 +973,7 @@ mod tests {
             examples: None,
             content: Some(content),
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -993,7 +993,7 @@ mod tests {
             "ex".to_owned(),
             RefOr::new_item(crate::v3_2::example::Example::default()),
         );
-        let p = Parameter::Path(InPath {
+        let p = Parameter::Path(Box::new(InPath {
             name: "id".into(),
             description: None,
             required: true,
@@ -1009,7 +1009,7 @@ mod tests {
             examples: Some(examples),
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors

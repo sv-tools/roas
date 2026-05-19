@@ -811,7 +811,7 @@ mod tests {
         let mut params = BTreeMap::new();
         params.insert(
             "limit".to_owned(),
-            RefOr::new_item(Parameter::Query(InQuery {
+            RefOr::new_item(Parameter::Query(Box::new(InQuery {
                 name: "limit".into(),
                 description: None,
                 required: None,
@@ -825,7 +825,7 @@ mod tests {
                 examples: None,
                 content: None,
                 extensions: None,
-            })),
+            }))),
         );
         let comp = Components {
             parameters: Some(params),

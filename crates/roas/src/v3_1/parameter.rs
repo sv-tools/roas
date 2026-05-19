@@ -667,7 +667,7 @@ mod tests {
     fn cookie_parameter_validates() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Cookie(InCookie {
+        let p = Parameter::Cookie(Box::new(InCookie {
             name: "session".into(),
             description: None,
             required: None,
@@ -683,7 +683,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
     }
@@ -692,7 +692,7 @@ mod tests {
     fn cookie_parameter_example_and_examples_mutex() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Cookie(InCookie {
+        let p = Parameter::Cookie(Box::new(InCookie {
             name: "session".into(),
             description: None,
             required: None,
@@ -711,7 +711,7 @@ mod tests {
             )])),
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -728,7 +728,7 @@ mod tests {
     fn header_parameter_validates() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Header(InHeader {
+        let p = Parameter::Header(Box::new(InHeader {
             name: "X-Request-ID".into(),
             description: None,
             required: None,
@@ -744,7 +744,7 @@ mod tests {
             examples: None,
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
     }
@@ -760,7 +760,7 @@ mod tests {
             "application/json".to_owned(),
             crate::v3_1::media_type::MediaType::default(),
         );
-        let p = Parameter::Path(InPath {
+        let p = Parameter::Path(Box::new(InPath {
             name: "id".into(),
             description: None,
             required: true,
@@ -776,7 +776,7 @@ mod tests {
             examples: None,
             content: Some(content),
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -793,7 +793,7 @@ mod tests {
     fn path_parameter_example_and_examples_mutex() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Path(InPath {
+        let p = Parameter::Path(Box::new(InPath {
             name: "id".into(),
             description: None,
             required: true,
@@ -812,7 +812,7 @@ mod tests {
             )])),
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors
@@ -827,7 +827,7 @@ mod tests {
     fn header_parameter_example_and_examples_mutex() {
         let spec = Spec::default();
         let mut ctx = Context::new(&spec, Options::new());
-        let p = Parameter::Header(InHeader {
+        let p = Parameter::Header(Box::new(InHeader {
             name: "X-ID".into(),
             description: None,
             required: None,
@@ -846,7 +846,7 @@ mod tests {
             )])),
             content: None,
             extensions: None,
-        });
+        }));
         p.validate_with_context(&mut ctx, "p".into());
         assert!(
             ctx.errors

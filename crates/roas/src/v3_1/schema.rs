@@ -3219,7 +3219,7 @@ mod tests {
     #[test]
     fn multi_schema_invalid_type_errors() {
         let schema = Schema::Multi(Box::new(MultiSchema {
-            schema_types: vec!["invalid_type".to_string()],
+            schema_types: vec![SchemaType::Custom("invalid_type".to_string())],
             ..Default::default()
         }));
         let spec = crate::v3_1::spec::Spec::default();
@@ -3237,7 +3237,7 @@ mod tests {
     #[test]
     fn multi_schema_duplicate_type_errors() {
         let schema = Schema::Multi(Box::new(MultiSchema {
-            schema_types: vec!["string".to_string(), "string".to_string()],
+            schema_types: vec![SchemaType::String, SchemaType::String],
             ..Default::default()
         }));
         let spec = crate::v3_1::spec::Spec::default();
@@ -3255,7 +3255,7 @@ mod tests {
     #[test]
     fn multi_schema_with_external_docs_validates() {
         let schema = Schema::Multi(Box::new(MultiSchema {
-            schema_types: vec!["string".to_string(), "null".to_string()],
+            schema_types: vec![SchemaType::String, SchemaType::Null],
             external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
                 url: "https://example.com".into(),
                 ..Default::default()

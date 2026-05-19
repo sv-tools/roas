@@ -2464,7 +2464,6 @@ mod tests {
     fn oauth2_missing_flow_falls_back_to_implicit() {
         // Build the JSON directly (bypassing the v2 typed model which requires
         // a valid `flow` enum value) so we exercise the `_ => "implicit"` arm.
-        use crate::v2::spec::Spec as V2Spec;
         let mut v: serde_json::Value = serde_json::json!({
             "swagger": "2.0",
             "info": { "title": "t", "version": "1" },
