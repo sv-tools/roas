@@ -150,6 +150,12 @@ jobs:
   PublishCrateJob:
     name: Test publishing per crate
     needs: RustMeta
+    # `RustMeta.outputs.publish` is `'[]'` on commits that don't bump
+    # any crate version (i.e. most PRs and main pushes). GitHub treats
+    # an empty matrix vector as a fatal "does not contain any values"
+    # error rather than silently skipping, so gate the whole job
+    # instead of relying on the matrix expanding to nothing.
+    if: ${{ needs.RustMeta.outputs.publish != '[]' }}
     strategy:
       matrix:
         package: ${{ fromJSON(needs.RustMeta.outputs.publish) }}
