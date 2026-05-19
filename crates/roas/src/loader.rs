@@ -12,6 +12,7 @@ use std::fs;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use thiserror::Error;
 use url::Url;
 
@@ -319,28 +320,81 @@ impl Loader {
         }
     }
 
-    /// Resolve and deserialize a reference into the requested type.
+    /// Look up a typed-cache entry, returning a cheap `Arc` clone on a hit.
     ///
-    /// Subsequent calls with the same `reference` and `T` return a clone
-    /// of the cached deserialized value rather than re-running serde over
-    /// the underlying `Value`.
-    pub fn resolve_reference_as<T>(&mut self, reference: &str) -> Result<T, LoaderError>
+    /// The typed cache stores `Arc<T>` (not `T`) so a hit hands back a
+    /// shared handle instead of deep-cloning a potentially large external
+    /// schema.
+    fn typed_cache_get<T: 'static>(&self, cache_key: &(String, TypeId)) -> Option<Arc<T>> {
+        self.typed_cache
+            .get(cache_key)?
+            .downcast_ref::<Arc<T>>()
+            .cloned()
+    }
+
+    /// Resolve and deserialize a reference into a shared `Arc<T>`.
+    ///
+    /// This is the allocation-cheap counterpart of [`Self::resolve_reference_as`]:
+    /// the deserialized value is parsed at most once and every subsequent
+    /// call — for the same `reference` and `T` — returns an `Arc` clone
+    /// rather than a deep clone of the value.
+    pub fn resolve_reference_as_arc<T>(&mut self, reference: &str) -> Result<Arc<T>, LoaderError>
     where
-        T: 'static + Clone + DeserializeOwned,
+        T: 'static + DeserializeOwned,
     {
         let cache_key = (reference.to_string(), TypeId::of::<T>());
-        if let Some(entry) = self.typed_cache.get(&cache_key)
-            && let Some(cached) = entry.downcast_ref::<T>()
-        {
-            return Ok(cached.clone());
+        if let Some(cached) = self.typed_cache_get::<T>(&cache_key) {
+            return Ok(cached);
         }
         let (key, _) = parse_reference(reference)?;
         let uri = key.to_string();
         let value = self.resolve_reference(reference)?;
         let parsed: T = serde_json::from_value(value.clone())
             .map_err(|source| LoaderError::Parse { uri, source })?;
-        self.typed_cache.insert(cache_key, Box::new(parsed.clone()));
-        Ok(parsed)
+        let arc = Arc::new(parsed);
+        self.typed_cache
+            .insert(cache_key, Box::new(Arc::clone(&arc)));
+        Ok(arc)
+    }
+
+    /// Resolve and deserialize a reference into the requested type.
+    ///
+    /// Subsequent calls with the same `reference` and `T` return a clone
+    /// of the cached deserialized value rather than re-running serde over
+    /// the underlying `Value`. Callers that can work with a shared handle
+    /// should prefer [`Self::resolve_reference_as_arc`], which skips the
+    /// deep clone.
+    pub fn resolve_reference_as<T>(&mut self, reference: &str) -> Result<T, LoaderError>
+    where
+        T: 'static + Clone + DeserializeOwned,
+    {
+        self.resolve_reference_as_arc::<T>(reference)
+            .map(|arc| (*arc).clone())
+    }
+
+    /// Asynchronously resolve and deserialize a reference into a shared `Arc<T>`.
+    ///
+    /// Shares the typed cache with [`Self::resolve_reference_as_arc`].
+    pub async fn resolve_reference_as_arc_async<T>(
+        &mut self,
+        reference: &str,
+    ) -> Result<Arc<T>, LoaderError>
+    where
+        T: 'static + DeserializeOwned,
+    {
+        let cache_key = (reference.to_string(), TypeId::of::<T>());
+        if let Some(cached) = self.typed_cache_get::<T>(&cache_key) {
+            return Ok(cached);
+        }
+        let (key, _) = parse_reference(reference)?;
+        let uri = key.to_string();
+        let value = self.resolve_reference_async(reference).await?;
+        let parsed: T = serde_json::from_value(value.clone())
+            .map_err(|source| LoaderError::Parse { uri, source })?;
+        let arc = Arc::new(parsed);
+        self.typed_cache
+            .insert(cache_key, Box::new(Arc::clone(&arc)));
+        Ok(arc)
     }
 
     /// Asynchronously resolve and deserialize a reference into the requested type.
@@ -350,19 +404,9 @@ impl Loader {
     where
         T: 'static + Clone + DeserializeOwned,
     {
-        let cache_key = (reference.to_string(), TypeId::of::<T>());
-        if let Some(entry) = self.typed_cache.get(&cache_key)
-            && let Some(cached) = entry.downcast_ref::<T>()
-        {
-            return Ok(cached.clone());
-        }
-        let (key, _) = parse_reference(reference)?;
-        let uri = key.to_string();
-        let value = self.resolve_reference_async(reference).await?;
-        let parsed: T = serde_json::from_value(value.clone())
-            .map_err(|source| LoaderError::Parse { uri, source })?;
-        self.typed_cache.insert(cache_key, Box::new(parsed.clone()));
-        Ok(parsed)
+        self.resolve_reference_as_arc_async::<T>(reference)
+            .await
+            .map(|arc| (*arc).clone())
     }
 }
 
@@ -915,6 +959,30 @@ mod tests {
 
         let second: Pet = loader.resolve_reference_as("doc.json#/Pet").unwrap();
         assert_eq!(first, second, "typed cache must keep the parsed value");
+    }
+
+    #[test]
+    fn resolve_reference_as_arc_shares_one_allocation() {
+        #[derive(Clone, serde::Deserialize)]
+        struct Pet {
+            name: String,
+        }
+
+        let mut loader = Loader::new();
+        loader
+            .preload_resource("doc.json", serde_json::json!({ "Pet": { "name": "rex" } }))
+            .unwrap();
+
+        let first: Arc<Pet> = loader.resolve_reference_as_arc("doc.json#/Pet").unwrap();
+        let second: Arc<Pet> = loader.resolve_reference_as_arc("doc.json#/Pet").unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "repeat calls must share one Arc allocation"
+        );
+        assert_eq!(first.name, "rex");
+        // The owned API is layered on the Arc cache and still works.
+        let owned: Pet = loader.resolve_reference_as("doc.json#/Pet").unwrap();
+        assert_eq!(owned.name, "rex");
     }
 
     fn block_on_simple<F: Future>(future: F) -> F::Output {
