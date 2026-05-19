@@ -613,6 +613,28 @@ mod tests {
     }
 
     #[test]
+    fn ref_fast_and_slow_paths_agree_on_a_full_ref() {
+        // A fully-populated `Ref` must deserialize identically whether
+        // `$ref` is the first key (streaming fast path) or not (buffered
+        // slow path). This guards against the two paths drifting if
+        // `Ref` ever gains a field — one path would then accept it and
+        // the other reject it for the same document.
+        let fast: RefOr<Foo> =
+            serde_json::from_str(r##"{"$ref":"#/x","summary":"s","description":"d"}"##).unwrap();
+        let slow: RefOr<Foo> =
+            serde_json::from_str(r##"{"summary":"s","$ref":"#/x","description":"d"}"##).unwrap();
+        assert_eq!(fast, slow, "first-key and non-first-key $ref must agree");
+        match fast {
+            RefOr::Ref(r) => {
+                assert_eq!(r.reference, "#/x");
+                assert_eq!(r.summary.as_deref(), Some("s"));
+                assert_eq!(r.description.as_deref(), Some("d"));
+            }
+            RefOr::Item(_) => panic!("expected Ref variant"),
+        }
+    }
+
+    #[test]
     fn get_item_with_loader_external_resolves_via_loader() {
         let dir = std::env::temp_dir().join(format!(
             "roas-refor-loader-{}-{}",

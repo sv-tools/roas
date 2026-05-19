@@ -1745,6 +1745,27 @@ mod tests {
     }
 
     #[test]
+    fn composition_keyword_beside_sibling_still_routes_to_allof() {
+        // `allOf` next to a sibling keyword that `AllOfSchema` does not
+        // model (`type`, `anyOf`) must still parse: the composition
+        // structs tolerate — and drop — unmodeled keys, so key-routing
+        // produces the same `AllOf` the old untagged fallthrough did.
+        let s: Schema = serde_json::from_value(serde_json::json!({
+            "allOf": [{"$ref": "#/components/schemas/Base"}],
+            "type": "object",
+        }))
+        .unwrap();
+        assert!(matches!(s, Schema::AllOf(_)), "got {s:?}");
+
+        let s: Schema = serde_json::from_value(serde_json::json!({
+            "allOf": [{"$ref": "#/components/schemas/Base"}],
+            "anyOf": [{"$ref": "#/components/schemas/Other"}],
+        }))
+        .unwrap();
+        assert!(matches!(s, Schema::AllOf(_)), "got {s:?}");
+    }
+
+    #[test]
     fn test_all_of_serialize() {
         assert_eq!(
             serde_json::to_value(Schema::from(AllOfSchema {
