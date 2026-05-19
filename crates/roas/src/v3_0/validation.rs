@@ -799,4 +799,122 @@ mod tests {
             ctx.errors
         );
     }
+
+    /// An internal `$ref` parameter that resolves successfully exercises the
+    /// `ResolvedParam::Item` branch (lines 46-47) for ref-form parameters.
+    #[test]
+    fn internal_ref_parameter_resolves_and_validates() {
+        use crate::v3_0::components::Components;
+
+        // Build a spec with a component parameter so `resolve_parameter`
+        // can follow the internal `$ref` and return `ResolvedParam::Item`.
+        let mut params = BTreeMap::new();
+        params.insert(
+            "limit".to_owned(),
+            RefOr::new_item(Parameter::Query(InQuery {
+                name: "limit".into(),
+                description: None,
+                required: None,
+                deprecated: None,
+                allow_empty_value: None,
+                style: None,
+                explode: None,
+                allow_reserved: None,
+                schema: None,
+                example: None,
+                examples: None,
+                content: None,
+                extensions: None,
+            })),
+        );
+        let comp = Components {
+            parameters: Some(params),
+            ..Default::default()
+        };
+        let spec_val = Spec {
+            components: Some(comp),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(spec_val));
+        let mut ctx = Context::new(spec, Options::new());
+
+        // Use a `$ref` pointing at the component.
+        let ref_param: RefOr<Parameter> = RefOr::new_ref("#/components/parameters/limit");
+        validate_operation_parameters(&mut ctx, "op", "/items", None, Some(&[ref_param]));
+        // No errors expected — resolved fine as a query param on a path with no template vars.
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    /// An internal `$ref` parameter that does NOT resolve yields
+    /// `ResolvedParam::UnresolvedInternal` (line 48), which the dup_pass
+    /// silently ignores. No panic, no spurious error.
+    #[test]
+    fn internal_ref_parameter_unresolved_is_silent() {
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let ref_param: RefOr<Parameter> = RefOr::new_ref("#/components/parameters/ghost");
+        // No panic; the unresolved internal ref is not flagged by dup_pass.
+        validate_operation_parameters(&mut ctx, "op", "/items", None, Some(&[ref_param]));
+        // The path has no template variables, so the only possible error
+        // would be from the ref resolution — which is handled elsewhere.
+        // Just verify we don't crash and no "duplicate" noise appears.
+        assert!(
+            !ctx.errors.mentions("duplicate"),
+            "no duplicate error for unresolved internal ref: {:?}",
+            ctx.errors
+        );
+    }
+
+    /// validate_path_template_uniqueness: x- extension keys in paths are
+    /// skipped (line 361).
+    #[test]
+    fn path_template_uniqueness_skips_x_extension_keys() {
+        let mut paths: BTreeMap<String, PathItem> = BTreeMap::new();
+        // Two x- keys that would canonicalise to the same shape if compared —
+        // they must be silently skipped, not reported as conflicts.
+        paths.insert("x-foo".into(), PathItem::default());
+        paths.insert("x-bar".into(), PathItem::default());
+        paths.insert("/real/{id}".into(), PathItem::default());
+
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_template_uniqueness(&mut ctx, &paths);
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    /// validate_path_item with no operations does not panic (line 399).
+    #[test]
+    fn path_item_with_no_operations_validated_without_panic() {
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let item = PathItem::default();
+        // A path item with no operations, servers, or parameters — must run
+        // the parameter checks for zero operations without panicking.
+        validate_path_item(&mut ctx, "/empty", "#.paths[/empty]", &item);
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    /// validate_security_requirements: when the named scheme's RefOr is a
+    /// `$ref` that doesn't resolve (get_item fails), the continue branch fires
+    /// (line 278). We exercise this by pointing at a non-existent component.
+    #[test]
+    fn security_scheme_ref_that_does_not_resolve_is_skipped() {
+        use crate::v3_0::components::Components;
+        // Put a `$ref` entry in securitySchemes that points at a ghost.
+        let mut schemes = BTreeMap::new();
+        schemes.insert(
+            "ghost".to_owned(),
+            RefOr::new_ref("#/components/securitySchemes/ghost"),
+        );
+        let comp = Components {
+            security_schemes: Some(schemes),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(spec_with_components(comp)));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        req.insert("ghost".to_owned(), vec![]);
+        // Must not panic; the unresolvable ref is silently skipped.
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+    }
 }

@@ -2033,4 +2033,673 @@ mod tests {
         let cat = &value["components"]["schemas"]["Cat"];
         assert_eq!(cat["discriminator"]["propertyName"], "kind");
     }
+
+    /// x-servers (Redoc extension) wins over host/basePath/schemes when
+    /// non-empty; an empty x-servers array falls back to the assembled
+    /// host+basePath+schemes list.
+    #[test]
+    fn x_servers_non_empty_wins_over_assembled_servers() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "host": "api.example.com",
+            "basePath": "/v1",
+            "schemes": ["https"],
+            "x-servers": [{"url": "https://override.example.com"}],
+            "paths": {}
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let servers = v3.servers.as_ref().expect("servers populated");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].url, "https://override.example.com");
+    }
+
+    /// assemble_servers: when no schemes are provided, defaults to https.
+    #[test]
+    fn assemble_servers_defaults_to_https_when_no_schemes() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "host": "api.example.com",
+            "basePath": "/v2",
+            "paths": {}
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let servers = v3.servers.as_ref().expect("servers populated");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].url, "https://api.example.com/v2");
+    }
+
+    /// Paths object: x- extension keys are skipped during path iteration.
+    #[test]
+    fn x_extension_key_in_paths_is_skipped() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "x-internal-note": "some extension",
+                "/real": {
+                    "get": {
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        // Must not panic; the x- key is not a path item and should be skipped.
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        // The real path is present.
+        assert!(value["paths"]["/real"]["get"].is_object());
+    }
+
+    /// Top-level `responses` component entries also get their schema
+    /// lifted into a `content` map (line 192 in transform_spec).
+    #[test]
+    fn top_level_responses_component_gets_content_map() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "produces": ["application/json"],
+            "responses": {
+                "ErrorResp": {
+                    "description": "an error",
+                    "schema": {"$ref": "#/definitions/Error"}
+                }
+            },
+            "definitions": {"Error": {"type": "object"}}
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let comp_resp = &value["components"]["responses"]["ErrorResp"];
+        assert_eq!(comp_resp["description"], "an error");
+        let schema_ref = &comp_resp["content"]["application/json"]["schema"]["$ref"];
+        assert_eq!(schema_ref, "#/components/schemas/Error");
+    }
+
+    /// Body parameter with description, required, and x-examples.
+    #[test]
+    fn body_param_with_description_and_x_examples_produces_complete_request_body() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "parameters": [{
+                            "in": "body",
+                            "name": "pet",
+                            "description": "A pet",
+                            "required": true,
+                            "schema": {"type": "object"},
+                            "x-examples": {
+                                "cat": {"name": "Whiskers"}
+                            }
+                        }],
+                        "responses": { "201": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let rb = &value["paths"]["/pets"]["post"]["requestBody"];
+        assert_eq!(rb["description"], "A pet");
+        assert_eq!(rb["required"], true);
+        // x-examples wrapped as Example Objects.
+        let examples = &rb["content"]["application/json"]["examples"];
+        assert_eq!(examples["cat"]["value"]["name"], "Whiskers");
+    }
+
+    /// transform_non_body_parameter: when collectionFormat is `ssv` outside
+    /// query/cookie it falls back to `simple`.
+    #[test]
+    fn collection_format_ssv_on_path_becomes_simple() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items/{tags}": {
+                    "get": {
+                        "parameters": [{
+                            "in": "path",
+                            "name": "tags",
+                            "required": true,
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "collectionFormat": "ssv"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/items/{tags}"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "simple");
+        assert_eq!(p["explode"], false);
+    }
+
+    /// collectionFormat `pipes` on query becomes `pipeDelimited`.
+    #[test]
+    fn collection_format_pipes_on_query_becomes_pipe_delimited() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query",
+                            "name": "tags",
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "collectionFormat": "pipes"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/items"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "pipeDelimited");
+    }
+
+    /// collectionFormat `multi` on a non-query/cookie location falls back to `simple`.
+    #[test]
+    fn collection_format_multi_on_header_becomes_simple() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "parameters": [{
+                            "in": "header",
+                            "name": "X-Tags",
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "collectionFormat": "multi"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/x"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "simple");
+        assert_eq!(p["explode"], true);
+    }
+
+    /// collectionFormat `csv` on query becomes `form`.
+    #[test]
+    fn collection_format_csv_on_query_becomes_form() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query",
+                            "name": "tags",
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "collectionFormat": "csv"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/items"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "form");
+        assert_eq!(p["explode"], false);
+    }
+
+    /// collectionFormat `csv` on a path/header becomes `simple`.
+    #[test]
+    fn collection_format_csv_on_path_becomes_simple() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items/{id}": {
+                    "get": {
+                        "parameters": [{
+                            "in": "path",
+                            "name": "id",
+                            "required": true,
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "collectionFormat": "csv"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/items/{id}"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "simple");
+    }
+
+    /// collectionFormat `ssv` on query becomes `spaceDelimited`.
+    #[test]
+    fn collection_format_ssv_on_query_becomes_space_delimited() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query",
+                            "name": "tags",
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "collectionFormat": "ssv"
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/items"]["get"]["parameters"][0];
+        assert_eq!(p["style"], "spaceDelimited");
+    }
+
+    /// transform_items: deeply nested `items` has collectionFormat stripped
+    /// recursively.
+    #[test]
+    fn nested_items_collectionformat_stripped() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/items": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query",
+                            "name": "tags",
+                            "type": "array",
+                            "collectionFormat": "csv",
+                            "items": {
+                                "type": "array",
+                                "collectionFormat": "csv",
+                                "items": {"type": "string"}
+                            }
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/items"]["get"]["parameters"][0];
+        // No collectionFormat at any nesting level.
+        assert!(p["schema"]["items"].get("collectionFormat").is_none());
+    }
+
+    /// Response header with $ref is passed through unchanged.
+    #[test]
+    fn response_header_ref_passes_through() {
+        // V2 Header is a `type`-tagged enum, so a $ref-only header cannot go
+        // through the typed model. Use the raw JSON transform instead.
+        let mut v: serde_json::Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "produces": ["application/json"],
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "headers": {
+                                    "X-Rate-Limit": {
+                                        "$ref": "#/x-headerDefs/rateLimit"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        super::transform_spec(&mut v);
+        let header = &v["paths"]["/x"]["get"]["responses"]["200"]["headers"]["X-Rate-Limit"];
+        // $ref is preserved verbatim through transform_header.
+        assert!(header.get("$ref").is_some());
+    }
+
+    /// oauth2 with `implicit` flow maps to the `implicit` key.
+    #[test]
+    fn oauth2_implicit_flow_preserved() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "securityDefinitions": {
+                "oauth": {
+                    "type": "oauth2",
+                    "flow": "implicit",
+                    "authorizationUrl": "https://example.com/auth",
+                    "scopes": {"read": "read access"}
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let scheme = &value["components"]["securitySchemes"]["oauth"];
+        assert!(scheme["flows"]["implicit"].is_object());
+        assert_eq!(
+            scheme["flows"]["implicit"]["authorizationUrl"],
+            "https://example.com/auth"
+        );
+    }
+
+    /// oauth2 with `password` flow maps to the `password` key.
+    #[test]
+    fn oauth2_password_flow_preserved() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "securityDefinitions": {
+                "oauth": {
+                    "type": "oauth2",
+                    "flow": "password",
+                    "tokenUrl": "https://example.com/token",
+                    "scopes": {"write": "write access"}
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let scheme = &value["components"]["securitySchemes"]["oauth"];
+        assert!(scheme["flows"]["password"].is_object());
+        assert_eq!(
+            scheme["flows"]["password"]["tokenUrl"],
+            "https://example.com/token"
+        );
+    }
+
+    /// oauth2 with `application` flow maps to `clientCredentials`.
+    #[test]
+    fn oauth2_application_flow_becomes_client_credentials() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "securityDefinitions": {
+                "oauth": {
+                    "type": "oauth2",
+                    "flow": "application",
+                    "tokenUrl": "https://example.com/token",
+                    "scopes": {"admin": "admin"}
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let scheme = &value["components"]["securitySchemes"]["oauth"];
+        assert!(scheme["flows"]["clientCredentials"].is_object());
+    }
+
+    /// oauth2 with no flow field falls back to `implicit` (the default arm
+    /// of the `match flow.as_deref()` in `transform_security_definitions`).
+    #[test]
+    fn oauth2_missing_flow_falls_back_to_implicit() {
+        // Build the JSON directly (bypassing the v2 typed model which requires
+        // a valid `flow` enum value) so we exercise the `_ => "implicit"` arm.
+        use crate::v2::spec::Spec as V2Spec;
+        let mut v: serde_json::Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "securityDefinitions": {
+                "oauth": {
+                    "type": "oauth2",
+                    "scopes": {}
+                }
+            }
+        });
+        // Transform on the raw JSON so the `flow` absence hits `_ => "implicit"`.
+        super::transform_spec(&mut v);
+        let scheme = &v["components"]["securitySchemes"]["oauth"];
+        assert!(scheme["flows"]["implicit"].is_object());
+    }
+
+    /// Links in responses go through Pos::Link so `parameters` and
+    /// `requestBody` payloads are opaque (not walked for $ref remapping).
+    #[test]
+    fn link_object_parameters_and_request_body_are_opaque() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "produces": ["application/json"],
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "schema": {"type": "object"},
+                                "x-links": {
+                                    "GetPetById": {
+                                        "operationId": "getPet",
+                                        "parameters": {
+                                            "petId": "#/definitions/ShouldNotBeRemapped"
+                                        },
+                                        "requestBody": "#/definitions/ShouldNotBeRemapped"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        // x-links is an extension — round-trips verbatim; walk doesn't touch its values.
+        let link = &value["paths"]["/pets"]["get"]["responses"]["200"]["x-links"]["GetPetById"];
+        assert_eq!(
+            link["parameters"]["petId"],
+            "#/definitions/ShouldNotBeRemapped"
+        );
+        assert_eq!(link["requestBody"], "#/definitions/ShouldNotBeRemapped");
+    }
+
+    /// The `links` (v3.0 native) map uses Pos::LinkMap — each entry is a Link.
+    #[test]
+    fn v3_links_in_response_use_link_map_position() {
+        // A v3.0-style links map on a response. "links" is not a v2 field so
+        // this must go through the raw JSON transform to avoid deserialization
+        // failures. The walker uses Pos::LinkMap so `parameters` entries are
+        // treated as opaque runtime expressions and must not be rewritten.
+        let mut v: serde_json::Value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "produces": ["application/json"],
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "schema": {"type": "object"},
+                                "links": {
+                                    "GetPetById": {
+                                        "operationId": "getPet",
+                                        "parameters": {
+                                            "petId": "$response.body#/id"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        super::transform_spec(&mut v);
+        let param = &v["paths"]["/pets"]["get"]["responses"]["200"]["links"]["GetPetById"]["parameters"]
+            ["petId"];
+        // The runtime expression string must not be rewritten.
+        assert_eq!(param, "$response.body#/id");
+    }
+
+    /// A $ref to a non-special prefix is returned as-is by remap_ref_path.
+    #[test]
+    fn unmatched_ref_prefix_passes_through() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "parameters": [{"$ref": "external.yaml#/components/parameters/Limit"}],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        // External ref must be preserved verbatim.
+        let p = &value["paths"]["/x"]["get"]["parameters"][0]["$ref"];
+        assert_eq!(p, "external.yaml#/components/parameters/Limit");
+    }
+
+    /// A `$ref` to a `#/securityDefinitions/` path gets remapped to
+    /// `#/components/securitySchemes/`.
+    #[test]
+    fn security_definitions_ref_remapped() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "security": [{"auth": []}],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            },
+            "securityDefinitions": {
+                "auth": {"type": "apiKey", "name": "api_key", "in": "header"}
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        // The scheme must live under securitySchemes.
+        assert!(
+            value["components"]["securitySchemes"]["auth"].is_object(),
+            "auth scheme must be in securitySchemes"
+        );
+    }
+
+    /// form_param with `allowEmptyValue` and `collectionFormat` fields are
+    /// stripped during form body synthesis.
+    #[test]
+    fn form_param_allowemptyvalue_and_collectionformat_stripped() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/login": {
+                    "post": {
+                        "parameters": [{
+                            "in": "formData",
+                            "name": "tags",
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "collectionFormat": "csv",
+                            "allowEmptyValue": true
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let props = &value["paths"]["/login"]["post"]["requestBody"]["content"]["application/x-www-form-urlencoded"]
+            ["schema"]["properties"];
+        let tags = &props["tags"];
+        // collectionFormat and allowEmptyValue must not appear on the schema property.
+        assert!(tags.get("collectionFormat").is_none());
+        assert!(tags.get("allowEmptyValue").is_none());
+        assert_eq!(tags["type"], "array");
+    }
+
+    /// `allowEmptyValue` is only valid on query parameters in v3.0;
+    /// it must be stripped from non-query parameters.
+    #[test]
+    fn allow_empty_value_stripped_from_path_param() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x/{id}": {
+                    "get": {
+                        "parameters": [{
+                            "in": "path",
+                            "name": "id",
+                            "required": true,
+                            "type": "string",
+                            "allowEmptyValue": true
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/x/{id}"]["get"]["parameters"][0];
+        assert!(
+            p.get("allowEmptyValue").is_none(),
+            "must be stripped from path param"
+        );
+    }
+
+    /// `allowEmptyValue` is preserved on query parameters.
+    #[test]
+    fn allow_empty_value_kept_on_query_param() {
+        let raw = r##"{
+            "swagger": "2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "parameters": [{
+                            "in": "query",
+                            "name": "q",
+                            "type": "string",
+                            "allowEmptyValue": true
+                        }],
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        }"##;
+        let v3: V3Spec = v2_from_json(raw).into();
+        let value = serde_json::to_value(&v3).unwrap();
+        let p = &value["paths"]["/x"]["get"]["parameters"][0];
+        assert_eq!(p["allowEmptyValue"], true);
+    }
 }

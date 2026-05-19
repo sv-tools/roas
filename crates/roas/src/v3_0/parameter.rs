@@ -763,4 +763,37 @@ mod tests {
             ctx.errors
         );
     }
+
+    /// A parameter with BOTH schema and content set must be rejected
+    /// (line 484: the `(true, true)` arm of `either_schema_or_content`).
+    #[test]
+    fn schema_and_content_mutually_exclusive() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let mut content = BTreeMap::new();
+        content.insert("application/json".to_owned(), MediaType::default());
+        let p = Parameter::Query(InQuery {
+            name: "q".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            allow_empty_value: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            schema: Some(ok_schema()),
+            example: None,
+            examples: None,
+            content: Some(content),
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("schema and content are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
 }

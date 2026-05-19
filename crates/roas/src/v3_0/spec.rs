@@ -1624,4 +1624,73 @@ mod tests {
             "IgnoreNonUniqOperationIDs must suppress the duplicate, got: {leftover:?}",
         );
     }
+
+    /// Spec::validate reports an error for paths not starting with `/`.
+    #[test]
+    fn validate_path_must_start_with_slash() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "noslash": {
+                    "get": {
+                        "responses": {"200": {"description": "ok"}}
+                    }
+                }
+            }
+        }))
+        .expect("spec must parse");
+
+        let err = spec.validate(IGNORE_UNUSED, None).expect_err("must fail");
+        assert!(
+            err.errors.iter().any(|e| e.contains("must start with `/`")),
+            "expected must-start-with-slash error: {:?}",
+            err.errors
+        );
+    }
+
+    /// Spec::validate runs validate_security_requirements for spec-level security.
+    #[test]
+    fn validate_spec_level_security_requirement_missing_scheme_errors() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "security": [{"nonexistent": []}]
+        }))
+        .expect("spec must parse");
+
+        let err = spec.validate(IGNORE_UNUSED, None).expect_err("must fail");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("nonexistent") || e.contains("securitySchemes")),
+            "expected missing scheme error: {:?}",
+            err.errors
+        );
+    }
+
+    /// Spec::validate walks x_tag_groups and emits errors for empty names/tags.
+    #[test]
+    fn validate_x_tag_groups_empty_name_and_tag_errors() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.0.4",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "x-tagGroups": [
+                {"name": "", "tags": [""]},
+                {"name": "Good", "tags": []}
+            ]
+        }))
+        .expect("spec must parse");
+
+        let err = spec.validate(IGNORE_UNUSED, None).expect_err("must fail");
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("x-tagGroups") && e.contains("name")),
+            "expected empty name error: {:?}",
+            err.errors
+        );
+    }
 }

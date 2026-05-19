@@ -1866,4 +1866,67 @@ mod tests {
         let parsed: Schema = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
+
+    /// AnyOf and OneOf validate dispatch walks into member schemas and
+    /// discriminators. Line coverage for Schema::AnyOf / Schema::OneOf
+    /// validate arms (lines 938-956).
+    #[test]
+    fn anyof_oneof_not_validate_dispatch() {
+        let spec = Spec::default();
+
+        // AnyOf with a bad member and a discriminator with empty propertyName.
+        let anyof: Schema = serde_json::from_value(serde_json::json!({
+            "anyOf": [
+                {"type": "string", "pattern": "["}
+            ],
+            "discriminator": {"propertyName": ""}
+        }))
+        .unwrap();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        anyof.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("pattern"),
+            "anyOf: expected pattern error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.mentions("propertyName"),
+            "anyOf: expected empty propertyName error: {:?}",
+            ctx.errors
+        );
+
+        // OneOf with a bad member and a discriminator with empty propertyName.
+        let oneof: Schema = serde_json::from_value(serde_json::json!({
+            "oneOf": [
+                {"type": "string", "pattern": "["}
+            ],
+            "discriminator": {"propertyName": ""}
+        }))
+        .unwrap();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        oneof.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("pattern"),
+            "oneOf: expected pattern error: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors.mentions("propertyName"),
+            "oneOf: expected empty propertyName error: {:?}",
+            ctx.errors
+        );
+
+        // Not with a bad inner schema.
+        let not_schema: Schema = serde_json::from_value(serde_json::json!({
+            "not": {"type": "string", "pattern": "["}
+        }))
+        .unwrap();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        not_schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.mentions("not"),
+            "not: expected nested pattern error: {:?}",
+            ctx.errors
+        );
+    }
 }
