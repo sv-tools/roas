@@ -77,7 +77,14 @@ pub enum ResolveError {
 #[serde(untagged)]
 pub enum RefOr<T> {
     /// A reference to another component.
-    Ref(Ref),
+    ///
+    /// `Ref` is boxed so the enum is not sized for the ~72-byte `Ref`
+    /// struct on every slot: a `RefOr<Schema>` (where `Schema` is itself
+    /// only ~16 bytes) shrinks from ~80 bytes to ~24. Reference variants
+    /// are the minority in a typical document, so the one extra heap
+    /// allocation per `$ref` is paid by the rare case while every inline
+    /// `Item` in a map or vec gets the smaller slot.
+    Ref(Box<Ref>),
 
     /// The component itself.
     Item(T),
@@ -99,7 +106,7 @@ where
         let has_ref = matches!(&value, serde_json::Value::Object(m) if m.contains_key("$ref"));
         if has_ref {
             Ref::deserialize(value)
-                .map(RefOr::Ref)
+                .map(|r| RefOr::Ref(Box::new(r)))
                 .map_err(serde::de::Error::custom)
         } else {
             T::deserialize(value)
@@ -234,7 +241,7 @@ impl<D> RefOr<D> {
 
     /// Create a new RefOr with a reference.
     pub fn new_ref(reference: impl Into<String>) -> Self {
-        RefOr::Ref(Ref::new(reference))
+        RefOr::Ref(Box::new(Ref::new(reference)))
     }
 
     /// Create a new RefOr with an item.
@@ -404,10 +411,10 @@ mod tests {
             "serialize item",
         );
         assert_eq!(
-            serde_json::to_value(RefOr::Ref::<Foo>(Ref {
+            serde_json::to_value(RefOr::Ref::<Foo>(Box::new(Ref {
                 reference: String::from("#/components/schemas/Foo"),
                 ..Default::default()
-            }))
+            })))
             .unwrap(),
             serde_json::json!({
                 "$ref": "#/components/schemas/Foo"
@@ -434,10 +441,10 @@ mod tests {
                 "$ref":"#/components/schemas/Foo",
             }))
             .unwrap(),
-            RefOr::Ref(Ref {
+            RefOr::Ref(Box::new(Ref {
                 reference: String::from("#/components/schemas/Foo"),
                 ..Default::default()
-            }),
+            })),
             "deserialize ref",
         );
     }

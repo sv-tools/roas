@@ -24,7 +24,7 @@ use std::mem;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::common::reference::{Ref, RefOr};
+use crate::common::reference::RefOr;
 use crate::loader::{Loader, LoaderError};
 
 /// Error returned by `Spec::collapse` for any OAS version.
@@ -355,7 +355,7 @@ where
         RefOr::Item(_) => {
             // Take ownership out of the slot so we can recurse +
             // intern without aliasing.
-            let placeholder = RefOr::Ref(Ref::new(String::new()));
+            let placeholder = RefOr::new_ref(String::new());
             let owned = mem::replace(slot, placeholder);
             let RefOr::Item(mut item) = owned else {
                 unreachable!("matched RefOr::Item above");
