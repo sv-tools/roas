@@ -875,4 +875,276 @@ mod tests {
             extensions: None,
         };
     }
+
+    // ── security: no components at all errors ─────────────────────────────────
+
+    #[test]
+    fn security_no_components_at_all_errors() {
+        // When the spec has no components at all, trying to resolve a named
+        // scheme should report the "no components.securitySchemes" error.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        req.insert("api_key".to_owned(), vec![]);
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("no `components.securitySchemes`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── unresolved internal param ref ─────────────────────────────────────────
+
+    #[test]
+    fn unresolved_internal_param_ref_is_treated_as_unknown() {
+        // A `$ref: "#/components/parameters/Nonexistent"` that doesn't resolve
+        // in the spec maps to `ResolvedParam::UnresolvedInternal` and is treated
+        // as having no contribution to path-param coverage — so the template
+        // variable `{id}` should still be flagged missing.
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        let params: Vec<RefOr<Parameter>> = vec![RefOr::new_ref(
+            "#/components/parameters/Nonexistent".to_owned(),
+        )];
+        validate_operation_parameters(&mut ctx, "op", "/users/{id}", None, Some(&params));
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("template variable `{id}`")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── x- extension keys skipped in path-template uniqueness ─────────────────
+
+    #[test]
+    fn x_extension_keys_skipped_in_path_template_uniqueness() {
+        let mut paths: BTreeMap<String, PathItem> = BTreeMap::new();
+        paths.insert("/pets/{id}".into(), PathItem::default());
+        paths.insert("x-internal-meta".into(), PathItem::default());
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_template_uniqueness(&mut ctx, "#.paths", &paths);
+        // The x- key must be skipped; only /pets/{id} is present so no
+        // duplicate-template error is expected.
+        assert!(
+            ctx.errors.is_empty(),
+            "x- keys must not trigger template uniqueness errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── validate_path_item follows $ref to webhooks ───────────────────────────
+
+    #[test]
+    fn validate_path_item_follows_ref_to_webhooks() {
+        // A `paths` entry whose `$ref` points at `#/webhooks/<name>` must
+        // be followed by `resolve_path_item_chain` so the path-template ↔
+        // parameter check sees the resolved operations.
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::response::{Response, Responses};
+
+        let target = PathItem {
+            operations: Some(BTreeMap::from([(
+                "get".to_owned(),
+                Operation {
+                    parameters: Some(vec![path_param("id")]),
+                    responses: Some(Responses {
+                        responses: Some(BTreeMap::from([(
+                            "200".to_owned(),
+                            RefOr::new_item(Response {
+                                description: "ok".into(),
+                                ..Default::default()
+                            }),
+                        )])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+        let mut webhooks = crate::v3_1::path_item::Paths::default();
+        webhooks.paths.insert("petCreated".to_owned(), target);
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            webhooks: Some(webhooks),
+            ..Default::default()
+        }));
+
+        // Path item with only a $ref to webhooks and no inline ops/params.
+        let item = PathItem {
+            reference: Some("#/webhooks/petCreated".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/pets/{id}", "#.paths[/pets/{id}]", &item);
+        // `id` is declared in the resolved target; no template-variable error.
+        assert!(
+            !ctx.errors
+                .iter()
+                .any(|e| e.contains("template variable `{id}`")),
+            "resolved path param should satisfy template: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── find_path_item_by_ref: various container paths ────────────────────────
+
+    #[test]
+    fn validate_path_item_follows_ref_through_components_callbacks() {
+        // A `$ref` pointing at `#/components/callbacks/<n>/<expr>` should be
+        // resolved by the chain follower and the operations it exposes
+        // should satisfy path-template checks.
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::response::{Response, Responses};
+
+        let cb_item = PathItem {
+            operations: Some(BTreeMap::from([(
+                "post".to_owned(),
+                Operation {
+                    parameters: Some(vec![path_param("id")]),
+                    responses: Some(Responses {
+                        responses: Some(BTreeMap::from([(
+                            "200".to_owned(),
+                            RefOr::new_item(Response {
+                                description: "ok".into(),
+                                ..Default::default()
+                            }),
+                        )])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("expr".to_owned(), cb_item);
+        let cb = crate::v3_1::callback::Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(Spec {
+            components: Some(comp),
+            ..Default::default()
+        }));
+
+        let item = PathItem {
+            reference: Some("#/components/callbacks/CB/expr".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        validate_path_item(&mut ctx, "/items/{id}", "#.paths[/items/{id}]", &item);
+        assert!(
+            !ctx.errors
+                .iter()
+                .any(|e| e.contains("template variable `{id}`")),
+            "callback-resident path param should satisfy template: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn validate_path_item_ref_cycle_returns_current() {
+        // An empty `$ref` on the path item triggers early return in
+        // `resolve_path_item_chain` (cycle / empty guard).
+        let spec: &'static Spec = Box::leak(Box::new(Spec::default()));
+        let item = PathItem {
+            reference: Some("".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(spec, Options::new());
+        // An empty ref item has no operations so the path-item chain returns
+        // the item itself without errors about template variables being
+        // fulfilled — but this exercises the chain-follow code path.
+        validate_path_item(&mut ctx, "/pets", "#.paths[/pets]", &item);
+        // No assertion on specific errors; just exercises the chain-follow path.
+    }
+
+    // ── security: HTTP and OAuth2 with password/client_creds flows ────────────
+
+    #[test]
+    fn security_http_scheme_with_roles_accepted_in_3_1() {
+        use crate::v3_1::security_scheme::HttpSecurityScheme;
+        let mut schemes = BTreeMap::new();
+        schemes.insert(
+            "basic".to_owned(),
+            RefOr::new_item(SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                scheme: "basic".into(),
+                ..Default::default()
+            }))),
+        );
+        let comp = Components {
+            security_schemes: Some(schemes),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(spec_with_components(comp)));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        req.insert("basic".to_owned(), vec!["admin".to_owned()]);
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn security_oauth2_with_all_flows_validates_scopes() {
+        use crate::v3_1::security_scheme::{
+            AuthorizationCodeOAuth2Flow, ClientCredentialsOAuth2Flow, PasswordOAuth2Flow,
+        };
+        let flows = OAuth2Flows {
+            implicit: Some(ImplicitOAuth2Flow {
+                authorization_url: "https://x.example/auth".into(),
+                refresh_url: None,
+                scopes: BTreeMap::from([("read".to_owned(), "Read".to_owned())]),
+                extensions: None,
+            }),
+            password: Some(PasswordOAuth2Flow {
+                token_url: "https://x.example/token".into(),
+                refresh_url: None,
+                scopes: BTreeMap::from([("write".to_owned(), "Write".to_owned())]),
+                extensions: None,
+            }),
+            client_credentials: Some(ClientCredentialsOAuth2Flow {
+                token_url: "https://x.example/token".into(),
+                refresh_url: None,
+                scopes: BTreeMap::from([("admin".to_owned(), "Admin".to_owned())]),
+                extensions: None,
+            }),
+            authorization_code: Some(AuthorizationCodeOAuth2Flow {
+                authorization_url: "https://x.example/auth".into(),
+                token_url: "https://x.example/token".into(),
+                refresh_url: None,
+                scopes: BTreeMap::from([("profile".to_owned(), "Profile".to_owned())]),
+                extensions: None,
+            }),
+            extensions: None,
+        };
+        let mut schemes = BTreeMap::new();
+        schemes.insert(
+            "o".to_owned(),
+            RefOr::new_item(SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+                flows,
+                description: None,
+                extensions: None,
+            }))),
+        );
+        let comp = Components {
+            security_schemes: Some(schemes),
+            ..Default::default()
+        };
+        let spec: &'static Spec = Box::leak(Box::new(spec_with_components(comp)));
+        let mut ctx = Context::new(spec, Options::new());
+        let mut req: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        req.insert("o".to_owned(), vec!["read".to_owned(), "write".to_owned()]);
+        validate_security_requirements(&mut ctx, "#.security", &[req]);
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
 }

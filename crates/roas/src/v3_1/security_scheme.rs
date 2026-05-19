@@ -1384,4 +1384,52 @@ mod tests {
         s.validate_with_context(&mut ctx, "mtls".into());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
+
+    // ── Display impls ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn security_scheme_display() {
+        assert_eq!(
+            format!(
+                "{}",
+                SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                    scheme: "bearer".into(),
+                    ..Default::default()
+                }))
+            ),
+            "http"
+        );
+        assert_eq!(
+            format!("{}", SecurityScheme::ApiKey(Box::default())),
+            "apiKey"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme::default()))
+            ),
+            "oauth2"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                SecurityScheme::OpenIdConnect(Box::new(OpenIdConnectSecurityScheme {
+                    open_id_connect_url: "https://x.example/.well-known".into(),
+                    ..Default::default()
+                }))
+            ),
+            "openIdConnect"
+        );
+        assert_eq!(
+            format!("{}", SecurityScheme::MutualTLS(Box::default())),
+            "mutualTLS"
+        );
+    }
+
+    #[test]
+    fn api_key_location_display() {
+        assert_eq!(format!("{}", ApiKeyLocation::Query), "query");
+        assert_eq!(format!("{}", ApiKeyLocation::Header), "header");
+        assert_eq!(format!("{}", ApiKeyLocation::Cookie), "cookie");
+    }
 }

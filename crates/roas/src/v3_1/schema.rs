@@ -2725,4 +2725,569 @@ mod tests {
         assert_eq!(empty_schema, Schema::Empty(EmptySchema));
         assert_ne!(bool_schema, empty_schema);
     }
+
+    // ── AnyOf / OneOf / Not validate ─────────────────────────────────────────
+
+    #[test]
+    fn any_of_with_inner_schemas_validates() {
+        let schema = Schema::AnyOf(Box::new(AnyOfSchema {
+            any_of: vec![
+                RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(
+                    StringSchema::default(),
+                )))),
+                RefOr::new_item(Schema::Single(Box::new(SingleSchema::Integer(
+                    IntegerSchema::default(),
+                )))),
+            ],
+            ..Default::default()
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn any_of_empty_errors() {
+        let schema = Schema::AnyOf(Box::new(AnyOfSchema {
+            any_of: vec![],
+            ..Default::default()
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`anyOf` must be a non-empty array")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn one_of_with_inner_schemas_validates() {
+        let schema = Schema::OneOf(Box::new(OneOfSchema {
+            one_of: vec![
+                RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(
+                    StringSchema::default(),
+                )))),
+                RefOr::new_item(Schema::Single(Box::new(SingleSchema::Null(
+                    NullSchema::default(),
+                )))),
+            ],
+            ..Default::default()
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn one_of_empty_errors() {
+        let schema = Schema::OneOf(Box::new(OneOfSchema {
+            one_of: vec![],
+            ..Default::default()
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("`oneOf` must be a non-empty array")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn not_schema_validates_inner() {
+        let schema = Schema::Not(Box::new(NotSchema {
+            not: RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(
+                StringSchema::default(),
+            )))),
+            external_docs: None,
+            example: None,
+            examples: None,
+            extensions: None,
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    // ── SingleSchema readOnly/writeOnly mutex ────────────────────────────────
+
+    #[test]
+    fn single_schema_read_only_write_only_mutex_error() {
+        // readOnly and writeOnly MUST NOT both be true.
+        let single = SingleSchema::String(StringSchema {
+            read_only: Some(true),
+            write_only: Some(true),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("readOnly") && e.contains("writeOnly")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── StringSchema validations ──────────────────────────────────────────────
+
+    #[test]
+    fn string_schema_min_length_gt_max_length_errors() {
+        let single = SingleSchema::String(StringSchema {
+            min_length: Some(10),
+            max_length: Some(5),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("minLength") && e.contains("maxLength")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn string_schema_with_external_docs_and_xml_validates() {
+        let single = SingleSchema::String(StringSchema {
+            external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+            xml: Some(crate::v3_1::xml::XML::default()),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        // No errors expected for valid external docs and xml
+        assert!(
+            !ctx.errors
+                .iter()
+                .any(|e| e.contains("externalDocs") || e.contains(".xml")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── IntegerSchema validations ─────────────────────────────────────────────
+
+    #[test]
+    fn integer_schema_multiple_of_zero_errors() {
+        let single = SingleSchema::Integer(IntegerSchema {
+            multiple_of: Some(0.0),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("multipleOf")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn integer_schema_with_external_docs_and_xml() {
+        let single = SingleSchema::Integer(IntegerSchema {
+            external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+            xml: Some(crate::v3_1::xml::XML::default()),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            !ctx.errors.iter().any(|e| e.contains("multipleOf")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── NumberSchema validations ──────────────────────────────────────────────
+
+    #[test]
+    fn number_schema_multiple_of_negative_errors() {
+        let single = SingleSchema::Number(NumberSchema {
+            multiple_of: Some(-1.0),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("multipleOf")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn number_schema_with_external_docs_and_xml() {
+        let single = SingleSchema::Number(NumberSchema {
+            external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+            xml: Some(crate::v3_1::xml::XML::default()),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            !ctx.errors.iter().any(|e| e.contains("multipleOf")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── BooleanSchema validations ─────────────────────────────────────────────
+
+    #[test]
+    fn boolean_schema_with_external_docs_and_xml() {
+        let single = SingleSchema::Boolean(BooleanSchema {
+            external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+            xml: Some(crate::v3_1::xml::XML::default()),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    // ── ArraySchema validations ───────────────────────────────────────────────
+
+    #[test]
+    fn array_schema_min_items_gt_max_items_errors() {
+        let single = SingleSchema::Array(ArraySchema {
+            min_items: Some(10),
+            max_items: Some(5),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("minItems") && e.contains("maxItems")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn array_schema_with_items_validates_recursively() {
+        let single = SingleSchema::Array(ArraySchema {
+            items: Some(BoolOr::Item(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::String(StringSchema::default()),
+            ))))),
+            external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+            xml: Some(crate::v3_1::xml::XML::default()),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            !ctx.errors.iter().any(|e| e.contains("minItems")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── ObjectSchema validations ──────────────────────────────────────────────
+
+    #[test]
+    fn object_schema_min_properties_gt_max_properties_errors() {
+        let single = SingleSchema::Object(ObjectSchema {
+            min_properties: Some(10),
+            max_properties: Some(5),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("minProperties") && e.contains("maxProperties")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn object_schema_pattern_properties_validates() {
+        let mut pattern_props = std::collections::BTreeMap::new();
+        pattern_props.insert(
+            "^[a-z]+$".to_string(),
+            RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(
+                StringSchema::default(),
+            )))),
+        );
+        let single = SingleSchema::Object(ObjectSchema {
+            pattern_properties: Some(pattern_props),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        // Valid pattern should not error
+        assert!(
+            !ctx.errors.iter().any(|e| e.contains("pattern_properties")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn object_schema_additional_properties_bool_and_schema() {
+        // BoolOr::Bool case
+        let single = SingleSchema::Object(ObjectSchema {
+            additional_properties: Some(BoolOr::Bool(false)),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "bool false errors: {:?}", ctx.errors);
+
+        // BoolOr::Item case
+        let single = SingleSchema::Object(ObjectSchema {
+            additional_properties: Some(BoolOr::Item(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::String(StringSchema::default()),
+            ))))),
+            ..Default::default()
+        });
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "schema additional_properties errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn object_schema_unevaluated_properties_bool_and_schema() {
+        // BoolOr::Bool case
+        let single = SingleSchema::Object(ObjectSchema {
+            unevaluated_properties: Some(BoolOr::Bool(true)),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "bool true errors: {:?}", ctx.errors);
+
+        // BoolOr::Item case
+        let single = SingleSchema::Object(ObjectSchema {
+            unevaluated_properties: Some(BoolOr::Item(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::String(StringSchema::default()),
+            ))))),
+            ..Default::default()
+        });
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.is_empty(),
+            "schema unevaluated_properties errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn object_schema_property_names_validates() {
+        let single = SingleSchema::Object(ObjectSchema {
+            property_names: Some(RefOr::new_item(Schema::Single(Box::new(
+                SingleSchema::String(StringSchema::default()),
+            )))),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn object_schema_x_tags_validates() {
+        let single = SingleSchema::Object(ObjectSchema {
+            x_tags: Some(vec!["pets".to_string(), "animals".to_string()]),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn object_schema_x_discriminator_value_validates() {
+        let single = SingleSchema::Object(ObjectSchema {
+            x_discriminator_value: Some("Dog".to_string()),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn object_schema_with_external_docs_and_xml() {
+        let single = SingleSchema::Object(ObjectSchema {
+            external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+            xml: Some(crate::v3_1::xml::XML::default()),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    // ── NullSchema validations ────────────────────────────────────────────────
+
+    #[test]
+    fn null_schema_with_external_docs_and_xml() {
+        let single = SingleSchema::Null(NullSchema {
+            external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+            xml: Some(crate::v3_1::xml::XML::default()),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    // ── MultiSchema validations ───────────────────────────────────────────────
+
+    #[test]
+    fn multi_schema_empty_type_array_errors() {
+        let schema = Schema::Multi(Box::new(MultiSchema {
+            schema_types: vec![],
+            ..Default::default()
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("must contain at least one element")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn multi_schema_invalid_type_errors() {
+        let schema = Schema::Multi(Box::new(MultiSchema {
+            schema_types: vec!["invalid_type".to_string()],
+            ..Default::default()
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("type `invalid_type` is not supported")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn multi_schema_duplicate_type_errors() {
+        let schema = Schema::Multi(Box::new(MultiSchema {
+            schema_types: vec!["string".to_string(), "string".to_string()],
+            ..Default::default()
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("type `string` is not unique")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn multi_schema_with_external_docs_validates() {
+        let schema = Schema::Multi(Box::new(MultiSchema {
+            schema_types: vec!["string".to_string(), "null".to_string()],
+            external_docs: Some(crate::v3_1::external_documentation::ExternalDocumentation {
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        schema.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            !ctx.errors.iter().any(|e| e.contains("type")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── enum description length mismatch ─────────────────────────────────────
+
+    #[test]
+    fn string_schema_enum_description_length_mismatch_errors() {
+        let single = SingleSchema::String(StringSchema {
+            enum_values: Some(vec!["a".to_string(), "b".to_string()]),
+            x_enum_descriptions: Some(vec!["only one".to_string()]),
+            ..Default::default()
+        });
+        let spec = crate::v3_1::spec::Spec::default();
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        single.validate_with_context(&mut ctx, "s".into());
+        assert!(
+            ctx.errors.iter().any(|e| e.contains("x-enumDescriptions")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
 }

@@ -750,6 +750,133 @@ mod tests {
     }
 
     #[test]
+    fn paths_is_empty_when_no_paths() {
+        let p = Paths::default();
+        assert!(p.is_empty());
+        let p: Paths = [("/a", PathItem::default())].into();
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn duplicate_ref_field_rejected() {
+        let raw = r##"{"$ref": "#/a", "$ref": "#/b"}"##;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate $ref should fail");
+    }
+
+    #[test]
+    fn duplicate_summary_field_rejected() {
+        let raw = r#"{"summary": "A", "summary": "B"}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate summary should fail");
+    }
+
+    #[test]
+    fn duplicate_description_field_rejected() {
+        let raw = r#"{"description": "A", "description": "B"}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate description should fail");
+    }
+
+    #[test]
+    fn duplicate_parameters_field_rejected() {
+        let raw = r#"{"parameters": [], "parameters": []}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate parameters should fail");
+    }
+
+    #[test]
+    fn duplicate_servers_field_rejected() {
+        let raw = r#"{"servers": [], "servers": []}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate servers should fail");
+    }
+
+    #[test]
+    fn duplicate_extension_field_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate extension should fail");
+    }
+
+    #[test]
+    fn duplicate_operation_method_rejected() {
+        let raw = r#"{"get": {}, "get": {}}"#;
+        let res = serde_json::from_str::<PathItem>(raw);
+        assert!(res.is_err(), "duplicate method should fail");
+    }
+
+    #[test]
+    fn internal_ref_to_paths_resolves() {
+        // Verify that $ref to #/paths/<name> is accepted as a valid path item ref
+        let mut paths = Paths::default();
+        paths
+            .paths
+            .insert("/target".to_owned(), PathItem::default());
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let pi = PathItem {
+            reference: Some("#/paths/~1target".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            !ctx.errors.mentions("not declared"),
+            "paths ref should resolve: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn internal_ref_with_slash_in_token_rejected() {
+        // #/components/callbacks/CB/e/x — extra token with '/' inside not valid
+        let spec = Spec::default();
+        let pi = PathItem {
+            reference: Some("#/paths/a/b".into()),
+            ..Default::default()
+        };
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        pi.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors.mentions("not declared"),
+            "multi-token paths ref should fail: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn paths_duplicate_extension_key_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let res = serde_json::from_str::<Paths>(raw);
+        assert!(res.is_err(), "duplicate extension key in Paths should fail");
+    }
+
+    #[test]
+    fn paths_duplicate_path_key_rejected() {
+        let raw = r#"{"/a": {}, "/a": {}}"#;
+        let res = serde_json::from_str::<Paths>(raw);
+        assert!(res.is_err(), "duplicate path key in Paths should fail");
+    }
+
+    #[test]
+    fn paths_serialize_with_extensions() {
+        let mut ext = std::collections::BTreeMap::new();
+        ext.insert(
+            "x-foo".to_owned(),
+            serde_json::Value::String("bar".to_owned()),
+        );
+        let mut p = Paths::default();
+        p.paths.insert("/pets".to_owned(), PathItem::default());
+        p.extensions = Some(ext);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["x-foo"], "bar");
+        assert!(v.get("/pets").is_some());
+    }
+
+    #[test]
     fn uppercase_method_rejected() {
         let raw = r#"{"GET": {"responses": {"200": {"description": "ok"}}}}"#;
         let err = serde_json::from_str::<PathItem>(raw)

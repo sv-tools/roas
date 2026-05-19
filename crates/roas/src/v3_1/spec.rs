@@ -2259,6 +2259,193 @@ mod tests {
         TagGroup::default().validate_with_context(&mut ctx, "#.x-tagGroups[0]".to_owned());
         assert_eq!(ctx.errors.len(), 2, "tag group errors: {:?}", ctx.errors);
     }
+
+    // ── paths entry not starting with '/' ────────────────────────────────────
+
+    #[test]
+    fn path_not_starting_with_slash_errors() {
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::{PathItem, Paths};
+        use crate::v3_1::response::{Response, Responses};
+
+        let op = Operation {
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op);
+        let pi = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let mut paths = Paths::default();
+        paths.paths.insert("pets".to_owned(), pi); // no leading slash
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.errors.iter().any(|e| e.contains("must start with `/`")),
+            "expected must-start-with-slash error: {:?}",
+            err.errors
+        );
+    }
+
+    // ── spec.security is validated ────────────────────────────────────────────
+
+    #[test]
+    fn spec_security_field_is_validated() {
+        use crate::v3_1::security_scheme::{ApiKeyLocation, ApiKeySecurityScheme, SecurityScheme};
+
+        // Spec with security that references a declared scheme (valid).
+        let mut schemes = BTreeMap::new();
+        schemes.insert(
+            "api_key".to_owned(),
+            RefOr::new_item(SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
+                name: "api_key".into(),
+                location: ApiKeyLocation::Header,
+                ..Default::default()
+            }))),
+        );
+        let comp = crate::v3_1::components::Components {
+            security_schemes: Some(schemes),
+            ..Default::default()
+        };
+        let mut security_req = BTreeMap::new();
+        security_req.insert("api_key".to_owned(), vec![]);
+        let spec = Spec {
+            security: Some(vec![security_req]),
+            components: Some(comp),
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        let res = spec.validate(Options::new(), None);
+        // No security requirement errors expected.
+        if let Err(e) = &res {
+            assert!(
+                e.errors
+                    .iter()
+                    .all(|s| !s.contains("not declared in `components.securitySchemes`")),
+                "unexpected scheme error: {:?}",
+                e.errors
+            );
+        }
+    }
+
+    // ── x-tagGroups is validated via Spec.validate ────────────────────────────
+
+    #[test]
+    fn spec_validates_x_tag_groups() {
+        // A tag group with an empty tags array triggers a validation error.
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.1.2",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "x-tagGroups": [
+                {"name": "EmptyGroup", "tags": []}
+            ]
+        }))
+        .unwrap();
+        // Empty tags list triggers "must contain at least one tag" from TagGroup::validate.
+        let err = spec.validate(Options::new(), None).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("x-tagGroups") || e.contains("tags")),
+            "expected x-tagGroups tags error: {:?}",
+            err.errors
+        );
+    }
+
+    // ── components.callbacks operationId dedup ────────────────────────────────
+
+    #[test]
+    fn components_callbacks_op_id_is_indexed() {
+        use crate::v3_1::callback::Callback;
+        use crate::v3_1::components::Components;
+        use crate::v3_1::operation::Operation;
+        use crate::v3_1::path_item::PathItem;
+        use crate::v3_1::response::{Response, Responses};
+
+        let op = Operation {
+            operation_id: Some("cbOp".into()),
+            responses: Some(Responses {
+                responses: Some(BTreeMap::from([(
+                    "200".to_owned(),
+                    RefOr::new_item(Response {
+                        description: "ok".into(),
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut ops = BTreeMap::new();
+        ops.insert("get".to_owned(), op.clone());
+        let pi = PathItem {
+            operations: Some(ops),
+            ..Default::default()
+        };
+        let mut cb_paths = BTreeMap::new();
+        cb_paths.insert("expr".to_owned(), pi);
+        let cb = Callback {
+            paths: cb_paths,
+            ..Default::default()
+        };
+        let comp = Components {
+            callbacks: Some(BTreeMap::from([("CB".to_owned(), RefOr::new_item(cb))])),
+            ..Default::default()
+        };
+        let spec = Spec {
+            components: Some(comp),
+            paths: Some(Default::default()),
+            ..Default::default()
+        };
+        let res = spec.validate(Options::new(), None);
+        // Single operationId in callback should be fine (no duplicate).
+        match res {
+            Ok(_) => {}
+            Err(e) => {
+                assert!(
+                    e.errors
+                        .iter()
+                        .all(|s| !s.contains("cbOp") || !s.contains("already in use")),
+                    "single callback op id should not be duplicate: {:?}",
+                    e.errors
+                );
+            }
+        }
+    }
+
+    // ── walk_path_item_ops: item with no operations returns early ─────────────
+
+    #[test]
+    fn walk_path_item_ops_no_operations() {
+        use crate::v3_1::path_item::{PathItem, Paths};
+        // PathItem with no operations: walk_path_item_ops returns early.
+        // This is exercised indirectly by having a path with no operations.
+        let pi = PathItem::default(); // no operations
+        let mut paths = Paths::default();
+        paths.paths.insert("/empty".to_owned(), pi);
+        let spec = Spec {
+            paths: Some(paths),
+            ..Default::default()
+        };
+        // validate() calls walk_path_item_ops which hits the early return.
+        let _ = spec.validate(Options::new(), None);
+        // Just verifying no panic.
+    }
 }
 
 //     #[test]

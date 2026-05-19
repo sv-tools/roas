@@ -202,4 +202,41 @@ mod tests {
             ctx.errors
         );
     }
+
+    // ── Serializer: extension with x- key ────────────────────────────────────
+
+    #[test]
+    fn callback_serialize_with_extensions() {
+        // Exercises the `if k.starts_with("x-")` branch in the serializer.
+        let mut ext = std::collections::BTreeMap::new();
+        ext.insert("x-trace-id".to_owned(), serde_json::Value::Bool(true));
+        // Also insert a non-x key that must NOT be serialized.
+        ext.insert("not-x".to_owned(), serde_json::Value::Bool(false));
+        let cb = Callback {
+            paths: std::collections::BTreeMap::new(),
+            extensions: Some(ext),
+        };
+        let v = serde_json::to_value(&cb).unwrap();
+        assert_eq!(v["x-trace-id"], true, "x- extension should be present");
+        assert!(
+            v.get("not-x").is_none(),
+            "non-x- key should be omitted: {v}"
+        );
+    }
+
+    // ── Deserializer: duplicate path and extension errors ─────────────────────
+
+    #[test]
+    fn callback_duplicate_path_rejected() {
+        let raw = r#"{"{$url}": {}, "{$url}": {}}"#;
+        let res = serde_json::from_str::<Callback>(raw);
+        assert!(res.is_err(), "duplicate path key should fail");
+    }
+
+    #[test]
+    fn callback_duplicate_extension_rejected() {
+        let raw = r#"{"x-foo": 1, "x-foo": 2}"#;
+        let res = serde_json::from_str::<Callback>(raw);
+        assert!(res.is_err(), "duplicate extension key should fail");
+    }
 }

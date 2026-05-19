@@ -229,4 +229,31 @@ mod tests {
             ctx.errors
         );
     }
+
+    // ── schema and content both present errors ────────────────────────────────
+
+    #[test]
+    fn header_schema_and_content_mutex() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, crate::validation::Options::new());
+        let mut content = BTreeMap::new();
+        content.insert("application/json".to_owned(), MediaType::default());
+        Header {
+            schema: Some(RefOr::new_item(crate::v3_1::schema::Schema::Single(
+                Box::new(crate::v3_1::schema::SingleSchema::String(
+                    crate::v3_1::schema::StringSchema::default(),
+                )),
+            ))),
+            content: Some(content),
+            ..Default::default()
+        }
+        .validate_with_context(&mut ctx, "h".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("schema and content are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
 }

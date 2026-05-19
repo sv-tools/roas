@@ -660,4 +660,200 @@ mod tests {
             ctx.errors
         );
     }
+
+    // ── Cookie parameter validates ───────────────────────────────────────────
+
+    #[test]
+    fn cookie_parameter_validates() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Cookie(InCookie {
+            name: "session".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(RefOr::new_item(crate::v3_1::schema::Schema::Single(
+                Box::new(crate::v3_1::schema::SingleSchema::String(
+                    crate::v3_1::schema::StringSchema::default(),
+                )),
+            ))),
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn cookie_parameter_example_and_examples_mutex() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Cookie(InCookie {
+            name: "session".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(RefOr::new_item(crate::v3_1::schema::Schema::Single(
+                Box::new(crate::v3_1::schema::SingleSchema::String(
+                    crate::v3_1::schema::StringSchema::default(),
+                )),
+            ))),
+            example: Some(serde_json::json!("abc")),
+            examples: Some(BTreeMap::from([(
+                "ex".to_owned(),
+                RefOr::new_item(crate::v3_1::example::Example::default()),
+            )])),
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── Header parameter validates ───────────────────────────────────────────
+
+    #[test]
+    fn header_parameter_validates() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Header(InHeader {
+            name: "X-Request-ID".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(RefOr::new_item(crate::v3_1::schema::Schema::Single(
+                Box::new(crate::v3_1::schema::SingleSchema::String(
+                    crate::v3_1::schema::StringSchema::default(),
+                )),
+            ))),
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(ctx.errors.is_empty(), "errors: {:?}", ctx.errors);
+    }
+
+    // ── schema and content both set errors ───────────────────────────────────
+
+    #[test]
+    fn path_parameter_schema_and_content_both_present_errors() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let mut content = BTreeMap::new();
+        content.insert(
+            "application/json".to_owned(),
+            crate::v3_1::media_type::MediaType::default(),
+        );
+        let p = Parameter::Path(InPath {
+            name: "id".into(),
+            description: None,
+            required: true,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(RefOr::new_item(crate::v3_1::schema::Schema::Single(
+                Box::new(crate::v3_1::schema::SingleSchema::String(
+                    crate::v3_1::schema::StringSchema::default(),
+                )),
+            ))),
+            example: None,
+            examples: None,
+            content: Some(content),
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("schema and content are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    // ── example/examples mutex for path and header parameters ────────────────
+
+    #[test]
+    fn path_parameter_example_and_examples_mutex() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Path(InPath {
+            name: "id".into(),
+            description: None,
+            required: true,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(RefOr::new_item(crate::v3_1::schema::Schema::Single(
+                Box::new(crate::v3_1::schema::SingleSchema::String(
+                    crate::v3_1::schema::StringSchema::default(),
+                )),
+            ))),
+            example: Some(serde_json::json!("123")),
+            examples: Some(BTreeMap::from([(
+                "ex".to_owned(),
+                RefOr::new_item(crate::v3_1::example::Example::default()),
+            )])),
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn header_parameter_example_and_examples_mutex() {
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        let p = Parameter::Header(InHeader {
+            name: "X-ID".into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: Some(RefOr::new_item(crate::v3_1::schema::Schema::Single(
+                Box::new(crate::v3_1::schema::SingleSchema::String(
+                    crate::v3_1::schema::StringSchema::default(),
+                )),
+            ))),
+            example: Some(serde_json::json!("abc")),
+            examples: Some(BTreeMap::from([(
+                "ex".to_owned(),
+                RefOr::new_item(crate::v3_1::example::Example::default()),
+            )])),
+            content: None,
+            extensions: None,
+        });
+        p.validate_with_context(&mut ctx, "p".into());
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("example and examples are mutually exclusive")),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
 }
