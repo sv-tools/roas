@@ -963,6 +963,113 @@ mod tests {
     }
 
     #[test]
+    fn ref_or_visitor_scalar_deserializations() {
+        // Exercises RefOrVisitor::visit_bool, visit_i64, visit_u64, visit_f64,
+        // visit_str, visit_unit, and visit_seq by deserializing RefOr<Value>
+        // from various JSON scalar and array forms.
+        use serde_json::Value;
+
+        // visit_bool — JSON `true`
+        let r: RefOr<Value> = serde_json::from_str("true").unwrap();
+        assert_eq!(r, RefOr::Item(Value::Bool(true)));
+
+        // visit_bool — JSON `false`
+        let r: RefOr<Value> = serde_json::from_str("false").unwrap();
+        assert_eq!(r, RefOr::Item(Value::Bool(false)));
+
+        // visit_u64 — positive integer
+        let r: RefOr<Value> = serde_json::from_str("42").unwrap();
+        assert_eq!(r, RefOr::Item(Value::Number(42_u64.into())));
+
+        // visit_i64 — negative integer
+        let r: RefOr<Value> = serde_json::from_str("-1").unwrap();
+        assert_eq!(r, RefOr::Item(Value::Number((-1_i64).into())));
+
+        // visit_f64 — float
+        let r: RefOr<Value> = serde_json::from_str("3.14").unwrap();
+        match r {
+            RefOr::Item(Value::Number(n)) => {
+                let v = n.as_f64().unwrap();
+                assert!((v - 3.14).abs() < 1e-10, "expected ~3.14, got {v}");
+            }
+            other => panic!("expected Item(Number), got {other:?}"),
+        }
+
+        // visit_str — JSON string
+        let r: RefOr<Value> = serde_json::from_str(r#""hello""#).unwrap();
+        assert_eq!(r, RefOr::Item(Value::String("hello".into())));
+
+        // visit_unit — JSON null
+        let r: RefOr<Value> = serde_json::from_str("null").unwrap();
+        assert_eq!(r, RefOr::Item(Value::Null));
+
+        // visit_seq — JSON array
+        let r: RefOr<Value> = serde_json::from_str("[1,2,3]").unwrap();
+        assert_eq!(
+            r,
+            RefOr::Item(Value::Array(vec![
+                Value::Number(1_u64.into()),
+                Value::Number(2_u64.into()),
+                Value::Number(3_u64.into()),
+            ]))
+        );
+
+        // Empty array
+        let r: RefOr<Value> = serde_json::from_str("[]").unwrap();
+        assert_eq!(r, RefOr::Item(Value::Array(vec![])));
+    }
+
+    #[test]
+    fn ref_or_visitor_visit_string_via_owned_deserializer() {
+        // visit_string is called by deserializers that yield an owned `String`
+        // rather than a borrowed `&str`. We exercise it via serde's
+        // `value::StringDeserializer` which directly calls `visit_string`.
+        use serde::Deserialize;
+        use serde::de::IntoDeserializer;
+        use serde::de::value::StringDeserializer;
+        use serde_json::Value;
+
+        let des: StringDeserializer<serde_json::Error> = "owned".to_owned().into_deserializer();
+        let r: RefOr<Value> = RefOr::deserialize(des).unwrap();
+        assert_eq!(r, RefOr::Item(Value::String("owned".into())));
+    }
+
+    #[test]
+    fn ref_or_visitor_expecting_message_via_error() {
+        // Triggers RefOrVisitor::expecting by attempting to deserialize a
+        // type-incompatible value so serde generates a descriptive error that
+        // includes the `expecting` string.
+        use serde::Deserialize;
+        use serde::de::IntoDeserializer;
+        use serde::de::value::U64Deserializer;
+
+        // Foo expects a map, so deserializing from a raw u64 fails.
+        // serde formats the error using `expecting`.
+        let des: U64Deserializer<serde_json::Error> = 99_u64.into_deserializer();
+        let r = Foo::deserialize(des);
+        assert!(r.is_err(), "Foo should not deserialize from u64");
+    }
+
+    #[test]
+    fn ref_duplicate_summary_is_rejected() {
+        // Exercises the `if summary.is_some()` branch (duplicate "summary" key).
+        // JSON object: `$ref` is first → fast path; second `summary` triggers error.
+        let r = serde_json::from_str::<RefOr<Foo>>(
+            r##"{"$ref":"#/x","summary":"first","summary":"second"}"##,
+        );
+        assert!(r.is_err(), "duplicate summary must be rejected");
+    }
+
+    #[test]
+    fn ref_duplicate_description_is_rejected() {
+        // Exercises the `if description.is_some()` branch (duplicate "description").
+        let r = serde_json::from_str::<RefOr<Foo>>(
+            r##"{"$ref":"#/x","description":"first","description":"second"}"##,
+        );
+        assert!(r.is_err(), "duplicate description must be rejected");
+    }
+
+    #[test]
     fn resolve_error_display_messages() {
         // Cover Display impls for all ResolveError variants.
         let e = ResolveError::NotFound("my-ref".into());

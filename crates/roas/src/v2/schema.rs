@@ -1853,4 +1853,17 @@ mod tests {
         }
         assert_eq!(serde_json::to_value(schema).unwrap(), value);
     }
+
+    #[test]
+    fn schema_from_value_all_of_both_paths_fail_returns_object_err() {
+        // `{"allOf": [1]}` has no "type" field and has an "allOf" key.
+        // ObjectSchema::deserialize fails because `1` is not a valid RefOr<ObjectSchema>.
+        // AllOfSchema::deserialize also fails because `1` is not a valid RefOr<Schema>.
+        // The code at line 147 returns the original object_err in that case.
+        let result = serde_json::from_str::<Schema>(r#"{"allOf":[1]}"#);
+        assert!(
+            result.is_err(),
+            "expected parse error for invalid allOf element"
+        );
+    }
 }

@@ -205,6 +205,7 @@ mod tests {
     use super::*;
     use crate::v2::parameter::{InPath, StringParameter};
     use crate::v2::response::Response;
+    use crate::validation::ValidationErrorsExt;
 
     #[test]
     fn deserialize() {
@@ -492,6 +493,33 @@ mod tests {
         let mut ctx = Context::new(&spec, Default::default());
         operation.validate_with_context(&mut ctx, "operation".to_owned());
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn empty_tag_name_triggers_continue_in_tag_loop() {
+        // Exercises the `if tag.is_empty() { continue }` branch (line 159).
+        // An empty tag name is flagged by validate_required_string, and then
+        // the loop skips the reference-lookup step for that entry.
+        let spec = Spec::default();
+        let mut ctx = Context::new(&spec, Default::default());
+        let op = Operation {
+            tags: Some(vec![String::new()]), // empty tag → triggers continue
+            responses: Responses {
+                default: Some(RefOr::new_item(Response {
+                    description: "ok".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        op.validate_with_context(&mut ctx, "op".to_owned());
+        // The empty-tag error from validate_required_string must appear.
+        assert!(
+            ctx.errors.mentions("must not be empty"),
+            "expected empty-tag error, got: {:?}",
+            ctx.errors
+        );
     }
 
     #[test]

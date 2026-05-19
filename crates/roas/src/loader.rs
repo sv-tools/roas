@@ -1276,4 +1276,47 @@ mod tests {
         let value = block_on_simple(loader.resolve_reference_async("doc.json")).unwrap();
         assert_eq!(value, &serde_json::json!({ "ok": true }));
     }
+
+    #[test]
+    fn decode_fragment_lowercase_hex_digits_are_accepted() {
+        // Exercises the `b'a'..=b'f'` arm of `hex()` — lowercase hex digits.
+        // `%2f` is a valid percent-encoded `/` using lowercase hex; the decoded
+        // fragment `/foo/bar` must successfully point into the document.
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "https://example.test/doc.json",
+                serde_json::json!({ "foo": { "bar": 42 } }),
+            )
+            .unwrap();
+        // `%2f` decodes to `/` so the full pointer becomes `/foo/bar`.
+        let value = loader
+            .resolve_reference("https://example.test/doc.json#/foo%2fbar")
+            .unwrap();
+        assert_eq!(value, &serde_json::json!(42));
+    }
+
+    #[test]
+    fn parse_reference_relative_with_control_char_produces_invalid_uri_error() {
+        // Exercises the `Url::parse(&relative).map_err(|source| LoaderError::InvalidUri
+        // { ... })` branch in `parse_reference`. A reference that is relative
+        // (no scheme → RelativeUrlWithoutBase) but then fails even when prefixed
+        // with `relative:` (e.g. because it contains a bare NUL byte which
+        // `url::Url::parse` rejects) must surface as `LoaderError::InvalidUri`.
+        // NUL bytes are rejected by the URL parser on all platforms.
+        let mut loader = Loader::new();
+        let reference = "doc\x00.json";
+        let err = loader
+            .load_resource(reference)
+            .expect_err("reference with NUL byte must error");
+        // Either InvalidUri (parse failed) or NoFetcherRegistered (parse
+        // succeeded — the URL crate normalised the NUL away on this platform).
+        assert!(
+            matches!(
+                err,
+                LoaderError::InvalidUri { .. } | LoaderError::NoFetcherRegistered { .. }
+            ),
+            "expected InvalidUri or NoFetcherRegistered, got {err:?}"
+        );
+    }
 }

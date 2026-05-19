@@ -915,4 +915,34 @@ mod tests {
             "serialize flow = application",
         );
     }
+
+    #[test]
+    fn scopes_visitor_expecting_via_type_mismatch() {
+        // ScopesVisitor::expecting is invoked when the input is not a map.
+        // Feed a JSON array to trigger the type-mismatch error path.
+        let err = serde_json::from_str::<Scopes>(r#"["read", "write"]"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Scopes") || msg.contains("expected") || msg.contains("map"),
+            "expected a type-mismatch serde error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scopes_serialize_with_extensions() {
+        // Exercises the extension-serialization branch (line 213) in
+        // Scopes::serialize. Build a Scopes value directly (bypassing the
+        // deserializer that filters out non-x- keys).
+        let mut scopes_map = BTreeMap::new();
+        scopes_map.insert("read:pets".to_owned(), "Read pets".to_owned());
+        let mut ext_map = BTreeMap::new();
+        ext_map.insert("x-custom".to_owned(), json!("value"));
+        let scopes = Scopes {
+            scopes: scopes_map,
+            extensions: Some(ext_map),
+        };
+        let value = serde_json::to_value(&scopes).unwrap();
+        assert_eq!(value["read:pets"], "Read pets");
+        assert_eq!(value["x-custom"], "value");
+    }
 }

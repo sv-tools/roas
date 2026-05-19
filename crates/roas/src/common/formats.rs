@@ -529,6 +529,35 @@ mod tests {
     }
 
     #[test]
+    fn schema_type_display() {
+        // Exercises Display for all SchemaType variants — these are distinct
+        // from Serialize (which is used by serde_json::to_string).
+        assert_eq!(SchemaType::String.to_string(), "string");
+        assert_eq!(SchemaType::Number.to_string(), "number");
+        assert_eq!(SchemaType::Integer.to_string(), "integer");
+        assert_eq!(SchemaType::Object.to_string(), "object");
+        assert_eq!(SchemaType::Array.to_string(), "array");
+        assert_eq!(SchemaType::Boolean.to_string(), "boolean");
+        assert_eq!(SchemaType::Null.to_string(), "null");
+        assert_eq!(
+            SchemaType::Custom("my-type".to_owned()).to_string(),
+            "my-type"
+        );
+    }
+
+    #[test]
+    fn schema_type_visitor_expecting_via_type_mismatch() {
+        // `SchemaTypeVisitor::expecting` is invoked when the input type is not
+        // a string. Feed a JSON integer to trigger the error path.
+        let err = serde_json::from_str::<SchemaType>("42").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("string") || msg.contains("expected"),
+            "expected a serde error mentioning 'string', got: {msg}"
+        );
+    }
+
+    #[test]
     fn string_format_visitor_expecting_message_via_invalid_type() {
         // `StringFormatVisitor::expecting` is invoked by serde when the input
         // type doesn't match (e.g. an integer instead of a string). We trigger
