@@ -12,7 +12,7 @@
 #   cp target/release/roas ctx/linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/
 #   docker build -t roas:dev ctx
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 ARG TARGETOS
 ARG TARGETARCH
 COPY ${TARGETOS}/${TARGETARCH}/roas /usr/local/bin/roas
