@@ -191,9 +191,13 @@ fn main() -> Result<()> {
 }
 
 fn run_completions(shell: clap_complete::Shell) -> Result<()> {
+    write_completions(shell, &mut io::stdout())
+}
+
+fn write_completions(shell: clap_complete::Shell, out: &mut dyn io::Write) -> Result<()> {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
-    clap_complete::generate(shell, &mut cmd, name, &mut io::stdout());
+    clap_complete::generate(shell, &mut cmd, name, out);
     Ok(())
 }
 
@@ -1091,5 +1095,130 @@ mod tests {
     fn cli_rejects_unknown_preview_renderer() {
         let res = Cli::try_parse_from(["roas", "preview", "--renderer", "stoplight", "spec.json"]);
         assert!(res.is_err(), "unknown renderer must be rejected");
+    }
+
+    // ── completions / manpages ──────────────────────────────────────────
+
+    #[test]
+    fn cli_parses_completions_with_each_supported_shell() {
+        for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+            let cli = Cli::try_parse_from(["roas", "completions", shell])
+                .unwrap_or_else(|e| panic!("completions {shell} parse: {e}"));
+            assert!(
+                matches!(cli.command, Command::Completions { .. }),
+                "expected Completions for {shell}",
+            );
+        }
+    }
+
+    #[test]
+    fn cli_rejects_unknown_completions_shell() {
+        let res = Cli::try_parse_from(["roas", "completions", "tcsh"]);
+        assert!(res.is_err(), "unsupported shell must be rejected");
+    }
+
+    #[test]
+    fn cli_parses_manpages_with_short_and_long_flag() {
+        for arg in ["--out", "-o"] {
+            let cli = Cli::try_parse_from(["roas", "manpages", arg, "/tmp/x"])
+                .unwrap_or_else(|e| panic!("manpages {arg} parse: {e}"));
+            match cli.command {
+                Command::Manpages { out } => assert_eq!(out, Path::new("/tmp/x")),
+                _ => panic!("expected Manpages"),
+            }
+        }
+    }
+
+    #[test]
+    fn cli_rejects_manpages_without_out_flag() {
+        let res = Cli::try_parse_from(["roas", "manpages"]);
+        assert!(res.is_err(), "--out is required");
+    }
+
+    /// Every shell variant should produce a non-empty completion script. We
+    /// don't pin the exact contents (clap_complete's output evolves), but
+    /// every script has to mention the bin name somewhere — that's enough
+    /// to distinguish "generator ran" from "generator no-op'd".
+    #[test]
+    fn write_completions_emits_a_script_for_every_supported_shell() {
+        use clap_complete::Shell;
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::PowerShell,
+            Shell::Elvish,
+        ] {
+            let mut buf = Vec::new();
+            write_completions(shell, &mut buf).expect("write_completions");
+            let out = String::from_utf8(buf).expect("completion script is UTF-8");
+            assert!(
+                !out.is_empty(),
+                "{shell:?} produced empty completion script"
+            );
+            assert!(
+                out.contains("roas"),
+                "{shell:?} completion script must reference the bin name",
+            );
+        }
+    }
+
+    #[test]
+    fn run_manpages_writes_top_level_and_per_subcommand_pages() {
+        let dir = temp_path("manpages-pages");
+        // run_manpages auto-creates a missing directory — assert that
+        // behaviour by handing it a path that doesn't exist yet.
+        assert!(!dir.exists());
+        run_manpages(&dir).expect("run_manpages");
+
+        // Top-level + one per subcommand (validate / convert / preview /
+        // completions / manpages). No nested subcommands today, so the
+        // tree walker stops one level deep.
+        for name in [
+            "roas.1",
+            "roas-validate.1",
+            "roas-convert.1",
+            "roas-preview.1",
+            "roas-completions.1",
+            "roas-manpages.1",
+        ] {
+            let path = dir.join(name);
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            assert!(!body.is_empty(), "{name} is empty");
+            // troff manpages have a `.TH <NAME> <SECTION>` header — the
+            // NAME is the renamed (hyphenated) form for subpages, so a
+            // bare `.TH ROAS-VALIDATE 1` is the strongest invariant the
+            // SYNOPSIS-renaming code can be checked against.
+            let expected_th = format!(".TH {} 1", name.trim_end_matches(".1").to_uppercase());
+            assert!(
+                body.contains(&expected_th),
+                "{name} missing TH header `{expected_th}`",
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_manpages_overwrites_existing_files() {
+        let dir = temp_path("manpages-overwrite");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let target = dir.join("roas.1");
+        std::fs::write(&target, b"stale").expect("seed file");
+
+        run_manpages(&dir).expect("run_manpages");
+
+        let body = std::fs::read_to_string(&target).expect("read");
+        assert_ne!(body, "stale", "existing manpage must be overwritten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_completions_invokes_write_completions_against_stdout() {
+        // Direct exercise of the thin `run_completions` wrapper so the
+        // dispatch shim doesn't sit uncovered. Output goes to the real
+        // stdout (the test harness will capture it); we only care that
+        // the call doesn't error.
+        run_completions(clap_complete::Shell::Bash).expect("run_completions");
     }
 }
