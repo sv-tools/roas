@@ -6,7 +6,9 @@
 //!   * `/` (and `/index.html`) — a small HTML shell that mounts the renderer
 //!     and pulls its bundle from the official CDN.
 //!   * `/spec` (and `/spec.json`) — the input spec, parsed via the existing
-//!     `read_and_parse` / `detect_or_use` pipeline and re-serialised as JSON.
+//!     `read_input` / `detect_or_use` pipeline and re-serialised as JSON.
+//!     The spec may come from a file path or from stdin (pass `-`, or omit
+//!     the path and pipe the spec). `--watch` requires a real file.
 //!   * `/reload` — when `--watch` is on, a Server-Sent-Events endpoint that
 //!     pushes one `data: reload` frame per file change. The injected
 //!     page-side `EventSource` subscriber calls `window.location.reload()` on
@@ -16,7 +18,7 @@
 //! runtime is constructed inside [`run_preview`] so the rest of the CLI
 //! stays sync.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -35,8 +37,8 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::read_and_parse;
 use crate::versioned::{self, SpecVersion};
+use crate::{InputFormat, InputSource, read_input, resolve_input_source};
 
 /// Renderer choice for the preview page. Both load their bundle from a public
 /// CDN; the spec itself is always served from the local server.
@@ -52,12 +54,18 @@ pub(crate) enum Renderer {
 
 #[derive(clap::Args)]
 pub struct PreviewArgs {
-    /// Path to the spec file (JSON or YAML).
-    pub(crate) file: PathBuf,
+    /// Path to the spec file (JSON or YAML). Pass `-`, or omit and pipe
+    /// the spec, to read from stdin. `--watch` requires a real file.
+    pub(crate) file: Option<PathBuf>,
 
     /// Force the input version (auto-detected by default).
     #[arg(long, value_enum)]
     pub(crate) from: Option<SpecVersion>,
+
+    /// Override format detection. By default, file paths use the extension
+    /// (`.yaml`/`.yml` → YAML, otherwise JSON) and stdin defaults to JSON.
+    #[arg(long, value_enum)]
+    pub(crate) format: Option<InputFormat>,
 
     /// Don't open the browser; just print the server URL and serve.
     #[arg(long)]
@@ -65,7 +73,8 @@ pub struct PreviewArgs {
 
     /// Watch the spec file and live-reload the browser on every change.
     /// Off by default; enable to spawn a filesystem watcher and an SSE
-    /// `/reload` route the rendered HTML subscribes to.
+    /// `/reload` route the rendered HTML subscribes to. Only works with
+    /// a real file; rejected for stdin input.
     #[arg(long)]
     pub(crate) watch: bool,
 
@@ -74,32 +83,87 @@ pub struct PreviewArgs {
     pub(crate) renderer: Renderer,
 }
 
-/// The minimal slice of `PreviewArgs` the spec-reading pipeline needs.
-/// Extracted so the file-watcher thread can re-run the same pipeline on
-/// every disk change without holding a reference to the full args struct.
+/// What the preview server reads from. Files can be re-read on every
+/// filesystem-watcher tick; stdin can be read exactly once.
 #[derive(Clone, Debug)]
-struct SpecSource {
-    file: PathBuf,
-    from: Option<SpecVersion>,
+enum SpecSource {
+    File {
+        file: PathBuf,
+        from: Option<SpecVersion>,
+        format: Option<InputFormat>,
+    },
+    /// Pre-read stdin body. `--watch` is rejected before we get here.
+    Stdin {
+        raw: String,
+        from: Option<SpecVersion>,
+        format: Option<InputFormat>,
+    },
 }
 
 impl SpecSource {
-    fn from_args(args: &PreviewArgs) -> Self {
-        Self {
-            file: args.file.clone(),
-            from: args.from,
+    fn from_args(args: &PreviewArgs) -> Result<Self> {
+        let source = resolve_input_source(args.file.as_deref())?;
+        match source {
+            InputSource::File(file) => Ok(SpecSource::File {
+                file,
+                from: args.from,
+                format: args.format,
+            }),
+            InputSource::Stdin => {
+                if args.watch {
+                    bail!("--watch requires a real file path; stdin cannot be watched");
+                }
+                // Read stdin once up-front. Errors here would normally
+                // surface from `read_input`, but stdin is consumed eagerly
+                // so we can keep the body around for repeated /spec serves.
+                let mut raw = String::new();
+                use std::io::Read;
+                std::io::stdin()
+                    .read_to_string(&mut raw)
+                    .context("reading from stdin")?;
+                Ok(SpecSource::Stdin {
+                    raw,
+                    from: args.from,
+                    format: args.format,
+                })
+            }
         }
     }
 
     /// Read + parse the spec, returning the JSON string the preview server
     /// hands to the renderer. Uses `convert_to(<same version>)` as a
-    /// "serialise back as a `Value`" pass.
+    /// "serialise back as a `Value`" pass. For stdin sources, "re-read"
+    /// just re-parses the buffered body.
     fn build_spec_json(&self) -> Result<String> {
-        let value = read_and_parse(&self.file)?;
-        let detected = versioned::detect_or_use(self.from, value)?;
+        let (value, from) = match self {
+            SpecSource::File { file, from, format } => {
+                let source = InputSource::File(file.clone());
+                let (value, _input_format) = read_input(&source, *format)?;
+                (value, *from)
+            }
+            SpecSource::Stdin { raw, from, format } => {
+                let is_yaml = matches!(format, Some(InputFormat::Yaml));
+                (versioned::parse_value(raw, is_yaml)?, *from)
+            }
+        };
+        let detected = versioned::detect_or_use(from, value)?;
         let version = detected.version();
         serde_json::to_string(&detected.convert_to(version)?)
             .context("serializing spec for the viewer")
+    }
+
+    fn display(&self) -> String {
+        match self {
+            SpecSource::File { file, .. } => file.display().to_string(),
+            SpecSource::Stdin { .. } => "<stdin>".to_string(),
+        }
+    }
+
+    fn watch_path(&self) -> Option<&PathBuf> {
+        match self {
+            SpecSource::File { file, .. } => Some(file),
+            SpecSource::Stdin { .. } => None,
+        }
     }
 }
 
@@ -180,6 +244,7 @@ fn render_html(renderer: Renderer, watch: bool) -> String {
 /// place, so a half-saved file doesn't black-hole the preview.
 fn spawn_file_watcher(
     source: SpecSource,
+    watch_path: PathBuf,
     spec_json: Arc<Mutex<String>>,
     reload_tx: broadcast::Sender<()>,
 ) -> Result<Debouncer<notify::RecommendedWatcher>> {
@@ -199,10 +264,10 @@ fn spawn_file_watcher(
     .context("starting filesystem watcher")?;
     debouncer
         .watcher()
-        .watch(&source.file, RecursiveMode::NonRecursive)
-        .with_context(|| format!("watching {}", source.file.display()))?;
+        .watch(&watch_path, RecursiveMode::NonRecursive)
+        .with_context(|| format!("watching {}", watch_path.display()))?;
 
-    let display_path = source.file.display().to_string();
+    let display_path = watch_path.display().to_string();
     thread::spawn(move || {
         while event_rx.recv().is_ok() {
             match source.build_spec_json() {
@@ -244,6 +309,9 @@ struct PreparedPreview {
     listener: tokio::net::TcpListener,
     url: String,
     renderer_label: &'static str,
+    /// Display label for the input source — file path or `<stdin>`. Threaded
+    /// into the "Serving …" banner so users can see where the spec came from.
+    source_label: String,
     state: AppState,
     /// Kept alive only to hold the filesystem watch open for as long as the
     /// server is running. Dropped when `PreparedPreview` is dropped.
@@ -251,7 +319,8 @@ struct PreparedPreview {
 }
 
 async fn prepare_preview(args: &PreviewArgs) -> Result<PreparedPreview> {
-    let source = SpecSource::from_args(args);
+    let source = SpecSource::from_args(args)?;
+    let source_label = source.display();
     let initial_json = source.build_spec_json()?;
     let spec_json = Arc::new(Mutex::new(initial_json));
 
@@ -270,13 +339,15 @@ async fn prepare_preview(args: &PreviewArgs) -> Result<PreparedPreview> {
 
     // Wire up the file watcher if `--watch` was passed. The debouncer is
     // returned so the caller can keep it alive — it stops watching when
-    // dropped.
-    let (reload_tx, debouncer) = if args.watch {
-        let (tx, _initial_rx) = broadcast::channel::<()>(16);
-        let debouncer = spawn_file_watcher(source, Arc::clone(&spec_json), tx.clone())?;
-        (Some(tx), Some(debouncer))
-    } else {
-        (None, None)
+    // dropped. `--watch` against stdin is rejected by `SpecSource::from_args`
+    // so `watch_path()` here is always `Some` when `args.watch` is true.
+    let (reload_tx, debouncer) = match (args.watch, source.watch_path().cloned()) {
+        (true, Some(path)) => {
+            let (tx, _initial_rx) = broadcast::channel::<()>(16);
+            let debouncer = spawn_file_watcher(source, path, Arc::clone(&spec_json), tx.clone())?;
+            (Some(tx), Some(debouncer))
+        }
+        _ => (None, None),
     };
 
     let state = AppState {
@@ -289,6 +360,7 @@ async fn prepare_preview(args: &PreviewArgs) -> Result<PreparedPreview> {
         listener,
         url,
         renderer_label,
+        source_label,
         state,
         _debouncer: debouncer,
     })
@@ -317,12 +389,10 @@ async fn run_preview_async(args: PreviewArgs) -> Result<()> {
 async fn drive_prepared_preview(args: &PreviewArgs, prepared: PreparedPreview) -> Result<()> {
     eprintln!(
         "Serving {} via {} at {}",
-        args.file.display(),
-        prepared.renderer_label,
-        prepared.url,
+        prepared.source_label, prepared.renderer_label, prepared.url,
     );
     if args.watch {
-        eprintln!("Watching {} for changes.", args.file.display());
+        eprintln!("Watching {} for changes.", prepared.source_label);
     }
     eprintln!("Press Ctrl+C to stop.");
 
@@ -539,8 +609,9 @@ mod tests {
     #[test]
     fn run_preview_missing_file_errors_with_reading_context() {
         let args = PreviewArgs {
-            file: temp_path("missing.json"),
+            file: Some(temp_path("missing.json")),
             from: None,
+            format: None,
             no_open: true,
             renderer: Renderer::Redoc,
             watch: false,
@@ -556,8 +627,9 @@ mod tests {
     async fn prepare_preview_with_redoc_returns_bound_listener_and_redoc_assets() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: None,
+            format: None,
             no_open: true,
             renderer: Renderer::Redoc,
             watch: false,
@@ -584,8 +656,9 @@ mod tests {
     async fn prepare_preview_with_swagger_ui_switches_renderer_fields() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: None,
+            format: None,
             no_open: true,
             renderer: Renderer::SwaggerUi,
             watch: false,
@@ -609,8 +682,9 @@ mod tests {
         .expect("write temp spec");
 
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: Some(SpecVersion::V3_1),
+            format: None,
             no_open: true,
             renderer: Renderer::Redoc,
             watch: false,
@@ -631,8 +705,9 @@ mod tests {
     async fn axum_router_serves_html_spec_and_404s_unknown_routes() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: None,
+            format: None,
             no_open: true,
             renderer: Renderer::Redoc,
             watch: false,
@@ -672,8 +747,9 @@ mod tests {
     async fn reload_route_returns_404_when_watch_is_off() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: None,
+            format: None,
             no_open: true,
             renderer: Renderer::Redoc,
             watch: false,
@@ -695,8 +771,9 @@ mod tests {
     async fn reload_route_emits_sse_frame_when_broadcast_fires() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: None,
+            format: None,
             no_open: true,
             renderer: Renderer::Redoc,
             watch: true,
@@ -766,8 +843,9 @@ mod tests {
     async fn file_watcher_broadcasts_reload_and_refreshes_spec_json_on_change() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: None,
+            format: None,
             no_open: true,
             watch: true,
             renderer: Renderer::Redoc,
@@ -813,8 +891,9 @@ mod tests {
     async fn file_watcher_keeps_previous_json_when_reparse_fails() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: None,
+            format: None,
             no_open: true,
             watch: true,
             renderer: Renderer::Redoc,
@@ -844,8 +923,9 @@ mod tests {
     async fn prepare_preview_with_watch_wires_up_broadcast_sender_and_html_injection() {
         let path = write_minimal_v3_2_spec();
         let args = PreviewArgs {
-            file: path.clone(),
+            file: Some(path.clone()),
             from: None,
+            format: None,
             no_open: true,
             watch: true,
             renderer: Renderer::Redoc,
@@ -862,5 +942,55 @@ mod tests {
 
         drop(prepared);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// `SpecSource::Stdin` re-parses its buffered body on every
+    /// `build_spec_json` call. This exercises the same code path the
+    /// server uses to serve `/spec` when input came from a pipe.
+    #[test]
+    fn spec_source_stdin_builds_json_from_buffered_body() {
+        let source = SpecSource::Stdin {
+            raw: r#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#.to_string(),
+            from: None,
+            format: None,
+        };
+        let json = source.build_spec_json().expect("build ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["openapi"], "3.2.0");
+        assert_eq!(source.display(), "<stdin>");
+        assert!(source.watch_path().is_none());
+    }
+
+    /// `--watch` against the `-` stdin sentinel must bail before any
+    /// stdin read — so we can exercise the rejection in-process without
+    /// hanging on a real TTY.
+    #[test]
+    fn spec_source_from_args_rejects_watch_with_stdin_sentinel() {
+        let args = PreviewArgs {
+            file: Some(PathBuf::from("-")),
+            from: None,
+            format: None,
+            no_open: true,
+            watch: true,
+            renderer: Renderer::Redoc,
+        };
+        let err = SpecSource::from_args(&args).expect_err("--watch + stdin must error");
+        assert!(
+            err.to_string().contains("--watch requires a real file"),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn spec_source_stdin_with_yaml_format_parses_yaml_body() {
+        let raw = "openapi: '3.2.0'\ninfo:\n  title: x\n  version: '1'\npaths: {}\n";
+        let source = SpecSource::Stdin {
+            raw: raw.to_string(),
+            from: None,
+            format: Some(InputFormat::Yaml),
+        };
+        let json = source.build_spec_json().expect("build ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["openapi"], "3.2.0");
     }
 }

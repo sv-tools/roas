@@ -2,29 +2,36 @@
 //!
 //! Three subcommands today:
 //!
-//! - `roas validate <FILE>` — parse and validate an OpenAPI spec. Version is
+//! - `roas validate [FILE]` — parse and validate an OpenAPI spec. Version is
 //!   auto-detected from the document; pass `--from` to force. External
 //!   `$ref`s are skipped by default; use `--load file` / `--load http`
-//!   (or both) to enable the loader.
+//!   (or both) to enable the loader. Pass `--print` to echo the parsed
+//!   spec to stdout on success — in the same format as the input (YAML
+//!   in → YAML out, JSON in → JSON out) — useful for pipelines.
 //!
-//! - `roas convert --to <VERSION> <FILE>` — chain the existing
+//! - `roas convert --to <VERSION> [FILE]` — chain the existing
 //!   `From<v_X::Spec> for v_Y::Spec` migrations to upconvert a spec.
 //!   Pass `--from` to force the input version. Pass `--collapse` to
 //!   run `Spec::collapse` on the (post-conversion) result, lifting
 //!   every inline component into the matching `components.<bag>` /
 //!   `definitions` / `parameters` / `responses` slot with strict
 //!   dedup. External `$ref`s are skipped by default; use
-//!   `--load file` / `--load http` to opt into the loader.
+//!   `--load file` / `--load http` to opt into the loader. Output
+//!   defaults to the input format (YAML in → YAML out, JSON in → JSON
+//!   out); pass `--output-format json|yaml` to override.
 //!
-//! - `roas preview <FILE>` — start a local HTTP server on
+//! - `roas preview [FILE]` — start a local HTTP server on
 //!   `127.0.0.1:<random>` that serves the spec rendered with
 //!   [Redoc](https://redocly.com/redoc) (default) or
 //!   [Swagger UI](https://swagger.io/tools/swagger-ui/) (`--renderer
 //!   swagger-ui`), and open the default browser at it. `--no-open` skips
-//!   the launch. Ctrl+C tears the server down.
+//!   the launch. Ctrl+C tears the server down. `--watch` requires a real
+//!   file (stdin can't be watched).
 //!
-//! Input may be JSON or YAML; the parser is selected by file extension
-//! (`.yaml` / `.yml` → YAML, otherwise JSON).
+//! Input may be JSON or YAML. With a file path, the parser is selected by
+//! extension (`.yaml` / `.yml` → YAML, otherwise JSON). Pass `-` as the
+//! file path, or omit it entirely and pipe the spec, to read from stdin;
+//! stdin defaults to JSON. `--format json|yaml` overrides everything.
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -33,7 +40,8 @@ use roas::validation::Options;
 use roas_file_fetcher::FileFetcher;
 use roas_http_fetcher::HttpFetcher;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
 
 // `roas::validation::Options` implements `clap::ValueEnum` under the `clap`
 // feature (enabled on the `roas` dep in this crate's Cargo.toml), so we can
@@ -66,12 +74,18 @@ enum Command {
 
 #[derive(clap::Args)]
 struct ValidateArgs {
-    /// Path to the spec file (JSON or YAML).
-    file: PathBuf,
+    /// Path to the spec file (JSON or YAML). Pass `-`, or omit and pipe
+    /// the spec, to read from stdin.
+    file: Option<PathBuf>,
 
     /// Force the input version (auto-detected by default).
     #[arg(long, value_enum)]
     from: Option<SpecVersion>,
+
+    /// Override format detection. By default, file paths use the extension
+    /// (`.yaml`/`.yml` → YAML, otherwise JSON) and stdin defaults to JSON.
+    #[arg(long, value_enum)]
+    format: Option<InputFormat>,
 
     /// Enable external-reference loading. Pass `--load file` to allow
     /// `file://` refs, `--load http` to allow `http://` and `https://`.
@@ -84,12 +98,20 @@ struct ValidateArgs {
     /// `roas validate --help` to see the full list.
     #[arg(long, value_enum)]
     ignore: Vec<Options>,
+
+    /// On success, echo the parsed spec to stdout in the same format as
+    /// the input (YAML in → YAML out, JSON in → JSON out). Diagnostics
+    /// stay on stderr. Lets `validate` sit in the middle of a pipeline:
+    /// `roas convert ... | roas validate --print | roas preview`.
+    #[arg(long)]
+    print: bool,
 }
 
 #[derive(clap::Args)]
 struct ConvertArgs {
-    /// Path to the spec file (JSON or YAML).
-    file: PathBuf,
+    /// Path to the spec file (JSON or YAML). Pass `-`, or omit and pipe
+    /// the spec, to read from stdin.
+    file: Option<PathBuf>,
 
     /// Target spec version.
     #[arg(long, value_enum)]
@@ -98,6 +120,16 @@ struct ConvertArgs {
     /// Force the input version (auto-detected by default).
     #[arg(long, value_enum)]
     from: Option<SpecVersion>,
+
+    /// Override format detection. By default, file paths use the extension
+    /// (`.yaml`/`.yml` → YAML, otherwise JSON) and stdin defaults to JSON.
+    #[arg(long, value_enum)]
+    format: Option<InputFormat>,
+
+    /// Output format. Defaults to the input format (YAML in → YAML out,
+    /// JSON in → JSON out). Pass `--output-format json|yaml` to switch.
+    #[arg(long, value_enum)]
+    output_format: Option<InputFormat>,
 
     /// Lift every inline component into the matching root bag
     /// (`components.<bag>` for v3.x, `definitions` / `parameters` /
@@ -123,6 +155,12 @@ enum LoaderKind {
     Http,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum InputFormat {
+    Json,
+    Yaml,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -132,9 +170,76 @@ fn main() -> Result<()> {
     }
 }
 
-pub(crate) fn read_and_parse(path: &std::path::Path) -> Result<serde_json::Value> {
-    let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    parse_value(&raw, path_looks_like_yaml(path))
+/// What was passed on the command line. `None` + piped stdin == read stdin;
+/// `Some(p)` where `p == Path::new("-")` is the explicit stdin sentinel;
+/// `None` + TTY stdin is a usage error.
+///
+/// `display()` returns a label for diagnostics: the file path for files,
+/// `<stdin>` for stdin.
+#[derive(Clone, Debug)]
+pub(crate) enum InputSource {
+    File(PathBuf),
+    Stdin,
+}
+
+impl InputSource {
+    pub(crate) fn display(&self) -> String {
+        match self {
+            InputSource::File(p) => p.display().to_string(),
+            InputSource::Stdin => "<stdin>".to_string(),
+        }
+    }
+}
+
+/// Resolve the positional `file` argument into a concrete source. Honors
+/// the `-` sentinel and the "no arg + piped stdin" shortcut. Returns
+/// `Err` only when neither was provided and stdin is a TTY.
+pub(crate) fn resolve_input_source(file: Option<&Path>) -> Result<InputSource> {
+    match file {
+        Some(p) if p == Path::new("-") => Ok(InputSource::Stdin),
+        Some(p) => Ok(InputSource::File(p.to_path_buf())),
+        None => {
+            if std::io::stdin().is_terminal() {
+                bail!("no input: pass a file path, or pipe a spec to stdin");
+            }
+            Ok(InputSource::Stdin)
+        }
+    }
+}
+
+/// Read + parse a spec from the resolved source. Format selection: explicit
+/// `--format` wins; otherwise file paths use the extension, stdin defaults
+/// to JSON. Returns the parsed value plus the *resolved* format so callers
+/// that round-trip the spec back to bytes (e.g. `validate --print`) can
+/// match the output format to the input.
+pub(crate) fn read_input(
+    source: &InputSource,
+    format: Option<InputFormat>,
+) -> Result<(serde_json::Value, InputFormat)> {
+    let resolved = match source {
+        InputSource::File(p) => format.unwrap_or_else(|| {
+            if path_looks_like_yaml(p) {
+                InputFormat::Yaml
+            } else {
+                InputFormat::Json
+            }
+        }),
+        InputSource::Stdin => format.unwrap_or(InputFormat::Json),
+    };
+    let raw = match source {
+        InputSource::File(p) => {
+            fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?
+        }
+        InputSource::Stdin => {
+            let mut raw = String::new();
+            std::io::stdin()
+                .read_to_string(&mut raw)
+                .context("reading from stdin")?;
+            raw
+        }
+    };
+    let value = parse_value(&raw, resolved == InputFormat::Yaml)?;
+    Ok((value, resolved))
 }
 
 fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {
@@ -159,8 +264,34 @@ fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {
     Some(loader)
 }
 
+/// Serialize a parsed spec back to bytes. `pretty_json` selects multi-line
+/// vs. compact JSON; YAML is always multi-line. A trailing newline is
+/// appended so the output is line-oriented like YAML's.
+///
+/// Used by both `validate --print` (compact, pipeline-friendly) and
+/// `convert` (pretty, file-friendly).
+fn serialize_spec(
+    value: &serde_json::Value,
+    format: InputFormat,
+    pretty_json: bool,
+) -> Result<String> {
+    match format {
+        InputFormat::Yaml => serde_yaml_ng::to_string(value).context("serializing spec as YAML"),
+        InputFormat::Json => {
+            let mut s = if pretty_json {
+                serde_json::to_string_pretty(value).context("serializing spec as JSON")?
+            } else {
+                serde_json::to_string(value).context("serializing spec as JSON")?
+            };
+            s.push('\n');
+            Ok(s)
+        }
+    }
+}
+
 fn run_validate(args: ValidateArgs) -> Result<()> {
-    let value = read_and_parse(&args.file)?;
+    let source = resolve_input_source(args.file.as_deref())?;
+    let (value, input_format) = read_input(&source, args.format)?;
     let detected = versioned::detect_or_use(args.from, value)?;
 
     let mut loader = build_loader(&args.load);
@@ -172,7 +303,15 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
     match detected.validate(options, loader.as_mut()) {
         Ok(()) => {
             // Diagnostics go to stderr so stdout stays clean for shell pipelines.
-            eprintln!("{}: valid {}", args.file.display(), detected.label());
+            eprintln!("{}: valid {}", source.display(), detected.label());
+            if args.print {
+                // Echo the parsed spec so the command can sit in the middle
+                // of a pipeline. Format matches the input: YAML in → YAML out,
+                // JSON in → JSON out. `into_value` re-serialises through the
+                // typed Spec, so the output is normalised.
+                let value = detected.into_value()?;
+                print!("{}", serialize_spec(&value, input_format, false)?);
+            }
             Ok(())
         }
         Err(err) => {
@@ -181,7 +320,7 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
             }
             Err(anyhow!(
                 "{}: validation failed ({} error{})",
-                args.file.display(),
+                source.display(),
                 err.errors.len(),
                 if err.errors.len() == 1 { "" } else { "s" }
             ))
@@ -190,7 +329,8 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
 }
 
 fn run_convert(args: ConvertArgs) -> Result<()> {
-    let value = read_and_parse(&args.file)?;
+    let source = resolve_input_source(args.file.as_deref())?;
+    let (value, input_format) = read_input(&source, args.format)?;
     let detected = versioned::detect_or_use(args.from, value)?;
 
     let target = args.to;
@@ -208,8 +348,9 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
         converted.collapse(loader.as_mut())?;
     }
     let value = converted.into_value()?;
-    let json = serde_json::to_string_pretty(&value).context("serializing converted spec")?;
-    println!("{json}");
+    // Output format defaults to the input format; `--output-format` overrides.
+    let out_format = args.output_format.unwrap_or(input_format);
+    print!("{}", serialize_spec(&value, out_format, true)?);
     Ok(())
 }
 
@@ -254,11 +395,45 @@ mod tests {
         let cli = Cli::try_parse_from(["roas", "validate", "spec.json"]).expect("validate parse");
         match cli.command {
             Command::Validate(args) => {
-                assert_eq!(args.file.to_string_lossy(), "spec.json");
+                assert_eq!(args.file.as_ref().unwrap().to_string_lossy(), "spec.json");
                 assert!(args.from.is_none());
                 assert!(args.load.is_empty());
                 assert!(args.ignore.is_empty());
+                assert!(!args.print);
+                assert!(args.format.is_none());
             }
+            _ => panic!("expected Validate"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_validate_without_file_arg() {
+        let cli = Cli::try_parse_from(["roas", "validate"]).expect("validate parse");
+        match cli.command {
+            Command::Validate(args) => assert!(args.file.is_none()),
+            _ => panic!("expected Validate"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_validate_with_stdin_sentinel_and_format_flag() {
+        let cli = Cli::try_parse_from(["roas", "validate", "--format", "yaml", "-"])
+            .expect("validate parse");
+        match cli.command {
+            Command::Validate(args) => {
+                assert_eq!(args.file.as_deref(), Some(Path::new("-")));
+                assert_eq!(args.format, Some(InputFormat::Yaml));
+            }
+            _ => panic!("expected Validate"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_validate_print_flag() {
+        let cli = Cli::try_parse_from(["roas", "validate", "--print", "spec.json"])
+            .expect("validate parse");
+        match cli.command {
+            Command::Validate(args) => assert!(args.print),
             _ => panic!("expected Validate"),
         }
     }
@@ -349,6 +524,24 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_convert_with_output_format_flag() {
+        let cli = Cli::try_parse_from([
+            "roas",
+            "convert",
+            "--to",
+            "v3_2",
+            "--output-format",
+            "yaml",
+            "spec.json",
+        ])
+        .expect("convert parse");
+        match cli.command {
+            Command::Convert(args) => assert_eq!(args.output_format, Some(InputFormat::Yaml)),
+            _ => panic!("expected Convert"),
+        }
+    }
+
+    #[test]
     fn cli_parses_convert_with_collapse_and_load_flags() {
         let cli = Cli::try_parse_from([
             "roas",
@@ -428,23 +621,47 @@ mod tests {
     }
 
     #[test]
-    fn read_and_parse_json_file_returns_parsed_value() {
+    fn read_input_json_file_returns_parsed_value_and_json_format() {
         let f = TempFile::write("ok.json", br#"{"hello":"world"}"#);
-        let v = read_and_parse(&f.0).expect("parse ok");
+        let (v, fmt) = read_input(&InputSource::File(f.0.clone()), None).expect("parse ok");
         assert_eq!(v, serde_json::json!({"hello": "world"}));
+        assert_eq!(fmt, InputFormat::Json);
     }
 
     #[test]
-    fn read_and_parse_yaml_file_routes_through_yaml_parser() {
+    fn read_input_yaml_file_routes_through_yaml_parser_via_extension() {
         let f = TempFile::write("ok.yaml", b"name: pet\ncount: 3\n");
-        let v = read_and_parse(&f.0).expect("parse ok");
+        let (v, fmt) = read_input(&InputSource::File(f.0.clone()), None).expect("parse ok");
         assert_eq!(v, serde_json::json!({"name": "pet", "count": 3}));
+        assert_eq!(fmt, InputFormat::Yaml);
     }
 
     #[test]
-    fn read_and_parse_missing_file_errors_with_reading_context() {
+    fn read_input_format_override_forces_yaml_on_no_extension_file() {
+        // No `.yaml` extension: extension sniffing would pick JSON, but
+        // `--format yaml` must win — and the resolved format must reflect it.
+        let f = TempFile::write("ok-noext", b"name: pet\ncount: 3\n");
+        let (v, fmt) =
+            read_input(&InputSource::File(f.0.clone()), Some(InputFormat::Yaml)).expect("parse ok");
+        assert_eq!(v, serde_json::json!({"name": "pet", "count": 3}));
+        assert_eq!(fmt, InputFormat::Yaml);
+    }
+
+    #[test]
+    fn read_input_format_override_forces_json_on_yaml_extension() {
+        // File has `.yaml` extension but contents are JSON: `--format json`
+        // must override the extension heuristic.
+        let f = TempFile::write("misnamed.yaml", br#"{"hello":"world"}"#);
+        let (v, fmt) =
+            read_input(&InputSource::File(f.0.clone()), Some(InputFormat::Json)).expect("parse ok");
+        assert_eq!(v, serde_json::json!({"hello": "world"}));
+        assert_eq!(fmt, InputFormat::Json);
+    }
+
+    #[test]
+    fn read_input_missing_file_errors_with_reading_context() {
         let p = temp_path("missing.json");
-        let err = read_and_parse(&p).expect_err("missing file must error");
+        let err = read_input(&InputSource::File(p), None).expect_err("missing file must error");
         assert!(
             err.to_string().contains("reading"),
             "expected `reading` context, got: {err}",
@@ -452,9 +669,10 @@ mod tests {
     }
 
     #[test]
-    fn read_and_parse_invalid_json_surfaces_parser_error() {
+    fn read_input_invalid_json_surfaces_parser_error() {
         let f = TempFile::write("bad.json", b"@@@ not json");
-        let err = read_and_parse(&f.0).expect_err("invalid JSON must error");
+        let err =
+            read_input(&InputSource::File(f.0.clone()), None).expect_err("invalid JSON must error");
         assert!(
             err.to_string().contains("parsing JSON"),
             "expected `parsing JSON` context, got: {err}",
@@ -462,13 +680,71 @@ mod tests {
     }
 
     #[test]
-    fn read_and_parse_invalid_yaml_surfaces_parser_error() {
+    fn read_input_invalid_yaml_surfaces_parser_error() {
         let f = TempFile::write("bad.yaml", b"key:\n\tvalue: oops\n");
-        let err = read_and_parse(&f.0).expect_err("invalid YAML must error");
+        let err =
+            read_input(&InputSource::File(f.0.clone()), None).expect_err("invalid YAML must error");
         assert!(
             err.to_string().contains("parsing YAML"),
             "expected `parsing YAML` context, got: {err}",
         );
+    }
+
+    #[test]
+    fn serialize_spec_compact_json_emits_single_line_with_trailing_newline() {
+        let v = serde_json::json!({"openapi":"3.2.0","info":{"title":"x","version":"1"}});
+        let out = serialize_spec(&v, InputFormat::Json, false).expect("ok");
+        assert!(out.ends_with('\n'), "JSON must end with a newline");
+        // Compact JSON has no internal newlines.
+        assert_eq!(out.matches('\n').count(), 1, "compact JSON: got: {out}");
+        let back: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn serialize_spec_pretty_json_emits_multi_line_with_trailing_newline() {
+        let v = serde_json::json!({"openapi":"3.2.0","info":{"title":"x","version":"1"}});
+        let out = serialize_spec(&v, InputFormat::Json, true).expect("ok");
+        assert!(out.ends_with('\n'), "JSON must end with a newline");
+        // Pretty JSON spans multiple lines for an object of this size.
+        assert!(out.matches('\n').count() > 1, "pretty JSON: got: {out}");
+        let back: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn serialize_spec_yaml_emits_yaml_for_yaml_format() {
+        let v = serde_json::json!({"openapi":"3.2.0","info":{"title":"x","version":"1"}});
+        let out = serialize_spec(&v, InputFormat::Yaml, false).expect("ok");
+        // YAML structure: no curly braces at the top level, keys are bare,
+        // and serde_yaml_ng terminates documents with a newline.
+        assert!(
+            out.contains("openapi:"),
+            "YAML output must use bare keys, got: {out}",
+        );
+        assert!(
+            !out.trim().starts_with('{'),
+            "YAML output must not be JSON, got: {out}",
+        );
+        // Round-trips back to the same value.
+        let back: serde_json::Value = serde_yaml_ng::from_str(&out).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn resolve_input_source_explicit_dash_is_stdin() {
+        let src = resolve_input_source(Some(Path::new("-"))).expect("resolve ok");
+        assert!(matches!(src, InputSource::Stdin));
+        assert_eq!(src.display(), "<stdin>");
+    }
+
+    #[test]
+    fn resolve_input_source_explicit_path_is_file() {
+        let src = resolve_input_source(Some(Path::new("spec.json"))).expect("resolve ok");
+        match src {
+            InputSource::File(p) => assert_eq!(p, Path::new("spec.json")),
+            _ => panic!("expected File"),
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -487,10 +763,12 @@ mod tests {
     fn run_validate_returns_ok_for_clean_spec() {
         let f = TempFile::write("clean.json", MINIMAL_V3_2);
         let args = ValidateArgs {
-            file: f.0.clone(),
+            file: Some(f.0.clone()),
             from: None,
+            format: None,
             load: Vec::new(),
             ignore: Vec::new(),
+            print: false,
         };
         run_validate(args).expect("clean spec must validate");
     }
@@ -501,10 +779,12 @@ mod tests {
         let body = br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{},"tags":[{"name":"unused"}]}"#;
         let f = TempFile::write("unused-tag.json", body);
         let args = ValidateArgs {
-            file: f.0.clone(),
+            file: Some(f.0.clone()),
             from: None,
+            format: None,
             load: Vec::new(),
             ignore: Vec::new(),
+            print: false,
         };
         let err = run_validate(args).expect_err("unused tag must fail");
         assert!(err.to_string().contains("validation failed"), "got: {err}",);
@@ -515,10 +795,12 @@ mod tests {
         let body = br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{},"tags":[{"name":"unused"}]}"#;
         let f = TempFile::write("ignored.json", body);
         let args = ValidateArgs {
-            file: f.0.clone(),
+            file: Some(f.0.clone()),
             from: None,
+            format: None,
             load: Vec::new(),
             ignore: vec![Options::IgnoreUnusedTags],
+            print: false,
         };
         run_validate(args).expect("--ignore unused-tags must suppress");
     }
@@ -527,10 +809,12 @@ mod tests {
     fn run_validate_with_load_file_builds_loader() {
         let f = TempFile::write("with-load.json", MINIMAL_V3_2);
         let args = ValidateArgs {
-            file: f.0.clone(),
+            file: Some(f.0.clone()),
             from: None,
+            format: None,
             load: vec![LoaderKind::File],
             ignore: Vec::new(),
+            print: false,
         };
         run_validate(args).expect("clean spec with file loader must validate");
     }
@@ -538,10 +822,12 @@ mod tests {
     #[test]
     fn run_validate_missing_file_errors_with_reading_context() {
         let args = ValidateArgs {
-            file: temp_path("missing.json"),
+            file: Some(temp_path("missing.json")),
             from: None,
+            format: None,
             load: Vec::new(),
             ignore: Vec::new(),
+            print: false,
         };
         let err = run_validate(args).expect_err("missing file must error");
         assert!(
@@ -554,9 +840,11 @@ mod tests {
     fn run_convert_v2_to_v3_2_succeeds() {
         let f = TempFile::write("v2.json", MINIMAL_V2);
         let args = ConvertArgs {
-            file: f.0.clone(),
+            file: Some(f.0.clone()),
             to: SpecVersion::V3_2,
             from: None,
+            format: None,
+            output_format: None,
             collapse: false,
             load: vec![],
         };
@@ -600,9 +888,11 @@ mod tests {
         );
         let f = TempFile::write("convert-collapse-spec.json", body.as_bytes());
         let args = ConvertArgs {
-            file: f.0.clone(),
+            file: Some(f.0.clone()),
             to: SpecVersion::V3_2,
             from: None,
+            format: None,
+            output_format: None,
             collapse: true,
             load: vec![LoaderKind::File],
         };
@@ -639,9 +929,11 @@ mod tests {
         }"#;
         let f = TempFile::write("collapse.json", body);
         let args = ConvertArgs {
-            file: f.0.clone(),
+            file: Some(f.0.clone()),
             to: SpecVersion::V3_2,
             from: None,
+            format: None,
+            output_format: None,
             collapse: true,
             load: vec![],
         };
@@ -652,9 +944,11 @@ mod tests {
     fn run_convert_rejects_downconversion() {
         let f = TempFile::write("v3.json", MINIMAL_V3_2);
         let args = ConvertArgs {
-            file: f.0.clone(),
+            file: Some(f.0.clone()),
             to: SpecVersion::V2,
             from: None,
+            format: None,
+            output_format: None,
             collapse: false,
             load: vec![],
         };
@@ -668,9 +962,11 @@ mod tests {
     #[test]
     fn run_convert_missing_file_errors_with_reading_context() {
         let args = ConvertArgs {
-            file: temp_path("missing.json"),
+            file: Some(temp_path("missing.json")),
             to: SpecVersion::V3_2,
             from: None,
+            format: None,
+            output_format: None,
             collapse: false,
             load: vec![],
         };
@@ -690,7 +986,7 @@ mod tests {
             .expect("preview parse");
         match cli.command {
             Command::Preview(args) => {
-                assert_eq!(args.file.to_string_lossy(), "spec.json");
+                assert_eq!(args.file.as_ref().unwrap().to_string_lossy(), "spec.json");
                 assert!(args.no_open);
                 assert!(args.from.is_none());
                 assert!(!args.watch);
