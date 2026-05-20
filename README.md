@@ -1,11 +1,26 @@
-# roas workspace
+# roas
 
-`roas` is a Rust **SDK** for the OpenAPI Specification — a typed Rust library that
-lets you parse, validate, convert, and round-trip OpenAPI / Swagger documents
-directly from Rust code. The SDK supports every released OpenAPI version: v2.0
-(Swagger), v3.0.x, v3.1.x, and v3.2.x.
+`roas` is a Rust **SDK and command-line tool** for the OpenAPI Specification:
+parse, validate, convert, and round-trip OpenAPI / Swagger documents from
+Rust code *or* from the shell. Every released OpenAPI version is supported:
+v2.0 (Swagger), v3.0.x, v3.1.x, and v3.2.x.
 
-## What this SDK provides
+## Use it as a CLI
+
+[`roas-cli`](crates/roas-cli) ships a `roas` binary with `validate`,
+`convert`, and `preview` subcommands. Install via Cargo, Homebrew, or
+Docker — pick whichever fits the host:
+
+```shell
+cargo install roas-cli                                                # any platform with a Rust toolchain
+brew install sv-tools/apps/roas                                       # macOS arm64, Linux
+docker run --rm -v "$PWD:/specs" -w /specs ghcr.io/sv-tools/roas:latest validate openapi.yaml
+```
+
+See the [`roas-cli` README](crates/roas-cli/README.md) for the full
+subcommand reference, piping examples, and the live-reload preview server.
+
+## Use it as a Rust SDK
 
 - **Parsers and serialisers** — deserialise OpenAPI documents from JSON or YAML
   into strongly-typed Rust structs (one type tree per spec version) and
@@ -27,16 +42,6 @@ directly from Rust code. The SDK supports every released OpenAPI version: v2.0
   for resolving external `$ref`s, with first-party fetcher crates for
   [filesystem](crates/roas-file-fetcher) and [HTTP](crates/roas-http-fetcher)
   sources (JSON or YAML bodies, optional async).
-- **Command-line interface** — [`roas-cli`](crates/roas-cli) ships a `roas`
-  binary with `validate` and `convert` subcommands for one-shot use without
-  writing Rust.
-- **Documentation viewer** — [`roas-cli`](crates/roas-cli)'s `preview`
-  subcommand starts a local HTTP server and renders the spec in a browser
-  via [Redoc](https://redocly.com/redoc) or
-  [Swagger UI](https://swagger.io/tools/swagger-ui/), so you can browse the
-  API as documentation without leaving your terminal. Pick the renderer with
-  `--renderer redoc|swagger-ui`, and pass `--watch` to live-reload the page
-  whenever the spec file changes on disk.
 
 ## Crates
 

@@ -6,11 +6,31 @@ Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and
 
 ## Install
 
+The installed binary is named `roas` (the crate is `roas-cli`).
+
+### Cargo
+
 ```shell
 cargo install roas-cli
 ```
 
-The installed binary is named `roas`.
+### Homebrew
+
+```shell
+brew install sv-tools/apps/roas
+```
+
+The tap is [`sv-tools/homebrew-apps`](https://github.com/sv-tools/homebrew-apps); the formula tracks the latest published release. macOS arm64 and Linux (arm64 / x86_64) only — Intel macOS users should `cargo install` or use Docker.
+
+### Docker
+
+Multi-arch image (`linux/amd64`, `linux/arm64`):
+
+```shell
+docker run --rm -v "$PWD:/specs" -w /specs ghcr.io/sv-tools/roas:latest validate openapi.yaml
+```
+
+Pinned versions: `ghcr.io/sv-tools/roas:<version>` — see the [GitHub Releases](https://github.com/sv-tools/roas/releases). The image's entrypoint is the `roas` binary, so any subcommand and flags follow `docker run ... ghcr.io/sv-tools/roas:<tag>`.
 
 ## Usage
 

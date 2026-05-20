@@ -154,8 +154,15 @@ jobs:
           tags: |
             ghcr.io/sv-tools/roas:${{ needs.Resolve.outputs.version }}
             ghcr.io/sv-tools/roas:latest
+          # Point `source` at the roas-cli subdirectory rather than the
+          # workspace root: GHCR uses this label to pick the README it
+          # renders on the package page, and the CLI README is the right
+          # surface for someone who landed here from
+          # `ghcr.io/sv-tools/roas`. Documentation label points at the
+          # same place explicitly for clients that prefer it.
           labels: |
-            org.opencontainers.image.source=https://github.com/sv-tools/roas
+            org.opencontainers.image.source=https://github.com/sv-tools/roas/tree/main/crates/roas-cli
+            org.opencontainers.image.documentation=https://github.com/sv-tools/roas/blob/main/crates/roas-cli/README.md
             org.opencontainers.image.description=Command-line front-end for the roas OpenAPI library
             org.opencontainers.image.licenses=MIT OR Apache-2.0
             org.opencontainers.image.version=${{ needs.Resolve.outputs.version }}
