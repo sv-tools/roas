@@ -271,7 +271,7 @@ jobs:
       #     --certificate-oidc-issuer    'https://token.actions.githubusercontent.com' \
       #     <archive>
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
       - name: Sign release tarballs with cosign (keyless)
         env:
           COSIGN_YES: "true"
@@ -296,12 +296,53 @@ jobs:
       # by Sigstore via OIDC and stored in GitHub's attestation API. The
       # attestation captures the workflow file + commit + runner, so a
       # consumer can later `gh attestation verify <archive> --repo
-      # sv-tools/roas` to confirm provenance.
+      # sv-tools/roas` to confirm provenance. We pass a hand-rolled
+      # SLSA v1.0 predicate to `actions/attest` (the generic primitive)
+      # rather than use the `attest-build-provenance` wrapper — same
+      # attestation shape, one fewer transitive action to audit.
       - name: Attest SLSA build provenance for release tarballs
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-path: |
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
+          predicate-type: https://slsa.dev/provenance/v1
+          # buildType URI follows the GitHub-Actions workflow build type
+          # registered by slsa-framework; `actions/runner/github-hosted`
+          # is the canonical builder ID for the hosted-runner fleet.
+          predicate: |
+            {
+              "buildDefinition": {
+                "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+                "externalParameters": {
+                  "workflow": {
+                    "ref": "${{ github.ref }}",
+                    "repository": "${{ github.server_url }}/${{ github.repository }}",
+                    "path": ".github/workflows/release-stage.yaml"
+                  }
+                },
+                "internalParameters": {
+                  "github": {
+                    "event_name": "${{ github.event_name }}",
+                    "repository_id": "${{ github.repository_id }}",
+                    "repository_owner_id": "${{ github.repository_owner_id }}"
+                  }
+                },
+                "resolvedDependencies": [
+                  {
+                    "uri": "git+${{ github.server_url }}/${{ github.repository }}@${{ github.ref }}",
+                    "digest": { "gitCommit": "${{ github.sha }}" }
+                  }
+                ]
+              },
+              "runDetails": {
+                "builder": {
+                  "id": "https://github.com/actions/runner/github-hosted"
+                },
+                "metadata": {
+                  "invocationId": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}"
+                }
+              }
+            }
 
       - name: Attach prebuilt binaries to draft Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
