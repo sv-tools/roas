@@ -114,11 +114,67 @@ jobs:
             ${{ steps.pack.outputs.archive }}
             ${{ steps.pack.outputs.archive }}.sha256
 
+  # ────────────────────────────────────────────────────────────────────────
+  # Smoke-test the release image with the actual tarball binaries before
+  # they reach a human reviewer. Mirrors the staging logic in
+  # `publish.yaml` so a GLIBC / base-image mismatch surfaces here rather
+  # than as a runtime crash for downstream `docker run` users. Native
+  # runners per arch so `docker run` exercises the binary directly, no
+  # QEMU emulation involved.
+  # ────────────────────────────────────────────────────────────────────────
+  DockerImageSmokeTest:
+    needs:
+      - Checks
+      - RoasCliBuild
+    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Extract roas-cli version from tag
+        id: v
+        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: roas-cli-${{ matrix.target }}
+          path: artifacts
+      - name: Stage linux binary for docker build
+        env:
+          V: ${{ steps.v.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "ctx/linux/${ARCH}"
+          tar -xzf "artifacts/roas-${V}-${TARGET}.tar.gz" -C "ctx/linux/${ARCH}"
+          chmod +x "ctx/linux/${ARCH}/roas"
+          cp Dockerfile ctx/
+      - name: Build image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker build \
+            --build-arg TARGETOS=linux \
+            --build-arg "TARGETARCH=${ARCH}" \
+            -t roas:smoke ctx
+      - name: Smoke-test image (binary actually starts under distroless)
+        run: docker run --rm roas:smoke --version
+
   AttachRoasCliBinaries:
     needs:
       - Checks
       - DraftRelease
       - RoasCliBuild
+      - DockerImageSmokeTest
     if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     runs-on: ubuntu-latest
     permissions:
