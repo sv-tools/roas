@@ -1,42 +1,77 @@
 comment: false
 
 coverage:
-  range: 85..95
+  range: 90..100
+  status:
+    project:
+      default:
+        # Overall repo coverage gate. PRs fail if total drops below 90%.
+        target: 90%
+    patch:
+      default:
+        # New/changed lines on a PR must also clear 90%.
+        target: 90%
 
+# Components slice the merged coverage report by repo-root-relative
+# path. Two dimensions: one component per workspace crate, plus one
+# component per OpenAPI spec version inside the `roas` crate. The two
+# sets intentionally overlap — `roas` reports the crate total, the
+# per-version components report individual subsets of it.
 component_management:
   default_rules:
     statuses:
       - type: project
         target: auto
   individual_components:
+    # ---- per workspace crate ----
+    - component_id: roas
+      name: roas
+      paths:
+        - crates/roas/**
+    - component_id: roas-cli
+      name: roas-cli
+      paths:
+        - crates/roas-cli/**
+    - component_id: roas-file-fetcher
+      name: roas-file-fetcher
+      paths:
+        - crates/roas-file-fetcher/**
+    - component_id: roas-http-fetcher
+      name: roas-http-fetcher
+      paths:
+        - crates/roas-http-fetcher/**
+
+    # ---- per OpenAPI spec version (within the `roas` crate) ----
     - component_id: common
       name: common
       paths:
-        - src/common.rs
-        - src/common/**
-        - src/lib.rs
-        - src/validation.rs
+        - crates/roas/src/lib.rs
+        - crates/roas/src/common.rs
+        - crates/roas/src/common/**
+        - crates/roas/src/loader.rs
+        - crates/roas/src/validation.rs
+        - crates/roas/tests/loader_test.rs
     - component_id: v2
       name: v2
       paths:
-        - src/v2.rs
-        - src/v2/**
-        - tests/v2_test.rs
+        - crates/roas/src/v2.rs
+        - crates/roas/src/v2/**
+        - crates/roas/tests/v2_test.rs
     - component_id: v3_0
       name: v3.0
       paths:
-        - src/v3_0.rs
-        - src/v3_0/**
-        - tests/v3_0_test.rs
+        - crates/roas/src/v3_0.rs
+        - crates/roas/src/v3_0/**
+        - crates/roas/tests/v3_0_test.rs
     - component_id: v3_1
       name: v3.1
       paths:
-        - src/v3_1.rs
-        - src/v3_1/**
-        - tests/v3_1_test.rs
+        - crates/roas/src/v3_1.rs
+        - crates/roas/src/v3_1/**
+        - crates/roas/tests/v3_1_test.rs
     - component_id: v3_2
       name: v3.2
       paths:
-        - src/v3_2.rs
-        - src/v3_2/**
-        - tests/v3_2_test.rs
+        - crates/roas/src/v3_2.rs
+        - crates/roas/src/v3_2/**
+        - crates/roas/tests/v3_2_test.rs
