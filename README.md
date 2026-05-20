@@ -54,11 +54,11 @@ subcommand reference, piping examples, and the live-reload preview server.
 
 ## OpenAPI versions
 
-| Spec      | Status |
-|-----------|--------|
-| OpenAPI [v2.0](https://spec.openapis.org/oas/v2.0.html) (Swagger) | parser, description validator, schema validator, converter to v3, documentation rendering via `roas preview` |
-| OpenAPI [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)       | parser, description validator, schema validator, converter to v3.1 / v3.2, documentation rendering via `roas preview` |
-| OpenAPI [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html)       | parser, description validator, schema validator, converter to v3.2, documentation rendering via `roas preview` |
+| Spec                                                              | Status                                                                                                                   |
+|-------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
+| OpenAPI [v2.0](https://spec.openapis.org/oas/v2.0.html) (Swagger) | parser, description validator, schema validator, converter to v3, documentation rendering via `roas preview`             |
+| OpenAPI [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)       | parser, description validator, schema validator, converter to v3.1 / v3.2, documentation rendering via `roas preview`    |
+| OpenAPI [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html)       | parser, description validator, schema validator, converter to v3.2, documentation rendering via `roas preview`           |
 | OpenAPI [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html)       | parser, description validator, schema validator, documentation rendering via `roas preview` (target of all upconverters) |
 
 See each crate's `README.md` for usage examples, and `AGENTS.md` at the
