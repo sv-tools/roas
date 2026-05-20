@@ -34,13 +34,13 @@
 //! stdin defaults to JSON. `--format json|yaml` overrides everything.
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use roas::loader::Loader;
 use roas::validation::Options;
 use roas_file_fetcher::FileFetcher;
 use roas_http_fetcher::HttpFetcher;
 use std::fs;
-use std::io::{IsTerminal, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
 // `roas::validation::Options` implements `clap::ValueEnum` under the `clap`
@@ -70,6 +70,24 @@ enum Command {
     Convert(ConvertArgs),
     /// Preview the spec in a browser, rendered with Redoc or Swagger UI.
     Preview(PreviewArgs),
+    /// Print a shell completion script to stdout.
+    ///
+    /// Source the output to enable completions; `roas completions bash >
+    /// /etc/bash_completion.d/roas` is the standard recipe. Bash, Zsh,
+    /// Fish, PowerShell, and Elvish are supported.
+    Completions {
+        /// Target shell.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Generate troff manpages for `roas` and each subcommand into a
+    /// directory. Top-level page is `roas.1`; subcommand pages follow the
+    /// `roas-<subcommand>.1` convention (e.g. `roas-validate.1`).
+    Manpages {
+        /// Output directory (created if missing).
+        #[arg(short, long, value_name = "DIR")]
+        out: PathBuf,
+    },
 }
 
 #[derive(clap::Args)]
@@ -167,7 +185,56 @@ fn main() -> Result<()> {
         Command::Validate(args) => run_validate(args),
         Command::Convert(args) => run_convert(args),
         Command::Preview(args) => preview::run_preview(args),
+        Command::Completions { shell } => run_completions(shell),
+        Command::Manpages { out } => run_manpages(&out),
     }
+}
+
+fn run_completions(shell: clap_complete::Shell) -> Result<()> {
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, name, &mut io::stdout());
+    Ok(())
+}
+
+fn run_manpages(out: &Path) -> Result<()> {
+    fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    let cmd = Cli::command();
+    write_manpage(out, &cmd, cmd.get_name())?;
+    // Recurse: every subcommand (and its subcommands, if any) gets its own
+    // `roas-<sub>[-<subsub>].1`. clap_mangen doesn't follow children
+    // automatically, so we walk the tree ourselves.
+    let mut stack: Vec<(String, clap::Command)> = cmd
+        .get_subcommands()
+        .cloned()
+        .map(|sub| (cmd.get_name().to_string(), sub))
+        .collect();
+    while let Some((parent_name, sub)) = stack.pop() {
+        let full_name = format!("{parent_name}-{}", sub.get_name());
+        // Rename the subcommand to its hyphenated full path so the NAME
+        // and SYNOPSIS lines render as `roas-validate` rather than the
+        // bare `validate` clap stores internally. clap::Command::name
+        // only takes `Into<Str>`, which lacks a `From<String>` impl —
+        // leak the heap string into a 'static reference. We're about to
+        // exit; the alloc is one per subcommand and unmeasurable.
+        let leaked: &'static str = String::leak(full_name.clone());
+        let renamed = sub.clone().name(leaked);
+        write_manpage(out, &renamed, &full_name)?;
+        for nested in sub.get_subcommands().cloned() {
+            stack.push((full_name.clone(), nested));
+        }
+    }
+    Ok(())
+}
+
+fn write_manpage(out: &Path, cmd: &clap::Command, name: &str) -> Result<()> {
+    let path = out.join(format!("{name}.1"));
+    let man = clap_mangen::Man::new(cmd.clone()).title(name.to_uppercase());
+    let mut buf = Vec::new();
+    man.render(&mut buf)
+        .with_context(|| format!("rendering {}", path.display()))?;
+    fs::write(&path, buf).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 /// What was passed on the command line. `None` + piped stdin == read stdin;

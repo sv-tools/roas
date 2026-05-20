@@ -107,6 +107,29 @@ roas preview --no-open --from v3_1 spec.json
 
 `--watch` watches the spec file and pushes a Server-Sent-Events reload to the browser on every change; the page reloads itself and re-fetches `/spec`. If a write produces a parse error the previous good JSON is kept and the error is logged to stderr. `--watch` requires a real file — stdin input is rejected. Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently. To preview an older spec under a v3.0+ renderer, upconvert it once with `roas convert --to v3_1 spec.json` and serve the result.
 
+### `completions`
+
+Prints a shell completion script to stdout. Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`. Pipe the output into the location your shell expects:
+
+```shell
+roas completions bash       > /etc/bash_completion.d/roas
+roas completions zsh        > "${fpath[1]}/_roas"
+roas completions fish       > ~/.config/fish/completions/roas.fish
+```
+
+The Homebrew formula auto-installs completions for bash/zsh/fish; the Docker image carries the same `completions` subcommand if you need to extract scripts in containerised builds.
+
+### `manpages`
+
+Generates troff manpages — top-level `roas.1` plus one per subcommand (`roas-validate.1`, `roas-convert.1`, `roas-preview.1`, …) — into an output directory:
+
+```shell
+roas manpages --out /tmp/man
+man /tmp/man/roas-validate.1
+```
+
+For a system-wide install: `roas manpages --out "$(brew --prefix)/share/man/man1"` (Homebrew), or `roas manpages --out ~/.local/share/man/man1` for a per-user install. The Homebrew formula installs these automatically.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](../../LICENSE-APACHE) or [MIT license](../../LICENSE-MIT) at your option.

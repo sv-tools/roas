@@ -169,11 +169,76 @@ jobs:
       - name: Smoke-test image (binary actually starts under distroless)
         run: docker run --rm roas:smoke --version
 
+  # ────────────────────────────────────────────────────────────────────────
+  # Shell completions + manpages. Both are derived from clap's command
+  # tree, so the artifacts are platform-independent — one ubuntu-latest
+  # build is enough. The `completions` and `manpages` subcommands on the
+  # built binary do the actual rendering; the workflow packs the outputs
+  # into two tarballs (`roas-${V}-completions.tar.gz`,
+  # `roas-${V}-manpages.tar.gz`) and uploads them alongside the per-target
+  # binary archives so `AttachRoasCliBinaries` can attach everything in
+  # one shot.
+  # ────────────────────────────────────────────────────────────────────────
+  RoasCliExtras:
+    needs: Checks
+    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      - name: Extract roas-cli version from tag
+        id: v
+        run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
+      - name: Build roas-cli
+        run: cargo build --release --package roas-cli --locked
+      - name: Generate completions and manpages
+        env:
+          ROAS: target/release/roas
+        run: |
+          set -euo pipefail
+          mkdir -p completions manpages
+          # File-name conventions per shell: bash uses the bare bin name,
+          # zsh expects `_<name>`, fish wants `<name>.fish`, powershell
+          # uses `_<name>.ps1`, elvish wants `<name>.elv`. Match what
+          # each shell autodiscovers so users can drop the file straight
+          # into their completion directory.
+          "$ROAS" completions bash       > completions/roas.bash
+          "$ROAS" completions zsh        > completions/_roas
+          "$ROAS" completions fish       > completions/roas.fish
+          "$ROAS" completions powershell > completions/_roas.ps1
+          "$ROAS" completions elvish     > completions/roas.elv
+          "$ROAS" manpages --out manpages
+      - name: Pack tarballs
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          completions_archive="roas-${V}-completions.tar.gz"
+          manpages_archive="roas-${V}-manpages.tar.gz"
+          # `tar -C <dir> .` puts the files at the archive root rather
+          # than under a `completions/` or `manpages/` prefix — matches
+          # what consumers (Homebrew, ad-hoc tar -xzf) expect.
+          tar -czf "$completions_archive" -C completions .
+          tar -czf "$manpages_archive" -C manpages .
+          shasum -a 256 "$completions_archive" > "${completions_archive}.sha256"
+          shasum -a 256 "$manpages_archive" > "${manpages_archive}.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # `roas-cli-*` prefix matches the wildcard pattern
+          # `AttachRoasCliBinaries` already uses to download artifacts.
+          name: roas-cli-extras
+          path: |
+            roas-${{ steps.v.outputs.version }}-completions.tar.gz
+            roas-${{ steps.v.outputs.version }}-completions.tar.gz.sha256
+            roas-${{ steps.v.outputs.version }}-manpages.tar.gz
+            roas-${{ steps.v.outputs.version }}-manpages.tar.gz.sha256
+
   AttachRoasCliBinaries:
     needs:
       - Checks
       - DraftRelease
       - RoasCliBuild
+      - RoasCliExtras
       - DockerImageSmokeTest
     if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     runs-on: ubuntu-latest
