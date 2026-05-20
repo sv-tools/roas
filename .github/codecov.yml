@@ -1,7 +1,16 @@
 comment: false
 
 coverage:
-  range: 85..95
+  range: 90..100
+  status:
+    project:
+      default:
+        # Overall repo coverage gate. PRs fail if total drops below 90%.
+        target: 90%
+    patch:
+      default:
+        # New/changed lines on a PR must also clear 90%.
+        target: 90%
 
 # Components slice the merged coverage report by repo-root-relative
 # path. Two dimensions: one component per workspace crate, plus one
