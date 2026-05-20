@@ -15,12 +15,24 @@ The installed binary is named `roas`.
 ## Usage
 
 ```shell
-roas validate <FILE>            # parse + validate
-roas convert --to v3_2 <FILE>   # upconvert across versions
-roas preview <FILE>             # open the spec in a browser via Redoc
+roas validate [FILE]            # parse + validate
+roas convert --to v3_2 [FILE]   # upconvert across versions
+roas preview [FILE]             # open the spec in a browser via Redoc
 ```
 
-Input can be JSON or YAML; the parser is selected by file extension (`.yaml` / `.yml` → YAML, everything else → JSON).
+Input can be JSON or YAML. With a file path, the parser is selected by extension (`.yaml` / `.yml` → YAML, everything else → JSON). Pass `-` as the file path, or omit it entirely and pipe the spec, to read from stdin; stdin defaults to JSON. `--format json|yaml` overrides everything.
+
+### Piping specs
+
+Every subcommand accepts the spec on stdin, so they chain naturally. `validate` is silent on stdout by default — pass `--print` to echo the parsed spec downstream:
+
+```shell
+cat spec.json | roas validate                           # auto: piped stdin
+cat spec.yaml | roas validate --format yaml             # stdin defaults to JSON; override
+roas convert --to v3_2 spec.json | roas validate --print | roas preview
+```
+
+`preview --watch` requires a real file and is rejected for stdin input.
 
 ### `validate`
 
@@ -47,16 +59,20 @@ empty-external-documentation-url
 
 Run `roas validate --help` for descriptions of each check.
 
+Pass `--print` to echo the parsed spec on stdout (diagnostics stay on stderr), so `validate` can sit in the middle of a pipeline. The output format matches the input: YAML in → YAML out, JSON in → JSON out.
+
 ### `convert`
 
 Upconverts a spec to a target version by chaining the existing `From<v_X::Spec> for v_Y::Spec` migrations. Downconversion is not supported.
 
 ```shell
-roas convert --to v3_2 spec.json
+roas convert --to v3_2 spec.json                          # JSON in → JSON out
+roas convert --to v3_2 spec.yaml                          # YAML in → YAML out
+roas convert --to v3_2 --output-format yaml spec.json     # switch format
 roas convert --to v3_1 --from v2 spec.yaml
 ```
 
-Output is JSON on stdout.
+Output goes to stdout. The format matches the input by default (YAML in → YAML out, JSON in → JSON out); pass `--output-format json|yaml` to override.
 
 ### `preview`
 
@@ -69,7 +85,7 @@ roas preview --watch spec.yaml                       # live-reload on file chang
 roas preview --no-open --from v3_1 spec.json
 ```
 
-`--watch` watches the spec file and pushes a Server-Sent-Events reload to the browser on every change; the page reloads itself and re-fetches `/spec`. If a write produces a parse error the previous good JSON is kept and the error is logged to stderr. Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently. To preview an older spec under a v3.0+ renderer, upconvert it once with `roas convert --to v3_1 spec.json` and serve the result.
+`--watch` watches the spec file and pushes a Server-Sent-Events reload to the browser on every change; the page reloads itself and re-fetches `/spec`. If a write produces a parse error the previous good JSON is kept and the error is logged to stderr. `--watch` requires a real file — stdin input is rejected. Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently. To preview an older spec under a v3.0+ renderer, upconvert it once with `roas convert --to v3_1 spec.json` and serve the result.
 
 ## License
 
