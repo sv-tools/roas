@@ -1,6 +1,6 @@
 [package]
 name = "roas-cli"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -18,7 +18,7 @@ name = "roas"
 path = "src/main.rs"
 
 [dependencies]
-roas = { version = ">=0.14", path = "../roas", features = ["clap", "v2", "v3_0", "v3_1", "v3_2"] }
+roas = { version = ">=0.15", path = "../roas", features = ["clap", "v2", "v3_0", "v3_1", "v3_2"] }
 roas-file-fetcher = { version = ">=0.1", path = "../roas-file-fetcher", features = ["yaml"] }
 roas-http-fetcher = { version = ">=0.1", path = "../roas-http-fetcher", features = ["yaml"] }
 anyhow.workspace = true
