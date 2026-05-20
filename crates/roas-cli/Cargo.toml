@@ -24,6 +24,8 @@ roas-http-fetcher = { version = ">=0.1", path = "../roas-http-fetcher", features
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
+clap_mangen.workspace = true
 enumset.workspace = true
 serde.workspace = true
 serde_json.workspace = true

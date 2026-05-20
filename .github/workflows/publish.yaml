@@ -247,6 +247,12 @@ jobs:
 
             def install
               bin.install "roas"
+              # Generate shell completions + manpages from the binary we
+              # just installed — no extra tarball download required.
+              generate_completions_from_executable(bin/"roas", "completions")
+              man_dir = buildpath/"man"
+              system bin/"roas", "manpages", "--out", man_dir
+              man1.install Dir[man_dir/"*.1"]
             end
 
             test do

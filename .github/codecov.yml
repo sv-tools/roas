@@ -32,6 +32,13 @@ component_management:
       name: roas-cli
       paths:
         - crates/roas-cli/**
+      # Tighter gate than the workspace default (`target: auto`). The
+      # CLI is small and exercised by in-file unit tests, so 95% is a
+      # comfortable floor — drops below it indicate a real regression
+      # rather than rounding noise.
+      statuses:
+        - type: project
+          target: 95%
     - component_id: roas-file-fetcher
       name: roas-file-fetcher
       paths:
