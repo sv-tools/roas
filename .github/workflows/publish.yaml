@@ -256,3 +256,48 @@ jobs:
             git commit -m "roas ${VERSION}"
             git push
           fi
+
+      # ── roas-action repo ─────────────────────────────────────────────────
+      # The GitHub Action wrapper in sv-tools/roas-action pins the image
+      # tag in its `Dockerfile` (`FROM ghcr.io/sv-tools/roas:<version>`).
+      # On every roas-cli release we bump that pin, commit to `main`, and
+      # tag `v<version>` so users can pin via `sv-tools/roas-action@vX.Y.Z`.
+      # Idempotent: re-running for the same version is a no-op when the
+      # pin and tag are already in place.
+      - name: Checkout roas-action
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: sv-tools/roas-action
+          # Fine-grained PAT (Contents: read+write on
+          # sv-tools/roas-action) stored as a secret in this repo. The
+          # default GITHUB_TOKEN is scoped to sv-tools/roas only.
+          token: ${{ secrets.ROAS_ACTION_TOKEN }}
+          path: roas-action
+
+      - name: Bump roas-action image pin and tag release
+        working-directory: roas-action
+        env:
+          V: ${{ needs.Resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Match any current pin (`:<version>` or `:latest`) and rewrite
+          # it to the new version. Anchored to the `FROM` line so unrelated
+          # mentions of the image elsewhere in the file aren't touched.
+          sed -i -E "s|^FROM ghcr\.io/sv-tools/roas:.*|FROM ghcr.io/sv-tools/roas:${V}|" Dockerfile
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet Dockerfile; then
+            echo "Dockerfile already pinned to ${V}; skipping commit"
+          else
+            git add Dockerfile
+            git commit -m "roas ${V}"
+            git push
+          fi
+          # Tag separately so a re-run after the commit landed but the tag
+          # push failed (rare but possible) still creates the tag.
+          if git ls-remote --tags origin "refs/tags/v${V}" | grep -q .; then
+            echo "Tag v${V} already exists on remote; skipping"
+          else
+            git tag "v${V}"
+            git push origin "v${V}"
+          fi
