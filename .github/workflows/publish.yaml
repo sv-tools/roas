@@ -339,10 +339,14 @@ jobs:
           V: ${{ needs.Resolve.outputs.version }}
         run: |
           set -euo pipefail
-          # Match any current pin (`:<version>` or `:latest`) and rewrite
-          # it to the new version. Anchored to the `FROM` line so unrelated
-          # mentions of the image elsewhere in the file aren't touched.
-          sed -i -E "s|^FROM ghcr\.io/sv-tools/roas:.*|FROM ghcr.io/sv-tools/roas:${V}|" Dockerfile
+          # Match `roas:<tag>` only — Docker tag charset is
+          # `[A-Za-z0-9._-]+`, which deliberately excludes whitespace
+          # and `#`. The previous regex used `.*`, which greedily ate
+          # the rest of the line and stripped multi-stage markers like
+          # ` AS src` or trailing comments. Anchored to `FROM` so
+          # unrelated mentions of the image elsewhere in the file
+          # aren't touched.
+          sed -i -E "s|^(FROM ghcr\.io/sv-tools/roas):[A-Za-z0-9._-]+|\1:${V}|" Dockerfile
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git diff --quiet Dockerfile; then
