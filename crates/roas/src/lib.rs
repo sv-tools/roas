@@ -2,6 +2,7 @@
 
 pub mod common;
 pub mod loader;
+pub mod merge;
 pub mod validation;
 
 #[cfg(feature = "v2")]

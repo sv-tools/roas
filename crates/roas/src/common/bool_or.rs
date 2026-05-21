@@ -25,6 +25,40 @@ impl<D> BoolOr<RefOr<D>> {
     }
 }
 
+impl<D, T> crate::merge::MergeWithContext<T> for BoolOr<D>
+where
+    D: crate::merge::MergeWithContext<T>,
+{
+    fn merge_with_context(
+        &mut self,
+        other: Self,
+        ctx: &mut crate::merge::MergeContext<T>,
+        path: String,
+    ) {
+        use crate::merge::ConflictKind;
+        match (self, other) {
+            (BoolOr::Item(base), BoolOr::Item(incoming)) => {
+                base.merge_with_context(incoming, ctx, path);
+            }
+            (slot @ BoolOr::Bool(_), BoolOr::Bool(incoming_bool)) => {
+                let BoolOr::Bool(base_bool) = slot else {
+                    unreachable!()
+                };
+                if *base_bool != incoming_bool
+                    && ctx.should_take_incoming(&path, ConflictKind::ScalarOverridden)
+                {
+                    *base_bool = incoming_bool;
+                }
+            }
+            (slot, incoming) => {
+                if ctx.should_take_incoming(&path, ConflictKind::RefVsValue) {
+                    *slot = incoming;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

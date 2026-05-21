@@ -442,6 +442,71 @@ impl Ref {
     }
 }
 
+// ---- merge ----
+
+impl<D, T> crate::merge::MergeWithContext<T> for RefOr<D>
+where
+    D: crate::merge::MergeWithContext<T>,
+{
+    fn merge_with_context(
+        &mut self,
+        other: Self,
+        ctx: &mut crate::merge::MergeContext<T>,
+        path: String,
+    ) {
+        use crate::merge::ConflictKind;
+        match (self, other) {
+            (RefOr::Item(base), RefOr::Item(incoming)) => {
+                base.merge_with_context(incoming, ctx, path);
+            }
+            (slot @ RefOr::Ref(_), RefOr::Ref(incoming_ref)) => {
+                let RefOr::Ref(base_ref) = slot else {
+                    unreachable!()
+                };
+                if base_ref.reference == incoming_ref.reference {
+                    base_ref.merge_with_context(*incoming_ref, ctx, path);
+                } else if ctx.should_take_incoming(&path, ConflictKind::RefReplaced) {
+                    *slot = RefOr::Ref(incoming_ref);
+                }
+            }
+            (slot, incoming) => {
+                if ctx.should_take_incoming(&path, ConflictKind::RefVsValue) {
+                    *slot = incoming;
+                }
+            }
+        }
+    }
+}
+
+impl<T> crate::merge::MergeWithContext<T> for Ref {
+    fn merge_with_context(
+        &mut self,
+        other: Self,
+        ctx: &mut crate::merge::MergeContext<T>,
+        path: String,
+    ) {
+        use crate::common::merge::merge_opt_scalar;
+        use crate::merge::ConflictKind;
+        merge_opt_scalar(
+            &mut self.summary,
+            other.summary,
+            ctx,
+            &format!("{path}.summary"),
+            ConflictKind::ScalarOverridden,
+        );
+        if ctx.errored {
+            return;
+        }
+        merge_opt_scalar(
+            &mut self.description,
+            other.description,
+            ctx,
+            &format!("{path}.description"),
+            ConflictKind::ScalarOverridden,
+        );
+    }
+}
+
 /// Resolve a `$ref` against a `Components`-style map, following alias
 /// chains iteratively with cycle detection.
 ///
