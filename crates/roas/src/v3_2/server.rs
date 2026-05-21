@@ -155,6 +155,59 @@ impl ValidateWithContext<Spec> for ServerVariable {
     }
 }
 
+// `ServerVariable` is the only v3.2 component whose `MergeWithContext`
+// impl lives outside `crates/roas/src/v3_2/merge.rs` — its `default`,
+// `enum_values`, and `description` fields are crate-private and not
+// reachable from the consolidated merge module. Keep this impl
+// alongside the type until those fields are exposed (or until we
+// move every component impl into its component file in a future
+// reorganization).
+impl crate::merge::MergeWithContext<()> for ServerVariable {
+    fn merge_with_context(
+        &mut self,
+        other: Self,
+        ctx: &mut crate::merge::MergeContext<()>,
+        path: &mut String,
+    ) {
+        if ctx.errored {
+            return;
+        }
+        use crate::common::merge::{merge_extensions, merge_opt_scalar, merge_required_scalar};
+        use crate::merge::ConflictKind;
+        merge_opt_scalar(
+            &mut self.enum_values,
+            other.enum_values,
+            ctx,
+            path,
+            ".enum",
+            ConflictKind::ScalarOverridden,
+        );
+        merge_required_scalar(
+            &mut self.default,
+            other.default,
+            ctx,
+            path,
+            ".default",
+            ConflictKind::RequiredScalarOverridden,
+        );
+        merge_opt_scalar(
+            &mut self.description,
+            other.description,
+            ctx,
+            path,
+            ".description",
+            ConflictKind::ScalarOverridden,
+        );
+        merge_extensions(
+            &mut self.extensions,
+            other.extensions,
+            ctx,
+            path,
+            ".extensions",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
