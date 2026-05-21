@@ -95,10 +95,11 @@ jobs:
     if: ${{ needs.Resolve.outputs.is_roas_cli == 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read        # checkout + `gh release download`
-      packages: write       # push the container image to ghcr.io
-      id-token: write       # OIDC token for keyless cosign signing + SLSA attestation
-      attestations: write   # actions/attest-build-provenance writes to GitHub's attestation store
+      contents: read              # checkout + `gh release download`
+      packages: write             # push the container image to ghcr.io
+      id-token: write             # OIDC token for keyless cosign signing + SLSA attestation
+      attestations: write         # actions/attest persists the attestation to the GitHub API
+      artifact-metadata: write    # required when `actions/attest` creates a storage record alongside the OCI-pushed attestation
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -186,53 +187,18 @@ jobs:
           DIGEST: ${{ steps.docker_push.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
-      # SLSA v1.0 provenance via the generic `actions/attest` primitive
-      # rather than the `attest-build-provenance` wrapper. The predicate
-      # is the same SLSA shape attest-build-provenance generates
-      # internally — one fewer transitive action to audit, same on-disk
-      # attestation. `push-to-registry: true` writes the attestation as
-      # an OCI referrer alongside the signed image.
+      # `actions/attest` defaults to "Provenance" mode — when no
+      # predicate input is supplied, it auto-generates a SLSA v1.0
+      # build-provenance predicate from the workflow context. Same
+      # shape as the deprecated `attest-build-provenance` wrapper.
+      # `push-to-registry: true` writes the attestation as an OCI
+      # referrer alongside the signed image.
       - name: Attest SLSA build provenance for the container image
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-name: ghcr.io/sv-tools/roas
           subject-digest: ${{ steps.docker_push.outputs.digest }}
           push-to-registry: true
-          predicate-type: https://slsa.dev/provenance/v1
-          predicate: |
-            {
-              "buildDefinition": {
-                "buildType": "https://actions.github.io/buildtypes/workflow/v1",
-                "externalParameters": {
-                  "workflow": {
-                    "ref": "${{ github.ref }}",
-                    "repository": "${{ github.server_url }}/${{ github.repository }}",
-                    "path": ".github/workflows/publish.yaml"
-                  }
-                },
-                "internalParameters": {
-                  "github": {
-                    "event_name": "${{ github.event_name }}",
-                    "repository_id": "${{ github.repository_id }}",
-                    "repository_owner_id": "${{ github.repository_owner_id }}"
-                  }
-                },
-                "resolvedDependencies": [
-                  {
-                    "uri": "git+${{ github.server_url }}/${{ github.repository }}@${{ github.ref }}",
-                    "digest": { "gitCommit": "${{ github.sha }}" }
-                  }
-                ]
-              },
-              "runDetails": {
-                "builder": {
-                  "id": "https://github.com/actions/runner/github-hosted"
-                },
-                "metadata": {
-                  "invocationId": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}"
-                }
-              }
-            }
 
       # ── Homebrew formula ─────────────────────────────────────────────────
       # Source the release-asset SHAs from the tarballs we downloaded.
