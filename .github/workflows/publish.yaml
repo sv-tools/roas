@@ -170,6 +170,19 @@ jobs:
             org.opencontainers.image.description=Command-line front-end for the roas OpenAPI library
             org.opencontainers.image.licenses=MIT OR Apache-2.0
             org.opencontainers.image.version=${{ needs.Resolve.outputs.version }}
+          # Labels live on each per-arch manifest, but GHCR's package
+          # page reads its description (and source / documentation links)
+          # from the *index* (manifest list) for multi-arch images.
+          # Without these annotations the package page shows "No
+          # description provided". The `index:` prefix is how
+          # docker/build-push-action targets the OCI index rather than
+          # each per-platform manifest.
+          annotations: |
+            index:org.opencontainers.image.source=https://github.com/sv-tools/roas/tree/main/crates/roas-cli
+            index:org.opencontainers.image.documentation=https://github.com/sv-tools/roas/blob/main/crates/roas-cli/README.md
+            index:org.opencontainers.image.description=Command-line front-end for the roas OpenAPI library
+            index:org.opencontainers.image.licenses=MIT OR Apache-2.0
+            index:org.opencontainers.image.version=${{ needs.Resolve.outputs.version }}
 
       # ── Sigstore keyless signing + SLSA provenance ───────────────────────
       # Sign the image by digest (not by tag) so the signature is bound
