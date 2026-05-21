@@ -94,6 +94,18 @@ roas convert --to v3_1 --from v2 spec.yaml
 
 Output goes to stdout. The format matches the input by default (YAML in → YAML out, JSON in → JSON out); pass `--output-format json|yaml` to override.
 
+`--merge <FILE>` (repeatable) layers additional specs on top after conversion. Each merge source is loaded with the same format-detection rules as the base, upconverted to the target version, then merged in incoming-order via `roas::merge`. The merge runs *after* the version conversion and *before* `--collapse`. By default the merge is incoming-wins on scalar conflicts, base keeps its `info` / `openapi`, refs replace silently, and schemas are leaf-replaced. `--merge-option` (repeatable) tunes that:
+
+```shell
+roas convert --to v3_2 --merge errors.yaml --merge auth.yaml base.json
+roas convert --to v3_2 --merge layer.yaml --merge-option base-wins spec.json
+roas convert --to v3_2 --merge layer.yaml --merge-option error-on-conflict spec.json
+roas convert --to v3_2 --merge layer.yaml --merge-option deep-merge-object-schemas spec.json
+roas convert --to v3_2 --merge layer.yaml --merge-option merge-info spec.json
+```
+
+Supported `--merge-option` values: `base-wins`, `error-on-conflict`, `deep-merge-object-schemas`, `merge-info`, `replace-lists-when-empty`. Under `error-on-conflict` the first real collision aborts the merge and `roas` exits non-zero with the conflicting path; the base spec is untouched on error.
+
 ### `preview`
 
 Starts a local HTTP server on `127.0.0.1:<random>` that serves the spec, embedded inside an HTML page rendered with either [Redoc](https://redocly.com/redoc) (default) or [Swagger UI](https://swagger.io/tools/swagger-ui/), and opens the default browser pointed at it. Pass `--no-open` to skip the browser launch (the URL is printed to stderr in either case). Ctrl+C tears the server down.
