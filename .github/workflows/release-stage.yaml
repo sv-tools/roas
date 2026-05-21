@@ -243,7 +243,9 @@ jobs:
     if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # upload assets to the draft GitHub Release
+      contents: write       # upload assets to the draft GitHub Release
+      id-token: write       # OIDC token for keyless cosign signing + SLSA attestation
+      attestations: write   # actions/attest-build-provenance writes to GitHub's attestation store
     steps:
       - name: Extract roas-cli version from tag
         id: v
@@ -255,12 +257,105 @@ jobs:
           pattern: roas-cli-*
           merge-multiple: true
 
+      # ── Sigstore keyless signing ─────────────────────────────────────────
+      # cosign in keyless mode exchanges the workflow's OIDC token for a
+      # short-lived Fulcio certificate, signs each tarball, and records
+      # both in Rekor (the public transparency log). Outputs are emitted
+      # as siblings of each archive: `<archive>.sig` (base64 signature)
+      # and `<archive>.crt` (PEM-encoded cert with the OIDC identity).
+      # Verifiers run:
+      #   cosign verify-blob \
+      #     --certificate <archive>.crt \
+      #     --signature   <archive>.sig \
+      #     --certificate-identity-regexp 'https://github.com/sv-tools/roas/\.github/workflows/release-stage\.yaml@.*' \
+      #     --certificate-oidc-issuer    'https://token.actions.githubusercontent.com' \
+      #     <archive>
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+      - name: Sign release tarballs with cosign (keyless)
+        env:
+          COSIGN_YES: "true"
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(artifacts/roas-${V}-*.tar.gz)
+          if [[ ${#archives[@]} -eq 0 ]]; then
+            echo "::error::no tarballs to sign — RoasCliBuild / RoasCliExtras inputs missing?"
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            cosign sign-blob --yes \
+              --output-signature   "${archive}.sig" \
+              --output-certificate "${archive}.crt" \
+              "$archive"
+          done
+
+      # ── SLSA build provenance ────────────────────────────────────────────
+      # Emits a SLSA v1.0 provenance attestation per subject path, signed
+      # by Sigstore via OIDC and stored in GitHub's attestation API. The
+      # attestation captures the workflow file + commit + runner, so a
+      # consumer can later `gh attestation verify <archive> --repo
+      # sv-tools/roas` to confirm provenance. We pass a hand-rolled
+      # SLSA v1.0 predicate to `actions/attest` (the generic primitive)
+      # rather than use the `attest-build-provenance` wrapper — same
+      # attestation shape, one fewer transitive action to audit.
+      - name: Attest SLSA build provenance for release tarballs
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
+          predicate-type: https://slsa.dev/provenance/v1
+          # buildType URI follows the GitHub-Actions workflow build type
+          # registered by slsa-framework; `actions/runner/github-hosted`
+          # is the canonical builder ID for the hosted-runner fleet.
+          predicate: |
+            {
+              "buildDefinition": {
+                "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+                "externalParameters": {
+                  "workflow": {
+                    "ref": "${{ github.ref }}",
+                    "repository": "${{ github.server_url }}/${{ github.repository }}",
+                    "path": ".github/workflows/release-stage.yaml"
+                  }
+                },
+                "internalParameters": {
+                  "github": {
+                    "event_name": "${{ github.event_name }}",
+                    "repository_id": "${{ github.repository_id }}",
+                    "repository_owner_id": "${{ github.repository_owner_id }}"
+                  }
+                },
+                "resolvedDependencies": [
+                  {
+                    "uri": "git+${{ github.server_url }}/${{ github.repository }}@${{ github.ref }}",
+                    "digest": { "gitCommit": "${{ github.sha }}" }
+                  }
+                ]
+              },
+              "runDetails": {
+                "builder": {
+                  "id": "https://github.com/actions/runner/github-hosted"
+                },
+                "metadata": {
+                  "invocationId": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}"
+                }
+              }
+            }
+
       - name: Attach prebuilt binaries to draft Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
+          # Cosign sig + cert ride along with the tarballs so consumers
+          # don't have to fetch them from a separate location. SLSA
+          # provenance lives in GitHub's attestation store, not on the
+          # release.
           files: |
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sha256
+            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sig
+            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.crt
           # Look up the existing draft minted by `DraftRelease` and
           # append rather than create a second release.
           draft: true
