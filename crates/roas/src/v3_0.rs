@@ -23,6 +23,7 @@ pub mod header;
 pub mod info;
 pub mod link;
 pub mod media_type;
+pub mod merge;
 pub mod operation;
 pub mod parameter;
 pub mod path_item;
