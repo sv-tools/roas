@@ -3,7 +3,7 @@
 //! Sits parallel to [`crate::validation`]:
 //!
 //! * The public [`Merge`] trait is what callers reach for — `base.merge(incoming, opts)`.
-//! * [`MergeWithContext<T>`] is the crate-internal recursive trait every
+//! * [`MergeWithContext`] is the crate-internal recursive trait every
 //!   component type implements. Implementors mutate `self` in place,
 //!   record [`MergeConflict`]s into [`MergeContext::conflicts`], and
 //!   recurse into children via each child's `merge_with_context`. The
@@ -256,22 +256,20 @@ pub trait Merge: Sized {
 /// most call sites don't have to. This turns the previous
 /// O(nodes × fields) `format!` allocations into O(conflicts) —
 /// only the conflict-recording path materialises an owned `String`.
-pub(crate) trait MergeWithContext<T> {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<T>, path: &mut String);
+pub(crate) trait MergeWithContext {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String);
 }
 
-/// Merge context — carries the spec being merged into, the options,
-/// and accumulated conflicts.
+/// Merge context — carries the per-call options and accumulated
+/// conflicts.
 ///
-/// The `spec` back-reference is currently unused by every concrete
-/// `MergeWithContext` impl (merge recurses through owned subtrees, so
-/// there's nothing to resolve against the parent spec). It's kept on
-/// the type for symmetry with `validation::Context<T>` and so v2 /
-/// v3.0 / v3.1 ports can introduce ref-following merge later without
-/// reshaping every signature. If it stays unused once all four
-/// versions land, drop `T` / `spec` in a follow-up.
-pub(crate) struct MergeContext<'a, T> {
-    pub spec: &'a T,
+/// No back-reference to the spec being merged into (unlike
+/// [`crate::validation::Context<T>`]): merge recurses through *owned*
+/// subtrees and never resolves a `$ref` against the spec, so there
+/// is nothing for the context to point at. If ref-following merge is
+/// ever wired up, reintroduce a `spec: &'a T` field and the trait /
+/// helper generics that go with it.
+pub(crate) struct MergeContext {
     pub options: EnumSet<MergeOptions>,
     pub conflicts: Vec<MergeConflict>,
     /// Set by [`Self::should_take_incoming`] when
@@ -282,7 +280,7 @@ pub(crate) struct MergeContext<'a, T> {
     pub errored: bool,
 }
 
-impl<T> MergeContext<'_, T> {
+impl MergeContext {
     pub fn is_option(&self, o: MergeOptions) -> bool {
         self.options.contains(o)
     }
@@ -317,12 +315,9 @@ impl<T> MergeContext<'_, T> {
             true
         }
     }
-}
 
-impl<T> MergeContext<'_, T> {
-    pub(crate) fn new<'a>(spec: &'a T, options: EnumSet<MergeOptions>) -> MergeContext<'a, T> {
+    pub(crate) fn new(options: EnumSet<MergeOptions>) -> MergeContext {
         MergeContext {
-            spec,
             options,
             conflicts: Vec::new(),
             errored: false,
@@ -330,8 +325,8 @@ impl<T> MergeContext<'_, T> {
     }
 }
 
-impl<'a, T> From<MergeContext<'a, T>> for Result<MergeReport, MergeError> {
-    fn from(ctx: MergeContext<'a, T>) -> Self {
+impl From<MergeContext> for Result<MergeReport, MergeError> {
+    fn from(ctx: MergeContext) -> Self {
         if ctx.errored {
             Err(MergeError {
                 conflicts: ctx.conflicts,
@@ -344,10 +339,9 @@ impl<'a, T> From<MergeContext<'a, T>> for Result<MergeReport, MergeError> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for MergeContext<'_, T> {
+impl fmt::Debug for MergeContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MergeContext")
-            .field("spec", &self.spec)
             .field("options", &self.options)
             .field("conflicts", &self.conflicts)
             .field("errored", &self.errored)
@@ -361,7 +355,7 @@ mod tests {
 
     #[test]
     fn should_take_incoming_default_takes_incoming_and_records() {
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let took = ctx.should_take_incoming("#.x", ConflictKind::ScalarOverridden);
         assert!(took);
         assert!(!ctx.errored);
@@ -371,7 +365,7 @@ mod tests {
 
     #[test]
     fn should_take_incoming_base_wins_keeps_base() {
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::BaseWins.only());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::BaseWins.only());
         let took = ctx.should_take_incoming("#.x", ConflictKind::ScalarOverridden);
         assert!(!took);
         assert!(!ctx.errored);
@@ -380,8 +374,7 @@ mod tests {
 
     #[test]
     fn should_take_incoming_error_mode_marks_errored() {
-        let mut ctx: MergeContext<()> =
-            MergeContext::new(&(), MergeOptions::ErrorOnConflict.only());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::ErrorOnConflict.only());
         let took = ctx.should_take_incoming("#.x", ConflictKind::ScalarOverridden);
         assert!(!took);
         assert!(ctx.errored);
@@ -390,8 +383,7 @@ mod tests {
 
     #[test]
     fn context_into_result_returns_err_when_errored() {
-        let mut ctx: MergeContext<()> =
-            MergeContext::new(&(), MergeOptions::ErrorOnConflict.only());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::ErrorOnConflict.only());
         ctx.should_take_incoming("#.x", ConflictKind::ScalarOverridden);
         let res: Result<MergeReport, MergeError> = ctx.into();
         assert!(res.is_err());
@@ -399,7 +391,7 @@ mod tests {
 
     #[test]
     fn context_into_result_returns_ok_with_report() {
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         ctx.should_take_incoming("#.x", ConflictKind::ScalarOverridden);
         let res: Result<MergeReport, MergeError> = ctx.into();
         let report = res.expect("ok");
@@ -499,7 +491,7 @@ mod tests {
 
     #[test]
     fn merge_context_debug_includes_state() {
-        let ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let s = format!("{ctx:?}");
         assert!(s.contains("MergeContext"));
         assert!(s.contains("conflicts: []"));
@@ -512,7 +504,7 @@ mod tests {
         // This test confirms the public surface no longer carries
         // either by reaching into Debug — defensive against accidental
         // re-introduction.
-        let ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let ctx: MergeContext = MergeContext::new(MergeOptions::new());
         assert!(!format!("{ctx:?}").contains("visited"));
     }
 }

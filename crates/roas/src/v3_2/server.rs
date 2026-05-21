@@ -162,11 +162,11 @@ impl ValidateWithContext<Spec> for ServerVariable {
 // alongside the type until those fields are exposed (or until we
 // move every component impl into its component file in a future
 // reorganization).
-impl crate::merge::MergeWithContext<()> for ServerVariable {
+impl crate::merge::MergeWithContext for ServerVariable {
     fn merge_with_context(
         &mut self,
         other: Self,
-        ctx: &mut crate::merge::MergeContext<()>,
+        ctx: &mut crate::merge::MergeContext,
         path: &mut String,
     ) {
         if ctx.errored {

@@ -65,12 +65,12 @@ impl Merge for Spec {
         other: Self,
         options: EnumSet<MergeOptions>,
     ) -> Result<MergeReport, MergeError> {
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), options);
+        let mut ctx: MergeContext = MergeContext::new(options);
         let mut path = String::from("#");
 
         if options.contains(MergeOptions::ErrorOnConflict) {
             let mut working = self.clone();
-            <Spec as MergeWithContext<()>>::merge_with_context(
+            <Spec as MergeWithContext>::merge_with_context(
                 &mut working,
                 other,
                 &mut ctx,
@@ -87,15 +87,15 @@ impl Merge for Spec {
             });
         }
 
-        <Spec as MergeWithContext<()>>::merge_with_context(self, other, &mut ctx, &mut path);
+        <Spec as MergeWithContext>::merge_with_context(self, other, &mut ctx, &mut path);
         ctx.into()
     }
 }
 
 // ----- Spec -----
 
-impl MergeWithContext<()> for Spec {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Spec {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -257,8 +257,8 @@ impl MergeWithContext<()> for Spec {
     }
 }
 
-impl MergeWithContext<()> for TagGroup {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for TagGroup {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -285,8 +285,8 @@ impl MergeWithContext<()> for TagGroup {
 
 // ----- Paths / PathItem / Operation -----
 
-impl MergeWithContext<()> for Paths {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Paths {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -315,8 +315,8 @@ impl MergeWithContext<()> for Paths {
     }
 }
 
-impl MergeWithContext<()> for PathItem {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for PathItem {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -357,8 +357,8 @@ impl MergeWithContext<()> for PathItem {
     }
 }
 
-impl MergeWithContext<()> for Operation {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Operation {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -465,8 +465,8 @@ impl MergeWithContext<()> for Operation {
     }
 }
 
-impl MergeWithContext<()> for CodeSample {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for CodeSample {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -559,8 +559,8 @@ fn parameter_name(p: &Parameter) -> String {
 /// (Body/Path/Query/Header/FormData), recurse one level into the
 /// inner enum. Mismatched outer variants replace with conflict
 /// recording.
-impl MergeWithContext<()> for Parameter {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Parameter {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -587,24 +587,19 @@ impl MergeWithContext<()> for Parameter {
     }
 }
 
-fn leaf_replace_in_path(a: &mut InPath, b: InPath, ctx: &mut MergeContext<()>, path: &mut str) {
+fn leaf_replace_in_path(a: &mut InPath, b: InPath, ctx: &mut MergeContext, path: &mut str) {
     if *a != b && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
         *a = b;
     }
 }
 
-fn leaf_replace_in_query(a: &mut InQuery, b: InQuery, ctx: &mut MergeContext<()>, path: &mut str) {
+fn leaf_replace_in_query(a: &mut InQuery, b: InQuery, ctx: &mut MergeContext, path: &mut str) {
     if *a != b && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
         *a = b;
     }
 }
 
-fn leaf_replace_in_header(
-    a: &mut InHeader,
-    b: InHeader,
-    ctx: &mut MergeContext<()>,
-    path: &mut str,
-) {
+fn leaf_replace_in_header(a: &mut InHeader, b: InHeader, ctx: &mut MergeContext, path: &mut str) {
     if *a != b && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
         *a = b;
     }
@@ -613,7 +608,7 @@ fn leaf_replace_in_header(
 fn leaf_replace_in_form_data(
     a: &mut InFormData,
     b: InFormData,
-    ctx: &mut MergeContext<()>,
+    ctx: &mut MergeContext,
     path: &mut str,
 ) {
     if *a != b && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
@@ -623,8 +618,8 @@ fn leaf_replace_in_form_data(
 
 // ----- Header (typed enum — leaf replace) -----
 
-impl MergeWithContext<()> for Header {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Header {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -637,8 +632,8 @@ impl MergeWithContext<()> for Header {
 
 // ----- Items (typed enum — leaf replace) -----
 
-impl MergeWithContext<()> for Items {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Items {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -650,8 +645,8 @@ impl MergeWithContext<()> for Items {
 
 // ----- Response / Responses -----
 
-impl MergeWithContext<()> for Responses {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Responses {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -682,8 +677,8 @@ impl MergeWithContext<()> for Responses {
     }
 }
 
-impl MergeWithContext<()> for Response {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Response {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -735,8 +730,8 @@ impl MergeWithContext<()> for Response {
 
 // ----- Schema (leaf by default; ObjectSchema deep merge) -----
 
-impl MergeWithContext<()> for Schema {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Schema {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -757,14 +752,14 @@ impl MergeWithContext<()> for Schema {
     }
 }
 
-fn leaf_replace_schema(base: &mut Schema, other: Schema, ctx: &mut MergeContext<()>, path: &str) {
+fn leaf_replace_schema(base: &mut Schema, other: Schema, ctx: &mut MergeContext, path: &str) {
     if *base != other && ctx.should_take_incoming(path, ConflictKind::SchemaLeafReplaced) {
         *base = other;
     }
 }
 
-impl MergeWithContext<()> for ObjectSchema {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for ObjectSchema {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -853,8 +848,8 @@ impl MergeWithContext<()> for ObjectSchema {
 
 // ----- SecurityScheme (leaf replace) -----
 
-impl MergeWithContext<()> for SecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for SecurityScheme {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -867,8 +862,8 @@ impl MergeWithContext<()> for SecurityScheme {
 
 // ----- Tag / Info / Contact / License / Logo / ExternalDocumentation / Server -----
 
-impl MergeWithContext<()> for Tag {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Tag {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -913,8 +908,8 @@ impl MergeWithContext<()> for Tag {
     }
 }
 
-impl MergeWithContext<()> for Info {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Info {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -963,8 +958,8 @@ impl MergeWithContext<()> for Info {
     }
 }
 
-impl MergeWithContext<()> for Contact {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Contact {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1002,8 +997,8 @@ impl MergeWithContext<()> for Contact {
     }
 }
 
-impl MergeWithContext<()> for License {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for License {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1033,8 +1028,8 @@ impl MergeWithContext<()> for License {
     }
 }
 
-impl MergeWithContext<()> for Logo {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Logo {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1080,8 +1075,8 @@ impl MergeWithContext<()> for Logo {
     }
 }
 
-impl MergeWithContext<()> for ExternalDocumentation {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for ExternalDocumentation {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1111,8 +1106,8 @@ impl MergeWithContext<()> for ExternalDocumentation {
     }
 }
 
-impl MergeWithContext<()> for Server {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Server {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1145,7 +1140,7 @@ impl MergeWithContext<()> for Server {
 // ----- Spec.info/swagger kept-base-or-error helper -----
 
 fn record_kept_base_or_error(
-    ctx: &mut MergeContext<()>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
     kind: ConflictKind,
@@ -1171,12 +1166,12 @@ mod tests {
         "#".to_owned()
     }
 
-    fn report<S: MergeWithContext<()>>(
+    fn report<S: MergeWithContext>(
         base: &mut S,
         incoming: S,
         opts: EnumSet<MergeOptions>,
     ) -> Vec<crate::merge::MergeConflict> {
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), opts);
+        let mut ctx: MergeContext = MergeContext::new(opts);
         let mut path = root_path();
         base.merge_with_context(incoming, &mut ctx, &mut path);
         ctx.conflicts

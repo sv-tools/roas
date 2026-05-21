@@ -444,14 +444,14 @@ impl Ref {
 
 // ---- merge ----
 
-impl<D, T> crate::merge::MergeWithContext<T> for RefOr<D>
+impl<D> crate::merge::MergeWithContext for RefOr<D>
 where
-    D: crate::merge::MergeWithContext<T>,
+    D: crate::merge::MergeWithContext,
 {
     fn merge_with_context(
         &mut self,
         other: Self,
-        ctx: &mut crate::merge::MergeContext<T>,
+        ctx: &mut crate::merge::MergeContext,
         path: &mut String,
     ) {
         if ctx.errored {
@@ -481,11 +481,11 @@ where
     }
 }
 
-impl<T> crate::merge::MergeWithContext<T> for Ref {
+impl crate::merge::MergeWithContext for Ref {
     fn merge_with_context(
         &mut self,
         other: Self,
-        ctx: &mut crate::merge::MergeContext<T>,
+        ctx: &mut crate::merge::MergeContext,
         path: &mut String,
     ) {
         use crate::common::merge::merge_opt_scalar;
@@ -1165,13 +1165,8 @@ mod tests {
 
     use crate::merge::{ConflictKind, MergeContext, MergeOptions, MergeWithContext, Resolution};
 
-    impl MergeWithContext<()> for Foo {
-        fn merge_with_context(
-            &mut self,
-            other: Self,
-            ctx: &mut MergeContext<()>,
-            path: &mut String,
-        ) {
+    impl MergeWithContext for Foo {
+        fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
             if self.foo != other.foo
                 && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden)
             {
@@ -1180,8 +1175,8 @@ mod tests {
         }
     }
 
-    fn merge_ctx(opts: enumset::EnumSet<MergeOptions>) -> MergeContext<'static, ()> {
-        MergeContext::new(&(), opts)
+    fn merge_ctx(opts: enumset::EnumSet<MergeOptions>) -> MergeContext {
+        MergeContext::new(opts)
     }
 
     #[test]

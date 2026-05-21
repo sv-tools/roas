@@ -145,11 +145,11 @@ impl ValidateWithContext<Spec> for ServerVariable {
     }
 }
 
-impl crate::merge::MergeWithContext<()> for ServerVariable {
+impl crate::merge::MergeWithContext for ServerVariable {
     fn merge_with_context(
         &mut self,
         other: Self,
-        ctx: &mut crate::merge::MergeContext<()>,
+        ctx: &mut crate::merge::MergeContext,
         path: &mut String,
     ) {
         if ctx.errored {

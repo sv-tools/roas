@@ -65,12 +65,12 @@ pub(crate) fn with_segment<R>(
 /// Merge two bare `BTreeMap`s by key. Used by `Paths`, `Callback`,
 /// `Components.<bag>` (each bag is `Option<BTreeMap<...>>` — wrap with
 /// [`merge_opt_map`] for those).
-pub(crate) fn merge_map<T, K, V>(
+pub(crate) fn merge_map<K, V>(
     base: &mut BTreeMap<K, V>,
     other: BTreeMap<K, V>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
-    mut recurse: impl FnMut(&mut V, V, &mut MergeContext<T>, &mut String),
+    mut recurse: impl FnMut(&mut V, V, &mut MergeContext, &mut String),
     fmt_key: impl Fn(&K, &mut String),
 ) where
     K: Ord,
@@ -101,13 +101,13 @@ pub(crate) fn merge_map<T, K, V>(
 /// Merge two `Option<BTreeMap<K, V>>` (the common shape for
 /// `Components.<bag>` and the dozens of optional-map sub-fields).
 /// Pushes `segment` onto `path` only when there's something to do.
-pub(crate) fn merge_opt_map<T, K, V>(
+pub(crate) fn merge_opt_map<K, V>(
     base: &mut Option<BTreeMap<K, V>>,
     other: Option<BTreeMap<K, V>>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
-    recurse: impl FnMut(&mut V, V, &mut MergeContext<T>, &mut String),
+    recurse: impl FnMut(&mut V, V, &mut MergeContext, &mut String),
     fmt_key: impl Fn(&K, &mut String),
 ) where
     K: Ord,
@@ -128,13 +128,13 @@ pub(crate) fn merge_opt_map<T, K, V>(
 /// Merge an identity-keyed `Vec` (e.g. `tags` by name, `parameters` by
 /// `(name, in)`). On collision the recursion callback decides what
 /// happens; new keys are appended in incoming order.
-pub(crate) fn merge_vec_by_key<T, V, K>(
+pub(crate) fn merge_vec_by_key<V, K>(
     base: &mut Vec<V>,
     other: Vec<V>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
     key_of: impl Fn(&V) -> K,
-    mut recurse: impl FnMut(&mut V, V, &mut MergeContext<T>, &mut String),
+    mut recurse: impl FnMut(&mut V, V, &mut MergeContext, &mut String),
     fmt_key: impl Fn(&K, &mut String),
 ) where
     K: Ord + Clone,
@@ -170,14 +170,14 @@ pub(crate) fn merge_vec_by_key<T, V, K>(
 /// Merge an optional identity-keyed vec, treating `None` like an
 /// empty list on either side.
 #[allow(clippy::too_many_arguments)] // 8 args; this is a structural plumbing helper.
-pub(crate) fn merge_opt_vec_by_key<T, V, K>(
+pub(crate) fn merge_opt_vec_by_key<V, K>(
     base: &mut Option<Vec<V>>,
     other: Option<Vec<V>>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
     key_of: impl Fn(&V) -> K,
-    recurse: impl FnMut(&mut V, V, &mut MergeContext<T>, &mut String),
+    recurse: impl FnMut(&mut V, V, &mut MergeContext, &mut String),
     fmt_key: impl Fn(&K, &mut String),
 ) where
     K: Ord + Clone,
@@ -209,10 +209,10 @@ pub(crate) fn merge_opt_vec_by_key<T, V, K>(
 /// additive.
 ///
 /// Linear-scan dedup: `Vec::contains` against the grown base.
-pub(crate) fn merge_opt_vec_set_union<T, V>(
+pub(crate) fn merge_opt_vec_set_union<V>(
     base: &mut Option<Vec<V>>,
     other: Option<Vec<V>>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     _path: &mut String,
     _segment: &str,
 ) where
@@ -240,10 +240,10 @@ pub(crate) fn merge_opt_vec_set_union<T, V>(
 ///
 /// `segment` is appended onto `path` only when a real conflict is
 /// recorded — the non-conflict path never grows `path`.
-pub(crate) fn merge_opt_scalar<T, V>(
+pub(crate) fn merge_opt_scalar<V>(
     base: &mut Option<V>,
     other: Option<V>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
     kind: ConflictKind,
@@ -270,10 +270,10 @@ pub(crate) fn merge_opt_scalar<T, V>(
 /// Merge a required scalar (one that's always present, like
 /// `info.title`). Same policy as [`merge_opt_scalar`] for the
 /// `Some × Some` arm.
-pub(crate) fn merge_required_scalar<T, V>(
+pub(crate) fn merge_required_scalar<V>(
     base: &mut V,
     other: V,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
     kind: ConflictKind,
@@ -294,10 +294,10 @@ pub(crate) fn merge_required_scalar<T, V>(
 /// Replace `base` with `other` only when `other` is non-empty.
 /// Records [`ConflictKind::ListReplaced`] when an actual replacement
 /// occurs. Used for `servers`, `security`, etc.
-pub(crate) fn merge_replace_list_when_nonempty<T, V>(
+pub(crate) fn merge_replace_list_when_nonempty<V>(
     base: &mut Option<Vec<V>>,
     other: Option<Vec<V>>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
 ) {
@@ -326,10 +326,10 @@ pub(crate) fn merge_replace_list_when_nonempty<T, V>(
 /// Merge `Option<BTreeMap<String, serde_json::Value>>` extensions
 /// per-key. Identical JSON values are no-ops; differing values go
 /// through the policy.
-pub(crate) fn merge_extensions<T>(
+pub(crate) fn merge_extensions(
     base: &mut Option<BTreeMap<String, serde_json::Value>>,
     other: Option<BTreeMap<String, serde_json::Value>>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
 ) {
@@ -362,16 +362,16 @@ pub(crate) fn merge_extensions<T>(
     }
 }
 
-/// Merge two `Option<S>` where `S: MergeWithContext<T>`. Mirrors the
+/// Merge two `Option<S>` where `S: MergeWithContext`. Mirrors the
 /// scalar shape but recurses on `Some × Some`.
-pub(crate) fn merge_opt_struct<T, S>(
+pub(crate) fn merge_opt_struct<S>(
     base: &mut Option<S>,
     other: Option<S>,
-    ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
 ) where
-    S: MergeWithContext<T>,
+    S: MergeWithContext,
 {
     if ctx.errored {
         return;
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn merge_opt_scalar_none_incoming_no_op() {
         let mut base: Option<String> = Some("a".into());
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         merge_opt_scalar(
             &mut base,
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn merge_opt_scalar_none_base_takes_incoming() {
         let mut base: Option<String> = None;
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         merge_opt_scalar(
             &mut base,
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn merge_opt_scalar_same_value_no_conflict() {
         let mut base: Option<String> = Some("a".into());
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         merge_opt_scalar(
             &mut base,
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn merge_opt_scalar_differing_takes_incoming_by_default() {
         let mut base: Option<String> = Some("a".into());
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         merge_opt_scalar(
             &mut base,
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn merge_opt_vec_set_union_dedupes_and_preserves_base_order() {
         let mut base: Option<Vec<i32>> = Some(vec![1, 2]);
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         merge_opt_vec_set_union(&mut base, Some(vec![2, 3]), &mut ctx, &mut path, ".x");
         assert_eq!(base.unwrap(), vec![1, 2, 3]);
@@ -485,7 +485,7 @@ mod tests {
         });
         let mut other = BTreeMap::new();
         other.insert("x-b".into(), serde_json::json!(2));
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         merge_extensions(&mut base, Some(other), &mut ctx, &mut path, ".ext");
         let b = base.unwrap();
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn merge_replace_list_keeps_populated_base_when_incoming_empty() {
         let mut base: Option<Vec<i32>> = Some(vec![1, 2]);
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         merge_replace_list_when_nonempty(&mut base, Some(vec![]), &mut ctx, &mut path, ".servers");
         assert_eq!(base, Some(vec![1, 2]));
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn merge_replace_list_replaces_when_both_non_empty() {
         let mut base: Option<Vec<i32>> = Some(vec![1, 2]);
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         merge_replace_list_when_nonempty(
             &mut base,

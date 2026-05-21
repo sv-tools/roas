@@ -84,7 +84,7 @@ impl Merge for Spec {
         // dereferencing happens during merge). Carrying the borrow as
         // a unit `&()` keeps the type generic without forcing the
         // caller to clone the base before merging into it.
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), options);
+        let mut ctx: MergeContext = MergeContext::new(options);
         // Single owned `String` for the whole merge — every child
         // pushes/truncates segments onto it via the helper guards.
         let mut path = String::from("#");
@@ -98,7 +98,7 @@ impl Merge for Spec {
             // `ErrorOnConflict` to get. The clone cost is paid only
             // when the option is opted in.
             let mut working = self.clone();
-            <Spec as MergeWithContext<()>>::merge_with_context(
+            <Spec as MergeWithContext>::merge_with_context(
                 &mut working,
                 other,
                 &mut ctx,
@@ -118,15 +118,15 @@ impl Merge for Spec {
         // Non-strict modes mutate `self` in place — the report still
         // captures every resolution, so callers wanting "see what
         // changed" don't need the clone-and-replace overhead.
-        <Spec as MergeWithContext<()>>::merge_with_context(self, other, &mut ctx, &mut path);
+        <Spec as MergeWithContext>::merge_with_context(self, other, &mut ctx, &mut path);
         ctx.into()
     }
 }
 
 // ----- Top-level Spec -----
 
-impl MergeWithContext<()> for Spec {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Spec {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -230,8 +230,8 @@ impl MergeWithContext<()> for Spec {
     }
 }
 
-impl MergeWithContext<()> for TagGroup {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for TagGroup {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -259,8 +259,8 @@ impl MergeWithContext<()> for TagGroup {
 
 // ----- Containers -----
 
-impl MergeWithContext<()> for Components {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Components {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -355,8 +355,8 @@ impl MergeWithContext<()> for Components {
     }
 }
 
-impl MergeWithContext<()> for Paths {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Paths {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -385,8 +385,8 @@ impl MergeWithContext<()> for Paths {
     }
 }
 
-impl MergeWithContext<()> for Callback {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Callback {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -415,8 +415,8 @@ impl MergeWithContext<()> for Callback {
     }
 }
 
-impl MergeWithContext<()> for PathItem {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for PathItem {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -476,8 +476,8 @@ impl MergeWithContext<()> for PathItem {
     }
 }
 
-impl MergeWithContext<()> for Responses {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Responses {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -510,8 +510,8 @@ impl MergeWithContext<()> for Responses {
     }
 }
 
-impl MergeWithContext<()> for Operation {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Operation {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -622,8 +622,8 @@ impl MergeWithContext<()> for Operation {
     }
 }
 
-impl MergeWithContext<()> for CodeSample {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for CodeSample {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -680,8 +680,8 @@ fn parameter_ref_key(p: &RefOr<Parameter>) -> (String, &'static str) {
     }
 }
 
-impl MergeWithContext<()> for Parameter {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Parameter {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -699,8 +699,8 @@ impl MergeWithContext<()> for Parameter {
     }
 }
 
-impl MergeWithContext<()> for InPath {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for InPath {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -781,8 +781,8 @@ impl MergeWithContext<()> for InPath {
     }
 }
 
-impl MergeWithContext<()> for InQuery {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for InQuery {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -879,8 +879,8 @@ impl MergeWithContext<()> for InQuery {
     }
 }
 
-impl MergeWithContext<()> for InHeader {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for InHeader {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -961,8 +961,8 @@ impl MergeWithContext<()> for InHeader {
     }
 }
 
-impl MergeWithContext<()> for InCookie {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for InCookie {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1050,7 +1050,7 @@ impl MergeWithContext<()> for InCookie {
 fn merge_schema_field(
     base: &mut Option<RefOr<Schema>>,
     other: Option<RefOr<Schema>>,
-    ctx: &mut MergeContext<()>,
+    ctx: &mut MergeContext,
     path: &mut String,
     field_name: &str,
 ) {
@@ -1072,8 +1072,8 @@ fn merge_schema_field(
 
 // ----- MediaType / Encoding / Header / Response / RequestBody / Example / Link -----
 
-impl MergeWithContext<()> for MediaType {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for MediaType {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1114,8 +1114,8 @@ impl MergeWithContext<()> for MediaType {
     }
 }
 
-impl MergeWithContext<()> for Encoding {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Encoding {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1170,8 +1170,8 @@ impl MergeWithContext<()> for Encoding {
     }
 }
 
-impl MergeWithContext<()> for Header {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Header {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1252,8 +1252,8 @@ impl MergeWithContext<()> for Header {
     }
 }
 
-impl MergeWithContext<()> for Response {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Response {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1303,8 +1303,8 @@ impl MergeWithContext<()> for Response {
     }
 }
 
-impl MergeWithContext<()> for RequestBody {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for RequestBody {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1349,8 +1349,8 @@ impl MergeWithContext<()> for RequestBody {
     }
 }
 
-impl MergeWithContext<()> for Example {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Example {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1396,8 +1396,8 @@ impl MergeWithContext<()> for Example {
     }
 }
 
-impl MergeWithContext<()> for Link {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Link {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1456,8 +1456,8 @@ impl MergeWithContext<()> for Link {
 // ----- Leaves: Tag, Info, Contact, License, ExternalDocumentation,
 //                Discriminator, XML, Server, ServerVariable -----
 
-impl MergeWithContext<()> for Tag {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Tag {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1502,8 +1502,8 @@ impl MergeWithContext<()> for Tag {
     }
 }
 
-impl MergeWithContext<()> for Info {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Info {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1552,8 +1552,8 @@ impl MergeWithContext<()> for Info {
     }
 }
 
-impl MergeWithContext<()> for Logo {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Logo {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1599,8 +1599,8 @@ impl MergeWithContext<()> for Logo {
     }
 }
 
-impl MergeWithContext<()> for Contact {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Contact {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1638,8 +1638,8 @@ impl MergeWithContext<()> for Contact {
     }
 }
 
-impl MergeWithContext<()> for License {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for License {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1669,8 +1669,8 @@ impl MergeWithContext<()> for License {
     }
 }
 
-impl MergeWithContext<()> for ExternalDocumentation {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for ExternalDocumentation {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1700,8 +1700,8 @@ impl MergeWithContext<()> for ExternalDocumentation {
     }
 }
 
-impl MergeWithContext<()> for Discriminator {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Discriminator {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1748,8 +1748,8 @@ impl MergeWithContext<()> for Discriminator {
     }
 }
 
-impl MergeWithContext<()> for XML {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for XML {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1803,8 +1803,8 @@ impl MergeWithContext<()> for XML {
     }
 }
 
-impl MergeWithContext<()> for Server {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Server {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1844,8 +1844,8 @@ impl MergeWithContext<()> for Server {
     }
 }
 
-impl MergeWithContext<()> for ServerVariable {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for ServerVariable {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1885,8 +1885,8 @@ impl MergeWithContext<()> for ServerVariable {
 
 // ----- SecurityScheme -----
 
-impl MergeWithContext<()> for SecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for SecurityScheme {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1912,8 +1912,8 @@ impl MergeWithContext<()> for SecurityScheme {
     }
 }
 
-impl MergeWithContext<()> for ApiKeySecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for ApiKeySecurityScheme {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1951,8 +1951,8 @@ impl MergeWithContext<()> for ApiKeySecurityScheme {
     }
 }
 
-impl MergeWithContext<()> for HttpSecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for HttpSecurityScheme {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1990,8 +1990,8 @@ impl MergeWithContext<()> for HttpSecurityScheme {
     }
 }
 
-impl MergeWithContext<()> for OpenIdConnectSecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for OpenIdConnectSecurityScheme {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -2021,8 +2021,8 @@ impl MergeWithContext<()> for OpenIdConnectSecurityScheme {
     }
 }
 
-impl MergeWithContext<()> for OAuth2SecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for OAuth2SecurityScheme {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -2049,8 +2049,8 @@ impl MergeWithContext<()> for OAuth2SecurityScheme {
     }
 }
 
-impl MergeWithContext<()> for OAuth2Flows {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for OAuth2Flows {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -2085,11 +2085,11 @@ impl MergeWithContext<()> for OAuth2Flows {
 /// from sprawling.
 macro_rules! oauth_flow_merge {
     ($t:ty, $($url_field:ident => $url_path:literal),* $(,)?) => {
-        impl MergeWithContext<()> for $t {
+        impl MergeWithContext for $t {
             fn merge_with_context(
                 &mut self,
                 other: Self,
-                ctx: &mut MergeContext<()>,
+                ctx: &mut MergeContext,
                 path: &mut String,
             ) {
                 if ctx.errored { return; }
@@ -2160,8 +2160,8 @@ oauth_flow_merge!(
 
 // ----- Schema -----
 
-impl MergeWithContext<()> for Schema {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for Schema {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -2202,7 +2202,7 @@ impl MergeWithContext<()> for Schema {
     }
 }
 
-fn leaf_replace_schema(base: &mut Schema, other: Schema, ctx: &mut MergeContext<()>, path: &str) {
+fn leaf_replace_schema(base: &mut Schema, other: Schema, ctx: &mut MergeContext, path: &str) {
     if *base != other && ctx.should_take_incoming(path, ConflictKind::SchemaLeafReplaced) {
         *base = other;
     }
@@ -2216,7 +2216,7 @@ fn leaf_replace_schema(base: &mut Schema, other: Schema, ctx: &mut MergeContext<
 /// when actually recording, keeping the eager-allocation
 /// regression off the non-conflict path.
 fn record_kept_base_or_error(
-    ctx: &mut MergeContext<()>,
+    ctx: &mut MergeContext,
     path: &mut String,
     segment: &str,
     kind: ConflictKind,
@@ -2232,8 +2232,8 @@ fn record_kept_base_or_error(
     path.truncate(original_len);
 }
 
-impl MergeWithContext<()> for ObjectSchema {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
+impl MergeWithContext for ObjectSchema {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -2346,7 +2346,7 @@ impl MergeWithContext<()> for ObjectSchema {
 }
 
 // Schema sub-types (StringSchema, IntegerSchema, …, SingleSchema)
-// don't need their own `MergeWithContext<()>` impls — `Schema`'s impl
+// don't need their own `MergeWithContext` impls — `Schema`'s impl
 // handles the entire enum at the top level via `leaf_replace_schema`
 // for any pairing other than `Single(Object(_))` × `Single(Object(_))`.
 // Nothing in the codebase holds a `RefOr<StringSchema>` or
@@ -2363,12 +2363,12 @@ mod tests {
         "#".to_owned()
     }
 
-    fn report<S: MergeWithContext<()>>(
+    fn report<S: MergeWithContext>(
         base: &mut S,
         incoming: S,
         opts: EnumSet<MergeOptions>,
     ) -> Vec<crate::merge::MergeConflict> {
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), opts);
+        let mut ctx: MergeContext = MergeContext::new(opts);
         let mut path = root_path();
         base.merge_with_context(incoming, &mut ctx, &mut path);
         ctx.conflicts
@@ -2711,7 +2711,7 @@ mod tests {
             description: Some("base".into()),
             ..Default::default()
         });
-        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
         let mut path = root_path();
         base.merge_with_context(
             RefOr::new_item(Tag {
