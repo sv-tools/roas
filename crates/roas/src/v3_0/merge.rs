@@ -21,7 +21,7 @@ use enumset::EnumSet;
 use crate::common::merge::{
     PathGuard, merge_extensions, merge_opt_map, merge_opt_scalar, merge_opt_struct,
     merge_opt_vec_by_key, merge_opt_vec_set_union, merge_replace_list_when_nonempty,
-    merge_required_scalar,
+    merge_required_scalar, record_kept_base_or_error,
 };
 use crate::common::reference::RefOr;
 use crate::merge::{
@@ -48,7 +48,7 @@ use crate::v3_0::security_scheme::{
     HttpSecurityScheme, ImplicitOAuth2Flow, OAuth2Flows, OAuth2SecurityScheme,
     OpenIdConnectSecurityScheme, PasswordOAuth2Flow, SecurityScheme,
 };
-use crate::v3_0::server::{Server, ServerVariable};
+use crate::v3_0::server::Server;
 use crate::v3_0::spec::{Spec, TagGroup};
 use crate::v3_0::tag::Tag;
 use crate::v3_0::xml::XML;
@@ -1844,44 +1844,8 @@ impl MergeWithContext for Server {
     }
 }
 
-impl MergeWithContext for ServerVariable {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
-        if ctx.errored {
-            return;
-        }
-        merge_opt_scalar(
-            &mut self.enum_values,
-            other.enum_values,
-            ctx,
-            path,
-            ".enum",
-            ConflictKind::ScalarOverridden,
-        );
-        merge_required_scalar(
-            &mut self.default,
-            other.default,
-            ctx,
-            path,
-            ".default",
-            ConflictKind::RequiredScalarOverridden,
-        );
-        merge_opt_scalar(
-            &mut self.description,
-            other.description,
-            ctx,
-            path,
-            ".description",
-            ConflictKind::ScalarOverridden,
-        );
-        merge_extensions(
-            &mut self.extensions,
-            other.extensions,
-            ctx,
-            path,
-            ".extensions",
-        );
-    }
-}
+// `ServerVariable` merge impl lives in `v3_0/server.rs` alongside
+// the type, matching the v3.1/v3.2 convention.
 
 // ----- SecurityScheme -----
 
@@ -2206,30 +2170,6 @@ fn leaf_replace_schema(base: &mut Schema, other: Schema, ctx: &mut MergeContext,
     if *base != other && ctx.should_take_incoming(path, ConflictKind::SchemaLeafReplaced) {
         *base = other;
     }
-}
-
-/// Record a collision where the documented contract says "base is
-/// kept" — used for `Spec.info` / `Spec.openapi` when `MergeInfo` is
-/// off. Records `Resolution::Base` in the default / `BaseWins` modes
-/// (reflecting what actually happened), and trips
-/// `ErrorOnConflict` when set. Pushes `segment` onto `path` only
-/// when actually recording, keeping the eager-allocation
-/// regression off the non-conflict path.
-fn record_kept_base_or_error(
-    ctx: &mut MergeContext,
-    path: &mut String,
-    segment: &str,
-    kind: ConflictKind,
-) {
-    let original_len = path.len();
-    path.push_str(segment);
-    if ctx.is_option(MergeOptions::ErrorOnConflict) {
-        ctx.record(path.clone(), kind, crate::merge::Resolution::Errored);
-        ctx.errored = true;
-    } else {
-        ctx.record(path.clone(), kind, crate::merge::Resolution::Base);
-    }
-    path.truncate(original_len);
 }
 
 impl MergeWithContext for ObjectSchema {

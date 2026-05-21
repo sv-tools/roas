@@ -21,7 +21,7 @@ use enumset::EnumSet;
 use crate::common::merge::{
     PathGuard, merge_extensions, merge_opt_map, merge_opt_scalar, merge_opt_struct,
     merge_opt_vec_by_key, merge_opt_vec_set_union, merge_replace_list_when_nonempty,
-    merge_required_scalar,
+    merge_required_scalar, record_kept_base_or_error,
 };
 use crate::common::reference::RefOr;
 use crate::merge::{
@@ -2362,30 +2362,6 @@ fn leaf_replace_schema(base: &mut Schema, other: Schema, ctx: &mut MergeContext,
     if *base != other && ctx.should_take_incoming(path, ConflictKind::SchemaLeafReplaced) {
         *base = other;
     }
-}
-
-/// Record a collision where the documented contract says "base is
-/// kept" — used for `Spec.info` / `Spec.openapi` when `MergeInfo` is
-/// off. Records `Resolution::Base` in the default / `BaseWins` modes
-/// (reflecting what actually happened), and trips
-/// `ErrorOnConflict` when set. Pushes `segment` onto `path` only
-/// when actually recording, keeping the eager-allocation
-/// regression off the non-conflict path.
-fn record_kept_base_or_error(
-    ctx: &mut MergeContext,
-    path: &mut String,
-    segment: &str,
-    kind: ConflictKind,
-) {
-    let original_len = path.len();
-    path.push_str(segment);
-    if ctx.is_option(MergeOptions::ErrorOnConflict) {
-        ctx.record(path.clone(), kind, crate::merge::Resolution::Errored);
-        ctx.errored = true;
-    } else {
-        ctx.record(path.clone(), kind, crate::merge::Resolution::Base);
-    }
-    path.truncate(original_len);
 }
 
 impl MergeWithContext for ObjectSchema {

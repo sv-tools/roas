@@ -386,6 +386,32 @@ pub(crate) fn merge_opt_struct<S>(
     }
 }
 
+/// Record a collision where the documented contract says "base is
+/// kept" — used by every per-version `Spec::merge_with_context` for
+/// `info` / `openapi` (or `swagger` in v2) when `MergeInfo` is off.
+/// Records `Resolution::Base` in the default / `BaseWins` modes
+/// (reflecting what actually happened) and trips
+/// `ErrorOnConflict` when set. Pushes `segment` onto `path` only
+/// when actually recording, keeping the eager-allocation regression
+/// off the non-conflict path.
+pub(crate) fn record_kept_base_or_error(
+    ctx: &mut MergeContext,
+    path: &mut String,
+    segment: &str,
+    kind: ConflictKind,
+) {
+    use crate::merge::{MergeOptions, Resolution};
+    let original_len = path.len();
+    path.push_str(segment);
+    if ctx.is_option(MergeOptions::ErrorOnConflict) {
+        ctx.record(path.clone(), kind, Resolution::Errored);
+        ctx.errored = true;
+    } else {
+        ctx.record(path.clone(), kind, Resolution::Base);
+    }
+    path.truncate(original_len);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -26,7 +26,7 @@ use enumset::EnumSet;
 use crate::common::merge::{
     PathGuard, merge_extensions, merge_opt_map, merge_opt_scalar, merge_opt_struct,
     merge_opt_vec_by_key, merge_opt_vec_set_union, merge_replace_list_when_nonempty,
-    merge_required_scalar,
+    merge_required_scalar, record_kept_base_or_error,
 };
 use crate::common::reference::RefOr;
 use crate::merge::{
@@ -510,48 +510,53 @@ fn parameter_ref_key(p: &RefOr<Parameter>) -> (String, &'static str) {
     match p {
         RefOr::Ref(r) => (r.reference.clone(), "ref"),
         RefOr::Item(p) => match p {
-            Parameter::Body(b) => (b.name.clone(), "body"),
-            Parameter::Path(_) => (parameter_name(p), "path"),
-            Parameter::Query(_) => (parameter_name(p), "query"),
-            Parameter::Header(_) => (parameter_name(p), "header"),
-            Parameter::FormData(_) => (parameter_name(p), "formData"),
+            Parameter::Body(p) => (p.name.clone(), "body"),
+            Parameter::Path(p) => (in_path_name(p), "path"),
+            Parameter::Query(p) => (in_query_name(p), "query"),
+            Parameter::Header(p) => (in_header_name(p), "header"),
+            Parameter::FormData(p) => (in_form_data_name(p), "formData"),
         },
     }
 }
 
-fn parameter_name(p: &Parameter) -> String {
-    use crate::v2::parameter::{InFormData, InHeader, InPath, InQuery};
+fn in_path_name(p: &InPath) -> String {
     match p {
-        Parameter::Body(b) => b.name.clone(),
-        Parameter::Path(p) => match &**p {
-            InPath::String(p) => p.name.clone(),
-            InPath::Integer(p) => p.name.clone(),
-            InPath::Number(p) => p.name.clone(),
-            InPath::Boolean(p) => p.name.clone(),
-            InPath::Array(p) => p.name.clone(),
-        },
-        Parameter::Query(p) => match &**p {
-            InQuery::String(p) => p.name.clone(),
-            InQuery::Integer(p) => p.name.clone(),
-            InQuery::Number(p) => p.name.clone(),
-            InQuery::Boolean(p) => p.name.clone(),
-            InQuery::Array(p) => p.name.clone(),
-        },
-        Parameter::Header(p) => match &**p {
-            InHeader::String(p) => p.name.clone(),
-            InHeader::Integer(p) => p.name.clone(),
-            InHeader::Number(p) => p.name.clone(),
-            InHeader::Boolean(p) => p.name.clone(),
-            InHeader::Array(p) => p.name.clone(),
-        },
-        Parameter::FormData(p) => match &**p {
-            InFormData::String(p) => p.name.clone(),
-            InFormData::Integer(p) => p.name.clone(),
-            InFormData::Number(p) => p.name.clone(),
-            InFormData::Boolean(p) => p.name.clone(),
-            InFormData::Array(p) => p.name.clone(),
-            InFormData::File(p) => p.name.clone(),
-        },
+        InPath::String(p) => p.name.clone(),
+        InPath::Integer(p) => p.name.clone(),
+        InPath::Number(p) => p.name.clone(),
+        InPath::Boolean(p) => p.name.clone(),
+        InPath::Array(p) => p.name.clone(),
+    }
+}
+
+fn in_query_name(p: &InQuery) -> String {
+    match p {
+        InQuery::String(p) => p.name.clone(),
+        InQuery::Integer(p) => p.name.clone(),
+        InQuery::Number(p) => p.name.clone(),
+        InQuery::Boolean(p) => p.name.clone(),
+        InQuery::Array(p) => p.name.clone(),
+    }
+}
+
+fn in_header_name(p: &InHeader) -> String {
+    match p {
+        InHeader::String(p) => p.name.clone(),
+        InHeader::Integer(p) => p.name.clone(),
+        InHeader::Number(p) => p.name.clone(),
+        InHeader::Boolean(p) => p.name.clone(),
+        InHeader::Array(p) => p.name.clone(),
+    }
+}
+
+fn in_form_data_name(p: &InFormData) -> String {
+    match p {
+        InFormData::String(p) => p.name.clone(),
+        InFormData::Integer(p) => p.name.clone(),
+        InFormData::Number(p) => p.name.clone(),
+        InFormData::Boolean(p) => p.name.clone(),
+        InFormData::Array(p) => p.name.clone(),
+        InFormData::File(p) => p.name.clone(),
     }
 }
 
@@ -587,20 +592,28 @@ impl MergeWithContext for Parameter {
     }
 }
 
-fn leaf_replace_in_path(a: &mut InPath, b: InPath, ctx: &mut MergeContext, path: &mut str) {
-    if *a != b && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
+// The four `leaf_replace_in_*` helpers + Header/Items merge with
+// `ScalarOverridden` (whole-value replacement, no deep recursion).
+// `ParameterVariantMismatch` is reserved for the outer
+// `Parameter::Path × Parameter::Query` (and similar) mismatch arm
+// in `Parameter::merge_with_context` — those reflect a real
+// cross-location collision, distinct from this same-variant leaf
+// replace.
+
+fn leaf_replace_in_path(a: &mut InPath, b: InPath, ctx: &mut MergeContext, path: &str) {
+    if *a != b && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden) {
         *a = b;
     }
 }
 
-fn leaf_replace_in_query(a: &mut InQuery, b: InQuery, ctx: &mut MergeContext, path: &mut str) {
-    if *a != b && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
+fn leaf_replace_in_query(a: &mut InQuery, b: InQuery, ctx: &mut MergeContext, path: &str) {
+    if *a != b && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden) {
         *a = b;
     }
 }
 
-fn leaf_replace_in_header(a: &mut InHeader, b: InHeader, ctx: &mut MergeContext, path: &mut str) {
-    if *a != b && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
+fn leaf_replace_in_header(a: &mut InHeader, b: InHeader, ctx: &mut MergeContext, path: &str) {
+    if *a != b && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden) {
         *a = b;
     }
 }
@@ -609,9 +622,9 @@ fn leaf_replace_in_form_data(
     a: &mut InFormData,
     b: InFormData,
     ctx: &mut MergeContext,
-    path: &mut str,
+    path: &str,
 ) {
-    if *a != b && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
+    if *a != b && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden) {
         *a = b;
     }
 }
@@ -623,8 +636,7 @@ impl MergeWithContext for Header {
         if ctx.errored {
             return;
         }
-        if *self != other && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch)
-        {
+        if *self != other && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden) {
             *self = other;
         }
     }
@@ -735,18 +747,19 @@ impl MergeWithContext for Schema {
         if ctx.errored {
             return;
         }
+        // Match on owned `other` up front so the deep-merge arm can
+        // move the inner `ObjectSchema` without re-destructuring or
+        // an `unreachable!()` guard.
         if ctx.is_option(MergeOptions::DeepMergeObjectSchemas)
             && let Schema::Object(self_obj) = self
-            && let Schema::Object(other_obj) = &other
         {
-            // Take ownership of `other` by re-matching now that we
-            // know the variant.
-            let _ = other_obj;
-            let Schema::Object(other_obj) = other else {
-                unreachable!()
-            };
-            self_obj.merge_with_context(*other_obj, ctx, path);
-            return;
+            match other {
+                Schema::Object(other_obj) => {
+                    self_obj.merge_with_context(*other_obj, ctx, path);
+                    return;
+                }
+                non_object => return leaf_replace_schema(self, non_object, ctx, path),
+            }
         }
         leaf_replace_schema(self, other, ctx, path);
     }
@@ -853,8 +866,7 @@ impl MergeWithContext for SecurityScheme {
         if ctx.errored {
             return;
         }
-        if *self != other && ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch)
-        {
+        if *self != other && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden) {
             *self = other;
         }
     }
@@ -1135,25 +1147,6 @@ impl MergeWithContext for Server {
             ".extensions",
         );
     }
-}
-
-// ----- Spec.info/swagger kept-base-or-error helper -----
-
-fn record_kept_base_or_error(
-    ctx: &mut MergeContext,
-    path: &mut String,
-    segment: &str,
-    kind: ConflictKind,
-) {
-    let original_len = path.len();
-    path.push_str(segment);
-    if ctx.is_option(MergeOptions::ErrorOnConflict) {
-        ctx.record(path.clone(), kind, crate::merge::Resolution::Errored);
-        ctx.errored = true;
-    } else {
-        ctx.record(path.clone(), kind, crate::merge::Resolution::Base);
-    }
-    path.truncate(original_len);
 }
 
 #[cfg(test)]
