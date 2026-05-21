@@ -13,7 +13,6 @@
 //!   schemas are leaves, info is preserved from base).
 
 use enumset::{EnumSet, EnumSetType};
-use std::collections::HashSet;
 use std::fmt::{self, Display};
 use thiserror::Error as ThisError;
 
@@ -231,12 +230,18 @@ pub(crate) trait MergeWithContext<T> {
 }
 
 /// Merge context — carries the spec being merged into, the options,
-/// accumulated conflicts, and a `visited` set for cycle safety
-/// during nested-ref / nested-schema recursion.
+/// and accumulated conflicts.
+///
+/// The `spec` back-reference is currently unused by every concrete
+/// `MergeWithContext` impl (merge recurses through owned subtrees, so
+/// there's nothing to resolve against the parent spec). It's kept on
+/// the type for symmetry with `validation::Context<T>` and so v2 /
+/// v3.0 / v3.1 ports can introduce ref-following merge later without
+/// reshaping every signature. If it stays unused once all four
+/// versions land, drop `T` / `spec` in a follow-up.
 pub(crate) struct MergeContext<'a, T> {
     pub spec: &'a T,
     pub options: EnumSet<MergeOptions>,
-    pub visited: HashSet<String>,
     pub conflicts: Vec<MergeConflict>,
     /// Set by [`Self::should_take_incoming`] when
     /// [`MergeOptions::ErrorOnConflict`] is engaged and a real
@@ -249,11 +254,6 @@ pub(crate) struct MergeContext<'a, T> {
 impl<T> MergeContext<'_, T> {
     pub fn is_option(&self, o: MergeOptions) -> bool {
         self.options.contains(o)
-    }
-
-    #[allow(dead_code)]
-    pub fn visit(&mut self, path: String) -> bool {
-        self.visited.insert(path)
     }
 
     pub fn record(&mut self, path: String, kind: ConflictKind, resolution: Resolution) {
@@ -293,7 +293,6 @@ impl<T> MergeContext<'_, T> {
         MergeContext {
             spec,
             options,
-            visited: HashSet::new(),
             conflicts: Vec::new(),
             errored: false,
         }
@@ -319,7 +318,6 @@ impl<T: fmt::Debug> fmt::Debug for MergeContext<'_, T> {
         f.debug_struct("MergeContext")
             .field("spec", &self.spec)
             .field("options", &self.options)
-            .field("visited", &self.visited)
             .field("conflicts", &self.conflicts)
             .field("errored", &self.errored)
             .finish()

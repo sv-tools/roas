@@ -5,13 +5,19 @@
 //! them with its own `V`. The dedup-policy decision (per-version files
 //! stay duplicated except `reference.rs`) is preserved.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::merge::{ConflictKind, MergeContext, MergeWithContext};
 
 /// Merge two bare `BTreeMap`s by key. Used by `Paths`, `Callback`,
 /// `Components.<bag>` (each bag is `Option<BTreeMap<...>>` — wrap with
 /// [`merge_opt_map`] for those).
+///
+/// All helpers in this module no-op when `ctx.errored` is already
+/// set, so callers do not need to interleave `if ctx.errored { return; }`
+/// checks between successive calls. The first helper to record a
+/// `Resolution::Errored` flips the flag and every subsequent helper
+/// returns early.
 pub(crate) fn merge_map<T, K, V>(
     base: &mut BTreeMap<K, V>,
     other: BTreeMap<K, V>,
@@ -22,6 +28,9 @@ pub(crate) fn merge_map<T, K, V>(
 ) where
     K: Ord,
 {
+    if ctx.errored {
+        return;
+    }
     for (k, incoming) in other {
         if let Some(base_v) = base.get_mut(&k) {
             let child_path = format!("{path}.{}", fmt_key(&k));
@@ -47,6 +56,9 @@ pub(crate) fn merge_opt_map<T, K, V>(
 ) where
     K: Ord,
 {
+    if ctx.errored {
+        return;
+    }
     let Some(other) = other else { return };
     match base {
         Some(base_map) => merge_map(base_map, other, ctx, path, recurse, fmt_key),
@@ -68,6 +80,9 @@ pub(crate) fn merge_vec_by_key<T, V, K>(
 ) where
     K: Ord + Clone,
 {
+    if ctx.errored {
+        return;
+    }
     use std::collections::BTreeMap as Map;
     let mut index: Map<K, usize> = Map::new();
     for (i, v) in base.iter().enumerate() {
@@ -101,6 +116,9 @@ pub(crate) fn merge_opt_vec_by_key<T, V, K>(
 ) where
     K: Ord + Clone,
 {
+    if ctx.errored {
+        return;
+    }
     let Some(other) = other else { return };
     match base {
         Some(base_v) => merge_vec_by_key(base_v, other, ctx, path, key_of, recurse, fmt_key),
@@ -108,24 +126,33 @@ pub(crate) fn merge_opt_vec_by_key<T, V, K>(
     }
 }
 
-/// Set-union an `Option<Vec<V: Ord + Eq>>` while preserving the base
-/// order (incoming-only entries appended in incoming order). No
-/// conflict is recorded — adding more tags / `required` entries is
-/// purely additive.
+/// Set-union an `Option<Vec<V>>` while preserving the base order
+/// (incoming-only entries appended in incoming order). No conflict
+/// is recorded — adding more tags / `required` entries is purely
+/// additive.
+///
+/// Linear-scan dedup: `Vec::contains` against the grown base. Zero
+/// allocations beyond the `Vec::push` itself — the previous
+/// implementation built a `BTreeSet<V>` by cloning every base
+/// element, then `insert`-cloned every incoming probe, paying
+/// `2·|base| + |incoming|` clones. For the typical `tags` / `required`
+/// list (handful of entries) the linear scan is faster anyway.
 pub(crate) fn merge_opt_vec_set_union<T, V>(
     base: &mut Option<Vec<V>>,
     other: Option<Vec<V>>,
-    _ctx: &mut MergeContext<T>,
+    ctx: &mut MergeContext<T>,
     _path: &str,
 ) where
-    V: Ord + Clone,
+    V: Eq,
 {
+    if ctx.errored {
+        return;
+    }
     let Some(other) = other else { return };
     match base {
         Some(base_v) => {
-            let mut seen: BTreeSet<V> = base_v.iter().cloned().collect();
             for v in other {
-                if seen.insert(v.clone()) {
+                if !base_v.contains(&v) {
                     base_v.push(v);
                 }
             }
@@ -146,6 +173,9 @@ pub(crate) fn merge_opt_scalar<T, V>(
 ) where
     V: PartialEq,
 {
+    if ctx.errored {
+        return;
+    }
     match (base.as_mut(), other) {
         (_, None) => {}
         (None, Some(v)) => *base = Some(v),
@@ -169,6 +199,9 @@ pub(crate) fn merge_required_scalar<T, V>(
 ) where
     V: PartialEq,
 {
+    if ctx.errored {
+        return;
+    }
     if *base != other && ctx.should_take_incoming(path, kind) {
         *base = other;
     }
@@ -183,6 +216,9 @@ pub(crate) fn merge_replace_list_when_nonempty<T, V>(
     ctx: &mut MergeContext<T>,
     path: &str,
 ) {
+    if ctx.errored {
+        return;
+    }
     use crate::merge::MergeOptions;
     let replace_when_empty = ctx.is_option(MergeOptions::ReplaceListsWhenEmpty);
     let Some(other) = other else { return };
@@ -208,6 +244,9 @@ pub(crate) fn merge_extensions<T>(
     ctx: &mut MergeContext<T>,
     path: &str,
 ) {
+    if ctx.errored {
+        return;
+    }
     let Some(other) = other else { return };
     let base_map = base.get_or_insert_with(BTreeMap::new);
     for (k, incoming) in other {
@@ -240,6 +279,9 @@ pub(crate) fn merge_opt_struct<T, S>(
 ) where
     S: MergeWithContext<T>,
 {
+    if ctx.errored {
+        return;
+    }
     match (base.as_mut(), other) {
         (_, None) => {}
         (None, Some(v)) => *base = Some(v),
