@@ -80,9 +80,31 @@ impl Merge for Spec {
         // caller to clone the base before merging into it.
         let mut ctx: MergeContext<()> = MergeContext::new(&(), options);
         let path = "#".to_owned();
-        // The actual recursion takes `&mut self` so we can't carry a
-        // borrow of `self` in `ctx.spec`. The component impls below
-        // are written against `MergeContext<()>` accordingly.
+
+        if options.contains(MergeOptions::ErrorOnConflict) {
+            // Strict-mode rollback: clone `self` into a working copy
+            // and only commit it back on success. Without this, an
+            // `Err` would leave `self` partially merged (additive
+            // steps run before the first collision flips `ctx.errored`),
+            // which contradicts the contract callers reach for
+            // `ErrorOnConflict` to get. The clone cost is paid only
+            // when the option is opted in.
+            let mut working = self.clone();
+            <Spec as MergeWithContext<()>>::merge_with_context(&mut working, other, &mut ctx, path);
+            if ctx.errored {
+                return Err(MergeError {
+                    conflicts: ctx.conflicts,
+                });
+            }
+            *self = working;
+            return Ok(MergeReport {
+                conflicts: ctx.conflicts,
+            });
+        }
+
+        // Non-strict modes mutate `self` in place — the report still
+        // captures every resolution, so callers wanting "see what
+        // changed" don't need the clone-and-replace overhead.
         <Spec as MergeWithContext<()>>::merge_with_context(self, other, &mut ctx, path);
         ctx.into()
     }
@@ -2605,6 +2627,108 @@ mod tests {
         let err = result.unwrap_err();
         assert!(!err.conflicts.is_empty());
         assert_eq!(err.conflicts[0].resolution, Resolution::Errored);
+    }
+
+    #[test]
+    fn spec_error_on_conflict_rolls_back_base_on_err() {
+        // Base has tags=[A,B], a 200 response on /pets.get, and a
+        // jsonSchemaDialect. Incoming adds a tag C (additive — no
+        // conflict by itself), a 404 response (additive), and a
+        // different jsonSchemaDialect that *will* collide. With
+        // `ErrorOnConflict`, the additive bits that ran *before*
+        // hitting the dialect conflict must not be observable on
+        // `base` after the `Err` returns — the rollback contract.
+        let mut base = Spec {
+            tags: Some(vec![
+                Tag {
+                    name: "A".into(),
+                    ..Default::default()
+                },
+                Tag {
+                    name: "B".into(),
+                    ..Default::default()
+                },
+            ]),
+            paths: Some(Paths {
+                paths: BTreeMap::from([(
+                    "/pets".to_owned(),
+                    PathItem {
+                        operations: Some(BTreeMap::from([(
+                            "get".to_owned(),
+                            Operation {
+                                responses: Some(Responses {
+                                    responses: Some(BTreeMap::from([(
+                                        "200".to_owned(),
+                                        response_with("ok"),
+                                    )])),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                        )])),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            json_schema_dialect: Some("base-dialect".into()),
+            ..Default::default()
+        };
+        let incoming = Spec {
+            tags: Some(vec![Tag {
+                name: "C".into(),
+                ..Default::default()
+            }]),
+            paths: Some(Paths {
+                paths: BTreeMap::from([(
+                    "/pets".to_owned(),
+                    PathItem {
+                        operations: Some(BTreeMap::from([(
+                            "get".to_owned(),
+                            Operation {
+                                responses: Some(Responses {
+                                    responses: Some(BTreeMap::from([(
+                                        "404".to_owned(),
+                                        response_with("missing"),
+                                    )])),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                        )])),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            json_schema_dialect: Some("incoming-dialect".into()),
+            ..Default::default()
+        };
+        let result = base.merge(incoming, MergeOptions::ErrorOnConflict.only());
+        assert!(result.is_err());
+        // Base is untouched: still 2 tags, still only the 200 response,
+        // still the original dialect.
+        let tag_names: Vec<_> = base
+            .tags
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(tag_names, vec!["A", "B"]);
+        let responses = base.paths.as_ref().unwrap().paths["/pets"]
+            .operations
+            .as_ref()
+            .unwrap()["get"]
+            .responses
+            .as_ref()
+            .unwrap()
+            .responses
+            .as_ref()
+            .unwrap();
+        assert!(responses.contains_key("200"));
+        assert!(!responses.contains_key("404"), "404 must not have leaked");
+        assert_eq!(base.json_schema_dialect.as_deref(), Some("base-dialect"));
     }
 
     // ---- Spec.tags: dedup by name with recursion ----
