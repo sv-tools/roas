@@ -146,6 +146,52 @@ impl ValidateWithContext<Spec> for ServerVariable {
     }
 }
 
+impl crate::merge::MergeWithContext for ServerVariable {
+    fn merge_with_context(
+        &mut self,
+        other: Self,
+        ctx: &mut crate::merge::MergeContext,
+        path: &mut String,
+    ) {
+        if ctx.errored {
+            return;
+        }
+        use crate::common::merge::{merge_extensions, merge_opt_scalar, merge_required_scalar};
+        use crate::merge::ConflictKind;
+        merge_opt_scalar(
+            &mut self.enum_values,
+            other.enum_values,
+            ctx,
+            path,
+            ".enum",
+            ConflictKind::ScalarOverridden,
+        );
+        merge_required_scalar(
+            &mut self.default,
+            other.default,
+            ctx,
+            path,
+            ".default",
+            ConflictKind::RequiredScalarOverridden,
+        );
+        merge_opt_scalar(
+            &mut self.description,
+            other.description,
+            ctx,
+            path,
+            ".description",
+            ConflictKind::ScalarOverridden,
+        );
+        merge_extensions(
+            &mut self.extensions,
+            other.extensions,
+            ctx,
+            path,
+            ".extensions",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

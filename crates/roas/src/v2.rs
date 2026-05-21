@@ -22,6 +22,7 @@ pub mod external_documentation;
 pub mod header;
 pub mod info;
 pub mod items;
+pub mod merge;
 pub mod operation;
 pub mod parameter;
 pub mod path_item;

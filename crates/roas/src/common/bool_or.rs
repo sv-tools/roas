@@ -25,14 +25,14 @@ impl<D> BoolOr<RefOr<D>> {
     }
 }
 
-impl<D, T> crate::merge::MergeWithContext<T> for BoolOr<D>
+impl<D> crate::merge::MergeWithContext for BoolOr<D>
 where
-    D: crate::merge::MergeWithContext<T>,
+    D: crate::merge::MergeWithContext,
 {
     fn merge_with_context(
         &mut self,
         other: Self,
-        ctx: &mut crate::merge::MergeContext<T>,
+        ctx: &mut crate::merge::MergeContext,
         path: &mut String,
     ) {
         if ctx.errored {
@@ -127,13 +127,8 @@ mod tests {
 
     use crate::merge::{ConflictKind, MergeContext, MergeOptions, MergeWithContext, Resolution};
 
-    impl MergeWithContext<()> for Foo {
-        fn merge_with_context(
-            &mut self,
-            other: Self,
-            ctx: &mut MergeContext<()>,
-            path: &mut String,
-        ) {
+    impl MergeWithContext for Foo {
+        fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
             if self.foo != other.foo
                 && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden)
             {
@@ -142,8 +137,8 @@ mod tests {
         }
     }
 
-    fn ctx_with(opts: enumset::EnumSet<MergeOptions>) -> MergeContext<'static, ()> {
-        MergeContext::new(&(), opts)
+    fn ctx_with(opts: enumset::EnumSet<MergeOptions>) -> MergeContext {
+        MergeContext::new(opts)
     }
 
     #[test]
