@@ -155,6 +155,13 @@ impl ValidateWithContext<Spec> for ServerVariable {
     }
 }
 
+// `ServerVariable` is the only v3.2 component whose `MergeWithContext`
+// impl lives outside `crates/roas/src/v3_2/merge.rs` — its `default`,
+// `enum_values`, and `description` fields are crate-private and not
+// reachable from the consolidated merge module. Keep this impl
+// alongside the type until those fields are exposed (or until we
+// move every component impl into its component file in a future
+// reorganization).
 impl crate::merge::MergeWithContext<()> for ServerVariable {
     fn merge_with_context(
         &mut self,

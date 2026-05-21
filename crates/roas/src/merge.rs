@@ -40,6 +40,14 @@ pub enum MergeOptions {
     ///
     /// Has no effect when only one side has a value, or for additive
     /// operations (new map keys, list-by-key new entries).
+    ///
+    /// **Caveat:** unlike [`Self::ErrorOnConflict`], `BaseWins` does
+    /// **not** roll back additive mutations. If the caller inspects
+    /// `self` after a `BaseWins` merge, new map keys / new tags / new
+    /// status codes from the incoming spec will be present — only the
+    /// overwrite-of-existing path is suppressed. Pair with
+    /// [`Self::ErrorOnConflict`] (which dominates — see below) if you
+    /// need atomicity.
     BaseWins,
 
     /// Convert the first real collision into an early `Err`. The
@@ -50,6 +58,13 @@ pub enum MergeOptions {
     /// list entries, and `Some` replacing `None`. Same-value
     /// collisions (where base and incoming compare equal) are also
     /// considered no-ops and do not trip this flag.
+    ///
+    /// **Dominates [`Self::BaseWins`]:** when both are set, the first
+    /// real mismatch returns `Err` rather than silently keeping base.
+    /// The base spec is left untouched on error
+    /// ([`Merge::merge`] clones internally before mutating in this
+    /// mode), so `BaseWins`-style "keep what I have" is implicitly
+    /// upheld by the rollback.
     ErrorOnConflict,
 
     /// Opt into deep-merging two object schemas. Without this flag,

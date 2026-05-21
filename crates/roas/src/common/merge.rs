@@ -38,11 +38,6 @@ impl<'a> PathGuard<'a> {
         PathGuard { path, original_len }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn as_str(&self) -> &str {
-        self.path
-    }
-
     pub(crate) fn path_mut(&mut self) -> &mut String {
         self.path
     }
@@ -85,11 +80,15 @@ pub(crate) fn merge_map<T, K, V>(
     }
     for (k, incoming) in other {
         if let Some(base_v) = base.get_mut(&k) {
-            let original_len = path.len();
-            path.push('.');
-            fmt_key(&k, path);
-            recurse(base_v, incoming, ctx, path);
-            path.truncate(original_len);
+            // Use the PathGuard so a panic inside `recurse` still
+            // restores the buffer on unwind. Merge runs against owned
+            // data and doesn't itself panic, but a buggy user-supplied
+            // recurse callback could — and dropped guards keep the
+            // module invariant ("path balanced at every return") intact.
+            let mut guard = PathGuard::new(path, ".");
+            fmt_key(&k, guard.path_mut());
+            recurse(base_v, incoming, ctx, guard.path_mut());
+            drop(guard);
             if ctx.errored {
                 return;
             }
@@ -151,12 +150,13 @@ pub(crate) fn merge_vec_by_key<T, V, K>(
     for incoming in other {
         let k = key_of(&incoming);
         if let Some(&i) = index.get(&k) {
-            let original_len = path.len();
-            path.push('[');
-            fmt_key(&k, path);
-            path.push(']');
-            recurse(&mut base[i], incoming, ctx, path);
-            path.truncate(original_len);
+            // PathGuard restores the buffer even if `recurse` panics
+            // — same panic-safety reasoning as `merge_map`.
+            let mut guard = PathGuard::new(path, "[");
+            fmt_key(&k, guard.path_mut());
+            guard.path_mut().push(']');
+            recurse(&mut base[i], incoming, ctx, guard.path_mut());
+            drop(guard);
             if ctx.errored {
                 return;
             }
@@ -526,8 +526,8 @@ mod tests {
     fn path_guard_restores_path_on_drop() {
         let mut path = "#.foo".to_owned();
         {
-            let guard = PathGuard::new(&mut path, ".bar");
-            assert_eq!(guard.as_str(), "#.foo.bar");
+            let mut guard = PathGuard::new(&mut path, ".bar");
+            assert_eq!(guard.path_mut(), "#.foo.bar");
         }
         assert_eq!(path, "#.foo");
     }
@@ -538,10 +538,10 @@ mod tests {
         {
             let mut g1 = PathGuard::new(&mut path, ".a");
             {
-                let g2 = PathGuard::new(g1.path_mut(), ".b");
-                assert_eq!(g2.as_str(), "#.a.b");
+                let mut g2 = PathGuard::new(g1.path_mut(), ".b");
+                assert_eq!(g2.path_mut(), "#.a.b");
             }
-            assert_eq!(g1.as_str(), "#.a");
+            assert_eq!(g1.path_mut(), "#.a");
         }
         assert_eq!(path, "#");
     }

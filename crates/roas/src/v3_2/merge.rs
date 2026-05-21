@@ -1827,6 +1827,12 @@ impl MergeWithContext<()> for Discriminator {
                         }
                     }
                 }
+                // ErrorOnConflict: bail on the first collision; matches
+                // the OAuth scopes loop and the documented "first real
+                // collision triggers early error" contract.
+                if ctx.errored {
+                    return;
+                }
             }
         }
         merge_opt_scalar(
@@ -2896,6 +2902,42 @@ mod tests {
         let err = result.unwrap_err();
         assert!(!err.conflicts.is_empty());
         assert_eq!(err.conflicts[0].resolution, Resolution::Errored);
+    }
+
+    #[test]
+    fn discriminator_mapping_loop_breaks_on_error_on_conflict() {
+        use crate::v3_2::discriminator::Discriminator;
+        // Two mapping collisions in a row; under ErrorOnConflict only
+        // the first should land in the report — the loop must `return`
+        // after the first collision, not keep recording. Before the
+        // early-break fix this test would see two recorded conflicts.
+        let mut base = Discriminator {
+            property_name: "kind".into(),
+            mapping: Some(BTreeMap::from([
+                ("a".to_owned(), "#/c/A".to_owned()),
+                ("b".to_owned(), "#/c/B".to_owned()),
+            ])),
+            ..Default::default()
+        };
+        let incoming = Discriminator {
+            property_name: "kind".into(),
+            mapping: Some(BTreeMap::from([
+                ("a".to_owned(), "#/c/AA".to_owned()),
+                ("b".to_owned(), "#/c/BB".to_owned()),
+            ])),
+            ..Default::default()
+        };
+        let mut ctx: MergeContext<()> =
+            MergeContext::new(&(), MergeOptions::ErrorOnConflict.only());
+        let mut path = String::from("#.d");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
+        assert!(ctx.errored, "first mapping collision must trip errored");
+        assert_eq!(
+            ctx.conflicts.len(),
+            1,
+            "loop must return after first collision, got {} conflicts",
+            ctx.conflicts.len()
+        );
     }
 
     #[test]
