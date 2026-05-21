@@ -33,8 +33,11 @@ where
         &mut self,
         other: Self,
         ctx: &mut crate::merge::MergeContext<T>,
-        path: String,
+        path: &mut String,
     ) {
+        if ctx.errored {
+            return;
+        }
         use crate::merge::ConflictKind;
         match (self, other) {
             (BoolOr::Item(base), BoolOr::Item(incoming)) => {
@@ -45,13 +48,13 @@ where
                     unreachable!()
                 };
                 if *base_bool != incoming_bool
-                    && ctx.should_take_incoming(&path, ConflictKind::ScalarOverridden)
+                    && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden)
                 {
                     *base_bool = incoming_bool;
                 }
             }
             (slot, incoming) => {
-                if ctx.should_take_incoming(&path, ConflictKind::RefVsValue) {
+                if ctx.should_take_incoming(path, ConflictKind::RefVsValue) {
                     *slot = incoming;
                 }
             }

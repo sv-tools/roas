@@ -19,8 +19,9 @@
 use enumset::EnumSet;
 
 use crate::common::merge::{
-    merge_extensions, merge_opt_map, merge_opt_scalar, merge_opt_struct, merge_opt_vec_by_key,
-    merge_opt_vec_set_union, merge_replace_list_when_nonempty, merge_required_scalar,
+    PathGuard, merge_extensions, merge_opt_map, merge_opt_scalar, merge_opt_struct,
+    merge_opt_vec_by_key, merge_opt_vec_set_union, merge_replace_list_when_nonempty,
+    merge_required_scalar,
 };
 use crate::common::reference::RefOr;
 use crate::merge::{
@@ -57,12 +58,22 @@ use crate::v3_2::spec::Spec;
 use crate::v3_2::tag::Tag;
 use crate::v3_2::xml::XML;
 
-// String-keyed maps appear everywhere; this is the single fmt_key the
-// helpers want. Cloning is cheap relative to the surrounding work and
-// keeps signatures uniform.
+// String-keyed maps appear everywhere; this is the single fmt_key
+// the helpers want. Writes the key directly into the path buffer
+// instead of allocating a fresh String — the helpers' `fmt_key`
+// signature is `Fn(&K, &mut String)` for exactly this reason.
 #[allow(clippy::ptr_arg)]
-fn key_str(s: &String) -> String {
-    s.clone()
+fn key_str(s: &String, out: &mut String) {
+    out.push_str(s);
+}
+
+/// `fmt_key` for the `(name, location)` keys used by
+/// `Operation.parameters` / `PathItem.parameters`. Writes
+/// `<name>:<location>` into the path buffer.
+fn fmt_param_key(k: &(String, &'static str), out: &mut String) {
+    out.push_str(&k.0);
+    out.push(':');
+    out.push_str(k.1);
 }
 
 // ----- Public entry point -----
@@ -79,7 +90,9 @@ impl Merge for Spec {
         // a unit `&()` keeps the type generic without forcing the
         // caller to clone the base before merging into it.
         let mut ctx: MergeContext<()> = MergeContext::new(&(), options);
-        let path = "#".to_owned();
+        // Single owned `String` for the whole merge — every child
+        // pushes/truncates segments onto it via the helper guards.
+        let mut path = String::from("#");
 
         if options.contains(MergeOptions::ErrorOnConflict) {
             // Strict-mode rollback: clone `self` into a working copy
@@ -90,7 +103,12 @@ impl Merge for Spec {
             // `ErrorOnConflict` to get. The clone cost is paid only
             // when the option is opted in.
             let mut working = self.clone();
-            <Spec as MergeWithContext<()>>::merge_with_context(&mut working, other, &mut ctx, path);
+            <Spec as MergeWithContext<()>>::merge_with_context(
+                &mut working,
+                other,
+                &mut ctx,
+                &mut path,
+            );
             if ctx.errored {
                 return Err(MergeError {
                     conflicts: ctx.conflicts,
@@ -105,7 +123,7 @@ impl Merge for Spec {
         // Non-strict modes mutate `self` in place — the report still
         // captures every resolution, so callers wanting "see what
         // changed" don't need the clone-and-replace overhead.
-        <Spec as MergeWithContext<()>>::merge_with_context(self, other, &mut ctx, path);
+        <Spec as MergeWithContext<()>>::merge_with_context(self, other, &mut ctx, &mut path);
         ctx.into()
     }
 }
@@ -113,7 +131,7 @@ impl Merge for Spec {
 // ----- Top-level Spec -----
 
 impl MergeWithContext<()> for Spec {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -132,23 +150,29 @@ impl MergeWithContext<()> for Spec {
                 &mut self.openapi,
                 other.openapi,
                 ctx,
-                &format!("{path}.openapi"),
+                path,
+                ".openapi",
                 ConflictKind::RequiredScalarOverridden,
             );
-            self.info
-                .merge_with_context(other.info, ctx, format!("{path}.info"));
+            {
+                let mut guard = PathGuard::new(path, ".info");
+                self.info
+                    .merge_with_context(other.info, ctx, guard.path_mut());
+            }
         } else {
             if self.openapi != other.openapi {
                 record_kept_base_or_error(
                     ctx,
-                    &format!("{path}.openapi"),
+                    path,
+                    ".openapi",
                     ConflictKind::RequiredScalarOverridden,
                 );
             }
             if !ctx.errored && self.info != other.info {
                 record_kept_base_or_error(
                     ctx,
-                    &format!("{path}.info"),
+                    path,
+                    ".info",
                     ConflictKind::RequiredScalarOverridden,
                 );
             }
@@ -157,46 +181,41 @@ impl MergeWithContext<()> for Spec {
             &mut self.self_uri,
             other.self_uri,
             ctx,
-            &format!("{path}.$self"),
+            path,
+            ".$self",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.json_schema_dialect,
             other.json_schema_dialect,
             ctx,
-            &format!("{path}.jsonSchemaDialect"),
+            path,
+            ".jsonSchemaDialect",
             ConflictKind::ScalarOverridden,
         );
-        merge_replace_list_when_nonempty(
-            &mut self.servers,
-            other.servers,
-            ctx,
-            &format!("{path}.servers"),
-        );
-        merge_opt_struct(&mut self.paths, other.paths, ctx, &format!("{path}.paths"));
-        merge_opt_struct(
-            &mut self.webhooks,
-            other.webhooks,
-            ctx,
-            &format!("{path}.webhooks"),
-        );
+        merge_replace_list_when_nonempty(&mut self.servers, other.servers, ctx, path, ".servers");
+        merge_opt_struct(&mut self.paths, other.paths, ctx, path, ".paths");
+        merge_opt_struct(&mut self.webhooks, other.webhooks, ctx, path, ".webhooks");
         merge_opt_struct(
             &mut self.components,
             other.components,
             ctx,
-            &format!("{path}.components"),
+            path,
+            ".components",
         );
         merge_replace_list_when_nonempty(
             &mut self.security,
             other.security,
             ctx,
-            &format!("{path}.security"),
+            path,
+            ".security",
         );
         merge_opt_vec_by_key(
             &mut self.tags,
             other.tags,
             ctx,
-            &format!("{path}.tags"),
+            path,
+            ".tags",
             |t: &Tag| t.name.clone(),
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
@@ -205,13 +224,15 @@ impl MergeWithContext<()> for Spec {
             &mut self.external_docs,
             other.external_docs,
             ctx,
-            &format!("{path}.externalDocs"),
+            path,
+            ".externalDocs",
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
@@ -219,7 +240,7 @@ impl MergeWithContext<()> for Spec {
 // ----- Containers -----
 
 impl MergeWithContext<()> for Components {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -227,7 +248,8 @@ impl MergeWithContext<()> for Components {
             &mut self.schemas,
             other.schemas,
             ctx,
-            &format!("{path}.schemas"),
+            path,
+            ".schemas",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -235,7 +257,8 @@ impl MergeWithContext<()> for Components {
             &mut self.responses,
             other.responses,
             ctx,
-            &format!("{path}.responses"),
+            path,
+            ".responses",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -243,7 +266,8 @@ impl MergeWithContext<()> for Components {
             &mut self.parameters,
             other.parameters,
             ctx,
-            &format!("{path}.parameters"),
+            path,
+            ".parameters",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -251,7 +275,8 @@ impl MergeWithContext<()> for Components {
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -259,7 +284,8 @@ impl MergeWithContext<()> for Components {
             &mut self.request_bodies,
             other.request_bodies,
             ctx,
-            &format!("{path}.requestBodies"),
+            path,
+            ".requestBodies",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -267,7 +293,8 @@ impl MergeWithContext<()> for Components {
             &mut self.headers,
             other.headers,
             ctx,
-            &format!("{path}.headers"),
+            path,
+            ".headers",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -275,7 +302,8 @@ impl MergeWithContext<()> for Components {
             &mut self.security_schemes,
             other.security_schemes,
             ctx,
-            &format!("{path}.securitySchemes"),
+            path,
+            ".securitySchemes",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -283,7 +311,8 @@ impl MergeWithContext<()> for Components {
             &mut self.links,
             other.links,
             ctx,
-            &format!("{path}.links"),
+            path,
+            ".links",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -291,7 +320,8 @@ impl MergeWithContext<()> for Components {
             &mut self.callbacks,
             other.callbacks,
             ctx,
-            &format!("{path}.callbacks"),
+            path,
+            ".callbacks",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -299,7 +329,8 @@ impl MergeWithContext<()> for Components {
             &mut self.path_items,
             other.path_items,
             ctx,
-            &format!("{path}.pathItems"),
+            path,
+            ".pathItems",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -307,7 +338,8 @@ impl MergeWithContext<()> for Components {
             &mut self.media_types,
             other.media_types,
             ctx,
-            &format!("{path}.mediaTypes"),
+            path,
+            ".mediaTypes",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -315,20 +347,28 @@ impl MergeWithContext<()> for Components {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Paths {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
         for (k, incoming) in other.paths {
             if let Some(base_v) = self.paths.get_mut(&k) {
-                let child = format!("{path}[{k}]");
-                base_v.merge_with_context(incoming, ctx, child);
+                let original_len = path.len();
+                path.push('[');
+                path.push_str(&k);
+                path.push(']');
+                base_v.merge_with_context(incoming, ctx, path);
+                path.truncate(original_len);
+                if ctx.errored {
+                    return;
+                }
             } else {
                 self.paths.insert(k, incoming);
             }
@@ -337,20 +377,28 @@ impl MergeWithContext<()> for Paths {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Callback {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
         for (k, incoming) in other.paths {
             if let Some(base_v) = self.paths.get_mut(&k) {
-                let child = format!("{path}[{k}]");
-                base_v.merge_with_context(incoming, ctx, child);
+                let original_len = path.len();
+                path.push('[');
+                path.push_str(&k);
+                path.push(']');
+                base_v.merge_with_context(incoming, ctx, path);
+                path.truncate(original_len);
+                if ctx.errored {
+                    return;
+                }
             } else {
                 self.paths.insert(k, incoming);
             }
@@ -359,13 +407,14 @@ impl MergeWithContext<()> for Callback {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for PathItem {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -373,28 +422,34 @@ impl MergeWithContext<()> for PathItem {
             &mut self.reference,
             other.reference,
             ctx,
-            &format!("{path}.$ref"),
+            path,
+            ".$ref",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.summary,
             other.summary,
             ctx,
-            &format!("{path}.summary"),
+            path,
+            ".summary",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.operations,
             other.operations,
             ctx,
-            &path,
+            path,
+            // No outer segment — operations live directly under the
+            // path item (e.g. `#.paths[/pets].get`).
+            "",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -402,36 +457,34 @@ impl MergeWithContext<()> for PathItem {
             &mut self.additional_operations,
             other.additional_operations,
             ctx,
-            &format!("{path}.additionalOperations"),
+            path,
+            ".additionalOperations",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
-        merge_replace_list_when_nonempty(
-            &mut self.servers,
-            other.servers,
-            ctx,
-            &format!("{path}.servers"),
-        );
+        merge_replace_list_when_nonempty(&mut self.servers, other.servers, ctx, path, ".servers");
         merge_opt_vec_by_key(
             &mut self.parameters,
             other.parameters,
             ctx,
-            &format!("{path}.parameters"),
+            path,
+            ".parameters",
             parameter_ref_key,
             |b, i, c, p| b.merge_with_context(i, c, p),
-            |k| format!("{}:{}", k.0, k.1),
+            fmt_param_key,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Responses {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -439,14 +492,18 @@ impl MergeWithContext<()> for Responses {
             (_, None) => {}
             (slot @ None, Some(v)) => *slot = Some(v),
             (Some(b), Some(i)) => {
-                b.merge_with_context(i, ctx, format!("{path}.default"));
+                let mut guard = PathGuard::new(path, ".default");
+                b.merge_with_context(i, ctx, guard.path_mut());
             }
         }
         merge_opt_map(
             &mut self.responses,
             other.responses,
             ctx,
-            &path,
+            path,
+            // Per-status responses live directly under Responses
+            // (e.g. `#.responses.200`).
+            "",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -454,69 +511,80 @@ impl MergeWithContext<()> for Responses {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Operation {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
-        merge_opt_vec_set_union(&mut self.tags, other.tags, ctx, &format!("{path}.tags"));
+        merge_opt_vec_set_union(&mut self.tags, other.tags, ctx, path, ".tags");
         merge_opt_scalar(
             &mut self.summary,
             other.summary,
             ctx,
-            &format!("{path}.summary"),
+            path,
+            ".summary",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_struct(
             &mut self.external_docs,
             other.external_docs,
             ctx,
-            &format!("{path}.externalDocs"),
+            path,
+            ".externalDocs",
         );
         merge_opt_scalar(
             &mut self.operation_id,
             other.operation_id,
             ctx,
-            &format!("{path}.operationId"),
+            path,
+            ".operationId",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_vec_by_key(
             &mut self.parameters,
             other.parameters,
             ctx,
-            &format!("{path}.parameters"),
+            path,
+            ".parameters",
             parameter_ref_key,
             |b, i, c, p| b.merge_with_context(i, c, p),
-            |k| format!("{}:{}", k.0, k.1),
+            fmt_param_key,
         );
         match (&mut self.request_body, other.request_body) {
             (_, None) => {}
             (slot @ None, Some(v)) => *slot = Some(v),
-            (Some(b), Some(i)) => b.merge_with_context(i, ctx, format!("{path}.requestBody")),
+            (Some(b), Some(i)) => {
+                let mut guard = PathGuard::new(path, ".requestBody");
+                b.merge_with_context(i, ctx, guard.path_mut());
+            }
         }
         merge_opt_struct(
             &mut self.responses,
             other.responses,
             ctx,
-            &format!("{path}.responses"),
+            path,
+            ".responses",
         );
         merge_opt_map(
             &mut self.callbacks,
             other.callbacks,
             ctx,
-            &format!("{path}.callbacks"),
+            path,
+            ".callbacks",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -524,26 +592,24 @@ impl MergeWithContext<()> for Operation {
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_replace_list_when_nonempty(
             &mut self.security,
             other.security,
             ctx,
-            &format!("{path}.security"),
+            path,
+            ".security",
         );
-        merge_replace_list_when_nonempty(
-            &mut self.servers,
-            other.servers,
-            ctx,
-            &format!("{path}.servers"),
-        );
+        merge_replace_list_when_nonempty(&mut self.servers, other.servers, ctx, path, ".servers");
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
@@ -569,7 +635,7 @@ fn parameter_ref_key(p: &RefOr<Parameter>) -> (String, &'static str) {
 }
 
 impl MergeWithContext<()> for Parameter {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -582,7 +648,7 @@ impl MergeWithContext<()> for Parameter {
                 a.merge_with_context(*b, ctx, path)
             }
             (slot, incoming) => {
-                if ctx.should_take_incoming(&path, ConflictKind::ParameterVariantMismatch) {
+                if ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
                     *slot = incoming;
                 }
             }
@@ -591,7 +657,7 @@ impl MergeWithContext<()> for Parameter {
 }
 
 impl MergeWithContext<()> for InPath {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -599,50 +665,57 @@ impl MergeWithContext<()> for InPath {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_required_scalar(
             &mut self.required,
             other.required,
             ctx,
-            &format!("{path}.required"),
+            path,
+            ".required",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.style,
             other.style,
             ctx,
-            &format!("{path}.style"),
+            path,
+            ".style",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.explode,
             other.explode,
             ctx,
-            &format!("{path}.explode"),
+            path,
+            ".explode",
             ConflictKind::ScalarOverridden,
         );
-        merge_schema_field(&mut self.schema, other.schema, ctx, &path, "schema");
+        merge_schema_field(&mut self.schema, other.schema, ctx, path, "schema");
         merge_opt_scalar(
             &mut self.example,
             other.example,
             ctx,
-            &format!("{path}.example"),
+            path,
+            ".example",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -650,7 +723,8 @@ impl MergeWithContext<()> for InPath {
             &mut self.content,
             other.content,
             ctx,
-            &format!("{path}.content"),
+            path,
+            ".content",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -658,13 +732,14 @@ impl MergeWithContext<()> for InPath {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for InQuery {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -672,64 +747,73 @@ impl MergeWithContext<()> for InQuery {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.required,
             other.required,
             ctx,
-            &format!("{path}.required"),
+            path,
+            ".required",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.allow_empty_value,
             other.allow_empty_value,
             ctx,
-            &format!("{path}.allowEmptyValue"),
+            path,
+            ".allowEmptyValue",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.style,
             other.style,
             ctx,
-            &format!("{path}.style"),
+            path,
+            ".style",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.explode,
             other.explode,
             ctx,
-            &format!("{path}.explode"),
+            path,
+            ".explode",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.allow_reserved,
             other.allow_reserved,
             ctx,
-            &format!("{path}.allowReserved"),
+            path,
+            ".allowReserved",
             ConflictKind::ScalarOverridden,
         );
-        merge_schema_field(&mut self.schema, other.schema, ctx, &path, "schema");
+        merge_schema_field(&mut self.schema, other.schema, ctx, path, "schema");
         merge_opt_scalar(
             &mut self.example,
             other.example,
             ctx,
-            &format!("{path}.example"),
+            path,
+            ".example",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -737,7 +821,8 @@ impl MergeWithContext<()> for InQuery {
             &mut self.content,
             other.content,
             ctx,
-            &format!("{path}.content"),
+            path,
+            ".content",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -745,13 +830,14 @@ impl MergeWithContext<()> for InQuery {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for InHeader {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -759,50 +845,57 @@ impl MergeWithContext<()> for InHeader {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.required,
             other.required,
             ctx,
-            &format!("{path}.required"),
+            path,
+            ".required",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.style,
             other.style,
             ctx,
-            &format!("{path}.style"),
+            path,
+            ".style",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.explode,
             other.explode,
             ctx,
-            &format!("{path}.explode"),
+            path,
+            ".explode",
             ConflictKind::ScalarOverridden,
         );
-        merge_schema_field(&mut self.schema, other.schema, ctx, &path, "schema");
+        merge_schema_field(&mut self.schema, other.schema, ctx, path, "schema");
         merge_opt_scalar(
             &mut self.example,
             other.example,
             ctx,
-            &format!("{path}.example"),
+            path,
+            ".example",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -810,7 +903,8 @@ impl MergeWithContext<()> for InHeader {
             &mut self.content,
             other.content,
             ctx,
-            &format!("{path}.content"),
+            path,
+            ".content",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -818,13 +912,14 @@ impl MergeWithContext<()> for InHeader {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for InCookie {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -832,50 +927,57 @@ impl MergeWithContext<()> for InCookie {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.required,
             other.required,
             ctx,
-            &format!("{path}.required"),
+            path,
+            ".required",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.style,
             other.style,
             ctx,
-            &format!("{path}.style"),
+            path,
+            ".style",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.explode,
             other.explode,
             ctx,
-            &format!("{path}.explode"),
+            path,
+            ".explode",
             ConflictKind::ScalarOverridden,
         );
-        merge_schema_field(&mut self.schema, other.schema, ctx, &path, "schema");
+        merge_schema_field(&mut self.schema, other.schema, ctx, path, "schema");
         merge_opt_scalar(
             &mut self.example,
             other.example,
             ctx,
-            &format!("{path}.example"),
+            path,
+            ".example",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -883,7 +985,8 @@ impl MergeWithContext<()> for InCookie {
             &mut self.content,
             other.content,
             ctx,
-            &format!("{path}.content"),
+            path,
+            ".content",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -891,13 +994,14 @@ impl MergeWithContext<()> for InCookie {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for InQuerystring {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -905,27 +1009,37 @@ impl MergeWithContext<()> for InQuerystring {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.required,
             other.required,
             ctx,
-            &format!("{path}.required"),
+            path,
+            ".required",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         // querystring `content` is a bare BTreeMap (required by the spec).
         for (k, incoming) in other.content {
             if let Some(b) = self.content.get_mut(&k) {
-                b.merge_with_context(incoming, ctx, format!("{path}.content.{k}"));
+                let original_len = path.len();
+                path.push_str(".content.");
+                path.push_str(&k);
+                b.merge_with_context(incoming, ctx, path);
+                path.truncate(original_len);
+                if ctx.errored {
+                    return;
+                }
             } else {
                 self.content.insert(k, incoming);
             }
@@ -934,14 +1048,16 @@ impl MergeWithContext<()> for InQuerystring {
             &mut self.example,
             other.example,
             ctx,
-            &format!("{path}.example"),
+            path,
+            ".example",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -949,7 +1065,8 @@ impl MergeWithContext<()> for InQuerystring {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
@@ -962,20 +1079,29 @@ fn merge_schema_field(
     base: &mut Option<RefOr<Schema>>,
     other: Option<RefOr<Schema>>,
     ctx: &mut MergeContext<()>,
-    path: &str,
+    path: &mut String,
     field_name: &str,
 ) {
+    if ctx.errored {
+        return;
+    }
     match (base.as_mut(), other) {
         (_, None) => {}
         (None, Some(v)) => *base = Some(v),
-        (Some(b), Some(i)) => b.merge_with_context(i, ctx, format!("{path}.{field_name}")),
+        (Some(b), Some(i)) => {
+            let original_len = path.len();
+            path.push('.');
+            path.push_str(field_name);
+            b.merge_with_context(i, ctx, path);
+            path.truncate(original_len);
+        }
     }
 }
 
 // ----- MediaType / Encoding / Header / Response / RequestBody / Example / Link -----
 
 impl MergeWithContext<()> for MediaType {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -983,29 +1109,32 @@ impl MergeWithContext<()> for MediaType {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
-        merge_schema_field(&mut self.schema, other.schema, ctx, &path, "schema");
+        merge_schema_field(&mut self.schema, other.schema, ctx, path, "schema");
         merge_schema_field(
             &mut self.item_schema,
             other.item_schema,
             ctx,
-            &path,
+            path,
             "itemSchema",
         );
         merge_opt_scalar(
             &mut self.example,
             other.example,
             ctx,
-            &format!("{path}.example"),
+            path,
+            ".example",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1013,7 +1142,8 @@ impl MergeWithContext<()> for MediaType {
             &mut self.encoding,
             other.encoding,
             ctx,
-            &format!("{path}.encoding"),
+            path,
+            ".encoding",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1022,24 +1152,29 @@ impl MergeWithContext<()> for MediaType {
             &mut self.prefix_encoding,
             other.prefix_encoding,
             ctx,
-            &format!("{path}.prefixEncoding"),
+            path,
+            ".prefixEncoding",
         );
         match (&mut self.item_encoding, other.item_encoding) {
             (_, None) => {}
             (slot @ None, Some(v)) => *slot = Some(v),
-            (Some(b), Some(i)) => b.merge_with_context(i, ctx, format!("{path}.itemEncoding")),
+            (Some(b), Some(i)) => {
+                let mut guard = PathGuard::new(path, ".itemEncoding");
+                b.merge_with_context(i, ctx, guard.path_mut());
+            }
         }
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Encoding {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1047,14 +1182,16 @@ impl MergeWithContext<()> for Encoding {
             &mut self.content_type,
             other.content_type,
             ctx,
-            &format!("{path}.contentType"),
+            path,
+            ".contentType",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.headers,
             other.headers,
             ctx,
-            &format!("{path}.headers"),
+            path,
+            ".headers",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1062,28 +1199,32 @@ impl MergeWithContext<()> for Encoding {
             &mut self.style,
             other.style,
             ctx,
-            &format!("{path}.style"),
+            path,
+            ".style",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.explode,
             other.explode,
             ctx,
-            &format!("{path}.explode"),
+            path,
+            ".explode",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.allow_reserved,
             other.allow_reserved,
             ctx,
-            &format!("{path}.allowReserved"),
+            path,
+            ".allowReserved",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.encoding,
             other.encoding,
             ctx,
-            &format!("{path}.encoding"),
+            path,
+            ".encoding",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1091,24 +1232,29 @@ impl MergeWithContext<()> for Encoding {
             &mut self.prefix_encoding,
             other.prefix_encoding,
             ctx,
-            &format!("{path}.prefixEncoding"),
+            path,
+            ".prefixEncoding",
         );
         match (&mut self.item_encoding, other.item_encoding) {
             (_, None) => {}
             (slot @ None, Some(v)) => *slot = Some(v),
-            (Some(b), Some(i)) => b.merge_with_context(*i, ctx, format!("{path}.itemEncoding")),
+            (Some(b), Some(i)) => {
+                let mut guard = PathGuard::new(path, ".itemEncoding");
+                b.merge_with_context(*i, ctx, guard.path_mut());
+            }
         }
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Header {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1116,50 +1262,57 @@ impl MergeWithContext<()> for Header {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.required,
             other.required,
             ctx,
-            &format!("{path}.required"),
+            path,
+            ".required",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.style,
             other.style,
             ctx,
-            &format!("{path}.style"),
+            path,
+            ".style",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.explode,
             other.explode,
             ctx,
-            &format!("{path}.explode"),
+            path,
+            ".explode",
             ConflictKind::ScalarOverridden,
         );
-        merge_schema_field(&mut self.schema, other.schema, ctx, &path, "schema");
+        merge_schema_field(&mut self.schema, other.schema, ctx, path, "schema");
         merge_opt_scalar(
             &mut self.example,
             other.example,
             ctx,
-            &format!("{path}.example"),
+            path,
+            ".example",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1167,7 +1320,8 @@ impl MergeWithContext<()> for Header {
             &mut self.content,
             other.content,
             ctx,
-            &format!("{path}.content"),
+            path,
+            ".content",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1175,13 +1329,14 @@ impl MergeWithContext<()> for Header {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Response {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1189,21 +1344,24 @@ impl MergeWithContext<()> for Response {
             &mut self.summary,
             other.summary,
             ctx,
-            &format!("{path}.summary"),
+            path,
+            ".summary",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.headers,
             other.headers,
             ctx,
-            &format!("{path}.headers"),
+            path,
+            ".headers",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1211,7 +1369,8 @@ impl MergeWithContext<()> for Response {
             &mut self.content,
             other.content,
             ctx,
-            &format!("{path}.content"),
+            path,
+            ".content",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1219,7 +1378,8 @@ impl MergeWithContext<()> for Response {
             &mut self.links,
             other.links,
             ctx,
-            &format!("{path}.links"),
+            path,
+            ".links",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1227,13 +1387,14 @@ impl MergeWithContext<()> for Response {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for RequestBody {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1241,13 +1402,21 @@ impl MergeWithContext<()> for RequestBody {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         // content is a bare BTreeMap (required).
         for (k, incoming) in other.content {
             if let Some(b) = self.content.get_mut(&k) {
-                b.merge_with_context(incoming, ctx, format!("{path}.content.{k}"));
+                let original_len = path.len();
+                path.push_str(".content.");
+                path.push_str(&k);
+                b.merge_with_context(incoming, ctx, path);
+                path.truncate(original_len);
+                if ctx.errored {
+                    return;
+                }
             } else {
                 self.content.insert(k, incoming);
             }
@@ -1256,20 +1425,22 @@ impl MergeWithContext<()> for RequestBody {
             &mut self.required,
             other.required,
             ctx,
-            &format!("{path}.required"),
+            path,
+            ".required",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Example {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1277,55 +1448,62 @@ impl MergeWithContext<()> for Example {
             &mut self.summary,
             other.summary,
             ctx,
-            &format!("{path}.summary"),
+            path,
+            ".summary",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.value,
             other.value,
             ctx,
-            &format!("{path}.value"),
+            path,
+            ".value",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.serialized_value,
             other.serialized_value,
             ctx,
-            &format!("{path}.serializedValue"),
+            path,
+            ".serializedValue",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.data_value,
             other.data_value,
             ctx,
-            &format!("{path}.dataValue"),
+            path,
+            ".dataValue",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.external_value,
             other.external_value,
             ctx,
-            &format!("{path}.externalValue"),
+            path,
+            ".externalValue",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Link {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1333,14 +1511,16 @@ impl MergeWithContext<()> for Link {
             &mut self.operation_ref,
             other.operation_ref,
             ctx,
-            &format!("{path}.operationRef"),
+            path,
+            ".operationRef",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.operation_id,
             other.operation_id,
             ctx,
-            &format!("{path}.operationId"),
+            path,
+            ".operationId",
             ConflictKind::ScalarOverridden,
         );
         // Link.parameters is `Option<BTreeMap<String, serde_json::Value>>`
@@ -1349,33 +1529,32 @@ impl MergeWithContext<()> for Link {
             &mut self.parameters,
             other.parameters,
             ctx,
-            &format!("{path}.parameters"),
+            path,
+            ".parameters",
         );
         merge_opt_scalar(
             &mut self.request_body,
             other.request_body,
             ctx,
-            &format!("{path}.requestBody"),
+            path,
+            ".requestBody",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
-        merge_opt_struct(
-            &mut self.server,
-            other.server,
-            ctx,
-            &format!("{path}.server"),
-        );
+        merge_opt_struct(&mut self.server, other.server, ctx, path, ".server");
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
@@ -1384,7 +1563,7 @@ impl MergeWithContext<()> for Link {
 //                Discriminator, XML, Server, ServerVariable -----
 
 impl MergeWithContext<()> for Tag {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1392,54 +1571,61 @@ impl MergeWithContext<()> for Tag {
             &mut self.name,
             other.name,
             ctx,
-            &format!("{path}.name"),
+            path,
+            ".name",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.summary,
             other.summary,
             ctx,
-            &format!("{path}.summary"),
+            path,
+            ".summary",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_struct(
             &mut self.external_docs,
             other.external_docs,
             ctx,
-            &format!("{path}.externalDocs"),
+            path,
+            ".externalDocs",
         );
         merge_opt_scalar(
             &mut self.parent,
             other.parent,
             ctx,
-            &format!("{path}.parent"),
+            path,
+            ".parent",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.kind,
             other.kind,
             ctx,
-            &format!("{path}.kind"),
+            path,
+            ".kind",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Info {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1447,60 +1633,56 @@ impl MergeWithContext<()> for Info {
             &mut self.title,
             other.title,
             ctx,
-            &format!("{path}.title"),
+            path,
+            ".title",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.summary,
             other.summary,
             ctx,
-            &format!("{path}.summary"),
+            path,
+            ".summary",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.terms_of_service,
             other.terms_of_service,
             ctx,
-            &format!("{path}.termsOfService"),
+            path,
+            ".termsOfService",
             ConflictKind::ScalarOverridden,
         );
-        merge_opt_struct(
-            &mut self.contact,
-            other.contact,
-            ctx,
-            &format!("{path}.contact"),
-        );
-        merge_opt_struct(
-            &mut self.license,
-            other.license,
-            ctx,
-            &format!("{path}.license"),
-        );
+        merge_opt_struct(&mut self.contact, other.contact, ctx, path, ".contact");
+        merge_opt_struct(&mut self.license, other.license, ctx, path, ".license");
         merge_required_scalar(
             &mut self.version,
             other.version,
             ctx,
-            &format!("{path}.version"),
+            path,
+            ".version",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Contact {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1508,34 +1690,38 @@ impl MergeWithContext<()> for Contact {
             &mut self.name,
             other.name,
             ctx,
-            &format!("{path}.name"),
+            path,
+            ".name",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.url,
             other.url,
             ctx,
-            &format!("{path}.url"),
+            path,
+            ".url",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.email,
             other.email,
             ctx,
-            &format!("{path}.email"),
+            path,
+            ".email",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for License {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1543,34 +1729,38 @@ impl MergeWithContext<()> for License {
             &mut self.name,
             other.name,
             ctx,
-            &format!("{path}.name"),
+            path,
+            ".name",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.identifier,
             other.identifier,
             ctx,
-            &format!("{path}.identifier"),
+            path,
+            ".identifier",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.url,
             other.url,
             ctx,
-            &format!("{path}.url"),
+            path,
+            ".url",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for ExternalDocumentation {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1578,27 +1768,30 @@ impl MergeWithContext<()> for ExternalDocumentation {
             &mut self.url,
             other.url,
             ctx,
-            &format!("{path}.url"),
+            path,
+            ".url",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Discriminator {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1606,7 +1799,8 @@ impl MergeWithContext<()> for Discriminator {
             &mut self.property_name,
             other.property_name,
             ctx,
-            &format!("{path}.propertyName"),
+            path,
+            ".propertyName",
             ConflictKind::RequiredScalarOverridden,
         );
         // mapping is Option<BTreeMap<String,String>>; per-key incoming wins.
@@ -1620,13 +1814,16 @@ impl MergeWithContext<()> for Discriminator {
                         base_map.insert(k, v);
                     }
                     Some(existing) => {
-                        if *existing != v
-                            && ctx.should_take_incoming(
-                                &format!("{path}.mapping.{k}"),
-                                ConflictKind::ScalarOverridden,
-                            )
-                        {
-                            *existing = v;
+                        if *existing != v {
+                            let original_len = path.len();
+                            path.push_str(".mapping.");
+                            path.push_str(&k);
+                            let take =
+                                ctx.should_take_incoming(path, ConflictKind::ScalarOverridden);
+                            path.truncate(original_len);
+                            if take {
+                                *existing = v;
+                            }
                         }
                     }
                 }
@@ -1636,14 +1833,15 @@ impl MergeWithContext<()> for Discriminator {
             &mut self.default_mapping,
             other.default_mapping,
             ctx,
-            &format!("{path}.defaultMapping"),
+            path,
+            ".defaultMapping",
             ConflictKind::ScalarOverridden,
         );
     }
 }
 
 impl MergeWithContext<()> for XML {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1651,55 +1849,62 @@ impl MergeWithContext<()> for XML {
             &mut self.name,
             other.name,
             ctx,
-            &format!("{path}.name"),
+            path,
+            ".name",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.namespace,
             other.namespace,
             ctx,
-            &format!("{path}.namespace"),
+            path,
+            ".namespace",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.prefix,
             other.prefix,
             ctx,
-            &format!("{path}.prefix"),
+            path,
+            ".prefix",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.attribute,
             other.attribute,
             ctx,
-            &format!("{path}.attribute"),
+            path,
+            ".attribute",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.wrapped,
             other.wrapped,
             ctx,
-            &format!("{path}.wrapped"),
+            path,
+            ".wrapped",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.node_type,
             other.node_type,
             ctx,
-            &format!("{path}.nodeType"),
+            path,
+            ".nodeType",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for Server {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1707,28 +1912,32 @@ impl MergeWithContext<()> for Server {
             &mut self.url,
             other.url,
             ctx,
-            &format!("{path}.url"),
+            path,
+            ".url",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.name,
             other.name,
             ctx,
-            &format!("{path}.name"),
+            path,
+            ".name",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.variables,
             other.variables,
             ctx,
-            &format!("{path}.variables"),
+            path,
+            ".variables",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -1736,7 +1945,8 @@ impl MergeWithContext<()> for Server {
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
@@ -1744,7 +1954,7 @@ impl MergeWithContext<()> for Server {
 // ----- SecurityScheme -----
 
 impl MergeWithContext<()> for SecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1765,7 +1975,7 @@ impl MergeWithContext<()> for SecurityScheme {
                 a.merge_with_context(*b, ctx, path)
             }
             (slot, incoming) => {
-                if ctx.should_take_incoming(&path, ConflictKind::ParameterVariantMismatch) {
+                if ctx.should_take_incoming(path, ConflictKind::ParameterVariantMismatch) {
                     *slot = incoming;
                 }
             }
@@ -1774,7 +1984,7 @@ impl MergeWithContext<()> for SecurityScheme {
 }
 
 impl MergeWithContext<()> for ApiKeySecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1782,41 +1992,46 @@ impl MergeWithContext<()> for ApiKeySecurityScheme {
             &mut self.name,
             other.name,
             ctx,
-            &format!("{path}.name"),
+            path,
+            ".name",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_required_scalar(
             &mut self.location,
             other.location,
             ctx,
-            &format!("{path}.in"),
+            path,
+            ".in",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for HttpSecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1824,41 +2039,46 @@ impl MergeWithContext<()> for HttpSecurityScheme {
             &mut self.scheme,
             other.scheme,
             ctx,
-            &format!("{path}.scheme"),
+            path,
+            ".scheme",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.bearer_format,
             other.bearer_format,
             ctx,
-            &format!("{path}.bearerFormat"),
+            path,
+            ".bearerFormat",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for MutualTLSSecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1866,27 +2086,30 @@ impl MergeWithContext<()> for MutualTLSSecurityScheme {
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for OpenIdConnectSecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -1894,109 +2117,114 @@ impl MergeWithContext<()> for OpenIdConnectSecurityScheme {
             &mut self.open_id_connect_url,
             other.open_id_connect_url,
             ctx,
-            &format!("{path}.openIdConnectUrl"),
+            path,
+            ".openIdConnectUrl",
             ConflictKind::RequiredScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for OAuth2SecurityScheme {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
-        self.flows
-            .merge_with_context(other.flows, ctx, format!("{path}.flows"));
+        {
+            let mut guard = PathGuard::new(path, ".flows");
+            self.flows
+                .merge_with_context(other.flows, ctx, guard.path_mut());
+        }
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.oauth2_metadata_url,
             other.oauth2_metadata_url,
             ctx,
-            &format!("{path}.oauth2MetadataUrl"),
+            path,
+            ".oauth2MetadataUrl",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
 
 impl MergeWithContext<()> for OAuth2Flows {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
-        merge_opt_struct(
-            &mut self.implicit,
-            other.implicit,
-            ctx,
-            &format!("{path}.implicit"),
-        );
-        merge_opt_struct(
-            &mut self.password,
-            other.password,
-            ctx,
-            &format!("{path}.password"),
-        );
+        merge_opt_struct(&mut self.implicit, other.implicit, ctx, path, ".implicit");
+        merge_opt_struct(&mut self.password, other.password, ctx, path, ".password");
         merge_opt_struct(
             &mut self.client_credentials,
             other.client_credentials,
             ctx,
-            &format!("{path}.clientCredentials"),
+            path,
+            ".clientCredentials",
         );
         merge_opt_struct(
             &mut self.authorization_code,
             other.authorization_code,
             ctx,
-            &format!("{path}.authorizationCode"),
+            path,
+            ".authorizationCode",
         );
         merge_opt_struct(
             &mut self.device_authorization,
             other.device_authorization,
             ctx,
-            &format!("{path}.deviceAuthorization"),
+            path,
+            ".deviceAuthorization",
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
@@ -2011,7 +2239,7 @@ macro_rules! oauth_flow_merge {
                 &mut self,
                 other: Self,
                 ctx: &mut MergeContext<()>,
-                path: String,
+                path: &mut String,
             ) {
                 if ctx.errored { return; }
                 $(
@@ -2019,7 +2247,8 @@ macro_rules! oauth_flow_merge {
                         &mut self.$url_field,
                         other.$url_field,
                         ctx,
-                        &format!("{path}.{}", $url_path),
+                        path,
+                        concat!(".", $url_path),
                         ConflictKind::RequiredScalarOverridden,
                     );
                 )*
@@ -2027,7 +2256,8 @@ macro_rules! oauth_flow_merge {
                     &mut self.refresh_url,
                     other.refresh_url,
                     ctx,
-                    &format!("{path}.refreshUrl"),
+                    path,
+                    ".refreshUrl",
                     ConflictKind::ScalarOverridden,
                 );
                 // scopes is a bare BTreeMap<String, String>.
@@ -2037,13 +2267,21 @@ macro_rules! oauth_flow_merge {
                             self.scopes.insert(k, v);
                         }
                         Some(existing) => {
-                            if *existing != v
-                                && ctx.should_take_incoming(
-                                    &format!("{path}.scopes.{k}"),
+                            if *existing != v {
+                                let original_len = path.len();
+                                path.push_str(".scopes.");
+                                path.push_str(&k);
+                                let take = ctx.should_take_incoming(
+                                    path,
                                     ConflictKind::ScalarOverridden,
-                                )
-                            {
-                                *existing = v;
+                                );
+                                path.truncate(original_len);
+                                if take {
+                                    *existing = v;
+                                }
+                                if ctx.errored {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -2052,7 +2290,8 @@ macro_rules! oauth_flow_merge {
                     &mut self.extensions,
                     other.extensions,
                     ctx,
-                    &format!("{path}.extensions"),
+                    path,
+                    ".extensions",
                 );
             }
         }
@@ -2076,7 +2315,7 @@ oauth_flow_merge!(
 // ----- Schema -----
 
 impl MergeWithContext<()> for Schema {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -2104,16 +2343,16 @@ impl MergeWithContext<()> for Schema {
                             self,
                             Schema::Single(Box::new(other_single_inner)),
                             ctx,
-                            &path,
+                            path,
                         );
                     }
                 },
                 non_single => {
-                    return leaf_replace_schema(self, non_single, ctx, &path);
+                    return leaf_replace_schema(self, non_single, ctx, path);
                 }
             }
         }
-        leaf_replace_schema(self, other, ctx, &path);
+        leaf_replace_schema(self, other, ctx, path);
     }
 }
 
@@ -2127,18 +2366,28 @@ fn leaf_replace_schema(base: &mut Schema, other: Schema, ctx: &mut MergeContext<
 /// kept" — used for `Spec.info` / `Spec.openapi` when `MergeInfo` is
 /// off. Records `Resolution::Base` in the default / `BaseWins` modes
 /// (reflecting what actually happened), and trips
-/// `ErrorOnConflict` when set.
-fn record_kept_base_or_error(ctx: &mut MergeContext<()>, path: &str, kind: ConflictKind) {
+/// `ErrorOnConflict` when set. Pushes `segment` onto `path` only
+/// when actually recording, keeping the eager-allocation
+/// regression off the non-conflict path.
+fn record_kept_base_or_error(
+    ctx: &mut MergeContext<()>,
+    path: &mut String,
+    segment: &str,
+    kind: ConflictKind,
+) {
+    let original_len = path.len();
+    path.push_str(segment);
     if ctx.is_option(MergeOptions::ErrorOnConflict) {
-        ctx.record(path.to_owned(), kind, crate::merge::Resolution::Errored);
+        ctx.record(path.clone(), kind, crate::merge::Resolution::Errored);
         ctx.errored = true;
     } else {
-        ctx.record(path.to_owned(), kind, crate::merge::Resolution::Base);
+        ctx.record(path.clone(), kind, crate::merge::Resolution::Base);
     }
+    path.truncate(original_len);
 }
 
 impl MergeWithContext<()> for ObjectSchema {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: String) {
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<()>, path: &mut String) {
         if ctx.errored {
             return;
         }
@@ -2146,21 +2395,24 @@ impl MergeWithContext<()> for ObjectSchema {
             &mut self.title,
             other.title,
             ctx,
-            &format!("{path}.title"),
+            path,
+            ".title",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_map(
             &mut self.properties,
             other.properties,
             ctx,
-            &format!("{path}.properties"),
+            path,
+            ".properties",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -2168,7 +2420,8 @@ impl MergeWithContext<()> for ObjectSchema {
             &mut self.pattern_properties,
             other.pattern_properties,
             ctx,
-            &format!("{path}.patternProperties"),
+            path,
+            ".patternProperties",
             |b, i, c, p| b.merge_with_context(i, c, p),
             key_str,
         );
@@ -2176,28 +2429,32 @@ impl MergeWithContext<()> for ObjectSchema {
             &mut self.default,
             other.default,
             ctx,
-            &format!("{path}.default"),
+            path,
+            ".default",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.max_properties,
             other.max_properties,
             ctx,
-            &format!("{path}.maxProperties"),
+            path,
+            ".maxProperties",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.min_properties,
             other.min_properties,
             ctx,
-            &format!("{path}.minProperties"),
+            path,
+            ".minProperties",
             ConflictKind::ScalarOverridden,
         );
         match (&mut self.additional_properties, other.additional_properties) {
             (_, None) => {}
             (slot @ None, Some(v)) => *slot = Some(v),
             (Some(b), Some(i)) => {
-                b.merge_with_context(i, ctx, format!("{path}.additionalProperties"))
+                let mut guard = PathGuard::new(path, ".additionalProperties");
+                b.merge_with_context(i, ctx, guard.path_mut());
             }
         }
         match (
@@ -2207,69 +2464,72 @@ impl MergeWithContext<()> for ObjectSchema {
             (_, None) => {}
             (slot @ None, Some(v)) => *slot = Some(v),
             (Some(b), Some(i)) => {
-                b.merge_with_context(i, ctx, format!("{path}.unevaluatedProperties"))
+                let mut guard = PathGuard::new(path, ".unevaluatedProperties");
+                b.merge_with_context(i, ctx, guard.path_mut());
             }
         }
         merge_schema_field(
             &mut self.property_names,
             other.property_names,
             ctx,
-            &path,
+            path,
             "propertyNames",
         );
-        merge_opt_vec_set_union(
-            &mut self.required,
-            other.required,
-            ctx,
-            &format!("{path}.required"),
-        );
+        merge_opt_vec_set_union(&mut self.required, other.required, ctx, path, ".required");
         merge_opt_scalar(
             &mut self.read_only,
             other.read_only,
             ctx,
-            &format!("{path}.readOnly"),
+            path,
+            ".readOnly",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.write_only,
             other.write_only,
             ctx,
-            &format!("{path}.writeOnly"),
+            path,
+            ".writeOnly",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.deprecated,
             other.deprecated,
             ctx,
-            &format!("{path}.deprecated"),
+            path,
+            ".deprecated",
             ConflictKind::ScalarOverridden,
         );
-        merge_opt_struct(&mut self.xml, other.xml, ctx, &format!("{path}.xml"));
+        merge_opt_struct(&mut self.xml, other.xml, ctx, path, ".xml");
         merge_opt_struct(
             &mut self.external_docs,
             other.external_docs,
             ctx,
-            &format!("{path}.externalDocs"),
+            path,
+            ".externalDocs",
         );
         merge_opt_scalar(
             &mut self.example,
             other.example,
             ctx,
-            &format!("{path}.example"),
+            path,
+            ".example",
             ConflictKind::ScalarOverridden,
         );
         merge_opt_scalar(
             &mut self.examples,
             other.examples,
             ctx,
-            &format!("{path}.examples"),
+            path,
+            ".examples",
             ConflictKind::ScalarOverridden,
         );
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
@@ -2286,11 +2546,11 @@ macro_rules! leaf_schema_merge {
                     &mut self,
                     other: Self,
                     ctx: &mut MergeContext<()>,
-                    path: String,
+                    path: &mut String,
                 ) {
                     if ctx.errored { return; }
                     if *self != other
-                        && ctx.should_take_incoming(&path, ConflictKind::SchemaLeafReplaced)
+                        && ctx.should_take_incoming(path, ConflictKind::SchemaLeafReplaced)
                     {
                         *self = other;
                     }
@@ -2386,7 +2646,8 @@ mod tests {
             ..Default::default()
         });
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#.tags[pets]".into());
+        let mut path = String::from("#.tags[pets]");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         match base {
             RefOr::Item(t) => {
                 assert_eq!(t.description.as_deref(), Some("base"));
@@ -2409,7 +2670,8 @@ mod tests {
             description: Some("new desc".into()),
         }));
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#".into());
+        let mut path = String::from("#");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         match base {
             RefOr::Ref(r) => {
                 assert_eq!(r.summary.as_deref(), Some("base summary"));
@@ -2425,7 +2687,8 @@ mod tests {
         let mut base: RefOr<Tag> = RefOr::Ref(Box::new(Ref::new("#/components/tags/A")));
         let incoming: RefOr<Tag> = RefOr::Ref(Box::new(Ref::new("#/components/tags/B")));
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#.tags[0]".into());
+        let mut path = String::from("#.tags[0]");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         match base {
             RefOr::Ref(r) => assert_eq!(r.reference, "#/components/tags/B"),
             _ => panic!("expected Ref"),
@@ -2443,7 +2706,8 @@ mod tests {
             ..Default::default()
         });
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#".into());
+        let mut path = String::from("#");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         assert!(matches!(base, RefOr::Item(_)));
         assert_eq!(ctx.conflicts.len(), 1);
         assert_eq!(ctx.conflicts[0].kind, ConflictKind::RefVsValue);
@@ -2474,7 +2738,8 @@ mod tests {
             ..Default::default()
         };
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#.op".into());
+        let mut path = String::from("#.op");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
 
         let r = base.responses.unwrap().responses.unwrap();
         assert!(r.contains_key("200"));
@@ -2501,7 +2766,8 @@ mod tests {
             ..Default::default()
         };
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#.op".into());
+        let mut path = String::from("#.op");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         let params = base.parameters.unwrap();
         assert_eq!(params.len(), 3, "no duplicates by (name, in)");
     }
@@ -2519,7 +2785,8 @@ mod tests {
             ..Default::default()
         };
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#.paths[/pets]".into());
+        let mut path = String::from("#.paths[/pets]");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         let ops = base.operations.unwrap();
         assert!(ops.contains_key("get"));
         assert!(ops.contains_key("post"));
@@ -2538,7 +2805,8 @@ mod tests {
             ..Default::default()
         })));
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#.s".into());
+        let mut path = String::from("#.s");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         // Replaced — `required` is now from incoming.
         let Schema::Single(box_single) = &base else {
             panic!()
@@ -2575,7 +2843,8 @@ mod tests {
         })));
         let mut ctx: MergeContext<()> =
             MergeContext::new(&(), MergeOptions::DeepMergeObjectSchemas.only());
-        base.merge_with_context(incoming, &mut ctx, "#.s".into());
+        let mut path = String::from("#.s");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         let Schema::Single(box_single) = &base else {
             panic!()
         };
@@ -2908,7 +3177,8 @@ mod tests {
             ..Default::default()
         };
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base.merge_with_context(incoming, &mut ctx, "#.mt".into());
+        let mut path = String::from("#.mt");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
         // Conflict path should mention itemSchema, not schema.
         assert!(
             ctx.conflicts.iter().any(|c| c.path.contains("itemSchema")),
@@ -2952,7 +3222,8 @@ mod tests {
             ..Default::default()
         };
         let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
-        base_server.merge_with_context(incoming_server, &mut ctx, "#.srv".into());
+        let mut path = String::from("#.srv");
+        base_server.merge_with_context(incoming_server, &mut ctx, &mut path);
         let merged = base_server.variables.unwrap();
         let v = merged.get("ver").unwrap();
         // Round-trip through serde to inspect the private fields.
@@ -2960,6 +3231,52 @@ mod tests {
         assert_eq!(json["description"], "incoming desc");
         assert_eq!(json["enum"], serde_json::json!(["v1", "v2"]));
         assert_eq!(json["default"], "v1");
+    }
+
+    // ---- Coverage: lazy paths balance correctly through deep recursion ----
+
+    #[test]
+    fn lazy_path_balances_after_deep_merge_of_identical_trees() {
+        // Identical Spec subtrees: no conflicts should be recorded
+        // and the `&mut String` path stack must end balanced. A
+        // missed `path.truncate()` would either panic in truncate or
+        // leak segments — the assertion that the empty conflict list
+        // came back tells us neither happened.
+        let mut base = Spec {
+            components: Some(Components {
+                schemas: Some(BTreeMap::from([(
+                    "Pet".to_owned(),
+                    RefOr::new_item(Schema::Single(Box::new(SingleSchema::Object(
+                        ObjectSchema {
+                            properties: Some(BTreeMap::from([(
+                                "name".to_owned(),
+                                RefOr::new_item(Schema::Single(Box::new(SingleSchema::Object(
+                                    ObjectSchema {
+                                        description: Some("base".into()),
+                                        ..Default::default()
+                                    },
+                                )))),
+                            )])),
+                            ..Default::default()
+                        },
+                    )))),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let incoming = base.clone();
+        let report = base
+            .merge(
+                incoming,
+                MergeOptions::DeepMergeObjectSchemas | MergeOptions::MergeInfo,
+            )
+            .unwrap();
+        assert!(
+            report.conflicts.is_empty(),
+            "identical trees should produce no conflicts: {:?}",
+            report.conflicts
+        );
     }
 
     // ---- Components: schemas collision uses leaf replace by default ----

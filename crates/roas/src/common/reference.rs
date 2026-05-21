@@ -452,8 +452,11 @@ where
         &mut self,
         other: Self,
         ctx: &mut crate::merge::MergeContext<T>,
-        path: String,
+        path: &mut String,
     ) {
+        if ctx.errored {
+            return;
+        }
         use crate::merge::ConflictKind;
         match (self, other) {
             (RefOr::Item(base), RefOr::Item(incoming)) => {
@@ -465,12 +468,12 @@ where
                 };
                 if base_ref.reference == incoming_ref.reference {
                     base_ref.merge_with_context(*incoming_ref, ctx, path);
-                } else if ctx.should_take_incoming(&path, ConflictKind::RefReplaced) {
+                } else if ctx.should_take_incoming(path, ConflictKind::RefReplaced) {
                     *slot = RefOr::Ref(incoming_ref);
                 }
             }
             (slot, incoming) => {
-                if ctx.should_take_incoming(&path, ConflictKind::RefVsValue) {
+                if ctx.should_take_incoming(path, ConflictKind::RefVsValue) {
                     *slot = incoming;
                 }
             }
@@ -483,7 +486,7 @@ impl<T> crate::merge::MergeWithContext<T> for Ref {
         &mut self,
         other: Self,
         ctx: &mut crate::merge::MergeContext<T>,
-        path: String,
+        path: &mut String,
     ) {
         use crate::common::merge::merge_opt_scalar;
         use crate::merge::ConflictKind;
@@ -491,17 +494,16 @@ impl<T> crate::merge::MergeWithContext<T> for Ref {
             &mut self.summary,
             other.summary,
             ctx,
-            &format!("{path}.summary"),
+            path,
+            ".summary",
             ConflictKind::ScalarOverridden,
         );
-        if ctx.errored {
-            return;
-        }
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
     }

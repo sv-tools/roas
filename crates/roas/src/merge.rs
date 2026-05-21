@@ -224,9 +224,25 @@ pub trait Merge: Sized {
 }
 
 /// Crate-internal recursive merge trait. Mirrors
-/// [`crate::validation::ValidateWithContext`].
+/// [`crate::validation::ValidateWithContext`], except the JSONPath
+/// locator is a `&mut String` push/truncate stack rather than an
+/// owned `String` rebuilt at every recursion level. Implementors
+/// push their child segments before recursing and truncate back
+/// when they return — concretely:
+///
+/// ```ignore
+/// let len = path.len();
+/// path.push_str(".myField");
+/// inner.merge_with_context(other, ctx, path);
+/// path.truncate(len);
+/// ```
+///
+/// The helpers in [`crate::common::merge`] do this internally so
+/// most call sites don't have to. This turns the previous
+/// O(nodes × fields) `format!` allocations into O(conflicts) —
+/// only the conflict-recording path materialises an owned `String`.
 pub(crate) trait MergeWithContext<T> {
-    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<T>, path: String);
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext<T>, path: &mut String);
 }
 
 /// Merge context — carries the spec being merged into, the options,

@@ -160,45 +160,43 @@ impl crate::merge::MergeWithContext<()> for ServerVariable {
         &mut self,
         other: Self,
         ctx: &mut crate::merge::MergeContext<()>,
-        path: String,
+        path: &mut String,
     ) {
+        if ctx.errored {
+            return;
+        }
         use crate::common::merge::{merge_extensions, merge_opt_scalar, merge_required_scalar};
         use crate::merge::ConflictKind;
         merge_opt_scalar(
             &mut self.enum_values,
             other.enum_values,
             ctx,
-            &format!("{path}.enum"),
+            path,
+            ".enum",
             ConflictKind::ScalarOverridden,
         );
-        if ctx.errored {
-            return;
-        }
         merge_required_scalar(
             &mut self.default,
             other.default,
             ctx,
-            &format!("{path}.default"),
+            path,
+            ".default",
             ConflictKind::RequiredScalarOverridden,
         );
-        if ctx.errored {
-            return;
-        }
         merge_opt_scalar(
             &mut self.description,
             other.description,
             ctx,
-            &format!("{path}.description"),
+            path,
+            ".description",
             ConflictKind::ScalarOverridden,
         );
-        if ctx.errored {
-            return;
-        }
         merge_extensions(
             &mut self.extensions,
             other.extensions,
             ctx,
-            &format!("{path}.extensions"),
+            path,
+            ".extensions",
         );
     }
 }
