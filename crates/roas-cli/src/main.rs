@@ -11,12 +11,17 @@
 //!
 //! - `roas convert --to <VERSION> [FILE]` — chain the existing
 //!   `From<v_X::Spec> for v_Y::Spec` migrations to upconvert a spec.
-//!   Pass `--from` to force the input version. Pass `--collapse` to
-//!   run `Spec::collapse` on the (post-conversion) result, lifting
-//!   every inline component into the matching `components.<bag>` /
-//!   `definitions` / `parameters` / `responses` slot with strict
-//!   dedup. External `$ref`s are skipped by default; use
-//!   `--load file` / `--load http` to opt into the loader. Output
+//!   Pass `--from` to force the input version. Pass `--merge <FILE>`
+//!   (repeatable) to layer additional specs on top: each is loaded,
+//!   upconverted to the target version, and merged in via
+//!   `roas::merge`. `--merge-option` (repeatable) tunes the merge —
+//!   defaults to incoming-wins, base retains `info` / `openapi`,
+//!   refs replace silently, schemas are leaves. Pass `--collapse` to
+//!   run `Spec::collapse` on the (post-conversion, post-merge)
+//!   result, lifting every inline component into the matching
+//!   `components.<bag>` / `definitions` / `parameters` / `responses`
+//!   slot with strict dedup. External `$ref`s are skipped by default;
+//!   use `--load file` / `--load http` to opt into the loader. Output
 //!   defaults to the input format (YAML in → YAML out, JSON in → JSON
 //!   out); pass `--output-format json|yaml` to override.
 //!
@@ -149,11 +154,28 @@ struct ConvertArgs {
     #[arg(long, value_enum)]
     output_format: Option<InputFormat>,
 
+    /// Path to an additional spec to merge on top of the base after
+    /// version conversion. Each `--merge` source is loaded with the
+    /// same format-detection rules as the base, converted to the
+    /// target version, then merged in incoming-order. Repeat the
+    /// flag to layer multiple sources. The merge runs *after* the
+    /// version conversion and *before* `--collapse`.
+    #[arg(long, value_name = "FILE")]
+    merge: Vec<PathBuf>,
+
+    /// Per-call merge option (repeatable). Maps to
+    /// `roas::merge::MergeOptions`. Default is incoming-wins on
+    /// scalar conflicts, base retains `info` / `openapi`, refs
+    /// replace silently, schemas are treated as leaves. Requires at
+    /// least one `--merge` source (clap rejects the flag on its own).
+    #[arg(long = "merge-option", value_enum, requires = "merge")]
+    merge_options: Vec<MergeOptionFlag>,
+
     /// Lift every inline component into the matching root bag
     /// (`components.<bag>` for v3.x, `definitions` / `parameters` /
     /// `responses` for v2) and replace its call sites with a `$ref`.
     /// Structurally identical components collapse to a single entry.
-    /// Runs after the version conversion.
+    /// Runs after the version conversion (and after `--merge`, if any).
     #[arg(long)]
     collapse: bool,
 
@@ -165,6 +187,42 @@ struct ConvertArgs {
     /// on its own — collapse is the only consumer).
     #[arg(long, value_enum, requires = "collapse")]
     load: Vec<LoaderKind>,
+}
+
+/// CLI mirror of `roas::merge::MergeOptions`. Kebab-case so users see
+/// `--merge-option base-wins` etc. on the command line.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum MergeOptionFlag {
+    /// Reverse the default "incoming wins" policy.
+    BaseWins,
+    /// Abort on the first real collision (returns a non-zero exit
+    /// after recording it). Spec.merge clones internally so the
+    /// base is untouched on error.
+    ErrorOnConflict,
+    /// Deep-merge two `ObjectSchema` values instead of leaf-replace.
+    DeepMergeObjectSchemas,
+    /// Allow `info` / `openapi` / `swagger` to merge instead of
+    /// being preserved from base.
+    MergeInfo,
+    /// Allow an empty incoming list (`servers`, `security`, …) to
+    /// clear a populated base list.
+    ReplaceListsWhenEmpty,
+}
+
+impl MergeOptionFlag {
+    fn to_roas(self) -> roas::merge::MergeOptions {
+        match self {
+            MergeOptionFlag::BaseWins => roas::merge::MergeOptions::BaseWins,
+            MergeOptionFlag::ErrorOnConflict => roas::merge::MergeOptions::ErrorOnConflict,
+            MergeOptionFlag::DeepMergeObjectSchemas => {
+                roas::merge::MergeOptions::DeepMergeObjectSchemas
+            }
+            MergeOptionFlag::MergeInfo => roas::merge::MergeOptions::MergeInfo,
+            MergeOptionFlag::ReplaceListsWhenEmpty => {
+                roas::merge::MergeOptions::ReplaceListsWhenEmpty
+            }
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -413,7 +471,60 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
         );
     }
 
+    // 1) Convert the base spec to the target version.
     let mut converted = detected.convert_to_detected(target)?;
+
+    // 2) Apply each `--merge` source (also converted to the target
+    //    version) in incoming-order, on top of the base.
+    if !args.merge.is_empty() {
+        let merge_options = merge_options_from_flags(&args.merge_options);
+        for path in &args.merge {
+            let raw =
+                fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+            // The merge source uses the *same* format-detection rules
+            // as the base: --format applies to all inputs (the base
+            // and every --merge source), and file extension falls
+            // back when --format is unset.
+            let format = args.format.unwrap_or_else(|| {
+                if path_looks_like_yaml(path) {
+                    InputFormat::Yaml
+                } else {
+                    InputFormat::Json
+                }
+            });
+            let value = parse_value(&raw, format == InputFormat::Yaml)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let other = versioned::detect_or_use(args.from, value)
+                .with_context(|| format!("detecting version of {}", path.display()))?;
+            if (other.version() as u8) > (target as u8) {
+                bail!(
+                    "downconversion is not supported for `--merge` source {}: input is {}, target is {}",
+                    path.display(),
+                    other.label(),
+                    target.label(),
+                );
+            }
+            let other_at_target = other
+                .convert_to_detected(target)
+                .with_context(|| format!("converting {} to {}", path.display(), target.label()))?;
+            match converted.merge_into(other_at_target, merge_options)? {
+                Ok(_report) => {}
+                Err(err) => {
+                    bail!(
+                        "merge aborted on conflict in {} ({} recorded): {}",
+                        path.display(),
+                        err.conflicts.len(),
+                        err.conflicts
+                            .last()
+                            .map(|c| c.path.as_str())
+                            .unwrap_or("<unknown path>"),
+                    );
+                }
+            }
+        }
+    }
+
+    // 3) Collapse last so it has visibility into the final merged tree.
     if args.collapse {
         let mut loader = build_loader(&args.load);
         converted.collapse(loader.as_mut())?;
@@ -423,6 +534,16 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
     let out_format = args.output_format.unwrap_or(input_format);
     print!("{}", serialize_spec(&value, out_format, true)?);
     Ok(())
+}
+
+fn merge_options_from_flags(
+    flags: &[MergeOptionFlag],
+) -> enumset::EnumSet<roas::merge::MergeOptions> {
+    let mut set = roas::merge::MergeOptions::new();
+    for f in flags {
+        set |= f.to_roas();
+    }
+    set
 }
 
 #[cfg(test)]
@@ -660,6 +781,104 @@ mod tests {
             "spec.json",
         ]);
         assert!(res.is_err(), "--load without --collapse must error");
+    }
+
+    #[test]
+    fn cli_parses_convert_with_merge() {
+        let cli = Cli::try_parse_from([
+            "roas",
+            "convert",
+            "--to",
+            "v3_2",
+            "--merge",
+            "extra.yaml",
+            "--merge",
+            "more.json",
+            "spec.json",
+        ])
+        .expect("convert with --merge parses");
+        match cli.command {
+            Command::Convert(args) => {
+                assert_eq!(args.merge.len(), 2);
+                assert_eq!(args.merge[0].to_string_lossy(), "extra.yaml");
+                assert_eq!(args.merge[1].to_string_lossy(), "more.json");
+            }
+            _ => panic!("expected Convert"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_convert_with_merge_options() {
+        let cli = Cli::try_parse_from([
+            "roas",
+            "convert",
+            "--to",
+            "v3_2",
+            "--merge",
+            "extra.yaml",
+            "--merge-option",
+            "base-wins",
+            "--merge-option",
+            "deep-merge-object-schemas",
+            "spec.json",
+        ])
+        .expect("convert with --merge-option parses");
+        match cli.command {
+            Command::Convert(args) => {
+                assert_eq!(args.merge_options.len(), 2);
+                assert!(matches!(args.merge_options[0], MergeOptionFlag::BaseWins));
+                assert!(matches!(
+                    args.merge_options[1],
+                    MergeOptionFlag::DeepMergeObjectSchemas
+                ));
+            }
+            _ => panic!("expected Convert"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_merge_option_without_merge() {
+        // `--merge-option` is only meaningful when at least one
+        // `--merge` source is provided; clap's `requires = "merge"`
+        // must reject the flag on its own.
+        let res = Cli::try_parse_from([
+            "roas",
+            "convert",
+            "--to",
+            "v3_2",
+            "--merge-option",
+            "base-wins",
+            "spec.json",
+        ]);
+        assert!(res.is_err(), "--merge-option without --merge must error");
+    }
+
+    #[test]
+    fn merge_options_from_flags_unions_into_enumset() {
+        let set =
+            merge_options_from_flags(&[MergeOptionFlag::BaseWins, MergeOptionFlag::MergeInfo]);
+        assert!(set.contains(roas::merge::MergeOptions::BaseWins));
+        assert!(set.contains(roas::merge::MergeOptions::MergeInfo));
+        assert!(!set.contains(roas::merge::MergeOptions::ErrorOnConflict));
+    }
+
+    #[test]
+    fn merge_options_from_flags_empty_is_default_set() {
+        let set = merge_options_from_flags(&[]);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn merge_source_format_detection_via_path_looks_like_yaml() {
+        // `versioned::path_looks_like_yaml` already covers the
+        // extension matrix in its own tests; the integration here
+        // is that the `--merge` source loop reads that helper to
+        // pick a parser. We don't re-test the matrix; just confirm
+        // the symbol is reachable from main.rs.
+        assert!(path_looks_like_yaml(std::path::Path::new("a.yaml")));
+        assert!(path_looks_like_yaml(std::path::Path::new("a.yml")));
+        assert!(!path_looks_like_yaml(std::path::Path::new("a.json")));
+        assert!(!path_looks_like_yaml(std::path::Path::new("noext")));
     }
 
     /// Process-scoped unique temp path so parallel tests don't collide.
@@ -918,6 +1137,8 @@ mod tests {
             output_format: None,
             collapse: false,
             load: vec![],
+            merge: vec![],
+            merge_options: vec![],
         };
         run_convert(args).expect("v2 → v3.2 must succeed");
     }
@@ -966,6 +1187,8 @@ mod tests {
             output_format: None,
             collapse: true,
             load: vec![LoaderKind::File],
+            merge: vec![],
+            merge_options: vec![],
         };
         run_convert(args).expect("convert + collapse + --load file must succeed");
     }
@@ -1007,6 +1230,8 @@ mod tests {
             output_format: None,
             collapse: true,
             load: vec![],
+            merge: vec![],
+            merge_options: vec![],
         };
         run_convert(args).expect("convert + collapse must succeed");
     }
@@ -1022,11 +1247,116 @@ mod tests {
             output_format: None,
             collapse: false,
             load: vec![],
+            merge: vec![],
+            merge_options: vec![],
         };
         let err = run_convert(args).expect_err("downconversion must error");
         assert!(
             err.to_string().contains("downconversion is not supported"),
             "got: {err}",
+        );
+    }
+
+    #[test]
+    fn run_convert_with_merge_layers_a_second_spec_on_top() {
+        // base has `tags=[]`; the merge source adds a tag. After
+        // `run_convert`, the printed result should include the tag.
+        // Captures the order: convert → merge → (no collapse).
+        let base = TempFile::write(
+            "base.json",
+            br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
+        );
+        let layer = TempFile::write(
+            "merge.json",
+            br#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{},"tags":[{"name":"pets"}]}"#,
+        );
+        let args = ConvertArgs {
+            file: Some(base.0.clone()),
+            to: SpecVersion::V3_2,
+            from: None,
+            format: None,
+            output_format: None,
+            merge: vec![layer.0.clone()],
+            merge_options: vec![],
+            collapse: false,
+            load: vec![],
+        };
+        run_convert(args).expect("convert + merge must succeed");
+    }
+
+    #[test]
+    fn run_convert_with_merge_across_versions_upconverts_each_source() {
+        // base is v2, merge layer is v3.0; target is v3.2 — both
+        // should upconvert to the target before merging. Tests the
+        // "convert each merge source to the target version" branch
+        // in run_convert.
+        let base = TempFile::write("base-v2.json", MINIMAL_V2);
+        let layer = TempFile::write(
+            "merge-v3_0.json",
+            br#"{"openapi":"3.0.4","info":{"title":"x","version":"1"},"paths":{},"tags":[{"name":"pets"}]}"#,
+        );
+        let args = ConvertArgs {
+            file: Some(base.0.clone()),
+            to: SpecVersion::V3_2,
+            from: None,
+            format: None,
+            output_format: None,
+            merge: vec![layer.0.clone()],
+            merge_options: vec![],
+            collapse: false,
+            load: vec![],
+        };
+        run_convert(args).expect("cross-version merge after convert must succeed");
+    }
+
+    #[test]
+    fn run_convert_with_merge_error_on_conflict_returns_err() {
+        // base and merge differ on a real collision (info.description)
+        // under MergeInfo + ErrorOnConflict → run_convert bails.
+        let base = TempFile::write(
+            "base.json",
+            br#"{"openapi":"3.2.0","info":{"title":"x","version":"1","description":"base"},"paths":{}}"#,
+        );
+        let layer = TempFile::write(
+            "merge.json",
+            br#"{"openapi":"3.2.0","info":{"title":"x","version":"1","description":"incoming"},"paths":{}}"#,
+        );
+        let args = ConvertArgs {
+            file: Some(base.0.clone()),
+            to: SpecVersion::V3_2,
+            from: None,
+            format: None,
+            output_format: None,
+            merge: vec![layer.0.clone()],
+            merge_options: vec![MergeOptionFlag::MergeInfo, MergeOptionFlag::ErrorOnConflict],
+            collapse: false,
+            load: vec![],
+        };
+        let err = run_convert(args).expect_err("error-on-conflict must surface");
+        assert!(
+            err.to_string().contains("merge aborted"),
+            "expected `merge aborted` in error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn run_convert_with_merge_missing_file_errors_with_reading_context() {
+        let base = TempFile::write("base.json", MINIMAL_V3_2);
+        let args = ConvertArgs {
+            file: Some(base.0.clone()),
+            to: SpecVersion::V3_2,
+            from: None,
+            format: None,
+            output_format: None,
+            merge: vec![temp_path("missing-merge.json")],
+            merge_options: vec![],
+            collapse: false,
+            load: vec![],
+        };
+        let err = run_convert(args).expect_err("missing merge source must error");
+        assert!(
+            err.to_string().contains("reading"),
+            "expected `reading` context, got: {err}",
         );
     }
 
@@ -1040,6 +1370,8 @@ mod tests {
             output_format: None,
             collapse: false,
             load: vec![],
+            merge: vec![],
+            merge_options: vec![],
         };
         let err = run_convert(args).expect_err("missing file must error");
         assert!(

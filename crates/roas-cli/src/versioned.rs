@@ -10,6 +10,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use roas::loader::Loader;
+use roas::merge::{Merge, MergeError, MergeOptions, MergeReport};
 use roas::validation::{Error as ValidationError, Options, Validate};
 use roas::{v2, v3_0, v3_1, v3_2};
 use serde_json::Value;
@@ -132,6 +133,38 @@ impl DetectedSpec {
     /// renderer).
     pub fn convert_to(self, target: SpecVersion) -> Result<Value> {
         self.convert_to_detected(target)?.into_value()
+    }
+
+    /// Merge `other` into `self` in place. Requires both sides to be
+    /// the same version — the caller is responsible for converting
+    /// merge sources to the target version before calling. Returns
+    /// the resulting [`MergeReport`] (success) or a [`MergeError`]
+    /// when the underlying `Spec::merge` aborts under
+    /// [`MergeOptions::ErrorOnConflict`]. Version mismatches are a
+    /// programming error and bail with an `anyhow` context.
+    pub fn merge_into(
+        &mut self,
+        other: DetectedSpec,
+        options: enumset::EnumSet<MergeOptions>,
+    ) -> Result<Result<MergeReport, MergeError>> {
+        let outcome = match (self, other) {
+            (DetectedSpec::V2(base), DetectedSpec::V2(incoming)) => base.merge(incoming, options),
+            (DetectedSpec::V3_0(base), DetectedSpec::V3_0(incoming)) => {
+                base.merge(incoming, options)
+            }
+            (DetectedSpec::V3_1(base), DetectedSpec::V3_1(incoming)) => {
+                base.merge(incoming, options)
+            }
+            (DetectedSpec::V3_2(base), DetectedSpec::V3_2(incoming)) => {
+                base.merge(incoming, options)
+            }
+            (base, incoming) => bail!(
+                "merge requires matching versions: base is {}, incoming is {}",
+                base.label(),
+                incoming.label(),
+            ),
+        };
+        Ok(outcome)
     }
 
     /// Run `Spec::collapse` against this spec, lifting every inline
