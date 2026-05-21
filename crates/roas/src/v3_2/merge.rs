@@ -42,11 +42,7 @@ use crate::v3_2::parameter::{InCookie, InHeader, InPath, InQuery, InQuerystring,
 use crate::v3_2::path_item::{PathItem, Paths};
 use crate::v3_2::request_body::RequestBody;
 use crate::v3_2::response::{Response, Responses};
-use crate::v3_2::schema::{
-    AllOfSchema, AnyOfSchema, ArraySchema, BooleanSchema, EmptySchema, IntegerSchema, MultiSchema,
-    NotSchema, NullSchema, NumberSchema, ObjectSchema, OneOfSchema, Schema, SingleSchema,
-    StringSchema,
-};
+use crate::v3_2::schema::{ObjectSchema, Schema, SingleSchema};
 use crate::v3_2::security_scheme::{
     ApiKeySecurityScheme, AuthorizationCodeOAuth2Flow, ClientCredentialsOAuth2Flow,
     DeviceAuthorizationOAuth2Flow, HttpSecurityScheme, ImplicitOAuth2Flow, MutualTLSSecurityScheme,
@@ -2540,47 +2536,13 @@ impl MergeWithContext<()> for ObjectSchema {
     }
 }
 
-// Schema sub-types that aren't recursively deep-merged still need a
-// `MergeWithContext<()>` impl so the generic `RefOr<X>::merge_with_context`
-// compiles when `X` is one of them. They land here as opaque leaves
-// (replace incoming-wins, recorded as `SchemaLeafReplaced`).
-macro_rules! leaf_schema_merge {
-    ($($t:ty),* $(,)?) => {
-        $(
-            impl MergeWithContext<()> for $t {
-                fn merge_with_context(
-                    &mut self,
-                    other: Self,
-                    ctx: &mut MergeContext<()>,
-                    path: &mut String,
-                ) {
-                    if ctx.errored { return; }
-                    if *self != other
-                        && ctx.should_take_incoming(path, ConflictKind::SchemaLeafReplaced)
-                    {
-                        *self = other;
-                    }
-                }
-            }
-        )*
-    };
-}
-
-leaf_schema_merge!(
-    EmptySchema,
-    StringSchema,
-    IntegerSchema,
-    NumberSchema,
-    BooleanSchema,
-    ArraySchema,
-    NullSchema,
-    AllOfSchema,
-    AnyOfSchema,
-    OneOfSchema,
-    NotSchema,
-    MultiSchema,
-    SingleSchema,
-);
+// Schema sub-types (StringSchema, IntegerSchema, …, SingleSchema)
+// don't need their own `MergeWithContext<()>` impls — `Schema`'s impl
+// handles the entire enum at the top level via `leaf_replace_schema`
+// for any pairing other than `Single(Object(_))` × `Single(Object(_))`.
+// Nothing in the codebase holds a `RefOr<StringSchema>` or
+// `&mut SingleSchema` directly, so the per-variant impls would be
+// dead code.
 
 #[cfg(test)]
 mod tests {
@@ -3363,5 +3325,1944 @@ mod tests {
                 .iter()
                 .any(|c| c.kind == ConflictKind::SchemaLeafReplaced)
         );
+    }
+
+    // ============================================================
+    // Coverage tests — one collision per component impl. Each builds
+    // two instances differing on a single field, merges, and asserts
+    // either a conflict was recorded or a merge happened. Keeps each
+    // case small; the structural correctness is already covered by
+    // the targeted tests above.
+    // ============================================================
+
+    fn root_path() -> String {
+        "#".to_owned()
+    }
+
+    fn run<S: MergeWithContext<()>>(mut base: S, incoming: S, opts: EnumSet<MergeOptions>) -> S {
+        let mut ctx: MergeContext<()> = MergeContext::new(&(), opts);
+        let mut path = root_path();
+        base.merge_with_context(incoming, &mut ctx, &mut path);
+        base
+    }
+
+    fn report<S: MergeWithContext<()>>(
+        base: &mut S,
+        incoming: S,
+        opts: EnumSet<MergeOptions>,
+    ) -> Vec<crate::merge::MergeConflict> {
+        let mut ctx: MergeContext<()> = MergeContext::new(&(), opts);
+        let mut path = root_path();
+        base.merge_with_context(incoming, &mut ctx, &mut path);
+        ctx.conflicts
+    }
+
+    fn mk_encoding(content_type: Option<&str>) -> crate::v3_2::media_type::Encoding {
+        crate::v3_2::media_type::Encoding {
+            content_type: content_type.map(str::to_owned),
+            headers: None,
+            style: None,
+            explode: None,
+            allow_reserved: None,
+            encoding: None,
+            prefix_encoding: None,
+            item_encoding: None,
+            extensions: None,
+        }
+    }
+
+    // ---- ExternalDocumentation ----
+
+    #[test]
+    fn external_documentation_field_merges() {
+        let mut base = ExternalDocumentation {
+            url: "https://a".into(),
+            description: Some("old".into()),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            ExternalDocumentation {
+                url: "https://b".into(),
+                description: Some("new".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.url, "https://b");
+        assert_eq!(base.description.as_deref(), Some("new"));
+        assert_eq!(conflicts.len(), 2);
+    }
+
+    // ---- Info / Contact / License ----
+
+    #[test]
+    fn contact_field_merges() {
+        let mut base = Contact {
+            name: Some("Alice".into()),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Contact {
+                name: Some("Bob".into()),
+                url: Some("https://b".into()),
+                email: Some("b@x".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.name.as_deref(), Some("Bob"));
+        assert_eq!(base.url.as_deref(), Some("https://b"));
+        assert_eq!(base.email.as_deref(), Some("b@x"));
+        assert_eq!(conflicts.len(), 1); // only `name` collided
+    }
+
+    #[test]
+    fn license_required_name_with_optional_fields() {
+        let mut base = License {
+            name: "MIT".into(),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            License {
+                name: "Apache-2.0".into(),
+                identifier: Some("Apache-2.0".into()),
+                url: Some("https://apache.org".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.name, "Apache-2.0");
+        assert_eq!(base.identifier.as_deref(), Some("Apache-2.0"));
+        assert_eq!(base.url.as_deref(), Some("https://apache.org"));
+        assert_eq!(conflicts.len(), 1); // name required-scalar collision
+        assert_eq!(conflicts[0].kind, ConflictKind::RequiredScalarOverridden);
+    }
+
+    #[test]
+    fn info_terms_of_service_and_extensions() {
+        use crate::v3_2::info::Info;
+        let mut base = Info {
+            title: "Base".into(),
+            version: "1.0.0".into(),
+            terms_of_service: Some("base tos".into()),
+            extensions: Some(BTreeMap::from([("x-a".into(), serde_json::json!(1))])),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Info {
+                title: "Base".into(),
+                version: "1.0.0".into(),
+                terms_of_service: Some("incoming tos".into()),
+                extensions: Some(BTreeMap::from([("x-b".into(), serde_json::json!(2))])),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.terms_of_service.as_deref(), Some("incoming tos"));
+        let ext = base.extensions.unwrap();
+        assert!(ext.contains_key("x-a"));
+        assert!(ext.contains_key("x-b"));
+        assert!(!conflicts.is_empty());
+    }
+
+    // ---- Discriminator ----
+
+    #[test]
+    fn discriminator_default_mapping_merges() {
+        use crate::v3_2::discriminator::Discriminator;
+        let mut base = Discriminator {
+            property_name: "kind".into(),
+            default_mapping: Some("a".into()),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Discriminator {
+                property_name: "kind".into(),
+                mapping: Some(BTreeMap::from([("a".into(), "#/c/A".into())])),
+                default_mapping: Some("b".into()),
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.default_mapping.as_deref(), Some("b"));
+        assert!(base.mapping.is_some());
+        assert_eq!(conflicts.len(), 1);
+    }
+
+    #[test]
+    fn discriminator_mapping_initially_none_takes_incoming() {
+        use crate::v3_2::discriminator::Discriminator;
+        let mut base = Discriminator {
+            property_name: "kind".into(),
+            mapping: None,
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Discriminator {
+                property_name: "kind".into(),
+                mapping: Some(BTreeMap::from([("a".into(), "#/c/A".into())])),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert!(base.mapping.is_some());
+        assert!(conflicts.is_empty());
+    }
+
+    // ---- XML ----
+
+    #[test]
+    fn xml_full_field_merge() {
+        use crate::v3_2::xml::XML;
+        let mut base = XML {
+            name: Some("xa".into()),
+            namespace: Some("ns".into()),
+            ..Default::default()
+        };
+        let merged = run(
+            base.clone(),
+            XML {
+                name: Some("xb".into()),
+                prefix: Some("p".into()),
+                attribute: Some(true),
+                wrapped: Some(false),
+                node_type: Some("element".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(merged.name.as_deref(), Some("xb"));
+        assert_eq!(merged.namespace.as_deref(), Some("ns"));
+        assert_eq!(merged.prefix.as_deref(), Some("p"));
+        assert_eq!(merged.attribute, Some(true));
+        let _ = &mut base;
+    }
+
+    // ---- Server / ServerVariable ----
+
+    #[test]
+    fn server_full_field_merge() {
+        use crate::v3_2::server::Server;
+        let mut base = Server {
+            url: "https://api1".into(),
+            name: Some("primary".into()),
+            description: Some("old".into()),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Server {
+                url: "https://api2".into(),
+                name: Some("secondary".into()),
+                description: Some("new".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.url, "https://api2");
+        assert_eq!(base.name.as_deref(), Some("secondary"));
+        assert_eq!(base.description.as_deref(), Some("new"));
+        // url required-scalar + name + description optional-scalar
+        assert!(conflicts.len() >= 3);
+    }
+
+    // ---- Tag with all optional fields ----
+
+    #[test]
+    fn tag_full_field_merge() {
+        let mut base = Tag {
+            name: "pets".into(),
+            summary: Some("base sum".into()),
+            description: Some("base desc".into()),
+            external_docs: Some(ExternalDocumentation {
+                url: "https://docs.a".into(),
+                ..Default::default()
+            }),
+            parent: Some("animals".into()),
+            kind: Some("entity".into()),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Tag {
+                name: "pets".into(),
+                summary: Some("inc sum".into()),
+                description: Some("inc desc".into()),
+                external_docs: Some(ExternalDocumentation {
+                    url: "https://docs.b".into(),
+                    ..Default::default()
+                }),
+                parent: Some("creatures".into()),
+                kind: Some("group".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.summary.as_deref(), Some("inc sum"));
+        assert_eq!(base.parent.as_deref(), Some("creatures"));
+        assert_eq!(base.kind.as_deref(), Some("group"));
+        assert!(!conflicts.is_empty());
+    }
+
+    // ---- MediaType + Encoding ----
+
+    #[test]
+    fn media_type_examples_and_encoding_merge() {
+        use crate::v3_2::media_type::MediaType;
+        let mut base = MediaType {
+            description: Some("base".into()),
+            example: Some(serde_json::json!({"a": 1})),
+            encoding: Some(BTreeMap::from([(
+                "field".to_owned(),
+                mk_encoding(Some("application/json")),
+            )])),
+            prefix_encoding: Some(vec![mk_encoding(Some("text/csv"))]),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            MediaType {
+                description: Some("incoming".into()),
+                example: Some(serde_json::json!({"a": 2})),
+                encoding: Some(BTreeMap::from([(
+                    "field".to_owned(),
+                    mk_encoding(Some("application/xml")),
+                )])),
+                prefix_encoding: Some(vec![mk_encoding(Some("text/plain"))]),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.description.as_deref(), Some("incoming"));
+        assert!(!conflicts.is_empty());
+    }
+
+    #[test]
+    fn media_type_item_encoding_merges_when_both_some() {
+        use crate::v3_2::media_type::MediaType;
+        let mut base = MediaType {
+            item_encoding: Some(mk_encoding(Some("a"))),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            MediaType {
+                item_encoding: Some(mk_encoding(Some("b"))),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(
+            base.item_encoding.unwrap().content_type.as_deref(),
+            Some("b")
+        );
+        assert_eq!(conflicts.len(), 1);
+    }
+
+    #[test]
+    fn encoding_full_field_merge() {
+        let mut base = mk_encoding(Some("a/b"));
+        base.explode = Some(false);
+        base.allow_reserved = Some(false);
+        let mut incoming = mk_encoding(Some("c/d"));
+        incoming.explode = Some(true);
+        incoming.allow_reserved = Some(true);
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert_eq!(base.content_type.as_deref(), Some("c/d"));
+        assert_eq!(base.explode, Some(true));
+        assert_eq!(base.allow_reserved, Some(true));
+        assert!(!conflicts.is_empty());
+    }
+
+    #[test]
+    fn encoding_item_encoding_merges_when_both_some() {
+        let mut base = mk_encoding(None);
+        base.item_encoding = Some(Box::new(mk_encoding(Some("a"))));
+        let mut incoming = mk_encoding(None);
+        incoming.item_encoding = Some(Box::new(mk_encoding(Some("b"))));
+        let _ = report(&mut base, incoming, MergeOptions::new());
+        assert_eq!(
+            base.item_encoding.unwrap().content_type.as_deref(),
+            Some("b")
+        );
+    }
+
+    // ---- Header ----
+
+    #[test]
+    fn header_full_field_merge() {
+        use crate::v3_2::header::Header;
+        let mut base = Header {
+            description: Some("base".into()),
+            required: Some(false),
+            deprecated: Some(false),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Header {
+                description: Some("incoming".into()),
+                required: Some(true),
+                deprecated: Some(true),
+                explode: Some(true),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.description.as_deref(), Some("incoming"));
+        assert_eq!(base.required, Some(true));
+        assert!(!conflicts.is_empty());
+    }
+
+    // ---- Response ----
+
+    #[test]
+    fn response_full_field_merge() {
+        use crate::v3_2::response::Response;
+        let mut base = Response {
+            summary: Some("base".into()),
+            description: Some("d-base".into()),
+            headers: Some(BTreeMap::from([(
+                "X-Base".into(),
+                RefOr::new_item(crate::v3_2::header::Header::default()),
+            )])),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Response {
+                summary: Some("incoming".into()),
+                description: Some("d-incoming".into()),
+                headers: Some(BTreeMap::from([(
+                    "X-Inc".into(),
+                    RefOr::new_item(crate::v3_2::header::Header::default()),
+                )])),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.summary.as_deref(), Some("incoming"));
+        let h = base.headers.unwrap();
+        assert!(h.contains_key("X-Base"));
+        assert!(h.contains_key("X-Inc"));
+        assert!(!conflicts.is_empty());
+    }
+
+    // ---- RequestBody ----
+
+    #[test]
+    fn request_body_content_and_required_merges() {
+        use crate::v3_2::media_type::MediaType;
+        use crate::v3_2::request_body::RequestBody;
+        let mut base = RequestBody {
+            description: Some("base".into()),
+            content: BTreeMap::from([(
+                "application/json".to_owned(),
+                RefOr::new_item(MediaType {
+                    description: Some("media-base".into()),
+                    ..Default::default()
+                }),
+            )]),
+            required: Some(false),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            RequestBody {
+                description: Some("incoming".into()),
+                content: BTreeMap::from([
+                    (
+                        "application/json".to_owned(),
+                        RefOr::new_item(MediaType {
+                            description: Some("media-inc".into()),
+                            ..Default::default()
+                        }),
+                    ),
+                    (
+                        "application/xml".to_owned(),
+                        RefOr::new_item(MediaType::default()),
+                    ),
+                ]),
+                required: Some(true),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.description.as_deref(), Some("incoming"));
+        assert_eq!(base.required, Some(true));
+        assert!(base.content.contains_key("application/json"));
+        assert!(base.content.contains_key("application/xml"));
+        assert!(!conflicts.is_empty());
+    }
+
+    // ---- Example ----
+
+    #[test]
+    fn example_full_field_merge() {
+        use crate::v3_2::example::Example;
+        let mut base = Example {
+            summary: Some("a".into()),
+            description: Some("d-a".into()),
+            value: Some(serde_json::json!(1)),
+            serialized_value: Some("a-ser".into()),
+            data_value: Some(serde_json::json!("d-a")),
+            external_value: Some("https://a".into()),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Example {
+                summary: Some("b".into()),
+                description: Some("d-b".into()),
+                value: Some(serde_json::json!(2)),
+                serialized_value: Some("b-ser".into()),
+                data_value: Some(serde_json::json!("d-b")),
+                external_value: Some("https://b".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.summary.as_deref(), Some("b"));
+        assert_eq!(base.external_value.as_deref(), Some("https://b"));
+        assert!(!conflicts.is_empty());
+    }
+
+    // ---- Link ----
+
+    #[test]
+    fn link_full_field_merge() {
+        use crate::v3_2::link::Link;
+        let mut base = Link {
+            operation_ref: Some("#/a".into()),
+            description: Some("base".into()),
+            request_body: Some(serde_json::json!({"r": 1})),
+            parameters: Some(BTreeMap::from([("p1".into(), serde_json::json!("v1"))])),
+            server: Some(Server {
+                url: "https://srv1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            Link {
+                operation_id: Some("op2".into()),
+                description: Some("incoming".into()),
+                request_body: Some(serde_json::json!({"r": 2})),
+                parameters: Some(BTreeMap::from([("p2".into(), serde_json::json!("v2"))])),
+                server: Some(Server {
+                    url: "https://srv1".into(),
+                    description: Some("srv-desc".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.description.as_deref(), Some("incoming"));
+        assert_eq!(base.operation_id.as_deref(), Some("op2"));
+        let p = base.parameters.unwrap();
+        assert!(p.contains_key("p1"));
+        assert!(p.contains_key("p2"));
+        assert!(!conflicts.is_empty());
+    }
+
+    // ---- SecurityScheme variants ----
+
+    #[test]
+    fn security_scheme_api_key_merges() {
+        use crate::v3_2::security_scheme::{ApiKeyLocation, ApiKeySecurityScheme, SecurityScheme};
+        let mut base = SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
+            name: "api-key".into(),
+            location: ApiKeyLocation::Header,
+            description: Some("base".into()),
+            ..Default::default()
+        }));
+        let _ = report(
+            &mut base,
+            SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
+                name: "api-key".into(),
+                location: ApiKeyLocation::Query,
+                description: Some("incoming".into()),
+                deprecated: Some(true),
+                ..Default::default()
+            })),
+            MergeOptions::new(),
+        );
+        if let SecurityScheme::ApiKey(a) = base {
+            assert_eq!(a.description.as_deref(), Some("incoming"));
+            assert!(matches!(a.location, ApiKeyLocation::Query));
+        } else {
+            panic!("expected ApiKey");
+        }
+    }
+
+    #[test]
+    fn security_scheme_http_merges() {
+        use crate::v3_2::security_scheme::{HttpSecurityScheme, SecurityScheme};
+        let mut base = SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+            scheme: "basic".into(),
+            description: Some("base".into()),
+            ..Default::default()
+        }));
+        let _ = report(
+            &mut base,
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                scheme: "bearer".into(),
+                bearer_format: Some("JWT".into()),
+                description: Some("incoming".into()),
+                deprecated: Some(true),
+                ..Default::default()
+            })),
+            MergeOptions::new(),
+        );
+        if let SecurityScheme::HTTP(h) = base {
+            assert_eq!(h.scheme, "bearer");
+            assert_eq!(h.bearer_format.as_deref(), Some("JWT"));
+        } else {
+            panic!("expected HTTP");
+        }
+    }
+
+    #[test]
+    fn security_scheme_mutual_tls_merges() {
+        use crate::v3_2::security_scheme::{MutualTLSSecurityScheme, SecurityScheme};
+        let mut base = SecurityScheme::MutualTLS(Box::new(MutualTLSSecurityScheme {
+            description: Some("base".into()),
+            ..Default::default()
+        }));
+        let conflicts = report(
+            &mut base,
+            SecurityScheme::MutualTLS(Box::new(MutualTLSSecurityScheme {
+                description: Some("incoming".into()),
+                deprecated: Some(true),
+                ..Default::default()
+            })),
+            MergeOptions::new(),
+        );
+        assert!(!conflicts.is_empty());
+    }
+
+    #[test]
+    fn security_scheme_openid_connect_merges() {
+        use crate::v3_2::security_scheme::{OpenIdConnectSecurityScheme, SecurityScheme};
+        let mut base = SecurityScheme::OpenIdConnect(Box::new(OpenIdConnectSecurityScheme {
+            open_id_connect_url: "https://a/.well-known".into(),
+            description: Some("base".into()),
+            ..Default::default()
+        }));
+        let conflicts = report(
+            &mut base,
+            SecurityScheme::OpenIdConnect(Box::new(OpenIdConnectSecurityScheme {
+                open_id_connect_url: "https://b/.well-known".into(),
+                description: Some("incoming".into()),
+                deprecated: Some(true),
+                ..Default::default()
+            })),
+            MergeOptions::new(),
+        );
+        if let SecurityScheme::OpenIdConnect(o) = base {
+            assert_eq!(o.open_id_connect_url, "https://b/.well-known");
+        } else {
+            panic!("expected OpenIdConnect");
+        }
+        assert!(!conflicts.is_empty());
+    }
+
+    #[test]
+    fn security_scheme_variant_mismatch_replaces() {
+        use crate::v3_2::security_scheme::{
+            ApiKeyLocation, ApiKeySecurityScheme, HttpSecurityScheme, SecurityScheme,
+        };
+        let mut base = SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
+            name: "k".into(),
+            location: ApiKeyLocation::Header,
+            ..Default::default()
+        }));
+        let conflicts = report(
+            &mut base,
+            SecurityScheme::HTTP(Box::new(HttpSecurityScheme {
+                scheme: "basic".into(),
+                ..Default::default()
+            })),
+            MergeOptions::new(),
+        );
+        assert!(matches!(base, SecurityScheme::HTTP(_)));
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, ConflictKind::ParameterVariantMismatch);
+    }
+
+    // ---- OAuth flows ----
+
+    #[test]
+    fn oauth2_flows_and_implicit_flow_merge() {
+        use crate::v3_2::security_scheme::{
+            ImplicitOAuth2Flow, OAuth2Flows, OAuth2SecurityScheme, SecurityScheme,
+        };
+        let mut flows = OAuth2Flows {
+            implicit: Some(ImplicitOAuth2Flow {
+                authorization_url: "https://auth/a".into(),
+                refresh_url: Some("https://refresh/a".into()),
+                scopes: BTreeMap::from([("read".into(), "Read".into())]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut base = SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+            flows: flows.clone(),
+            description: Some("base".into()),
+            ..Default::default()
+        }));
+        flows.implicit = Some(ImplicitOAuth2Flow {
+            authorization_url: "https://auth/b".into(),
+            refresh_url: Some("https://refresh/b".into()),
+            scopes: BTreeMap::from([
+                ("read".into(), "Updated Read".into()),
+                ("write".into(), "Write".into()),
+            ]),
+            ..Default::default()
+        });
+        let conflicts = report(
+            &mut base,
+            SecurityScheme::OAuth2(Box::new(OAuth2SecurityScheme {
+                flows,
+                description: Some("incoming".into()),
+                oauth2_metadata_url: Some("https://meta".into()),
+                ..Default::default()
+            })),
+            MergeOptions::new(),
+        );
+        if let SecurityScheme::OAuth2(o) = &base {
+            let i = o.flows.implicit.as_ref().unwrap();
+            assert_eq!(i.authorization_url, "https://auth/b");
+            assert!(i.scopes.contains_key("write"));
+            assert_eq!(o.description.as_deref(), Some("incoming"));
+            assert_eq!(o.oauth2_metadata_url.as_deref(), Some("https://meta"));
+        } else {
+            panic!("expected OAuth2");
+        }
+        assert!(!conflicts.is_empty());
+    }
+
+    #[test]
+    fn oauth2_password_flow_merges() {
+        use crate::v3_2::security_scheme::PasswordOAuth2Flow;
+        let mut base = PasswordOAuth2Flow {
+            token_url: "https://a/token".into(),
+            scopes: BTreeMap::from([("s1".into(), "S1".into())]),
+            ..Default::default()
+        };
+        let conflicts = report(
+            &mut base,
+            PasswordOAuth2Flow {
+                token_url: "https://b/token".into(),
+                refresh_url: Some("https://b/refresh".into()),
+                scopes: BTreeMap::from([
+                    ("s1".into(), "S1-updated".into()),
+                    ("s2".into(), "S2".into()),
+                ]),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.token_url, "https://b/token");
+        assert!(base.scopes.contains_key("s2"));
+        assert!(!conflicts.is_empty());
+    }
+
+    #[test]
+    fn oauth2_client_credentials_flow_merges() {
+        use crate::v3_2::security_scheme::ClientCredentialsOAuth2Flow;
+        let mut base = ClientCredentialsOAuth2Flow {
+            token_url: "https://a".into(),
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            ClientCredentialsOAuth2Flow {
+                token_url: "https://b".into(),
+                refresh_url: Some("https://b/r".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.token_url, "https://b");
+    }
+
+    #[test]
+    fn oauth2_authorization_code_flow_merges() {
+        use crate::v3_2::security_scheme::AuthorizationCodeOAuth2Flow;
+        let mut base = AuthorizationCodeOAuth2Flow {
+            authorization_url: "https://a/auth".into(),
+            token_url: "https://a/token".into(),
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            AuthorizationCodeOAuth2Flow {
+                authorization_url: "https://b/auth".into(),
+                token_url: "https://b/token".into(),
+                refresh_url: Some("https://b/r".into()),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.authorization_url, "https://b/auth");
+        assert_eq!(base.token_url, "https://b/token");
+    }
+
+    #[test]
+    fn oauth2_device_authorization_flow_merges() {
+        use crate::v3_2::security_scheme::DeviceAuthorizationOAuth2Flow;
+        let mut base = DeviceAuthorizationOAuth2Flow {
+            device_authorization_url: "https://a/da".into(),
+            token_url: "https://a/token".into(),
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            DeviceAuthorizationOAuth2Flow {
+                device_authorization_url: "https://b/da".into(),
+                token_url: "https://b/token".into(),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.device_authorization_url, "https://b/da");
+    }
+
+    // ---- Parameter variant mismatches ----
+
+    #[test]
+    fn parameter_variant_mismatch_replaces() {
+        let mut base = Parameter::Path(Box::new(InPath {
+            name: "id".into(),
+            description: None,
+            required: true,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        }));
+        let conflicts = report(
+            &mut base,
+            Parameter::Query(Box::new(InQuery {
+                name: "id".into(),
+                description: None,
+                required: None,
+                deprecated: None,
+                allow_empty_value: None,
+                style: None,
+                explode: None,
+                allow_reserved: None,
+                schema: None,
+                example: None,
+                examples: None,
+                content: None,
+                extensions: None,
+            })),
+            MergeOptions::new(),
+        );
+        assert!(matches!(base, Parameter::Query(_)));
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, ConflictKind::ParameterVariantMismatch);
+    }
+
+    // ---- Schema enum non-Single variants ----
+
+    #[test]
+    fn schema_all_of_leaf_replaces_under_deep_merge_option() {
+        use crate::v3_2::schema::AllOfSchema;
+        let mut base = Schema::AllOf(Box::new(AllOfSchema {
+            all_of: vec![],
+            ..Default::default()
+        }));
+        let conflicts = report(
+            &mut base,
+            Schema::AllOf(Box::new(AllOfSchema {
+                all_of: vec![RefOr::new_item(Schema::Single(Box::new(
+                    SingleSchema::Object(ObjectSchema::default()),
+                )))],
+                ..Default::default()
+            })),
+            MergeOptions::DeepMergeObjectSchemas.only(),
+        );
+        // AllOf doesn't deep-merge — falls back to leaf replace.
+        if let Schema::AllOf(a) = &base {
+            assert_eq!(a.all_of.len(), 1);
+        }
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, ConflictKind::SchemaLeafReplaced);
+    }
+
+    #[test]
+    fn schema_single_string_replaces_under_deep_merge_object_only() {
+        use crate::v3_2::schema::StringSchema;
+        let mut base = Schema::Single(Box::new(SingleSchema::String(StringSchema {
+            description: Some("base".into()),
+            ..Default::default()
+        })));
+        let conflicts = report(
+            &mut base,
+            Schema::Single(Box::new(SingleSchema::String(StringSchema {
+                description: Some("incoming".into()),
+                ..Default::default()
+            }))),
+            MergeOptions::DeepMergeObjectSchemas.only(),
+        );
+        // StringSchema isn't ObjectSchema → leaf-replace.
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, ConflictKind::SchemaLeafReplaced);
+    }
+
+    // ---- ObjectSchema deep merge — broader field coverage ----
+
+    #[test]
+    fn object_schema_deep_merge_full_fields() {
+        use crate::common::bool_or::BoolOr;
+        let mk_obj = |required: Vec<&str>, title: &str| {
+            Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+                title: Some(title.into()),
+                description: Some(format!("{title} desc")),
+                required: Some(required.iter().map(|s| s.to_string()).collect()),
+                pattern_properties: Some(BTreeMap::from([(
+                    "^pat$".into(),
+                    RefOr::new_item(Schema::Single(Box::new(SingleSchema::Object(
+                        ObjectSchema::default(),
+                    )))),
+                )])),
+                additional_properties: Some(BoolOr::Bool(true)),
+                read_only: Some(false),
+                write_only: Some(false),
+                deprecated: Some(false),
+                max_properties: Some(10),
+                min_properties: Some(0),
+                ..Default::default()
+            })))
+        };
+        let mut base = mk_obj(vec!["a"], "Base");
+        let incoming = mk_obj(vec!["b"], "Incoming");
+        let _ = report(
+            &mut base,
+            incoming,
+            MergeOptions::DeepMergeObjectSchemas.only(),
+        );
+        let Schema::Single(s) = &base else { panic!() };
+        let SingleSchema::Object(o) = &**s else {
+            panic!()
+        };
+        assert_eq!(o.title.as_deref(), Some("Incoming"));
+        let req = o.required.as_ref().unwrap();
+        assert!(req.contains(&"a".to_owned()) && req.contains(&"b".to_owned()));
+    }
+
+    #[test]
+    fn object_schema_additional_properties_none_some_takes_incoming() {
+        use crate::common::bool_or::BoolOr;
+        let mut base = ObjectSchema::default();
+        let incoming = ObjectSchema {
+            additional_properties: Some(BoolOr::Bool(false)),
+            ..Default::default()
+        };
+        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut path = root_path();
+        base.merge_with_context(incoming, &mut ctx, &mut path);
+        assert!(matches!(
+            base.additional_properties,
+            Some(BoolOr::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn object_schema_unevaluated_properties_merges() {
+        use crate::common::bool_or::BoolOr;
+        let mut base = ObjectSchema {
+            unevaluated_properties: Some(BoolOr::Bool(true)),
+            ..Default::default()
+        };
+        let incoming = ObjectSchema {
+            unevaluated_properties: Some(BoolOr::Bool(false)),
+            ..Default::default()
+        };
+        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let mut path = root_path();
+        base.merge_with_context(incoming, &mut ctx, &mut path);
+        assert!(matches!(
+            base.unevaluated_properties,
+            Some(BoolOr::Bool(false))
+        ));
+    }
+
+    // ---- Operation: callbacks, security, servers ----
+
+    #[test]
+    fn operation_callbacks_security_servers_merge() {
+        use crate::v3_2::callback::Callback;
+        let mut base = Operation {
+            callbacks: Some(BTreeMap::from([(
+                "cb1".to_owned(),
+                RefOr::new_item(Callback::default()),
+            )])),
+            security: Some(vec![BTreeMap::from([("a".into(), vec!["read".into()])])]),
+            servers: Some(vec![Server {
+                url: "https://srv1".into(),
+                ..Default::default()
+            }]),
+            deprecated: Some(false),
+            extensions: Some(BTreeMap::from([("x-a".into(), serde_json::json!(1))])),
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            Operation {
+                callbacks: Some(BTreeMap::from([(
+                    "cb2".to_owned(),
+                    RefOr::new_item(Callback::default()),
+                )])),
+                security: Some(vec![BTreeMap::from([("b".into(), vec!["write".into()])])]),
+                servers: Some(vec![Server {
+                    url: "https://srv2".into(),
+                    ..Default::default()
+                }]),
+                deprecated: Some(true),
+                extensions: Some(BTreeMap::from([("x-b".into(), serde_json::json!(2))])),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        // callbacks: new key appended → both present.
+        let cb = base.callbacks.unwrap();
+        assert!(cb.contains_key("cb1") && cb.contains_key("cb2"));
+        // security: replace-when-non-empty.
+        assert_eq!(base.security.unwrap().len(), 1);
+        // deprecated overridden.
+        assert_eq!(base.deprecated, Some(true));
+    }
+
+    // ---- PathItem: additional_operations + parameters dedup ----
+
+    #[test]
+    fn path_item_additional_operations_and_param_dedup() {
+        let mut base = PathItem {
+            additional_operations: Some(BTreeMap::from([(
+                "trace".to_owned(),
+                Operation::default(),
+            )])),
+            parameters: Some(vec![param_path("id")]),
+            extensions: Some(BTreeMap::from([("x-a".into(), serde_json::json!(1))])),
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            PathItem {
+                additional_operations: Some(BTreeMap::from([(
+                    "link".to_owned(),
+                    Operation::default(),
+                )])),
+                parameters: Some(vec![param_path("id"), param_query("limit")]),
+                extensions: Some(BTreeMap::from([("x-b".into(), serde_json::json!(2))])),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        let ao = base.additional_operations.unwrap();
+        assert!(ao.contains_key("trace") && ao.contains_key("link"));
+        // Param dedup: id should not be duplicated.
+        assert_eq!(base.parameters.unwrap().len(), 2);
+        let ext = base.extensions.unwrap();
+        assert!(ext.contains_key("x-a") && ext.contains_key("x-b"));
+    }
+
+    // ---- Components: every bag exercised ----
+
+    #[test]
+    fn components_every_bag_merges() {
+        use crate::v3_2::callback::Callback;
+        use crate::v3_2::components::Components;
+        use crate::v3_2::example::Example;
+        use crate::v3_2::header::Header;
+        use crate::v3_2::link::Link;
+        use crate::v3_2::media_type::MediaType;
+        use crate::v3_2::request_body::RequestBody;
+        use crate::v3_2::response::Response;
+        use crate::v3_2::security_scheme::{ApiKeyLocation, ApiKeySecurityScheme, SecurityScheme};
+
+        let make_components = |suffix: &str| Components {
+            schemas: Some(BTreeMap::from([(
+                format!("S{suffix}"),
+                RefOr::new_item(Schema::Single(Box::new(SingleSchema::Object(
+                    ObjectSchema::default(),
+                )))),
+            )])),
+            responses: Some(BTreeMap::from([(
+                format!("R{suffix}"),
+                RefOr::new_item(Response::default()),
+            )])),
+            parameters: Some(BTreeMap::from([(
+                format!("P{suffix}"),
+                param_path(&format!("p{suffix}")),
+            )])),
+            examples: Some(BTreeMap::from([(
+                format!("E{suffix}"),
+                RefOr::new_item(Example::default()),
+            )])),
+            request_bodies: Some(BTreeMap::from([(
+                format!("RB{suffix}"),
+                RefOr::new_item(RequestBody::default()),
+            )])),
+            headers: Some(BTreeMap::from([(
+                format!("H{suffix}"),
+                RefOr::new_item(Header::default()),
+            )])),
+            security_schemes: Some(BTreeMap::from([(
+                format!("SS{suffix}"),
+                RefOr::new_item(SecurityScheme::ApiKey(Box::new(ApiKeySecurityScheme {
+                    name: "k".into(),
+                    location: ApiKeyLocation::Header,
+                    ..Default::default()
+                }))),
+            )])),
+            links: Some(BTreeMap::from([(
+                format!("L{suffix}"),
+                RefOr::new_item(Link::default()),
+            )])),
+            callbacks: Some(BTreeMap::from([(
+                format!("CB{suffix}"),
+                RefOr::new_item(Callback::default()),
+            )])),
+            path_items: Some(BTreeMap::from([(
+                format!("PI{suffix}"),
+                PathItem::default(),
+            )])),
+            media_types: Some(BTreeMap::from([(
+                format!("MT{suffix}"),
+                RefOr::new_item(MediaType::default()),
+            )])),
+            extensions: Some(BTreeMap::from([(
+                format!("x-{suffix}"),
+                serde_json::json!(1),
+            )])),
+        };
+        let mut base = make_components("a");
+        let _ = report(&mut base, make_components("b"), MergeOptions::new());
+        // Every bag should now have both entries.
+        assert_eq!(base.schemas.unwrap().len(), 2);
+        assert_eq!(base.responses.unwrap().len(), 2);
+        assert_eq!(base.parameters.unwrap().len(), 2);
+        assert_eq!(base.examples.unwrap().len(), 2);
+        assert_eq!(base.request_bodies.unwrap().len(), 2);
+        assert_eq!(base.headers.unwrap().len(), 2);
+        assert_eq!(base.security_schemes.unwrap().len(), 2);
+        assert_eq!(base.links.unwrap().len(), 2);
+        assert_eq!(base.callbacks.unwrap().len(), 2);
+        assert_eq!(base.path_items.unwrap().len(), 2);
+        assert_eq!(base.media_types.unwrap().len(), 2);
+        assert_eq!(base.extensions.unwrap().len(), 2);
+    }
+
+    // ---- Spec: webhooks, security, external_docs ----
+
+    #[test]
+    fn spec_webhooks_security_external_docs() {
+        let mut base = Spec {
+            webhooks: Some(Paths {
+                paths: BTreeMap::from([(
+                    "/wh1".to_owned(),
+                    PathItem {
+                        summary: Some("wh1".into()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            security: Some(vec![BTreeMap::from([("base".into(), vec![])])]),
+            external_docs: Some(ExternalDocumentation {
+                url: "https://docs/a".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let incoming = Spec {
+            webhooks: Some(Paths {
+                paths: BTreeMap::from([(
+                    "/wh2".to_owned(),
+                    PathItem {
+                        summary: Some("wh2".into()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            security: Some(vec![BTreeMap::from([("incoming".into(), vec![])])]),
+            external_docs: Some(ExternalDocumentation {
+                url: "https://docs/b".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        base.merge(incoming, MergeOptions::new()).unwrap();
+        // webhooks merge per-key
+        let wh = base.webhooks.unwrap().paths;
+        assert!(wh.contains_key("/wh1") && wh.contains_key("/wh2"));
+        // security: replace-when-non-empty
+        assert_eq!(base.security.unwrap().len(), 1);
+        // external_docs: deep merge
+        assert_eq!(base.external_docs.unwrap().url, "https://docs/b");
+    }
+
+    // ---- None × Some additive paths for nested Option<RefOr<_>>s ----
+
+    #[test]
+    fn responses_default_none_takes_incoming() {
+        use crate::v3_2::response::Responses;
+        let mut base = Responses {
+            default: None,
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            Responses {
+                default: Some(response_with("default")),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert!(base.default.is_some());
+    }
+
+    #[test]
+    fn operation_request_body_none_takes_incoming() {
+        use crate::v3_2::request_body::RequestBody;
+        let mut base = Operation {
+            request_body: None,
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            Operation {
+                request_body: Some(RefOr::new_item(RequestBody::default())),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert!(base.request_body.is_some());
+    }
+
+    // ---- parameter_ref_key for non-Path variants (used in dedup) ----
+
+    fn param_header(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Header(Box::new(InHeader {
+            name: name.into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        })))
+    }
+
+    fn param_cookie(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Cookie(Box::new(InCookie {
+            name: name.into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        })))
+    }
+
+    fn param_querystring(name: &str) -> RefOr<Parameter> {
+        RefOr::new_item(Parameter::Querystring(Box::new(InQuerystring {
+            name: name.into(),
+            description: None,
+            required: None,
+            deprecated: None,
+            content: BTreeMap::new(),
+            example: None,
+            examples: None,
+            extensions: None,
+        })))
+    }
+
+    #[test]
+    fn parameter_dedup_covers_all_locations() {
+        // Run a merge with each Parameter variant on both sides so
+        // parameter_ref_key sees Header / Cookie / Querystring (and
+        // ref) — covers the non-Path arms.
+        let mut base = Operation {
+            parameters: Some(vec![
+                param_header("X-A"),
+                param_cookie("c"),
+                param_querystring("q"),
+                RefOr::new_ref("#/components/parameters/P"),
+            ]),
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            Operation {
+                parameters: Some(vec![
+                    // Same keys — should dedup.
+                    param_header("X-A"),
+                    param_cookie("c"),
+                    param_querystring("q"),
+                    RefOr::new_ref("#/components/parameters/P"),
+                ]),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        assert_eq!(base.parameters.unwrap().len(), 4, "no duplicates");
+    }
+
+    #[test]
+    fn parameter_enum_each_same_variant_recurses() {
+        // Cover each (Variant × Variant) match arm in Parameter.
+        for (name, base, incoming) in [
+            (
+                "path",
+                Parameter::Path(Box::new(mk_inpath("id", Some("a"), true))),
+                Parameter::Path(Box::new(mk_inpath("id", Some("b"), true))),
+            ),
+            (
+                "query",
+                Parameter::Query(Box::new(InQuery {
+                    name: "q".into(),
+                    description: Some("a".into()),
+                    required: None,
+                    deprecated: None,
+                    allow_empty_value: None,
+                    style: None,
+                    explode: None,
+                    allow_reserved: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                })),
+                Parameter::Query(Box::new(InQuery {
+                    name: "q".into(),
+                    description: Some("b".into()),
+                    required: None,
+                    deprecated: None,
+                    allow_empty_value: None,
+                    style: None,
+                    explode: None,
+                    allow_reserved: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                })),
+            ),
+            (
+                "header",
+                Parameter::Header(Box::new(InHeader {
+                    name: "X-A".into(),
+                    description: Some("a".into()),
+                    required: None,
+                    deprecated: None,
+                    style: None,
+                    explode: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                })),
+                Parameter::Header(Box::new(InHeader {
+                    name: "X-A".into(),
+                    description: Some("b".into()),
+                    required: None,
+                    deprecated: None,
+                    style: None,
+                    explode: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                })),
+            ),
+            (
+                "cookie",
+                Parameter::Cookie(Box::new(InCookie {
+                    name: "c".into(),
+                    description: Some("a".into()),
+                    required: None,
+                    deprecated: None,
+                    style: None,
+                    explode: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                })),
+                Parameter::Cookie(Box::new(InCookie {
+                    name: "c".into(),
+                    description: Some("b".into()),
+                    required: None,
+                    deprecated: None,
+                    style: None,
+                    explode: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                })),
+            ),
+            (
+                "querystring",
+                Parameter::Querystring(Box::new(InQuerystring {
+                    name: "qs".into(),
+                    description: Some("a".into()),
+                    required: None,
+                    deprecated: None,
+                    content: BTreeMap::new(),
+                    example: None,
+                    examples: None,
+                    extensions: None,
+                })),
+                Parameter::Querystring(Box::new(InQuerystring {
+                    name: "qs".into(),
+                    description: Some("b".into()),
+                    required: None,
+                    deprecated: None,
+                    content: BTreeMap::new(),
+                    example: None,
+                    examples: None,
+                    extensions: None,
+                })),
+            ),
+        ] {
+            let mut b = base;
+            let _ = report(&mut b, incoming, MergeOptions::new());
+            // After merge, description should be "b" for every variant.
+            let desc = match &b {
+                Parameter::Path(p) => p.description.as_deref(),
+                Parameter::Query(p) => p.description.as_deref(),
+                Parameter::Header(p) => p.description.as_deref(),
+                Parameter::Cookie(p) => p.description.as_deref(),
+                Parameter::Querystring(p) => p.description.as_deref(),
+            };
+            assert_eq!(desc, Some("b"), "{name}: incoming description must win");
+        }
+    }
+
+    // ---- ErrorOnConflict success path (commits the working copy) ----
+
+    #[test]
+    fn spec_error_on_conflict_success_commits_working_copy() {
+        // ErrorOnConflict set + no real collision → `Ok` with the
+        // merged result observable on `self`. Exercises the
+        // `*self = working` + Ok return in Spec::merge.
+        let mut base = Spec::default();
+        let incoming = Spec {
+            json_schema_dialect: Some("https://example/dialect".into()),
+            ..Default::default()
+        };
+        base.merge(incoming, MergeOptions::ErrorOnConflict.only())
+            .unwrap();
+        assert_eq!(
+            base.json_schema_dialect.as_deref(),
+            Some("https://example/dialect")
+        );
+    }
+
+    // ---- Responses.default / Operation.request_body — both Some ----
+
+    #[test]
+    fn responses_default_both_some_recurses_into_response() {
+        use crate::v3_2::response::Responses;
+        let mut base = Responses {
+            default: Some(response_with("base")),
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            Responses {
+                default: Some(response_with("incoming")),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        let RefOr::Item(r) = base.default.as_ref().unwrap() else {
+            panic!()
+        };
+        assert_eq!(r.description.as_deref(), Some("incoming"));
+    }
+
+    #[test]
+    fn operation_request_body_both_some_recurses() {
+        use crate::v3_2::media_type::MediaType;
+        use crate::v3_2::request_body::RequestBody;
+        let mut base = Operation {
+            request_body: Some(RefOr::new_item(RequestBody {
+                description: Some("base".into()),
+                content: BTreeMap::from([(
+                    "application/json".to_owned(),
+                    RefOr::new_item(MediaType::default()),
+                )]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let _ = report(
+            &mut base,
+            Operation {
+                request_body: Some(RefOr::new_item(RequestBody {
+                    description: Some("incoming".into()),
+                    content: BTreeMap::from([(
+                        "application/xml".to_owned(),
+                        RefOr::new_item(MediaType::default()),
+                    )]),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            MergeOptions::new(),
+        );
+        let RefOr::Item(rb) = base.request_body.as_ref().unwrap() else {
+            panic!()
+        };
+        assert_eq!(rb.description.as_deref(), Some("incoming"));
+        assert!(rb.content.contains_key("application/json"));
+        assert!(rb.content.contains_key("application/xml"));
+    }
+
+    // ---- Helpers no-op when ctx.errored already set ----
+
+    #[test]
+    fn component_impls_no_op_when_already_errored() {
+        // Sweep every component impl that has an entry-guard
+        // `if ctx.errored { return; }`. Pre-flip the flag, call the
+        // impl, and confirm nothing mutated. Covers the entry-guard
+        // return branches that otherwise sit dead.
+        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        ctx.errored = true;
+        let mut path = root_path();
+
+        // PathItem
+        {
+            let mut pi = PathItem {
+                summary: Some("base".into()),
+                ..Default::default()
+            };
+            pi.merge_with_context(
+                PathItem {
+                    summary: Some("incoming".into()),
+                    ..Default::default()
+                },
+                &mut ctx,
+                &mut path,
+            );
+            assert_eq!(pi.summary.as_deref(), Some("base"));
+        }
+        // Responses
+        {
+            use crate::v3_2::response::Responses;
+            let mut r = Responses::default();
+            r.merge_with_context(
+                Responses {
+                    default: Some(response_with("incoming")),
+                    ..Default::default()
+                },
+                &mut ctx,
+                &mut path,
+            );
+            assert!(r.default.is_none());
+        }
+        // Operation
+        {
+            let mut op = Operation::default();
+            op.merge_with_context(
+                Operation {
+                    summary: Some("incoming".into()),
+                    ..Default::default()
+                },
+                &mut ctx,
+                &mut path,
+            );
+            assert!(op.summary.is_none());
+        }
+        // Parameter
+        {
+            let mut p = Parameter::Path(Box::new(mk_inpath("x", None, true)));
+            p.merge_with_context(
+                Parameter::Query(Box::new(InQuery {
+                    name: "x".into(),
+                    description: None,
+                    required: None,
+                    deprecated: None,
+                    allow_empty_value: None,
+                    style: None,
+                    explode: None,
+                    allow_reserved: None,
+                    schema: None,
+                    example: None,
+                    examples: None,
+                    content: None,
+                    extensions: None,
+                })),
+                &mut ctx,
+                &mut path,
+            );
+            assert!(matches!(p, Parameter::Path(_)));
+        }
+        // InPath / InQuery / InHeader / InCookie — entry guards.
+        {
+            let mut p = mk_inpath("a", Some("base"), true);
+            p.merge_with_context(mk_inpath("a", Some("inc"), true), &mut ctx, &mut path);
+            assert_eq!(p.description.as_deref(), Some("base"));
+        }
+    }
+
+    // ---- Schema deep-merge fallback for Object × non-Object ----
+
+    #[test]
+    fn schema_object_vs_string_under_deep_merge_falls_back_to_replace() {
+        use crate::v3_2::schema::StringSchema;
+        let mut base = Schema::Single(Box::new(SingleSchema::Object(ObjectSchema {
+            description: Some("base obj".into()),
+            ..Default::default()
+        })));
+        let _ = report(
+            &mut base,
+            Schema::Single(Box::new(SingleSchema::String(StringSchema {
+                description: Some("incoming str".into()),
+                ..Default::default()
+            }))),
+            MergeOptions::DeepMergeObjectSchemas.only(),
+        );
+        // Falls into the `other_single_inner` arm → leaf-replace.
+        assert!(matches!(
+            base,
+            Schema::Single(box_s) if matches!(*box_s, SingleSchema::String(_))
+        ));
+    }
+
+    // ---- Parameter variants: collisions exercise field-level merges ----
+
+    fn mk_inpath(name: &str, description: Option<&str>, required: bool) -> InPath {
+        InPath {
+            name: name.into(),
+            description: description.map(str::to_owned),
+            required,
+            deprecated: None,
+            style: None,
+            explode: None,
+            schema: None,
+            example: None,
+            examples: None,
+            content: None,
+            extensions: None,
+        }
+    }
+
+    #[test]
+    fn in_path_full_field_merge() {
+        let mut base = mk_inpath("id", Some("base"), true);
+        base.explode = Some(false);
+        base.example = Some(serde_json::json!(1));
+        let mut incoming = mk_inpath("id", Some("incoming"), false);
+        incoming.deprecated = Some(true);
+        incoming.explode = Some(true);
+        incoming.example = Some(serde_json::json!(2));
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert_eq!(base.description.as_deref(), Some("incoming"));
+        assert!(!base.required); // required-scalar collision
+        assert_eq!(base.deprecated, Some(true));
+        assert_eq!(base.explode, Some(true));
+        assert!(!conflicts.is_empty());
+    }
+
+    #[test]
+    fn in_query_full_field_merge() {
+        let mut base = InQuery {
+            name: "q".into(),
+            description: Some("base".into()),
+            required: Some(false),
+            deprecated: None,
+            allow_empty_value: Some(false),
+            style: None,
+            explode: Some(false),
+            allow_reserved: Some(false),
+            schema: None,
+            example: Some(serde_json::json!("a")),
+            examples: None,
+            content: None,
+            extensions: None,
+        };
+        let incoming = InQuery {
+            name: "q".into(),
+            description: Some("incoming".into()),
+            required: Some(true),
+            deprecated: Some(true),
+            allow_empty_value: Some(true),
+            style: None,
+            explode: Some(true),
+            allow_reserved: Some(true),
+            schema: None,
+            example: Some(serde_json::json!("b")),
+            examples: None,
+            content: None,
+            extensions: None,
+        };
+        let conflicts = report(&mut base, incoming, MergeOptions::new());
+        assert_eq!(base.required, Some(true));
+        assert_eq!(base.explode, Some(true));
+        assert_eq!(base.allow_reserved, Some(true));
+        assert!(!conflicts.is_empty());
+    }
+
+    #[test]
+    fn in_header_full_field_merge() {
+        let mut base = InHeader {
+            name: "X-A".into(),
+            description: Some("base".into()),
+            required: Some(false),
+            deprecated: None,
+            style: None,
+            explode: Some(false),
+            schema: None,
+            example: Some(serde_json::json!("a")),
+            examples: None,
+            content: None,
+            extensions: None,
+        };
+        let incoming = InHeader {
+            name: "X-A".into(),
+            description: Some("incoming".into()),
+            required: Some(true),
+            deprecated: Some(true),
+            style: None,
+            explode: Some(true),
+            schema: None,
+            example: Some(serde_json::json!("b")),
+            examples: None,
+            content: None,
+            extensions: None,
+        };
+        let _ = report(&mut base, incoming, MergeOptions::new());
+        assert_eq!(base.required, Some(true));
+        assert_eq!(base.explode, Some(true));
+    }
+
+    #[test]
+    fn in_cookie_full_field_merge() {
+        let mut base = InCookie {
+            name: "c".into(),
+            description: Some("base".into()),
+            required: Some(false),
+            deprecated: None,
+            style: None,
+            explode: Some(false),
+            schema: None,
+            example: Some(serde_json::json!("a")),
+            examples: None,
+            content: None,
+            extensions: None,
+        };
+        let incoming = InCookie {
+            name: "c".into(),
+            description: Some("incoming".into()),
+            required: Some(true),
+            deprecated: Some(true),
+            style: None,
+            explode: Some(true),
+            schema: None,
+            example: Some(serde_json::json!("b")),
+            examples: None,
+            content: None,
+            extensions: None,
+        };
+        let _ = report(&mut base, incoming, MergeOptions::new());
+        assert_eq!(base.required, Some(true));
+        assert_eq!(base.deprecated, Some(true));
+    }
+
+    #[test]
+    fn in_querystring_full_field_merge_with_content_overlap() {
+        use crate::v3_2::media_type::MediaType;
+        let mut base = InQuerystring {
+            name: "qs".into(),
+            description: Some("base".into()),
+            required: Some(false),
+            deprecated: None,
+            content: BTreeMap::from([(
+                "application/json".to_owned(),
+                RefOr::new_item(MediaType {
+                    description: Some("media-base".into()),
+                    ..Default::default()
+                }),
+            )]),
+            example: Some(serde_json::json!("a")),
+            examples: None,
+            extensions: None,
+        };
+        let incoming = InQuerystring {
+            name: "qs".into(),
+            description: Some("incoming".into()),
+            required: Some(true),
+            deprecated: Some(true),
+            content: BTreeMap::from([
+                (
+                    // Overlapping key — exercises the inner loop's
+                    // recursive merge path.
+                    "application/json".to_owned(),
+                    RefOr::new_item(MediaType {
+                        description: Some("media-inc".into()),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    "text/plain".to_owned(),
+                    RefOr::new_item(MediaType::default()),
+                ),
+            ]),
+            example: Some(serde_json::json!("b")),
+            examples: None,
+            extensions: None,
+        };
+        let _ = report(&mut base, incoming, MergeOptions::new());
+        assert_eq!(base.required, Some(true));
+        assert!(base.content.contains_key("application/json"));
+        assert!(base.content.contains_key("text/plain"));
+    }
+
+    // ---- Callback paths overlap exercises the inline loop ----
+
+    #[test]
+    fn callback_paths_overlap_merges_per_path_expression() {
+        use crate::v3_2::callback::Callback;
+        let mut base = Callback {
+            paths: BTreeMap::from([(
+                "{$request.body#/url}".to_owned(),
+                PathItem {
+                    summary: Some("base".into()),
+                    ..Default::default()
+                },
+            )]),
+            extensions: Some(BTreeMap::from([("x-a".into(), serde_json::json!(1))])),
+        };
+        let incoming = Callback {
+            paths: BTreeMap::from([
+                (
+                    "{$request.body#/url}".to_owned(),
+                    PathItem {
+                        summary: Some("incoming".into()),
+                        ..Default::default()
+                    },
+                ),
+                ("{$response.body#/url}".to_owned(), PathItem::default()),
+            ]),
+            extensions: Some(BTreeMap::from([("x-b".into(), serde_json::json!(2))])),
+        };
+        let _ = report(&mut base, incoming, MergeOptions::new());
+        // Overlapping path-expression — base summary replaced.
+        assert_eq!(
+            base.paths["{$request.body#/url}"].summary.as_deref(),
+            Some("incoming")
+        );
+        // New path-expression appended.
+        assert!(base.paths.contains_key("{$response.body#/url}"));
+    }
+
+    // ---- record_kept_base_or_error covers the openapi mismatch branch ----
+
+    #[test]
+    fn spec_openapi_mismatch_records_resolution_base_under_default() {
+        // Forcing openapi to differ requires `Spec::default()`'s
+        // V3_2_0 to be overridden — go through serde to build two
+        // Specs with different openapi values.
+        let mut base: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "T", "version": "1"},
+        }))
+        .unwrap();
+        let incoming: Spec = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.1",
+            "info": {"title": "T", "version": "1"},
+        }))
+        .unwrap();
+        let report = base.merge(incoming, MergeOptions::new()).unwrap();
+        assert!(
+            report
+                .conflicts
+                .iter()
+                .any(|c| c.path.ends_with(".openapi") && c.resolution == Resolution::Base)
+        );
+        // Base kept its openapi.
+        let openapi_str = serde_json::to_value(&base.openapi).unwrap();
+        assert_eq!(openapi_str, serde_json::json!("3.2.0"));
+    }
+
+    // ---- ReplaceListsWhenEmpty exercises that branch ----
+
+    #[test]
+    fn replace_lists_when_empty_option_drops_base_list() {
+        let mut base = Spec {
+            servers: Some(vec![Server {
+                url: "https://srv1".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        base.merge(
+            Spec {
+                servers: Some(vec![]),
+                ..Default::default()
+            },
+            MergeOptions::ReplaceListsWhenEmpty.only(),
+        )
+        .unwrap();
+        // With the option set, incoming empty replaces base.
+        let s = base.servers.unwrap();
+        assert!(s.is_empty(), "incoming empty list should replace base");
+    }
+
+    // ---- BaseWins mode propagates through helpers ----
+
+    #[test]
+    fn base_wins_keeps_base_value_in_extensions() {
+        let mut base: Option<BTreeMap<String, serde_json::Value>> =
+            Some(BTreeMap::from([("x-a".into(), serde_json::json!(1))]));
+        let mut ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::BaseWins.only());
+        let mut path = root_path();
+        crate::common::merge::merge_extensions(
+            &mut base,
+            Some(BTreeMap::from([("x-a".into(), serde_json::json!(2))])),
+            &mut ctx,
+            &mut path,
+            ".ext",
+        );
+        let m = base.unwrap();
+        assert_eq!(m.get("x-a"), Some(&serde_json::json!(1)));
+        assert_eq!(ctx.conflicts.len(), 1);
+        assert_eq!(ctx.conflicts[0].resolution, Resolution::Base);
     }
 }

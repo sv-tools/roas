@@ -405,4 +405,114 @@ mod tests {
         let report = res.expect("ok");
         assert_eq!(report.len(), 1);
     }
+
+    #[test]
+    fn merge_options_only_helper_returns_single_set() {
+        let only = MergeOptions::BaseWins.only();
+        assert!(only.contains(MergeOptions::BaseWins));
+        assert!(!only.contains(MergeOptions::ErrorOnConflict));
+        assert_eq!(only.len(), 1);
+    }
+
+    #[test]
+    fn merge_options_new_is_empty() {
+        assert!(MergeOptions::new().is_empty());
+    }
+
+    #[test]
+    fn merge_report_default_is_empty_and_len_zero() {
+        let r = MergeReport::default();
+        assert!(r.is_empty());
+        assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn merge_report_display_renders_count_and_bullets() {
+        let r = MergeReport {
+            conflicts: vec![
+                MergeConflict {
+                    path: "#.a".into(),
+                    kind: ConflictKind::ScalarOverridden,
+                    resolution: Resolution::Incoming,
+                },
+                MergeConflict {
+                    path: "#.b".into(),
+                    kind: ConflictKind::RefReplaced,
+                    resolution: Resolution::Base,
+                },
+            ],
+        };
+        let s = r.to_string();
+        assert!(s.starts_with("2 merge conflicts:"));
+        assert!(s.contains("- #.a: scalar overridden (Incoming)"));
+        assert!(s.contains("- #.b: ref replaced (Base)"));
+    }
+
+    #[test]
+    fn merge_report_display_empty_still_renders_header() {
+        let s = MergeReport::default().to_string();
+        assert!(s.starts_with("0 merge conflicts:"));
+    }
+
+    #[test]
+    fn merge_conflict_display_renders_path_kind_resolution() {
+        let c = MergeConflict {
+            path: "#.foo".into(),
+            kind: ConflictKind::ListReplaced,
+            resolution: Resolution::Errored,
+        };
+        assert_eq!(c.to_string(), "#.foo: list replaced (Errored)");
+    }
+
+    #[test]
+    fn conflict_kind_display_covers_every_variant() {
+        for (k, expected) in [
+            (ConflictKind::ScalarOverridden, "scalar overridden"),
+            (
+                ConflictKind::RequiredScalarOverridden,
+                "required scalar overridden",
+            ),
+            (ConflictKind::RefReplaced, "ref replaced"),
+            (ConflictKind::RefVsValue, "ref/value mismatch"),
+            (ConflictKind::SchemaLeafReplaced, "schema leaf replaced"),
+            (ConflictKind::ListReplaced, "list replaced"),
+            (
+                ConflictKind::ParameterVariantMismatch,
+                "parameter variant mismatch",
+            ),
+        ] {
+            assert_eq!(k.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn merge_error_display_shows_message() {
+        let err = MergeError {
+            conflicts: vec![MergeConflict {
+                path: "#".into(),
+                kind: ConflictKind::ScalarOverridden,
+                resolution: Resolution::Errored,
+            }],
+        };
+        assert_eq!(err.to_string(), "merge aborted on conflict");
+    }
+
+    #[test]
+    fn merge_context_debug_includes_state() {
+        let ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        let s = format!("{ctx:?}");
+        assert!(s.contains("MergeContext"));
+        assert!(s.contains("conflicts: []"));
+        assert!(s.contains("errored: false"));
+    }
+
+    #[test]
+    fn merge_context_visit_inserts_path() {
+        // (`visit` was removed; the visited HashSet is gone too.)
+        // This test confirms the public surface no longer carries
+        // either by reaching into Debug — defensive against accidental
+        // re-introduction.
+        let ctx: MergeContext<()> = MergeContext::new(&(), MergeOptions::new());
+        assert!(!format!("{ctx:?}").contains("visited"));
+    }
 }

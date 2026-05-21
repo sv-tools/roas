@@ -122,4 +122,106 @@ mod tests {
             "deserialize true",
         );
     }
+
+    // ---- Merge coverage ----
+
+    use crate::merge::{ConflictKind, MergeContext, MergeOptions, MergeWithContext, Resolution};
+
+    impl MergeWithContext<()> for Foo {
+        fn merge_with_context(
+            &mut self,
+            other: Self,
+            ctx: &mut MergeContext<()>,
+            path: &mut String,
+        ) {
+            if self.foo != other.foo
+                && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden)
+            {
+                self.foo = other.foo;
+            }
+        }
+    }
+
+    fn ctx_with(opts: enumset::EnumSet<MergeOptions>) -> MergeContext<'static, ()> {
+        MergeContext::new(&(), opts)
+    }
+
+    #[test]
+    fn bool_or_item_item_recurses_into_inner() {
+        let mut base: BoolOr<Foo> = BoolOr::Item(Foo { foo: "a".into() });
+        let mut ctx = ctx_with(MergeOptions::new());
+        let mut path = "#".to_owned();
+        base.merge_with_context(BoolOr::Item(Foo { foo: "b".into() }), &mut ctx, &mut path);
+        match base {
+            BoolOr::Item(f) => assert_eq!(f.foo, "b"),
+            _ => panic!("expected Item"),
+        }
+        assert_eq!(ctx.conflicts.len(), 1);
+        assert_eq!(ctx.conflicts[0].kind, ConflictKind::ScalarOverridden);
+    }
+
+    #[test]
+    fn bool_or_bool_bool_same_value_no_conflict() {
+        let mut base: BoolOr<Foo> = BoolOr::Bool(true);
+        let mut ctx = ctx_with(MergeOptions::new());
+        let mut path = "#".to_owned();
+        base.merge_with_context(BoolOr::Bool(true), &mut ctx, &mut path);
+        assert!(matches!(base, BoolOr::Bool(true)));
+        assert!(ctx.conflicts.is_empty());
+    }
+
+    #[test]
+    fn bool_or_bool_bool_different_takes_incoming_by_default() {
+        let mut base: BoolOr<Foo> = BoolOr::Bool(true);
+        let mut ctx = ctx_with(MergeOptions::new());
+        let mut path = "#".to_owned();
+        base.merge_with_context(BoolOr::Bool(false), &mut ctx, &mut path);
+        assert!(matches!(base, BoolOr::Bool(false)));
+        assert_eq!(ctx.conflicts.len(), 1);
+        assert_eq!(ctx.conflicts[0].kind, ConflictKind::ScalarOverridden);
+    }
+
+    #[test]
+    fn bool_or_bool_bool_different_base_wins() {
+        let mut base: BoolOr<Foo> = BoolOr::Bool(true);
+        let mut ctx = ctx_with(MergeOptions::BaseWins.only());
+        let mut path = "#".to_owned();
+        base.merge_with_context(BoolOr::Bool(false), &mut ctx, &mut path);
+        assert!(matches!(base, BoolOr::Bool(true)));
+        assert_eq!(ctx.conflicts[0].resolution, Resolution::Base);
+    }
+
+    #[test]
+    fn bool_or_bool_vs_item_replaces_with_ref_vs_value_kind() {
+        let mut base: BoolOr<Foo> = BoolOr::Bool(true);
+        let mut ctx = ctx_with(MergeOptions::new());
+        let mut path = "#".to_owned();
+        base.merge_with_context(BoolOr::Item(Foo { foo: "x".into() }), &mut ctx, &mut path);
+        assert!(matches!(base, BoolOr::Item(_)));
+        assert_eq!(ctx.conflicts.len(), 1);
+        assert_eq!(ctx.conflicts[0].kind, ConflictKind::RefVsValue);
+    }
+
+    #[test]
+    fn bool_or_item_vs_bool_replaces_with_ref_vs_value_kind() {
+        let mut base: BoolOr<Foo> = BoolOr::Item(Foo { foo: "x".into() });
+        let mut ctx = ctx_with(MergeOptions::new());
+        let mut path = "#".to_owned();
+        base.merge_with_context(BoolOr::Bool(false), &mut ctx, &mut path);
+        assert!(matches!(base, BoolOr::Bool(false)));
+        assert_eq!(ctx.conflicts.len(), 1);
+        assert_eq!(ctx.conflicts[0].kind, ConflictKind::RefVsValue);
+    }
+
+    #[test]
+    fn bool_or_errored_entry_short_circuits() {
+        let mut base: BoolOr<Foo> = BoolOr::Bool(true);
+        let mut ctx = ctx_with(MergeOptions::new());
+        ctx.errored = true;
+        let mut path = "#".to_owned();
+        base.merge_with_context(BoolOr::Bool(false), &mut ctx, &mut path);
+        // Errored entry → no-op; base unchanged, no new conflict.
+        assert!(matches!(base, BoolOr::Bool(true)));
+        assert!(ctx.conflicts.is_empty());
+    }
 }

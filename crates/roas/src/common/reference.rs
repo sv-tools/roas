@@ -1160,4 +1160,113 @@ mod tests {
         let src = std::error::Error::source(&e).expect("External must have a source");
         assert!(src.to_string().contains("no fetcher"));
     }
+
+    // ---- Merge coverage ----
+
+    use crate::merge::{ConflictKind, MergeContext, MergeOptions, MergeWithContext, Resolution};
+
+    impl MergeWithContext<()> for Foo {
+        fn merge_with_context(
+            &mut self,
+            other: Self,
+            ctx: &mut MergeContext<()>,
+            path: &mut String,
+        ) {
+            if self.foo != other.foo
+                && ctx.should_take_incoming(path, ConflictKind::ScalarOverridden)
+            {
+                self.foo = other.foo;
+            }
+        }
+    }
+
+    fn merge_ctx(opts: enumset::EnumSet<MergeOptions>) -> MergeContext<'static, ()> {
+        MergeContext::new(&(), opts)
+    }
+
+    #[test]
+    fn refor_item_vs_ref_replaces_with_ref_vs_value_kind() {
+        // Opposite direction from the existing refor_ref_vs_item test.
+        let mut base: RefOr<Foo> = RefOr::new_item(Foo { foo: "x".into() });
+        let mut ctx = merge_ctx(MergeOptions::new());
+        let mut path = "#".to_owned();
+        base.merge_with_context(RefOr::new_ref("#/foo/A".to_owned()), &mut ctx, &mut path);
+        assert!(matches!(base, RefOr::Ref(_)));
+        assert_eq!(ctx.conflicts.len(), 1);
+        assert_eq!(ctx.conflicts[0].kind, ConflictKind::RefVsValue);
+    }
+
+    #[test]
+    fn ref_summary_description_merge_independently() {
+        let mut base = Ref {
+            reference: "#/c/A".into(),
+            summary: Some("base sum".into()),
+            description: None,
+        };
+        let incoming = Ref {
+            reference: "#/c/A".into(),
+            summary: None,
+            description: Some("inc desc".into()),
+        };
+        let mut ctx = merge_ctx(MergeOptions::new());
+        let mut path = "#.ref".to_owned();
+        base.merge_with_context(incoming, &mut ctx, &mut path);
+        assert_eq!(base.summary.as_deref(), Some("base sum"));
+        assert_eq!(base.description.as_deref(), Some("inc desc"));
+        assert!(ctx.conflicts.is_empty());
+    }
+
+    #[test]
+    fn ref_summary_collision_records_conflict() {
+        let mut base = Ref {
+            reference: "#/c/A".into(),
+            summary: Some("a".into()),
+            description: None,
+        };
+        let mut ctx = merge_ctx(MergeOptions::new());
+        let mut path = "#.ref".to_owned();
+        base.merge_with_context(
+            Ref {
+                reference: "#/c/A".into(),
+                summary: Some("b".into()),
+                description: None,
+            },
+            &mut ctx,
+            &mut path,
+        );
+        assert_eq!(base.summary.as_deref(), Some("b"));
+        assert_eq!(ctx.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn ref_or_base_wins_records_resolution_base() {
+        let mut base: RefOr<Foo> = RefOr::new_ref("#/A");
+        let mut ctx = merge_ctx(MergeOptions::BaseWins.only());
+        let mut path = "#".to_owned();
+        base.merge_with_context(RefOr::new_ref("#/B".to_owned()), &mut ctx, &mut path);
+        match base {
+            RefOr::Ref(r) => assert_eq!(r.reference, "#/A"),
+            _ => panic!("expected Ref"),
+        }
+        assert_eq!(ctx.conflicts[0].resolution, Resolution::Base);
+    }
+
+    #[test]
+    fn ref_or_errored_entry_short_circuits() {
+        let mut base: RefOr<Foo> = RefOr::new_item(Foo { foo: "x".into() });
+        let mut ctx = merge_ctx(MergeOptions::new());
+        ctx.errored = true;
+        let mut path = "#".to_owned();
+        base.merge_with_context(
+            RefOr::new_item(Foo { foo: "y".into() }),
+            &mut ctx,
+            &mut path,
+        );
+        // Errored entry → no-op; base unchanged, no new conflict.
+        match base {
+            RefOr::Item(f) => assert_eq!(f.foo, "x"),
+            _ => panic!(),
+        }
+        assert!(ctx.conflicts.is_empty());
+    }
 }
