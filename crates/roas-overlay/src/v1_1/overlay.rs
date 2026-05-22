@@ -131,10 +131,6 @@ fn apply_action(
         kind,
     };
 
-    let path =
-        compile_path(&action.target).map_err(|msg| err(ApplyErrorKind::InvalidJsonPath(msg)))?;
-    let pointers = locate(doc, &path);
-
     let operation = if action.is_remove() {
         Operation::Remove
     } else if action.copy.is_some() {
@@ -142,7 +138,29 @@ fn apply_action(
     } else {
         Operation::Update
     };
-    let no_effect = !action.is_remove() && action.update.is_none() && action.copy.is_none();
+
+    // No-op fast path (validate flags it; this is the defensive
+    // arm for callers that skip validation). Bail before any JSONPath
+    // work — a do-nothing action can't affect the document.
+    if !action.is_remove() && action.update.is_none() && action.copy.is_none() {
+        return Ok(ActionOutcome {
+            index,
+            target: action.target.clone(),
+            operation,
+            matched: 0,
+        });
+    }
+
+    // `update` and `copy` are mutually exclusive (validate flags it).
+    // Fail fast rather than silently dropping `update` — there is no
+    // spec-defined precedence between the two, unlike `remove`.
+    if !action.is_remove() && action.update.is_some() && action.copy.is_some() {
+        return Err(err(ApplyErrorKind::ConflictingMergeSources));
+    }
+
+    let path =
+        compile_path(&action.target).map_err(|msg| err(ApplyErrorKind::InvalidJsonPath(msg)))?;
+    let pointers = locate(doc, &path);
 
     if pointers.is_empty() {
         if options.contains(ApplyOptions::ErrorOnZeroMatch) {
@@ -167,15 +185,6 @@ fn apply_action(
         return Err(err(ApplyErrorKind::MixedKindMatch));
     }
 
-    if no_effect {
-        return Ok(ActionOutcome {
-            index,
-            target: action.target.clone(),
-            operation,
-            matched: 0,
-        });
-    }
-
     if action.is_remove() {
         // Process in reverse to preserve earlier pointer validity
         // when siblings live in the same array. Count only successful
@@ -194,10 +203,11 @@ fn apply_action(
         });
     }
 
-    // Resolve the effective merge value: either the inline `update`,
-    // or — for v1.1 `copy` actions — the value at the `copy` source
-    // JSONPath. The source must resolve to exactly one node.
-    let effective_update: Value = if let Some(copy_src) = &action.copy {
+    // Resolve the effective merge value. For `copy` it must be owned
+    // (cloned out of the doc so the later mutation can't alias it);
+    // for `update` we borrow the payload to avoid an extra deep clone
+    // when every target is an object (`merge_json` only needs `&Value`).
+    let copy_value: Option<Value> = if let Some(copy_src) = &action.copy {
         let copy_path =
             compile_path(copy_src).map_err(|msg| err(ApplyErrorKind::InvalidJsonPath(msg)))?;
         let src_pointers = locate(doc, &copy_path);
@@ -207,29 +217,38 @@ fn apply_action(
         if src_pointers.len() > 1 {
             return Err(err(ApplyErrorKind::CopySourceMultiple(copy_src.clone())));
         }
-        doc.pointer(&src_pointers[0])
-            .expect("located pointer must resolve in same doc snapshot")
-            .clone()
+        Some(
+            doc.pointer(&src_pointers[0])
+                .expect("located pointer must resolve in same doc snapshot")
+                .clone(),
+        )
     } else {
-        action
+        None
+    };
+    let effective_update: &Value = match &copy_value {
+        Some(v) => v,
+        None => action
             .update
             .as_ref()
-            .expect("no_effect path covers the all-None case")
-            .clone()
+            .expect("no-op fast path covers the all-None case"),
     };
 
-    // Update / copy share the same per-node merge rules. Array
-    // targets append `effective_update` as a single entry; object
-    // targets recurse per §4.4.3.1.
+    // Update / copy share the same per-node merge rules. For an array
+    // target the merge value either concatenates (when it is itself an
+    // array) or is appended as a single entry (object / primitive),
+    // per Overlay v1.1 §3.3. Object targets recurse per §4.4.3.1.
     for (ptr, kind) in pointers.iter().zip(kinds.iter()) {
         if let Some(node) = doc.pointer_mut(ptr) {
             match kind {
                 NodeKind::Array => {
                     if let Value::Array(arr) = node {
-                        arr.push(effective_update.clone());
+                        match effective_update {
+                            Value::Array(items) => arr.extend(items.iter().cloned()),
+                            other => arr.push(other.clone()),
+                        }
                     }
                 }
-                NodeKind::Object => merge_json(node, &effective_update),
+                NodeKind::Object => merge_json(node, effective_update),
                 NodeKind::Primitive | NodeKind::Missing => {
                     // Primitives rejected above; Missing can't occur
                     // because pointers were just located.
@@ -373,7 +392,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_copy_against_array_target_appends_source_as_single_entry() {
+    fn apply_copy_against_array_target_appends_object_source_as_single_entry() {
+        // v1.1 §3.3: an object/primitive merge value is *appended* as
+        // one element to an array target.
         let o = ovl(vec![Action {
             target: "$.parameters".into(),
             copy: Some("$.shared_parameter".into()),
@@ -391,6 +412,65 @@ mod tests {
                 { "name": "limit", "in": "query" }
             ]),
         );
+    }
+
+    #[test]
+    fn apply_update_array_value_into_array_target_concatenates() {
+        // v1.1 §3.3: an *array* merge value is concatenated with the
+        // target array (element-wise), not nested as one element.
+        // This is the v1.1 divergence from v1.0.
+        let o = ovl(vec![Action {
+            target: "$.tags".into(),
+            update: Some(json!(["new-a", "new-b"])),
+            ..Default::default()
+        }]);
+        let mut doc = json!({ "tags": ["existing"] });
+        o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(doc["tags"], json!(["existing", "new-a", "new-b"]));
+    }
+
+    #[test]
+    fn apply_copy_array_value_into_array_target_concatenates() {
+        let o = ovl(vec![Action {
+            target: "$.dst".into(),
+            copy: Some("$.src".into()),
+            ..Default::default()
+        }]);
+        let mut doc = json!({
+            "dst": [1, 2],
+            "src": [3, 4]
+        });
+        o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(doc["dst"], json!([1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn apply_update_object_value_into_array_target_appends() {
+        let o = ovl(vec![Action {
+            target: "$.list".into(),
+            update: Some(json!({ "added": true })),
+            ..Default::default()
+        }]);
+        let mut doc = json!({ "list": [1, 2] });
+        o.apply(&mut doc, EnumSet::empty()).unwrap();
+        assert_eq!(doc["list"], json!([1, 2, { "added": true }]));
+    }
+
+    #[test]
+    fn apply_conflicting_update_and_copy_errors_and_rolls_back() {
+        // Validate flags this; apply fails fast rather than silently
+        // dropping `update`.
+        let o = ovl(vec![Action {
+            target: "$.dest".into(),
+            update: Some(json!({ "from": "update" })),
+            copy: Some("$.src".into()),
+            ..Default::default()
+        }]);
+        let mut doc = json!({ "dest": {}, "src": { "from": "copy" } });
+        let snapshot = doc.clone();
+        let err = o.apply(&mut doc, EnumSet::empty()).unwrap_err();
+        assert_eq!(err.kind, ApplyErrorKind::ConflictingMergeSources);
+        assert_eq!(doc, snapshot);
     }
 
     #[test]

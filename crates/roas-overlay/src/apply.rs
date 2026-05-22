@@ -138,6 +138,10 @@ pub enum ApplyErrorKind {
     /// Overlay v1.1 only: the action's `copy` JSONPath matched more
     /// than one node; the spec requires exactly one source.
     CopySourceMultiple(String),
+    /// Overlay v1.1 only: the action set both `update` and `copy`,
+    /// which the spec treats as mutually exclusive. Validation flags
+    /// this; apply fails fast rather than silently dropping one.
+    ConflictingMergeSources,
 }
 
 impl Display for ApplyErrorKind {
@@ -162,6 +166,9 @@ impl Display for ApplyErrorKind {
                 f,
                 "`copy` source {s:?} matched multiple nodes; exactly one is required",
             ),
+            ApplyErrorKind::ConflictingMergeSources => {
+                f.write_str("action sets both `update` and `copy`; they are mutually exclusive")
+            }
         }
     }
 }
@@ -199,6 +206,7 @@ mod tests {
             ApplyErrorKind::PrimitiveActionTarget,
             ApplyErrorKind::CopySourceNotFound("$.src".into()),
             ApplyErrorKind::CopySourceMultiple("$.src".into()),
+            ApplyErrorKind::ConflictingMergeSources,
         ];
         for k in cases {
             assert!(

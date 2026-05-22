@@ -24,6 +24,7 @@ impl Version {
         Self("1.0.0".to_owned())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }

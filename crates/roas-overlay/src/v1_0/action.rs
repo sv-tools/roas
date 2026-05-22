@@ -6,7 +6,7 @@
 //! each match or removes them.
 
 use crate::common::apply::compile_path;
-use crate::validation::{Context, ValidateWithContext, validate_required_string};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -38,22 +38,25 @@ pub struct Action {
 
 impl Action {
     /// Returns `true` if this action's `remove` field is set to `true`.
+    #[must_use]
     pub fn is_remove(&self) -> bool {
         self.remove == Some(true)
     }
 }
 
+/// Validate that `value` is a non-empty, syntactically valid RFC 9535
+/// JSONPath, recording diagnostics under `path` (computed once).
+fn validate_jsonpath(value: &str, ctx: &mut Context, path: String) {
+    if value.is_empty() {
+        ctx.error(path, "must not be empty");
+    } else if let Err(msg) = compile_path(value) {
+        ctx.error(path, format!("invalid JSONPath query: {msg}"));
+    }
+}
+
 impl ValidateWithContext for Action {
     fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.target, ctx, format!("{path}.target"));
-        if !self.target.is_empty()
-            && let Err(msg) = compile_path(&self.target)
-        {
-            ctx.error(
-                format!("{path}.target"),
-                format!("invalid JSONPath query: {msg}"),
-            );
-        }
+        validate_jsonpath(&self.target, ctx, format!("{path}.target"));
         // The spec says `update` "has no impact if the `remove` field
         // of this action object is `true`", but at validation time we
         // reject the combo because it almost certainly indicates an
