@@ -15,9 +15,11 @@ publish = true
 
 [features]
 default = ["v1_0"]
-# Support for OpenAPI Overlay v1.0.x
+# Support for OpenAPI Overlay v1.0.x.
 v1_0 = []
-# Support for OpenAPI Overlay v1.1.x (not yet implemented)
+# Support for OpenAPI Overlay v1.1.x. Independent of `v1_0`; enable
+# both to get the additional `From<v1_0::Overlay> for v1_1::Overlay`
+# upconversion impl.
 v1_1 = []
 
 # `clap::ValueEnum` impls for `apply::ApplyOptions` and

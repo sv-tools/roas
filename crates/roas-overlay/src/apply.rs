@@ -73,6 +73,9 @@ pub struct ActionOutcome {
 pub enum Operation {
     Update,
     Remove,
+    /// Overlay v1.1 only: source node located via the action's `copy`
+    /// JSONPath was merged into each matched `target` node.
+    Copy,
 }
 
 impl Display for Operation {
@@ -80,6 +83,7 @@ impl Display for Operation {
         f.write_str(match self {
             Operation::Update => "update",
             Operation::Remove => "remove",
+            Operation::Copy => "copy",
         })
     }
 }
@@ -128,6 +132,12 @@ pub enum ApplyErrorKind {
     /// requires action targets to be objects or arrays, for both
     /// `update` and `remove` actions.
     PrimitiveActionTarget,
+    /// Overlay v1.1 only: the action's `copy` JSONPath is
+    /// syntactically valid but matched no node in the working doc.
+    CopySourceNotFound(String),
+    /// Overlay v1.1 only: the action's `copy` JSONPath matched more
+    /// than one node; the spec requires exactly one source.
+    CopySourceMultiple(String),
 }
 
 impl Display for ApplyErrorKind {
@@ -145,6 +155,13 @@ impl Display for ApplyErrorKind {
                 "action `target` must resolve to objects or arrays, \
                  not primitives or null",
             ),
+            ApplyErrorKind::CopySourceNotFound(s) => {
+                write!(f, "`copy` source {s:?} matched no node")
+            }
+            ApplyErrorKind::CopySourceMultiple(s) => write!(
+                f,
+                "`copy` source {s:?} matched multiple nodes; exactly one is required",
+            ),
         }
     }
 }
@@ -157,6 +174,7 @@ mod tests {
     fn operation_display_uses_lowercase_words() {
         assert_eq!(Operation::Update.to_string(), "update");
         assert_eq!(Operation::Remove.to_string(), "remove");
+        assert_eq!(Operation::Copy.to_string(), "copy");
     }
 
     #[test]
@@ -179,6 +197,8 @@ mod tests {
             ApplyErrorKind::ZeroMatch,
             ApplyErrorKind::MixedKindMatch,
             ApplyErrorKind::PrimitiveActionTarget,
+            ApplyErrorKind::CopySourceNotFound("$.src".into()),
+            ApplyErrorKind::CopySourceMultiple("$.src".into()),
         ];
         for k in cases {
             assert!(

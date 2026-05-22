@@ -1,0 +1,29 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Source / Destination demo",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/source": {
+      "get": {
+        "summary": "Source endpoint",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/destination": {}
+  },
+  "components": {
+    "schemas": {
+      "PetCore": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" }
+        }
+      }
+    }
+  }
+}

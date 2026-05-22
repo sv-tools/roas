@@ -100,3 +100,8 @@ component_management:
       paths:
         - crates/roas-overlay/src/v1_0/**
         - crates/roas-overlay/tests/v1_0_test.rs
+    - component_id: overlay-v1_1
+      name: overlay-v1.1
+      paths:
+        - crates/roas-overlay/src/v1_1/**
+        - crates/roas-overlay/tests/v1_1_test.rs

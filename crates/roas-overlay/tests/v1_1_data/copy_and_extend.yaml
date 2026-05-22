@@ -1,0 +1,19 @@
+overlay: 1.1.0
+info:
+  title: Compose copy + update
+  version: 1.0.0
+  description: Copy the PetCore schema as Pet, then patch the copy.
+actions:
+  # Create an empty Pet slot by merging into the schemas map.
+  - target: $.components.schemas
+    update:
+      Pet: {}
+  # Copy the existing PetCore over the empty Pet (merge semantics).
+  - target: $.components.schemas['Pet']
+    copy: $.components.schemas['PetCore']
+  # Patch the copy with the required field.
+  - target: $.components.schemas['Pet']
+    update:
+      required:
+        - id
+        - name

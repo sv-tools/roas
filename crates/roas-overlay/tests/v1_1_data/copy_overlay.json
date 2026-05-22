@@ -1,0 +1,15 @@
+{
+  "overlay": "1.1.0",
+  "info": {
+    "title": "Copy /source to /destination",
+    "version": "1.0.0",
+    "description": "Demonstrates the v1.1 `copy` action."
+  },
+  "actions": [
+    {
+      "target": "$.paths['/destination']",
+      "copy": "$.paths['/source']",
+      "description": "Mirror the source endpoint under /destination."
+    }
+  ]
+}
