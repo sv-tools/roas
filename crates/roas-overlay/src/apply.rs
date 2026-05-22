@@ -24,13 +24,13 @@ pub trait Apply {
 pub enum ApplyOptions {
     /// Treat a zero-match `target` JSONPath as an error rather than a
     /// no-op. Default behavior (option absent) follows
-    /// [§4.4](https://spec.openapis.org/overlay/v1.1.0.html#action-object):
+    /// [§4.4](https://spec.openapis.org/overlay/v1.0.0.html#action-object):
     /// "the action succeeds without changing the target document".
     ErrorOnZeroMatch,
-    /// Reject `update`/`copy` actions whose `target` selects nodes of
-    /// mixed kind (some objects, some arrays, some primitives). The
-    /// v1.1 spec calls this out normatively; v1.0 doesn't, so this
-    /// option lets v1.0 callers opt into the stricter check.
+    /// Reject `update` actions whose `target` selects nodes of mixed
+    /// kind (some objects, some arrays). The v1.1 spec calls this out
+    /// normatively; v1.0 doesn't, so this option lets v1.0 callers
+    /// opt into the stricter check.
     ErrorOnMixedKindMatch,
 }
 
@@ -51,7 +51,7 @@ impl clap::ValueEnum for ApplyOptions {
             ),
             ApplyOptions::ErrorOnMixedKindMatch => (
                 "error-on-mixed-kind-match",
-                "Fail when `update`/`copy` selects a mix of objects, arrays, and primitives",
+                "Fail when `update` selects a mix of objects and arrays",
             ),
         };
         Some(clap::builder::PossibleValue::new(name).help(help))
@@ -60,6 +60,7 @@ impl clap::ValueEnum for ApplyOptions {
 
 /// One entry per applied action, in declaration order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ActionOutcome {
     pub index: usize,
     pub target: String,
@@ -68,11 +69,10 @@ pub struct ActionOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Operation {
     Update,
     Remove,
-    /// v1.1 only.
-    Copy,
 }
 
 impl Display for Operation {
@@ -80,13 +80,13 @@ impl Display for Operation {
         f.write_str(match self {
             Operation::Update => "update",
             Operation::Remove => "remove",
-            Operation::Copy => "copy",
         })
     }
 }
 
 /// Report returned by a successful [`Apply::apply`] call.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct ApplyReport {
     pub actions: Vec<ActionOutcome>,
 }
@@ -94,6 +94,7 @@ pub struct ApplyReport {
 /// Failure returned by [`Apply::apply`]. The `target` document is
 /// guaranteed untouched on error.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ApplyError {
     pub action_index: usize,
     pub target: String,
@@ -113,6 +114,7 @@ impl Display for ApplyError {
 impl std::error::Error for ApplyError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApplyErrorKind {
     /// `target` is not a syntactically valid RFC 9535 JSONPath query.
     InvalidJsonPath(String),
@@ -121,17 +123,11 @@ pub enum ApplyErrorKind {
     /// Target matched nodes of mixed kinds and
     /// [`ApplyOptions::ErrorOnMixedKindMatch`] is set.
     MixedKindMatch,
-    /// `update` is set but `target` resolves to a primitive or `null`,
-    /// which the spec
-    /// [§4.4](https://spec.openapis.org/overlay/v1.1.0.html#action-object)
-    /// disallows.
-    UpdateOnPrimitiveTarget,
-    /// v1.1 only: `copy` source JSONPath is syntactically valid but
-    /// matched no node.
-    CopySourceNotFound(String),
-    /// v1.1 only: `copy` source matched multiple nodes; the spec
-    /// requires exactly one.
-    CopySourceMultiple(String),
+    /// `target` resolves to a primitive or `null`. The spec
+    /// [§4.4](https://spec.openapis.org/overlay/v1.0.0.html#action-object)
+    /// requires action targets to be objects or arrays, for both
+    /// `update` and `remove` actions.
+    PrimitiveActionTarget,
 }
 
 impl Display for ApplyErrorKind {
@@ -142,19 +138,12 @@ impl Display for ApplyErrorKind {
                 f.write_str("target matched zero nodes (error-on-zero-match)")
             }
             ApplyErrorKind::MixedKindMatch => f.write_str(
-                "target matched nodes of mixed kind (objects, arrays, primitives) — \
+                "target matched nodes of mixed kind (objects and arrays) — \
                  error-on-mixed-kind-match",
             ),
-            ApplyErrorKind::UpdateOnPrimitiveTarget => f.write_str(
-                "`update` requires target nodes to be objects or arrays, \
+            ApplyErrorKind::PrimitiveActionTarget => f.write_str(
+                "action `target` must resolve to objects or arrays, \
                  not primitives or null",
-            ),
-            ApplyErrorKind::CopySourceNotFound(s) => {
-                write!(f, "`copy` source {s:?} matched no node")
-            }
-            ApplyErrorKind::CopySourceMultiple(s) => write!(
-                f,
-                "`copy` source {s:?} matched multiple nodes; exactly one is required",
             ),
         }
     }
@@ -168,7 +157,6 @@ mod tests {
     fn operation_display_uses_lowercase_words() {
         assert_eq!(Operation::Update.to_string(), "update");
         assert_eq!(Operation::Remove.to_string(), "remove");
-        assert_eq!(Operation::Copy.to_string(), "copy");
     }
 
     #[test]
@@ -190,9 +178,7 @@ mod tests {
             ApplyErrorKind::InvalidJsonPath("bad path".into()),
             ApplyErrorKind::ZeroMatch,
             ApplyErrorKind::MixedKindMatch,
-            ApplyErrorKind::UpdateOnPrimitiveTarget,
-            ApplyErrorKind::CopySourceNotFound("$.src".into()),
-            ApplyErrorKind::CopySourceMultiple("$.src".into()),
+            ApplyErrorKind::PrimitiveActionTarget,
         ];
         for k in cases {
             assert!(

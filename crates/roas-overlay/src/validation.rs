@@ -88,8 +88,6 @@ pub enum ValidationOptions {
     IgnoreEmptyInfoTitle,
     /// Allow `info.version` to be empty (still required to be present).
     IgnoreEmptyInfoVersion,
-    /// Skip the URI-reference format check on `extends`.
-    IgnoreExtendsFormat,
 }
 
 #[cfg(feature = "clap")]
@@ -98,7 +96,6 @@ impl clap::ValueEnum for ValidationOptions {
         &[
             ValidationOptions::IgnoreEmptyInfoTitle,
             ValidationOptions::IgnoreEmptyInfoVersion,
-            ValidationOptions::IgnoreExtendsFormat,
         ]
     }
 
@@ -110,10 +107,6 @@ impl clap::ValueEnum for ValidationOptions {
             ValidationOptions::IgnoreEmptyInfoVersion => {
                 ("empty-info-version", "Allow empty `info.version`")
             }
-            ValidationOptions::IgnoreExtendsFormat => (
-                "extends-format",
-                "Skip the URI-reference format check on `extends`",
-            ),
         };
         Some(clap::builder::PossibleValue::new(name).help(help))
     }
@@ -124,26 +117,21 @@ pub trait Validate {
     fn validate(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error>;
 }
 
-/// Crate-internal: implemented by every component type. The generic
-/// parameter `O` exists so per-version overlays can have their own
-/// component impls without ambiguity, even though the validator
-/// itself doesn't reach into the overlay during the recursive descent.
-pub(crate) trait ValidateWithContext<O> {
-    fn validate_with_context(&self, ctx: &mut Context<O>, path: String);
+/// Crate-internal: implemented by every component type.
+pub(crate) trait ValidateWithContext {
+    fn validate_with_context(&self, ctx: &mut Context, path: String);
 }
 
-pub(crate) struct Context<O> {
+pub(crate) struct Context {
     pub options: EnumSet<ValidationOptions>,
     pub errors: Vec<ValidationError>,
-    _marker: std::marker::PhantomData<fn() -> O>,
 }
 
-impl<O> Context<O> {
+impl Context {
     pub fn new(options: EnumSet<ValidationOptions>) -> Self {
         Self {
             options,
             errors: Vec::new(),
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -166,10 +154,9 @@ impl<O> Context<O> {
     }
 }
 
-/// Validate that a required string is not empty. Mirrors the helper
-/// in `roas::common::helpers::validate_required_string` so per-version
-/// modules stay readable.
-pub(crate) fn validate_required_string<O>(s: &str, ctx: &mut Context<O>, path: String) {
+/// Validate that a required string is not empty. Mirrors
+/// `roas::common::helpers::validate_required_string`.
+pub(crate) fn validate_required_string(s: &str, ctx: &mut Context, path: String) {
     if s.is_empty() {
         ctx.error(path, "must not be empty");
     }
@@ -221,7 +208,7 @@ mod tests {
 
     #[test]
     fn context_collects_errors_and_converts_to_result() {
-        let mut ctx: Context<()> = Context::new(EnumSet::empty());
+        let mut ctx = Context::new(EnumSet::empty());
         ctx.error("#.x".into(), "kaboom");
         let r = ctx.into_result();
         let err = r.unwrap_err();
@@ -230,21 +217,21 @@ mod tests {
 
     #[test]
     fn context_with_no_errors_returns_ok() {
-        let ctx: Context<()> = Context::new(EnumSet::empty());
+        let ctx = Context::new(EnumSet::empty());
         assert!(ctx.into_result().is_ok());
     }
 
     #[test]
     fn context_is_option_reflects_set_membership() {
         let opts = EnumSet::only(ValidationOptions::IgnoreEmptyInfoTitle);
-        let ctx: Context<()> = Context::new(opts);
+        let ctx = Context::new(opts);
         assert!(ctx.is_option(ValidationOptions::IgnoreEmptyInfoTitle));
         assert!(!ctx.is_option(ValidationOptions::IgnoreEmptyInfoVersion));
     }
 
     #[test]
     fn validate_required_string_pushes_error_for_empty() {
-        let mut ctx: Context<()> = Context::new(EnumSet::empty());
+        let mut ctx = Context::new(EnumSet::empty());
         validate_required_string("", &mut ctx, "#.info.title".into());
         validate_required_string("ok", &mut ctx, "#.info.version".into());
         assert_eq!(ctx.errors.len(), 1);

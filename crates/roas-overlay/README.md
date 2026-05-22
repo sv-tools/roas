@@ -10,10 +10,10 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 
 ## Versions
 
-| Overlay version | Feature flag | Status |
-|-----------------|--------------|--------|
-| 1.0             | `v1_0` (default) | ✅ implemented |
-| 1.1             | `v1_1`       | planned (next PR) |
+| Overlay version | Feature flag     | Status            |
+|-----------------|------------------|-------------------|
+| 1.0             | `v1_0` (default) | ✅ implemented     |
+| 1.1             | `v1_1`           | planned (next PR) |
 
 ## Quick start
 
@@ -55,10 +55,11 @@ For each action in declaration order, against the *current* working copy of the 
 1. Compile the `target` JSONPath. Syntax errors abort the merge with `InvalidJsonPath`.
 2. Resolve matching nodes via [`serde_json_path`](https://crates.io/crates/serde_json_path).
 3. Zero matches → silent no-op (or `ZeroMatch` error under `ApplyOptions::ErrorOnZeroMatch`).
-4. `remove: true` → drop each matched node from its container. Sibling array indices are preserved by processing matches in reverse.
-5. Otherwise, if `update` is set:
-   - Targets must be objects or arrays (spec §4.4); primitives or `null` raise `UpdateOnPrimitiveTarget`.
-   - Merge the `update` value into each matched node per [§4.4.3.1](https://spec.openapis.org/overlay/v1.0.0.html#merging-rules): objects merge per key (recursively), arrays concatenate, anything else replaces.
+4. Targets must be objects or arrays for *every* action (spec §4.4); primitives or `null` raise `PrimitiveActionTarget`.
+5. `remove: true` → drop each matched node from its container. Sibling array indices are preserved by processing matches in reverse.
+6. Otherwise, if `update` is set, the behavior depends on the matched node's kind:
+   - **Array target** → `update` is appended as a single new element, regardless of its shape (spec §4.4: *"an entry to append to the array"*).
+   - **Object target** → recursive merge per [§4.4.3.1](https://spec.openapis.org/overlay/v1.0.0.html#merging-rules): keys present in both sides recurse (objects), or use the merge rules (primitives replace, arrays concatenate at the property level).
 
 On any error the target document is left **untouched** — `Overlay::apply` operates on a clone and commits only on success.
 
@@ -67,12 +68,11 @@ On any error the target document is left **untouched** — `Overlay::apply` oper
 `ApplyOptions` (EnumSet):
 
 - `ErrorOnZeroMatch` — fail when an action's `target` selects zero nodes (default: silent no-op).
-- `ErrorOnMixedKindMatch` — fail when an `update`/`copy` selects nodes of mixed kind (some objects, some arrays). The v1.1 spec calls this out normatively; this option lets v1.0 callers opt in.
+- `ErrorOnMixedKindMatch` — fail when an `update` selects nodes of mixed kind (some objects, some arrays). The v1.1 spec calls this out normatively; this option lets v1.0 callers opt in.
 
 `ValidationOptions` (EnumSet):
 
 - `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion` — allow `info.title` / `info.version` to be empty.
-- `IgnoreExtendsFormat` — skip the format check on `extends`.
 
 Behind the `clap` feature, both enums implement `clap::ValueEnum` so downstream CLIs (such as `roas-cli`) can surface them directly.
 

@@ -43,8 +43,11 @@ impl serde::Serialize for Version {
 
 const VERSION_SCHEMA_DESCRIPTION: &str = "`1.0.<patch>` semver (Overlay v1.0)";
 
+/// Schema pattern is `^1\.0\.\d+$` — hand-rolled to avoid pulling in
+/// `lazy-regex` just for this one check.
 fn matches_overlay_1_0_version(s: &str) -> bool {
-    lazy_regex::regex!(r"^1\.0\.\d+$").is_match(s)
+    s.strip_prefix("1.0.")
+        .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl<'de> serde::Deserialize<'de> for Version {

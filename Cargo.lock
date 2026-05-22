@@ -1296,12 +1296,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "enumset",
- "lazy-regex",
  "serde",
  "serde_json",
  "serde_json_path",
  "serde_yaml_ng",
- "thiserror",
 ]
 
 [[package]]

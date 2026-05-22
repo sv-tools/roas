@@ -136,19 +136,23 @@ fn error_on_zero_match_aborts_and_rolls_back() {
 }
 
 #[test]
-fn ignore_extends_format_option_skips_extends_diagnostic() {
+fn ignore_info_options_suppress_diagnostics() {
     let mut overlay = load_overlay_json("targeted_overlay.json");
-    overlay.extends = Some(String::new());
+    overlay.info.title.clear();
+    overlay.info.version.clear();
 
-    // Without the option, the empty `extends` field is flagged.
     let err = overlay.validate(EnumSet::empty()).unwrap_err();
     assert!(
         err.errors
             .iter()
-            .any(|e| e == "#.extends: must not be empty")
+            .any(|e| e == "#.info.title: must not be empty")
+    );
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| e == "#.info.version: must not be empty")
     );
 
-    // With the option set, the diagnostic is suppressed.
-    let opts = ValidationOptions::IgnoreExtendsFormat.into();
-    overlay.validate(opts).expect("validates with option");
+    let opts = ValidationOptions::IgnoreEmptyInfoTitle | ValidationOptions::IgnoreEmptyInfoVersion;
+    overlay.validate(opts).expect("validates with options");
 }

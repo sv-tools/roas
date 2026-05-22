@@ -4,7 +4,6 @@
 //! a minimal metadata block with required `title` and `version`,
 //! extensible via `x-` fields.
 
-use crate::v1_0::overlay::Overlay;
 use crate::validation::{
     Context, ValidateWithContext, ValidationOptions, validate_required_string,
 };
@@ -26,8 +25,8 @@ pub struct Info {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-impl ValidateWithContext<Overlay> for Info {
-    fn validate_with_context(&self, ctx: &mut Context<Overlay>, path: String) {
+impl ValidateWithContext for Info {
+    fn validate_with_context(&self, ctx: &mut Context, path: String) {
         if !ctx.is_option(ValidationOptions::IgnoreEmptyInfoTitle) {
             validate_required_string(&self.title, ctx, format!("{path}.title"));
         }
@@ -43,7 +42,7 @@ mod tests {
     use enumset::EnumSet;
     use serde_json::json;
 
-    fn ctx() -> Context<Overlay> {
+    fn ctx() -> Context {
         Context::new(EnumSet::empty())
     }
 
@@ -93,7 +92,7 @@ mod tests {
     fn validate_ignore_options_suppress_diagnostics() {
         let opts = EnumSet::only(ValidationOptions::IgnoreEmptyInfoTitle)
             | ValidationOptions::IgnoreEmptyInfoVersion;
-        let mut c: Context<Overlay> = Context::new(opts);
+        let mut c = Context::new(opts);
         let info = Info::default();
         info.validate_with_context(&mut c, "#.info".into());
         assert!(c.errors.is_empty());

@@ -6,7 +6,6 @@
 //! each match or removes them.
 
 use crate::common::apply::compile_path;
-use crate::v1_0::overlay::Overlay;
 use crate::validation::{Context, ValidateWithContext, validate_required_string};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -44,8 +43,8 @@ impl Action {
     }
 }
 
-impl ValidateWithContext<Overlay> for Action {
-    fn validate_with_context(&self, ctx: &mut Context<Overlay>, path: String) {
+impl ValidateWithContext for Action {
+    fn validate_with_context(&self, ctx: &mut Context, path: String) {
         validate_required_string(&self.target, ctx, format!("{path}.target"));
         if !self.target.is_empty()
             && let Err(msg) = compile_path(&self.target)
@@ -55,13 +54,24 @@ impl ValidateWithContext<Overlay> for Action {
                 format!("invalid JSONPath query: {msg}"),
             );
         }
-        // `remove: true` and `update` are mutually exclusive — the
-        // spec says `update` "has no impact if the `remove` field of
-        // this action object is `true`", but at validation time we
+        // The spec says `update` "has no impact if the `remove` field
+        // of this action object is `true`", but at validation time we
         // reject the combo because it almost certainly indicates an
         // authoring mistake.
         if self.is_remove() && self.update.is_some() {
-            ctx.error(path, "`remove: true` and `update` are mutually exclusive");
+            ctx.error(
+                path.clone(),
+                "`remove: true` and `update` are mutually exclusive",
+            );
+        }
+        // Catch the silent-no-op authoring bug: an action that does
+        // nothing is overwhelmingly a typo (e.g. forgot the `update`
+        // payload) rather than a deliberate placeholder.
+        if !self.is_remove() && self.update.is_none() {
+            ctx.error(
+                path,
+                "action must specify either `update` or `remove: true`",
+            );
         }
     }
 }
@@ -73,7 +83,7 @@ mod tests {
     use serde_json::json;
 
     fn validate(action: &Action) -> Vec<String> {
-        let mut ctx: Context<Overlay> = Context::new(EnumSet::empty());
+        let mut ctx = Context::new(EnumSet::empty());
         action.validate_with_context(&mut ctx, "#.actions[0]".into());
         ctx.errors.iter().map(|e| e.to_string()).collect()
     }
