@@ -22,13 +22,13 @@
 //!   result, lifting every inline component into the matching
 //!   `components.<bag>` / `definitions` / `parameters` / `responses`
 //!   slot with strict dedup. Pass `--apply <FILE>` (repeatable) to
-//!   apply OpenAPI Overlay documents on top of the final spec —
-//!   overlays run *last*, after conversion, `--merge`, and
-//!   `--collapse`; `--apply-option` tunes the apply. External `$ref`s
-//!   are skipped by default; use `--load file` / `--load http` to opt
-//!   into the loader. Output defaults to the input format (YAML in →
-//!   YAML out, JSON in → JSON out); pass `--output-format json|yaml`
-//!   to override.
+//!   apply OpenAPI Overlay documents to the spec; `--apply-option`
+//!   tunes the apply. The pipeline runs convert → `--merge` →
+//!   `--apply` → `--collapse`, so overlay edits are visible to
+//!   collapse. External `$ref`s are skipped by default; use `--load
+//!   file` / `--load http` to opt into the loader. Output defaults to
+//!   the input format (YAML in → YAML out, JSON in → JSON out); pass
+//!   `--output-format json|yaml` to override.
 //!
 //! - `roas overlay <validate|convert|apply>` — work with OpenAPI
 //!   Overlay documents. `overlay validate` parses + validates an
@@ -557,23 +557,44 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
         }
     }
 
-    // 3) Collapse so it has visibility into the final merged tree.
-    if args.collapse {
-        let mut loader = build_loader(&args.load);
-        converted.collapse(loader.as_mut())?;
-    }
-    let mut value = converted.into_value()?;
-
-    // 4) Apply overlays last, on the serialized JSON. Overlays produce
-    //    arbitrary JSON that no longer needs the typed model, whereas
-    //    collapse does — so apply must run after it.
-    if !args.apply.is_empty() {
+    // Pipeline order is convert → merge → apply → collapse, so overlay
+    // edits are visible to collapse (overlay-introduced inline
+    // components get lifted into `$ref`s too). `collapse` works on the
+    // typed spec while `apply` works on `serde_json::Value`, so:
+    //
+    //   - no `--apply`: collapse on the typed spec directly (no
+    //     serialize/re-parse round-trip; identical to plain convert).
+    //   - with `--apply`: serialize, apply the overlays, then — if
+    //     `--collapse` — re-parse the result at the target version and
+    //     collapse the typed spec.
+    let value = if args.apply.is_empty() {
+        // 3) Collapse on the typed (post-merge) spec.
+        if args.collapse {
+            let mut loader = build_loader(&args.load);
+            converted.collapse(loader.as_mut())?;
+        }
+        converted.into_value()?
+    } else {
+        // 3) Apply overlays on the serialized (post-merge) spec.
         let mut apply_options = enumset::EnumSet::<roas_overlay::apply::ApplyOptions>::empty();
         for opt in &args.apply_options {
             apply_options |= *opt;
         }
+        let mut value = converted.into_value()?;
         overlay::apply_overlays(&mut value, &args.apply, apply_options)?;
-    }
+
+        // 4) Collapse the overlaid spec. Re-parse at the target
+        //    version first, since collapse needs the typed model.
+        if args.collapse {
+            let mut respec = versioned::detect_or_use(Some(target), value)
+                .context("re-parsing the overlaid spec for --collapse")?;
+            let mut loader = build_loader(&args.load);
+            respec.collapse(loader.as_mut())?;
+            respec.into_value()?
+        } else {
+            value
+        }
+    };
 
     // Output format defaults to the input format; `--output-format` overrides.
     let out_format = args.output_format.unwrap_or(input_format);
@@ -1442,6 +1463,33 @@ mod tests {
             apply_options: vec![],
         };
         run_convert(args).expect("convert + apply must succeed");
+    }
+
+    #[test]
+    fn run_convert_with_apply_then_collapse_reparses_and_collapses() {
+        // Exercises the apply → collapse path: the overlay edits the
+        // spec (Value), then it's re-parsed at the target version and
+        // collapsed. The overlay adds an inline schema that collapse
+        // can lift into components.
+        let base = TempFile::write("base.json", MINIMAL_V3_2);
+        let overlay = TempFile::write(
+            "overlay.json",
+            br#"{"overlay":"1.0.0","info":{"title":"o","version":"1"},"actions":[{"target":"$","update":{"components":{"schemas":{"Pet":{"type":"object"}}}}}]}"#,
+        );
+        let args = ConvertArgs {
+            file: Some(base.0.clone()),
+            to: SpecVersion::V3_2,
+            from: None,
+            format: None,
+            output_format: None,
+            merge: vec![],
+            merge_options: vec![],
+            collapse: true,
+            load: vec![],
+            apply: vec![overlay.0.clone()],
+            apply_options: vec![],
+        };
+        run_convert(args).expect("convert + apply + collapse must succeed");
     }
 
     #[test]

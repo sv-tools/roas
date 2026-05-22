@@ -111,7 +111,7 @@ roas convert --to v3_2 --merge layer.yaml --merge-option merge-info spec.json
 
 Supported `--merge-option` values: `base-wins`, `error-on-conflict`, `deep-merge-object-schemas`, `merge-info`, `replace-lists-when-empty`. Under `error-on-conflict` the first real collision aborts the merge and `roas` exits non-zero with the conflicting path; the base spec is untouched on error.
 
-`--apply <FILE>` (repeatable) applies OpenAPI Overlay documents on top of the converted spec. Each overlay is loaded with extension-based format detection, its version detected from the `overlay` field, and applied via [`roas-overlay`](https://crates.io/crates/roas-overlay). The full convert pipeline is **convert → `--merge` → `--collapse` → `--apply`** — overlays run last, on the final JSON, because they produce arbitrary structure that no longer needs the typed model (whereas collapse does). `--apply-option` (repeatable) tunes the apply (`error-on-zero-match`, `error-on-mixed-kind-match`):
+`--apply <FILE>` (repeatable) applies OpenAPI Overlay documents to the converted spec. Each overlay is loaded with extension-based format detection, its version detected from the `overlay` field, and applied via [`roas-overlay`](https://crates.io/crates/roas-overlay). The full convert pipeline is **convert → `--merge` → `--apply` → `--collapse`** — overlays apply before collapse so overlay-introduced inline components are lifted into `$ref`s too. (When `--apply` and `--collapse` are combined, the overlaid spec is re-parsed at the target version before collapsing, so it must still be a valid OpenAPI document.) `--apply-option` (repeatable) tunes the apply (`error-on-zero-match`, `error-on-mixed-kind-match`):
 
 ```shell
 roas convert --to v3_2 --apply patch.yaml spec.json
