@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "roas-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1256,6 +1256,7 @@ dependencies = [
  "roas",
  "roas-file-fetcher",
  "roas-http-fetcher",
+ "roas-overlay",
  "serde",
  "serde_json",
  "serde_yaml_ng",

@@ -1,6 +1,7 @@
 //! `roas` command-line front-end.
 //!
-//! Three subcommands today:
+//! The root `validate` and `convert` commands operate on OpenAPI specs;
+//! the `overlay` subcommand group operates on OpenAPI Overlay documents.
 //!
 //! - `roas validate [FILE]` — parse and validate an OpenAPI spec. Version is
 //!   auto-detected from the document; pass `--from` to force. External
@@ -20,10 +21,20 @@
 //!   run `Spec::collapse` on the (post-conversion, post-merge)
 //!   result, lifting every inline component into the matching
 //!   `components.<bag>` / `definitions` / `parameters` / `responses`
-//!   slot with strict dedup. External `$ref`s are skipped by default;
-//!   use `--load file` / `--load http` to opt into the loader. Output
-//!   defaults to the input format (YAML in → YAML out, JSON in → JSON
-//!   out); pass `--output-format json|yaml` to override.
+//!   slot with strict dedup. Pass `--apply <FILE>` (repeatable) to
+//!   apply OpenAPI Overlay documents on top of the final spec —
+//!   overlays run *last*, after conversion, `--merge`, and
+//!   `--collapse`; `--apply-option` tunes the apply. External `$ref`s
+//!   are skipped by default; use `--load file` / `--load http` to opt
+//!   into the loader. Output defaults to the input format (YAML in →
+//!   YAML out, JSON in → JSON out); pass `--output-format json|yaml`
+//!   to override.
+//!
+//! - `roas overlay <validate|convert|apply>` — work with OpenAPI
+//!   Overlay documents. `overlay validate` parses + validates an
+//!   overlay; `overlay convert --to v1_1` upconverts one; `overlay
+//!   apply --overlay <FILE> [SPEC]` applies overlay(s) to a target
+//!   spec (spec on stdin or as the positional arg).
 //!
 //! - `roas preview [FILE]` — start a local HTTP server on
 //!   `127.0.0.1:<random>` that serves the spec rendered with
@@ -54,9 +65,11 @@ use std::path::{Path, PathBuf};
 // Variants render as kebab-case with the `Ignore` prefix dropped: e.g.
 // `Options::IgnoreMissingTags` ↔ `--ignore missing-tags`.
 
+mod overlay;
 mod preview;
 mod versioned;
 
+use overlay::OverlayCommand;
 use preview::PreviewArgs;
 use versioned::{SpecVersion, parse_value, path_looks_like_yaml};
 
@@ -73,6 +86,9 @@ enum Command {
     Validate(ValidateArgs),
     /// Convert an OpenAPI spec to a different version.
     Convert(ConvertArgs),
+    /// Work with OpenAPI Overlay documents: validate, convert, or apply.
+    #[command(subcommand)]
+    Overlay(OverlayCommand),
     /// Preview the spec in a browser, rendered with Redoc or Swagger UI.
     Preview(PreviewArgs),
     /// Print a shell completion script to stdout.
@@ -179,6 +195,22 @@ struct ConvertArgs {
     #[arg(long)]
     collapse: bool,
 
+    /// Path to an OpenAPI Overlay document to apply on top of the
+    /// converted (and merged / collapsed) spec. Each `--apply` source
+    /// is loaded with extension-based format detection, its version
+    /// detected from the `overlay` field, and applied via
+    /// `roas-overlay`. Repeat the flag to apply several overlays in
+    /// order. Apply runs *last* — after conversion, `--merge`, and
+    /// `--collapse`.
+    #[arg(long, value_name = "FILE")]
+    apply: Vec<PathBuf>,
+
+    /// Per-call overlay apply option (repeatable). Maps to
+    /// `roas_overlay::apply::ApplyOptions`. Requires at least one
+    /// `--apply` source (clap rejects the flag on its own).
+    #[arg(long = "apply-option", value_enum, requires = "apply")]
+    apply_options: Vec<roas_overlay::apply::ApplyOptions>,
+
     /// Enable external-reference loading during `--collapse`. Same
     /// semantics as `roas validate --load`: pass `--load file` to
     /// allow `file://` refs, `--load http` for `http(s)://`; repeat
@@ -242,6 +274,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Validate(args) => run_validate(args),
         Command::Convert(args) => run_convert(args),
+        Command::Overlay(cmd) => overlay::run_overlay(cmd),
         Command::Preview(args) => preview::run_preview(args),
         Command::Completions { shell } => run_completions(shell),
         Command::Manpages { out } => run_manpages(&out),
@@ -399,7 +432,7 @@ fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {
 ///
 /// Used by both `validate --print` (compact, pipeline-friendly) and
 /// `convert` (pretty, file-friendly).
-fn serialize_spec(
+pub(crate) fn serialize_spec(
     value: &serde_json::Value,
     format: InputFormat,
     pretty_json: bool,
@@ -524,12 +557,24 @@ fn run_convert(args: ConvertArgs) -> Result<()> {
         }
     }
 
-    // 3) Collapse last so it has visibility into the final merged tree.
+    // 3) Collapse so it has visibility into the final merged tree.
     if args.collapse {
         let mut loader = build_loader(&args.load);
         converted.collapse(loader.as_mut())?;
     }
-    let value = converted.into_value()?;
+    let mut value = converted.into_value()?;
+
+    // 4) Apply overlays last, on the serialized JSON. Overlays produce
+    //    arbitrary JSON that no longer needs the typed model, whereas
+    //    collapse does — so apply must run after it.
+    if !args.apply.is_empty() {
+        let mut apply_options = enumset::EnumSet::<roas_overlay::apply::ApplyOptions>::empty();
+        for opt in &args.apply_options {
+            apply_options |= *opt;
+        }
+        overlay::apply_overlays(&mut value, &args.apply, apply_options)?;
+    }
+
     // Output format defaults to the input format; `--output-format` overrides.
     let out_format = args.output_format.unwrap_or(input_format);
     print!("{}", serialize_spec(&value, out_format, true)?);
@@ -1139,6 +1184,8 @@ mod tests {
             load: vec![],
             merge: vec![],
             merge_options: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         run_convert(args).expect("v2 → v3.2 must succeed");
     }
@@ -1189,6 +1236,8 @@ mod tests {
             load: vec![LoaderKind::File],
             merge: vec![],
             merge_options: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         run_convert(args).expect("convert + collapse + --load file must succeed");
     }
@@ -1232,6 +1281,8 @@ mod tests {
             load: vec![],
             merge: vec![],
             merge_options: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         run_convert(args).expect("convert + collapse must succeed");
     }
@@ -1249,6 +1300,8 @@ mod tests {
             load: vec![],
             merge: vec![],
             merge_options: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         let err = run_convert(args).expect_err("downconversion must error");
         assert!(
@@ -1280,6 +1333,8 @@ mod tests {
             merge_options: vec![],
             collapse: false,
             load: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         run_convert(args).expect("convert + merge must succeed");
     }
@@ -1305,6 +1360,8 @@ mod tests {
             merge_options: vec![],
             collapse: false,
             load: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         run_convert(args).expect("cross-version merge after convert must succeed");
     }
@@ -1331,6 +1388,8 @@ mod tests {
             merge_options: vec![MergeOptionFlag::MergeInfo, MergeOptionFlag::ErrorOnConflict],
             collapse: false,
             load: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         let err = run_convert(args).expect_err("error-on-conflict must surface");
         assert!(
@@ -1352,12 +1411,104 @@ mod tests {
             merge_options: vec![],
             collapse: false,
             load: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         let err = run_convert(args).expect_err("missing merge source must error");
         assert!(
             err.to_string().contains("reading"),
             "expected `reading` context, got: {err}",
         );
+    }
+
+    #[test]
+    fn run_convert_with_apply_layers_an_overlay_after_conversion() {
+        let base = TempFile::write("base.json", MINIMAL_V3_2);
+        let overlay = TempFile::write(
+            "overlay.json",
+            br#"{"overlay":"1.0.0","info":{"title":"o","version":"1"},"actions":[{"target":"$.info","update":{"description":"added"}}]}"#,
+        );
+        let args = ConvertArgs {
+            file: Some(base.0.clone()),
+            to: SpecVersion::V3_2,
+            from: None,
+            format: None,
+            output_format: None,
+            merge: vec![],
+            merge_options: vec![],
+            collapse: false,
+            load: vec![],
+            apply: vec![overlay.0.clone()],
+            apply_options: vec![],
+        };
+        run_convert(args).expect("convert + apply must succeed");
+    }
+
+    #[test]
+    fn run_convert_apply_option_error_on_zero_match_surfaces() {
+        // Threading check: an overlay targeting a missing node, with
+        // `--apply-option error-on-zero-match`, must abort `convert`.
+        let base = TempFile::write("base.json", MINIMAL_V3_2);
+        let overlay = TempFile::write(
+            "overlay.json",
+            br#"{"overlay":"1.0.0","info":{"title":"o","version":"1"},"actions":[{"target":"$.nope","update":{}}]}"#,
+        );
+        let args = ConvertArgs {
+            file: Some(base.0.clone()),
+            to: SpecVersion::V3_2,
+            from: None,
+            format: None,
+            output_format: None,
+            merge: vec![],
+            merge_options: vec![],
+            collapse: false,
+            load: vec![],
+            apply: vec![overlay.0.clone()],
+            apply_options: vec![roas_overlay::apply::ApplyOptions::ErrorOnZeroMatch],
+        };
+        let err = run_convert(args).expect_err("error-on-zero-match must surface");
+        assert!(
+            err.to_string().contains("applying overlay"),
+            "expected `applying overlay` context, got: {err}",
+        );
+    }
+
+    #[test]
+    fn cli_parses_convert_with_apply_and_apply_option() {
+        let cli = Cli::try_parse_from([
+            "roas",
+            "convert",
+            "--to",
+            "v3_2",
+            "--apply",
+            "o.yaml",
+            "--apply-option",
+            "error-on-zero-match",
+            "spec.json",
+        ])
+        .expect("convert --apply parse");
+        match cli.command {
+            Command::Convert(a) => {
+                assert_eq!(a.apply, vec![PathBuf::from("o.yaml")]);
+                assert_eq!(a.apply_options.len(), 1);
+            }
+            _ => panic!("expected convert"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_apply_option_without_apply() {
+        // `--apply-option` requires at least one `--apply` source.
+        let res = Cli::try_parse_from([
+            "roas",
+            "convert",
+            "--to",
+            "v3_2",
+            "--apply-option",
+            "error-on-zero-match",
+            "spec.json",
+        ]);
+        assert!(res.is_err(), "--apply-option without --apply must error");
     }
 
     #[test]
@@ -1372,6 +1523,8 @@ mod tests {
             load: vec![],
             merge: vec![],
             merge_options: vec![],
+            apply: vec![],
+            apply_options: vec![],
         };
         let err = run_convert(args).expect_err("missing file must error");
         assert!(

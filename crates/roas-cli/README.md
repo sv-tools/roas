@@ -1,6 +1,6 @@
 # roas-cli
 
-Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and convert OpenAPI specs across versions 2.0 / 3.0.x / 3.1.x / 3.2.x.
+Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and convert OpenAPI specs across versions 2.0 / 3.0.x / 3.1.x / 3.2.x, and validate / convert / apply [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 / v1.1) via [`roas-overlay`](https://crates.io/crates/roas-overlay).
 
 [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)
 
@@ -35,10 +35,15 @@ Pinned versions: `ghcr.io/sv-tools/roas:<version>` — see the [GitHub Releases]
 ## Usage
 
 ```shell
-roas validate [FILE]            # parse + validate
-roas convert --to v3_2 [FILE]   # upconvert across versions
-roas preview [FILE]             # open the spec in a browser via Redoc
+roas validate [FILE]                       # parse + validate an OpenAPI spec
+roas convert --to v3_2 [FILE]              # upconvert across versions
+roas overlay validate [FILE]               # validate an OpenAPI Overlay document
+roas overlay convert --to v1_1 [FILE]      # upconvert an overlay
+roas overlay apply --overlay O.yaml [SPEC] # apply overlay(s) to a spec
+roas preview [FILE]                        # open the spec in a browser via Redoc
 ```
+
+The root `validate` and `convert` commands operate on OpenAPI specs; the `overlay` subcommand group operates on OpenAPI Overlay documents.
 
 Input can be JSON or YAML. With a file path, the parser is selected by extension (`.yaml` / `.yml` → YAML, everything else → JSON). Pass `-` as the file path, or omit it entirely and pipe the spec, to read from stdin; stdin defaults to JSON. `--format json|yaml` overrides everything.
 
@@ -105,6 +110,30 @@ roas convert --to v3_2 --merge layer.yaml --merge-option merge-info spec.json
 ```
 
 Supported `--merge-option` values: `base-wins`, `error-on-conflict`, `deep-merge-object-schemas`, `merge-info`, `replace-lists-when-empty`. Under `error-on-conflict` the first real collision aborts the merge and `roas` exits non-zero with the conflicting path; the base spec is untouched on error.
+
+`--apply <FILE>` (repeatable) applies OpenAPI Overlay documents on top of the converted spec. Each overlay is loaded with extension-based format detection, its version detected from the `overlay` field, and applied via [`roas-overlay`](https://crates.io/crates/roas-overlay). The full convert pipeline is **convert → `--merge` → `--collapse` → `--apply`** — overlays run last, on the final JSON, because they produce arbitrary structure that no longer needs the typed model (whereas collapse does). `--apply-option` (repeatable) tunes the apply (`error-on-zero-match`, `error-on-mixed-kind-match`):
+
+```shell
+roas convert --to v3_2 --apply patch.yaml spec.json
+roas convert --to v3_2 --merge layer.yaml --apply patch.yaml --collapse spec.json
+roas convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-match spec.json
+```
+
+### `overlay`
+
+Work with [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 and v1.1). The overlay version is auto-detected from the `overlay` field.
+
+```shell
+roas overlay validate overlay.yaml                          # parse + validate
+roas overlay convert --to v1_1 overlay.json                 # upconvert v1.0 → v1.1
+roas overlay apply --overlay patch.yaml spec.json           # apply to a spec
+cat spec.json | roas overlay apply --overlay patch.yaml     # spec on stdin
+roas overlay apply --overlay a.yaml --overlay b.yaml spec.json | roas validate
+```
+
+- **`overlay validate`** — checks structure: the `overlay` version, non-empty `actions`, valid RFC 9535 JSONPath in every `target` (and `copy`), and the mutual-exclusivity rules. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed overlay.
+- **`overlay convert --to <v1_0|v1_1>`** — upconverts an overlay. Only upconversion is supported (v1.0 → v1.1 adds the `copy` action and `info.description`); downconversion errors.
+- **`overlay apply`** — applies overlay(s) to a target spec. The spec is the positional argument (or stdin); `--overlay <FILE>` (repeatable, at least one required) names the overlay(s), applied in order. The spec is treated as untyped JSON, so this works for any OpenAPI version. `--apply-option` (repeatable) accepts `error-on-zero-match` and `error-on-mixed-kind-match`. On any apply error the spec is left untouched and `roas` exits non-zero.
 
 ### `preview`
 
