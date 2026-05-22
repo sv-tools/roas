@@ -10,10 +10,12 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 
 ## Versions
 
-| Overlay version | Feature flag     | Status            |
-|-----------------|------------------|-------------------|
-| 1.0             | `v1_0` (default) | ✅ implemented     |
-| 1.1             | `v1_1`           | planned (next PR) |
+| Overlay version | Feature flag     | Status         | Adds over the previous version                     |
+|-----------------|------------------|----------------|----------------------------------------------------|
+| 1.0             | `v1_0` (default) | ✅ implemented  | —                                                  |
+| 1.1             | `v1_1`           | ✅ implemented  | `copy` action, `info.description`                  |
+
+`v1_0` and `v1_1` are independent — enable whichever you need. With both enabled, an `impl From<v1_0::Overlay> for v1_1::Overlay` is available for upconverting an existing v1.0 document.
 
 ## Quick start
 
@@ -57,9 +59,12 @@ For each action in declaration order, against the *current* working copy of the 
 3. Zero matches → silent no-op (or `ZeroMatch` error under `ApplyOptions::ErrorOnZeroMatch`).
 4. Targets must be objects or arrays for *every* action (spec §4.4); primitives or `null` raise `PrimitiveActionTarget`.
 5. `remove: true` → drop each matched node from its container. Sibling array indices are preserved by processing matches in reverse.
-6. Otherwise, if `update` is set, the behavior depends on the matched node's kind:
-   - **Array target** → `update` is appended as a single new element, regardless of its shape (spec §4.4: *"an entry to append to the array"*).
-   - **Object target** → recursive merge per [§4.4.3.1](https://spec.openapis.org/overlay/v1.0.0.html#merging-rules): keys present in both sides recurse (objects), or use the merge rules (primitives replace, arrays concatenate at the property level).
+6. **v1.1 only:** if `copy` is set, the action's source JSONPath is evaluated against the *current* doc; it must match exactly one node (`CopySourceNotFound` / `CopySourceMultiple`). The source value is then used as the merge value, exactly like `update`. Setting both `update` and `copy` raises `ConflictingMergeSources`.
+7. Otherwise, the merge value (`update`, or the `copy` source) is merged into each matched node by kind:
+   - **Object target** → recursive merge per [§4.4.3.1](https://spec.openapis.org/overlay/v1.0.0.html#merging-rules): shared object keys recurse; primitives replace; nested arrays concatenate.
+   - **Array target** → depends on the version:
+     - **v1.0** — the merge value is appended as a single new element (spec §3.3: *"an entry to append to the array"*).
+     - **v1.1** — an *array* merge value is concatenated element-wise; an *object or primitive* merge value is appended as a single element (spec §3.3).
 
 On any error the target document is left **untouched** — `Overlay::apply` operates on a clone and commits only on success.
 

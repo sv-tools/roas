@@ -53,3 +53,6 @@ pub mod validation;
 
 #[cfg(feature = "v1_0")]
 pub mod v1_0;
+
+#[cfg(feature = "v1_1")]
+pub mod v1_1;

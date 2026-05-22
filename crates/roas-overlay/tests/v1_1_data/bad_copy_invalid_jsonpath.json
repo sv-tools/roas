@@ -1,0 +1,10 @@
+{
+  "overlay": "1.1.0",
+  "info": { "title": "Bad copy path", "version": "1.0.0" },
+  "actions": [
+    {
+      "target": "$.dest",
+      "copy": "not a path"
+    }
+  ]
+}
