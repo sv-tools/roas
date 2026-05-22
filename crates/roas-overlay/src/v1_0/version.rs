@@ -153,4 +153,18 @@ mod tests {
         let v: Version = "1.0.3".parse().unwrap();
         assert_eq!(format!("{v}"), "1.0.3");
     }
+
+    #[test]
+    fn try_from_str_and_string_match_from_str() {
+        // `TryFrom<&str>` and `TryFrom<String>` exist for API parity
+        // with `roas::v3_2::spec::Version`; both should agree with
+        // `FromStr` on accept/reject.
+        assert_eq!(Version::try_from("1.0.0").unwrap(), Version::V1_0_0());
+        assert!(Version::try_from("2.0.0").is_err());
+
+        let owned_ok = Version::try_from(String::from("1.0.7")).unwrap();
+        assert_eq!(owned_ok.as_str(), "1.0.7");
+        let owned_err = Version::try_from(String::from("nope")).unwrap_err();
+        assert_eq!(owned_err.0, "nope");
+    }
 }
