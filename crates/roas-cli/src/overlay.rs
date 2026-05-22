@@ -332,6 +332,38 @@ mod tests {
         })
     }
 
+    fn v1_1_overlay() -> Value {
+        json!({
+            "overlay": "1.1.0",
+            "info": { "title": "T", "version": "1.0.0", "description": "via copy" },
+            "actions": [ { "target": "$.paths['/b']", "copy": "$.paths['/a']" } ]
+        })
+    }
+
+    /// A temp file that cleans itself up on drop (mirrors the helper in
+    /// `main.rs`'s test module).
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn write(name: &str, value: &Value) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "roas-cli-overlay-{}-{n}-{name}",
+                std::process::id(),
+            ));
+            std::fs::write(&path, serde_json::to_string(value).unwrap()).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     #[test]
     fn detect_overlay_distinguishes_versions() {
         assert_eq!(
@@ -364,22 +396,37 @@ mod tests {
         let value = up.into_value().unwrap();
         assert_eq!(value["overlay"], "1.1.0");
 
-        // identity
+        // identity (v1.0 → v1.0)
         let d = detect_or_use_overlay(None, v1_0_overlay()).unwrap();
         assert_eq!(
             d.convert_to(OverlayVersion::V1_0).unwrap().version(),
             OverlayVersion::V1_0
         );
 
+        // identity (v1.1 → v1.1)
+        let d = detect_or_use_overlay(None, v1_1_overlay()).unwrap();
+        assert_eq!(
+            d.convert_to(OverlayVersion::V1_1).unwrap().version(),
+            OverlayVersion::V1_1
+        );
+
         // downconvert errors
-        let v11 = json!({
+        let d = detect_or_use_overlay(None, v1_1_overlay()).unwrap();
+        let err = d.convert_to(OverlayVersion::V1_0).unwrap_err();
+        assert!(err.to_string().contains("downconversion is not supported"));
+    }
+
+    #[test]
+    fn detect_or_use_overlay_honors_forced_version() {
+        // Force v1.1 even though a bare doc could be ambiguous; the
+        // forced branch skips `detect_overlay`.
+        let doc = json!({
             "overlay": "1.1.0",
             "info": { "title": "T", "version": "1.0.0" },
             "actions": [ { "target": "$", "remove": true } ]
         });
-        let d = detect_or_use_overlay(None, v11).unwrap();
-        let err = d.convert_to(OverlayVersion::V1_0).unwrap_err();
-        assert!(err.to_string().contains("downconversion is not supported"));
+        let d = detect_or_use_overlay(Some(OverlayVersion::V1_1), doc).unwrap();
+        assert_eq!(d.version(), OverlayVersion::V1_1);
     }
 
     #[test]
@@ -389,12 +436,8 @@ mod tests {
             "info": { "title": "API", "version": "1.0.0" }
         });
         // Write the v1.0 overlay to a temp file and apply it.
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("roas-cli-overlay-test-{}.json", std::process::id()));
-        std::fs::write(&path, serde_json::to_string(&v1_0_overlay()).unwrap()).unwrap();
-        let res = apply_overlays(&mut spec, std::slice::from_ref(&path), EnumSet::empty());
-        let _ = std::fs::remove_file(&path);
-        res.unwrap();
+        let f = TempFile::write("apply.json", &v1_0_overlay());
+        apply_overlays(&mut spec, std::slice::from_ref(&f.0), EnumSet::empty()).unwrap();
         assert_eq!(spec["info"]["description"], "d");
     }
 
@@ -407,12 +450,9 @@ mod tests {
             // target a primitive → PrimitiveActionTarget
             "actions": [ { "target": "$.info.title", "update": { "x": 1 } } ]
         });
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("roas-cli-overlay-bad-{}.json", std::process::id()));
-        std::fs::write(&path, serde_json::to_string(&bad).unwrap()).unwrap();
+        let f = TempFile::write("bad.json", &bad);
         let err =
-            apply_overlays(&mut spec, std::slice::from_ref(&path), EnumSet::empty()).unwrap_err();
-        let _ = std::fs::remove_file(&path);
+            apply_overlays(&mut spec, std::slice::from_ref(&f.0), EnumSet::empty()).unwrap_err();
         assert!(err.to_string().contains("applying overlay"));
     }
 
@@ -473,5 +513,148 @@ mod tests {
             OverlayVersion::from_str("v1.1", true).unwrap(),
             OverlayVersion::V1_1
         );
+    }
+
+    // --- end-to-end run-function coverage (build args directly, like
+    // the `run_convert` tests in main.rs; assert Ok/Err since stdout
+    // isn't captured here). ---
+
+    #[test]
+    fn run_overlay_validate_ok_with_print_covers_v1_0() {
+        let f = TempFile::write("ok.json", &v1_0_overlay());
+        let args = OverlayValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![],
+            print: true, // exercises into_value + serialize_spec
+        };
+        run_overlay(OverlayCommand::Validate(args)).expect("valid overlay must pass");
+    }
+
+    #[test]
+    fn run_overlay_validate_ok_covers_v1_1() {
+        let f = TempFile::write("ok11.json", &v1_1_overlay());
+        let args = OverlayValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![],
+            print: false,
+        };
+        run_overlay(OverlayCommand::Validate(args)).expect("valid v1.1 overlay must pass");
+    }
+
+    #[test]
+    fn run_overlay_validate_reports_single_error() {
+        // Valid info, empty actions → exactly one error (singular "").
+        let doc = json!({
+            "overlay": "1.0.0",
+            "info": { "title": "T", "version": "1.0.0" },
+            "actions": []
+        });
+        let f = TempFile::write("empty-actions.json", &doc);
+        let args = OverlayValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![],
+            print: false,
+        };
+        let err = run_overlay(OverlayCommand::Validate(args)).unwrap_err();
+        assert!(
+            err.to_string().contains("1 error)"),
+            "expected singular error count, got: {err}",
+        );
+    }
+
+    #[test]
+    fn run_overlay_validate_reports_multiple_errors() {
+        // Empty info title+version AND empty actions → 3 errors (plural).
+        let doc = json!({
+            "overlay": "1.0.0",
+            "info": { "title": "", "version": "" },
+            "actions": []
+        });
+        let f = TempFile::write("many-errors.json", &doc);
+        let args = OverlayValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![],
+            print: false,
+        };
+        let err = run_overlay(OverlayCommand::Validate(args)).unwrap_err();
+        assert!(
+            err.to_string().contains("errors)"),
+            "expected plural error count, got: {err}",
+        );
+    }
+
+    #[test]
+    fn run_overlay_validate_ignore_suppresses_check() {
+        // Empty title but `--ignore empty-info-title` → still other
+        // diagnostics, but proves the ignore set is threaded through.
+        let doc = json!({
+            "overlay": "1.0.0",
+            "info": { "title": "", "version": "1.0.0" },
+            "actions": [ { "target": "$.info", "update": {} } ]
+        });
+        let f = TempFile::write("ignore.json", &doc);
+        let args = OverlayValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![ValidationOptions::IgnoreEmptyInfoTitle],
+            print: false,
+        };
+        run_overlay(OverlayCommand::Validate(args)).expect("empty title is ignored");
+    }
+
+    #[test]
+    fn run_overlay_convert_upconverts_v1_0_to_v1_1() {
+        let f = TempFile::write("conv.json", &v1_0_overlay());
+        let args = OverlayConvertArgs {
+            file: Some(f.0.clone()),
+            to: OverlayVersion::V1_1,
+            format: None,
+            output_format: None,
+        };
+        run_overlay(OverlayCommand::Convert(args)).expect("upconvert must succeed");
+    }
+
+    #[test]
+    fn run_overlay_apply_applies_v1_1_overlay_to_spec() {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "info": { "title": "API", "version": "1.0.0" },
+            "paths": { "/a": { "get": { "summary": "s" } }, "/b": {} }
+        });
+        let spec_file = TempFile::write("spec.json", &spec);
+        let overlay_file = TempFile::write("ov.json", &v1_1_overlay());
+        let args = OverlayApplyArgs {
+            file: Some(spec_file.0.clone()),
+            overlay: vec![overlay_file.0.clone()],
+            apply_options: vec![],
+            format: None,
+            output_format: Some(InputFormat::Yaml), // exercise output-format override
+        };
+        run_overlay(OverlayCommand::Apply(args)).expect("apply must succeed");
+    }
+
+    #[test]
+    fn run_overlay_apply_surfaces_apply_error() {
+        let spec = json!({ "info": { "title": "x" } });
+        let spec_file = TempFile::write("spec.json", &spec);
+        let bad = json!({
+            "overlay": "1.0.0",
+            "info": { "title": "T", "version": "1.0.0" },
+            "actions": [ { "target": "$.nope", "update": {} } ]
+        });
+        let overlay_file = TempFile::write("bad.json", &bad);
+        let args = OverlayApplyArgs {
+            file: Some(spec_file.0.clone()),
+            overlay: vec![overlay_file.0.clone()],
+            apply_options: vec![ApplyOptions::ErrorOnZeroMatch],
+            format: None,
+            output_format: None,
+        };
+        let err = run_overlay(OverlayCommand::Apply(args)).unwrap_err();
+        assert!(err.to_string().contains("applying overlay"));
     }
 }
