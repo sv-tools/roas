@@ -1,0 +1,26 @@
+{
+  "overlay": "1.0.0",
+  "info": {
+    "title": "Add descriptions to GET operations",
+    "version": "1.0.0"
+  },
+  "extends": "./base_petstore.json",
+  "actions": [
+    {
+      "target": "$.paths['/pets'].get",
+      "description": "Annotate the list endpoint.",
+      "update": {
+        "description": "List all pets in the store."
+      }
+    },
+    {
+      "target": "$.info",
+      "update": {
+        "contact": {
+          "name": "API Team",
+          "email": "api@example.com"
+        }
+      }
+    }
+  ]
+}

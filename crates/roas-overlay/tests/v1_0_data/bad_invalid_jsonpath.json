@@ -1,0 +1,7 @@
+{
+  "overlay": "1.0.0",
+  "info": { "title": "Bad target", "version": "1.0.0" },
+  "actions": [
+    { "target": "not a path", "update": {} }
+  ]
+}

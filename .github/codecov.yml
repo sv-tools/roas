@@ -47,6 +47,10 @@ component_management:
       name: roas-http-fetcher
       paths:
         - crates/roas-http-fetcher/**
+    - component_id: roas-overlay
+      name: roas-overlay
+      paths:
+        - crates/roas-overlay/**
 
     # ---- per OpenAPI spec version (within the `roas` crate) ----
     - component_id: common
@@ -82,3 +86,17 @@ component_management:
         - crates/roas/src/v3_2.rs
         - crates/roas/src/v3_2/**
         - crates/roas/tests/v3_2_test.rs
+
+    # ---- per Overlay version (within the `roas-overlay` crate) ----
+    - component_id: overlay-common
+      name: overlay-common
+      paths:
+        - crates/roas-overlay/src/lib.rs
+        - crates/roas-overlay/src/apply.rs
+        - crates/roas-overlay/src/validation.rs
+        - crates/roas-overlay/src/common/**
+    - component_id: overlay-v1_0
+      name: overlay-v1.0
+      paths:
+        - crates/roas-overlay/src/v1_0/**
+        - crates/roas-overlay/tests/v1_0_test.rs

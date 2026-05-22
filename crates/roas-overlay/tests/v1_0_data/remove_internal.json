@@ -1,0 +1,14 @@
+{
+  "overlay": "1.0.0",
+  "info": {
+    "title": "Strip internal endpoints",
+    "version": "1.0.0"
+  },
+  "actions": [
+    {
+      "target": "$.paths['/internal/metrics']",
+      "remove": true,
+      "description": "Hide internal-only paths from the public bundle."
+    }
+  ]
+}
