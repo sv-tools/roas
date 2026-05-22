@@ -1,0 +1,36 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pet Store",
+    "version": "1.0.0",
+    "contact": {
+      "name": "API Team",
+      "email": "api@example.com"
+    }
+  },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "List pets",
+        "description": "List all pets in the store.",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      },
+      "post": {
+        "summary": "Create a pet",
+        "responses": {
+          "201": { "description": "Created" }
+        }
+      }
+    },
+    "/internal/metrics": {
+      "get": {
+        "summary": "Internal metrics",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    }
+  }
+}

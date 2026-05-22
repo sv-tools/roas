@@ -1,0 +1,15 @@
+overlay: 1.0.0
+info:
+  title: Sequential actions demo
+  version: 1.0.0
+actions:
+  - target: $.paths['/pets'].get
+    update:
+      description: List all pets in the store.
+  - target: $.paths['/pets'].get
+    update:
+      tags:
+        - pets
+        - public
+  - target: $.paths['/internal/metrics']
+    remove: true
