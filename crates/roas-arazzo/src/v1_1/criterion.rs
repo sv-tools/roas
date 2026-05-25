@@ -145,6 +145,14 @@ mod tests {
     }
 
     #[test]
+    fn criterion_type_default_is_simple() {
+        assert_eq!(
+            CriterionType::default(),
+            CriterionType::Simple(CriterionKind::Simple)
+        );
+    }
+
+    #[test]
     fn type_without_context_is_rejected() {
         let c = Criterion {
             condition: "x".into(),

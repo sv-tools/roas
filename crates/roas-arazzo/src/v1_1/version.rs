@@ -147,4 +147,27 @@ mod tests {
     fn deserialize_rejects_v1_0() {
         assert!(serde_json::from_value::<Version>(serde_json::json!("1.0.0")).is_err());
     }
+
+    #[test]
+    fn display_renders_inner_string() {
+        let v: Version = "1.1.3".parse().unwrap();
+        assert_eq!(format!("{v}"), "1.1.3");
+    }
+
+    #[test]
+    fn try_from_str_and_string_match_from_str() {
+        assert_eq!(Version::try_from("1.1.0").unwrap(), Version::V1_1_0());
+        assert!(Version::try_from("1.0.0").is_err());
+
+        let owned_ok = Version::try_from(String::from("1.1.9")).unwrap();
+        assert_eq!(owned_ok.as_str(), "1.1.9");
+        let owned_err = Version::try_from(String::from("nope")).unwrap_err();
+        assert_eq!(owned_err.0, "nope");
+    }
+
+    #[test]
+    fn invalid_version_error_echoes_input() {
+        let err = "2.0.0".parse::<Version>().unwrap_err();
+        assert!(err.to_string().contains("2.0.0"));
+    }
 }

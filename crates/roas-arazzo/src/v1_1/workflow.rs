@@ -147,6 +147,35 @@ mod tests {
     }
 
     #[test]
+    fn empty_id_and_action_lists_are_validated() {
+        let wf: Workflow = serde_json::from_value(json!({
+            "workflowId": "",
+            "steps": [ { "stepId": "s", "workflowId": "x" } ],
+            "parameters": [ { "reference": "" } ],
+            "successActions": [ { "reference": "" } ],
+            "failureActions": [ { "reference": "" } ],
+        }))
+        .unwrap();
+        let errs = validate(&wf);
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.workflows[0].workflowId: must not be empty")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.workflows[0].parameters[0].reference: must not be empty")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.workflows[0].successActions[0].reference: must not be empty")
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e == "#.workflows[0].failureActions[0].reference: must not be empty")
+        );
+    }
+
+    #[test]
     fn output_selector_round_trips() {
         let wf: Workflow = serde_json::from_value(json!({
             "workflowId": "w",

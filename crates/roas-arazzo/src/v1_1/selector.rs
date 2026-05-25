@@ -166,6 +166,15 @@ mod tests {
     }
 
     #[test]
+    fn selector_type_expression_is_validated() {
+        let st: SelectorType =
+            serde_json::from_value(json!({ "type": "xpath", "version": "bad" })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.t");
+        st.validate_with_context(&mut ctx);
+        assert!(ctx.errors.iter().any(|e| e.contains("xpath")));
+    }
+
+    #[test]
     fn selector_round_trips_and_validates() {
         let s: Selector = serde_json::from_value(json!({
             "context": "$response.body",

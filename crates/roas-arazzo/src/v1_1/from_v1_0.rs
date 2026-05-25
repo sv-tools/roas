@@ -338,4 +338,140 @@ mod tests {
             Some(v1_1::CriterionType::Simple(v1_1::CriterionKind::Regex))
         );
     }
+
+    /// Exercises every `From` impl: both source types, all v1.0
+    /// parameter locations, the xpath-with-version criterion branch, a
+    /// reusable + an inline action, a request body with a replacement,
+    /// every components map, a workflow step, and outputs.
+    #[test]
+    fn upconverts_every_object() {
+        let v0: v1_0::Description = serde_json::from_value(json!({
+            "arazzo": "1.0.1",
+            "info": { "title": "T", "summary": "S", "description": "D", "version": "1.0.0", "x-a": 1 },
+            "sourceDescriptions": [
+                { "name": "arazzoSrc", "url": "a.yaml", "type": "arazzo" },
+                { "name": "openapiSrc", "url": "o.yaml", "type": "openapi" }
+            ],
+            "workflows": [
+                {
+                    "workflowId": "wf",
+                    "dependsOn": ["other"],
+                    "parameters": [
+                        { "name": "h", "in": "header", "value": "v" },
+                        { "reference": "$components.parameters.locale" }
+                    ],
+                    "successActions": [
+                        { "name": "sa", "type": "end" },
+                        { "reference": "$components.successActions.done" }
+                    ],
+                    "failureActions": [
+                        { "name": "fa", "type": "retry", "retryAfter": 1.0, "retryLimit": 2 }
+                    ],
+                    "steps": [
+                        {
+                            "stepId": "s",
+                            "operationId": "op",
+                            "parameters": [
+                                { "name": "p1", "in": "path", "value": "x" },
+                                { "name": "q1", "in": "query", "value": "y" },
+                                { "name": "c1", "in": "cookie", "value": "z" }
+                            ],
+                            "requestBody": {
+                                "contentType": "application/json",
+                                "payload": { "k": "v" },
+                                "replacements": [ { "target": "/a", "value": "b" } ]
+                            },
+                            "successCriteria": [
+                                { "context": "$r", "condition": "$.x", "type": "xpath", "version": "xpath-10" },
+                                { "condition": "ok" }
+                            ],
+                            "onSuccess": [ { "name": "g", "type": "goto", "stepId": "s2" } ],
+                            "onFailure": [ { "name": "f", "type": "end" } ],
+                            "outputs": { "o1": "$response.body" }
+                        },
+                        { "stepId": "s2", "workflowId": "wf2" }
+                    ],
+                    "outputs": { "wo": "$x" }
+                }
+            ],
+            "components": {
+                "inputs": { "in1": { "type": "string" } },
+                "parameters": { "locale": { "name": "locale", "in": "header", "value": "en" } },
+                "successActions": { "done": { "name": "done", "type": "end" } },
+                "failureActions": { "abort": { "name": "abort", "type": "end" } }
+            }
+        }))
+        .unwrap();
+
+        let v1: v1_1::Description = v0.into();
+        v1.validate(EnumSet::empty())
+            .expect("upconverted doc validates");
+
+        // Source types mapped.
+        assert_eq!(
+            v1.source_descriptions[0].type_,
+            Some(v1_1::SourceType::Arazzo)
+        );
+        assert_eq!(
+            v1.source_descriptions[1].type_,
+            Some(v1_1::SourceType::Openapi)
+        );
+
+        let wf = &v1.workflows[0];
+        // Reusable arm preserved; inline arm converted.
+        assert!(matches!(wf.parameters[1], v1_1::ReusableOr::Reusable(_)));
+        assert!(matches!(
+            wf.success_actions[1],
+            v1_1::ReusableOr::Reusable(_)
+        ));
+
+        let step = &wf.steps[0];
+        // Parameter locations mapped across the board.
+        let locs: Vec<_> = step
+            .parameters
+            .iter()
+            .filter_map(|p| match p {
+                v1_1::ReusableOr::Item(p) => p.in_,
+                v1_1::ReusableOr::Reusable(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            locs,
+            vec![
+                v1_1::ParameterLocation::Path,
+                v1_1::ParameterLocation::Query,
+                v1_1::ParameterLocation::Cookie,
+            ]
+        );
+
+        // xpath + version folded into an ExpressionType; the bare
+        // condition kept no type.
+        match &step.success_criteria[0].type_ {
+            Some(v1_1::CriterionType::Expression(et)) => {
+                assert_eq!(et.type_, v1_1::ExpressionKind::Xpath);
+                assert_eq!(et.version, "xpath-10");
+            }
+            other => panic!("expected xpath expression type, got {other:?}"),
+        }
+        assert!(step.success_criteria[1].type_.is_none());
+
+        // Request body + replacement converted; value wrapped as literal.
+        let replacement = &step.request_body.as_ref().unwrap().replacements[0];
+        assert_eq!(replacement.value, v1_1::ValueOrSelector::literal("b"));
+        assert!(replacement.target_selector_type.is_none());
+
+        // Second step is a workflow step.
+        assert_eq!(v1.workflows[0].steps[1].workflow_id.as_deref(), Some("wf2"));
+
+        // Every components map carried over.
+        let components = v1.components.as_ref().unwrap();
+        assert!(components.inputs.contains_key("in1"));
+        assert!(components.parameters.contains_key("locale"));
+        assert!(components.success_actions.contains_key("done"));
+        assert!(components.failure_actions.contains_key("abort"));
+
+        // Root info / extensions preserved.
+        assert_eq!(v1.info.summary.as_deref(), Some("S"));
+        assert!(v1.info.extensions.is_some());
+    }
 }

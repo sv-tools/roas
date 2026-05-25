@@ -158,4 +158,56 @@ mod tests {
         bad["arazzo"] = json!("1.0.0");
         assert!(serde_json::from_value::<Description>(bad).is_err());
     }
+
+    #[test]
+    fn empty_collections_fail_validation() {
+        let doc = Description {
+            arazzo: Version::V1_1_0(),
+            info: Info {
+                title: "T".into(),
+                version: "1".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = doc.validate(EnumSet::empty()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e == "#.sourceDescriptions: must contain at least one entry")
+        );
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e == "#.workflows: must contain at least one entry")
+        );
+    }
+
+    #[test]
+    fn duplicate_source_names_and_workflow_ids_fail() {
+        let doc: Description = serde_json::from_value(json!({
+            "arazzo": "1.1.0",
+            "info": { "title": "T", "version": "1" },
+            "sourceDescriptions": [
+                { "name": "dup", "url": "a" },
+                { "name": "dup", "url": "b" }
+            ],
+            "workflows": [
+                { "workflowId": "w", "steps": [ { "stepId": "s", "workflowId": "x" } ] },
+                { "workflowId": "w", "steps": [ { "stepId": "s2", "workflowId": "y" } ] }
+            ]
+        }))
+        .unwrap();
+        let err = doc.validate(EnumSet::empty()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("duplicate source name `dup`"))
+        );
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("duplicate workflowId `w`"))
+        );
+    }
 }

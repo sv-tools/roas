@@ -141,4 +141,18 @@ mod tests {
                 .any(|e| e == "#.a.retryAfter: must not be negative")
         );
     }
+
+    #[test]
+    fn criteria_are_recursed() {
+        let a = FailureAction {
+            name: "n".into(),
+            criteria: vec![Criterion::default()],
+            ..Default::default()
+        };
+        assert!(
+            validate(&a)
+                .iter()
+                .any(|e| e == "#.a.criteria[0].condition: must not be empty")
+        );
+    }
 }

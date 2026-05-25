@@ -63,6 +63,20 @@ mod tests {
     }
 
     #[test]
+    fn full_info_round_trips() {
+        let info: Info = serde_json::from_value(json!({
+            "title": "T", "summary": "S", "description": "D", "version": "1.0", "x-team": "p"
+        }))
+        .unwrap();
+        assert_eq!(info.summary.as_deref(), Some("S"));
+        assert_eq!(info.description.as_deref(), Some("D"));
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["summary"], json!("S"));
+        assert_eq!(v["description"], json!("D"));
+        assert_eq!(v["x-team"], json!("p"));
+    }
+
+    #[test]
     fn validate_rejects_empty_title_and_version() {
         let mut c = Context::with_path(EnumSet::empty(), "#.info");
         Info::default().validate_with_context(&mut c);

@@ -73,6 +73,28 @@ impl ValidateWithContext for Components {
 mod tests {
     use super::*;
     use enumset::EnumSet;
+    use serde_json::json;
+
+    #[test]
+    fn validate_recurses_into_action_maps() {
+        let c: Components = serde_json::from_value(json!({
+            "inputs": { "in1": { "type": "string" } },
+            "successActions": { "a": { "name": "", "type": "end" } },
+            "failureActions": { "b": { "name": "", "type": "end" } }
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.components");
+        c.validate_with_context(&mut ctx);
+        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
+        assert!(
+            msgs.iter()
+                .any(|e| e == "#.components.successActions.a.name: must not be empty")
+        );
+        assert!(
+            msgs.iter()
+                .any(|e| e == "#.components.failureActions.b.name: must not be empty")
+        );
+    }
 
     #[test]
     fn validate_rejects_bad_key_and_recurses() {

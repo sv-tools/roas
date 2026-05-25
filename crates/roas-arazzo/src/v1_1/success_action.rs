@@ -143,4 +143,18 @@ mod tests {
         };
         assert!(validate(&a).iter().any(|e| e.contains("goto")));
     }
+
+    #[test]
+    fn criteria_are_recursed() {
+        let a = SuccessAction {
+            name: "n".into(),
+            criteria: vec![Criterion::default()],
+            ..Default::default()
+        };
+        assert!(
+            validate(&a)
+                .iter()
+                .any(|e| e == "#.a.criteria[0].condition: must not be empty")
+        );
+    }
 }

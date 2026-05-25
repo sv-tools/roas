@@ -305,6 +305,84 @@ mod tests {
     }
 
     #[test]
+    fn async_operation_id_and_channel_path_are_mutually_exclusive() {
+        let step = Step {
+            step_id: "s".into(),
+            operation_id: Some("op".into()),
+            channel_path: Some("$src#/c".into()),
+            action: Some(StepAction::Send),
+            ..Default::default()
+        };
+        assert!(
+            validate(&step)
+                .iter()
+                .any(|e| e == "#.steps[0]: `operationId` and `channelPath` are mutually exclusive")
+        );
+    }
+
+    #[test]
+    fn async_step_with_action_but_no_target_is_rejected() {
+        let step = Step {
+            step_id: "s".into(),
+            action: Some(StepAction::Send),
+            ..Default::default()
+        };
+        assert!(
+            validate(&step).iter().any(
+                |e| e == "#.steps[0]: an AsyncAPI step must set `operationId` or `channelPath`"
+            )
+        );
+    }
+
+    #[test]
+    fn operation_path_on_async_step_is_rejected() {
+        let step = Step {
+            step_id: "s".into(),
+            channel_path: Some("$src#/c".into()),
+            operation_path: Some("$src#/op".into()),
+            action: Some(StepAction::Send),
+            ..Default::default()
+        };
+        assert!(
+            validate(&step)
+                .iter()
+                .any(|e| e == "#.steps[0]: `operationPath` is not valid on an AsyncAPI step")
+        );
+    }
+
+    #[test]
+    fn openapi_operation_id_and_path_are_mutually_exclusive() {
+        let step = Step {
+            step_id: "s".into(),
+            operation_id: Some("op".into()),
+            operation_path: Some("$src#/op".into()),
+            ..Default::default()
+        };
+        assert!(
+            validate(&step).iter().any(
+                |e| e == "#.steps[0]: `operationId` and `operationPath` are mutually exclusive"
+            )
+        );
+    }
+
+    #[test]
+    fn on_failure_actions_are_recursed() {
+        let step = Step {
+            step_id: "s".into(),
+            workflow_id: Some("wf".into()),
+            on_failure: vec![ReusableOr::Reusable(
+                crate::common::reusable::Reusable::default(),
+            )],
+            ..Default::default()
+        };
+        assert!(
+            validate(&step)
+                .iter()
+                .any(|e| e == "#.steps[0].onFailure[0].reference: must not be empty")
+        );
+    }
+
+    #[test]
     fn output_selector_is_validated() {
         let step: Step = serde_json::from_value(json!({
             "stepId": "s",
