@@ -28,7 +28,7 @@
 
 use serde::de::{Error, MapAccess, Visitor};
 use serde::ser::SerializeMap;
-use serde::{Deserializer, Serialize, Serializer};
+use serde::{Deserializer, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -84,7 +84,7 @@ where
         }
         map.end()
     } else {
-        None::<BTreeMap<String, serde_json::Value>>.serialize(serializer)
+        serializer.serialize_none()
     }
 }
 

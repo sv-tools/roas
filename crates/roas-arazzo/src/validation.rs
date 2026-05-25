@@ -2,21 +2,25 @@
 //!
 //! Modeled after [`roas::validation`] / `roas-overlay`: a public
 //! [`Validate`] trait drives a recursive descent through a
-//! crate-internal trait; each component pushes diagnostics into a
-//! context keyed by a JSONPath-flavor path string. Errors collect
+//! crate-internal trait. The current location is held as a single
+//! mutable path buffer on the [`Context`]; nodes `enter` a child
+//! segment, recurse, and the segment is truncated on the way out. The
+//! path string is cloned only when an error is actually recorded, so a
+//! valid document allocates no per-node path strings. Errors collect
 //! rather than fail fast.
 //!
 //! [`roas::validation`]: https://docs.rs/roas/latest/roas/validation/index.html
 
 use enumset::{EnumSet, EnumSetType};
 use std::collections::BTreeMap;
-use std::fmt::{self, Display};
+use std::fmt::{self, Display, Write};
 
 /// A single validation finding.
 ///
 /// `path` is a human-readable locator (e.g. `#.workflows[0].steps[1].stepId`),
 /// not an RFC 6901 JSON Pointer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct ValidationError {
     pub path: String,
     pub message: String,
@@ -63,6 +67,7 @@ impl PartialEq<&str> for ValidationError {
 
 /// The accumulated outcome of a validation pass.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Error {
     pub errors: Vec<ValidationError>,
 }
@@ -82,8 +87,10 @@ impl std::error::Error for Error {}
 /// Per-call validation toggles.
 ///
 /// Each option suppresses one shallow check so callers can opt out of
-/// individual diagnostics without disabling the whole validator.
+/// individual diagnostics without disabling the whole validator. Marked
+/// `#[non_exhaustive]` so future toggles are non-breaking additions.
 #[derive(EnumSetType, Debug)]
+#[non_exhaustive]
 pub enum ValidationOptions {
     /// Allow `info.title` to be empty (still required to be present).
     IgnoreEmptyInfoTitle,
@@ -118,14 +125,18 @@ pub trait Validate {
     fn validate(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error>;
 }
 
-/// Crate-internal: implemented by every component type.
+/// Crate-internal: implemented by every component type. The location is
+/// carried by [`Context`]'s path buffer rather than a per-call string.
 pub(crate) trait ValidateWithContext {
-    fn validate_with_context(&self, ctx: &mut Context, path: String);
+    fn validate_with_context(&self, ctx: &mut Context);
 }
 
 pub(crate) struct Context {
-    pub options: EnumSet<ValidationOptions>,
+    options: EnumSet<ValidationOptions>,
     pub errors: Vec<ValidationError>,
+    /// The current location, e.g. `#.workflows[0].steps[1]`. Mutated in
+    /// place via `in_*`; only cloned when an error is recorded.
+    path: String,
 }
 
 impl Context {
@@ -133,6 +144,7 @@ impl Context {
         Self {
             options,
             errors: Vec::new(),
+            path: "#".to_owned(),
         }
     }
 
@@ -140,8 +152,71 @@ impl Context {
         self.options.contains(option)
     }
 
-    pub fn error(&mut self, path: String, message: impl Into<String>) {
-        self.errors.push(ValidationError::new(path, message.into()));
+    /// Record an error at the current path.
+    pub fn error(&mut self, message: impl Into<String>) {
+        self.errors
+            .push(ValidationError::new(self.path.clone(), message.into()));
+    }
+
+    /// Record an error at `<current>.<field>` without descending into it.
+    pub fn error_field(&mut self, field: &str, message: impl Into<String>) {
+        let mark = self.path.len();
+        self.push_field(field);
+        self.error(message);
+        self.path.truncate(mark);
+    }
+
+    /// Push `.<field>` for the duration of `f`.
+    pub fn in_field<R>(&mut self, field: &str, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mark = self.path.len();
+        self.push_field(field);
+        let result = f(self);
+        self.path.truncate(mark);
+        result
+    }
+
+    /// Push `.<field>[<index>]` for the duration of `f`.
+    pub fn in_index<R>(&mut self, field: &str, index: usize, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mark = self.path.len();
+        self.push_field(field);
+        let _ = write!(self.path, "[{index}]");
+        let result = f(self);
+        self.path.truncate(mark);
+        result
+    }
+
+    /// Push `.<field>.<key>` for the duration of `f` (for map entries).
+    pub fn in_key<R>(&mut self, field: &str, key: &str, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mark = self.path.len();
+        self.push_field(field);
+        self.push_field(key);
+        let result = f(self);
+        self.path.truncate(mark);
+        result
+    }
+
+    /// Error at `<current>.<field>` if the required string is empty.
+    pub fn require_non_empty(&mut self, field: &str, value: &str) {
+        if value.is_empty() {
+            self.error_field(field, "must not be empty");
+        }
+    }
+
+    /// Validate that every key in a map matches the component / output
+    /// key pattern `^[a-zA-Z0-9\.\-_]+$`, reported under `.<field>`.
+    pub fn validate_map_keys<V>(&mut self, field: &str, map: &BTreeMap<String, V>) {
+        self.in_field(field, |ctx| {
+            for key in map.keys() {
+                if !is_valid_key(key) {
+                    ctx.error_field(key, r"key must match `^[a-zA-Z0-9\.\-_]+$`");
+                }
+            }
+        });
+    }
+
+    fn push_field(&mut self, field: &str) {
+        self.path.push('.');
+        self.path.push_str(field);
     }
 
     pub fn into_result(self) -> Result<(), Error> {
@@ -153,12 +228,14 @@ impl Context {
             })
         }
     }
-}
 
-/// Validate that a required string is not empty.
-pub(crate) fn validate_required_string(s: &str, ctx: &mut Context, path: String) {
-    if s.is_empty() {
-        ctx.error(path, "must not be empty");
+    #[cfg(test)]
+    pub fn with_path(options: EnumSet<ValidationOptions>, path: &str) -> Self {
+        Self {
+            options,
+            errors: Vec::new(),
+            path: path.to_owned(),
+        }
     }
 }
 
@@ -177,19 +254,6 @@ pub(crate) fn is_valid_key(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
-}
-
-/// Validate that every key in a map matches the component / output key
-/// pattern `^[a-zA-Z0-9\.\-_]+$`.
-pub(crate) fn validate_map_keys<V>(map: &BTreeMap<String, V>, ctx: &mut Context, path: &str) {
-    for key in map.keys() {
-        if !is_valid_key(key) {
-            ctx.error(
-                format!("{path}.{key}"),
-                r"key must match `^[a-zA-Z0-9\.\-_]+$`",
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -235,12 +299,34 @@ mod tests {
     }
 
     #[test]
-    fn context_collects_errors_and_converts_to_result() {
+    fn error_records_at_current_path() {
         let mut ctx = Context::new(EnumSet::empty());
-        ctx.error("#.x".into(), "kaboom");
-        let r = ctx.into_result();
-        let err = r.unwrap_err();
-        assert_eq!(err.errors.len(), 1);
+        ctx.error("kaboom");
+        assert!(ctx.errors[0] == "#: kaboom");
+    }
+
+    #[test]
+    fn in_scopes_compose_and_truncate() {
+        let mut ctx = Context::new(EnumSet::empty());
+        ctx.in_index("workflows", 0, |ctx| {
+            ctx.in_index("steps", 1, |ctx| {
+                ctx.error_field("stepId", "bad");
+            });
+            // back to #.workflows[0] after inner scope
+            ctx.error("here");
+        });
+        // back to # after outer scope
+        ctx.error("root");
+        assert!(ctx.errors[0] == "#.workflows[0].steps[1].stepId: bad");
+        assert!(ctx.errors[1] == "#.workflows[0]: here");
+        assert!(ctx.errors[2] == "#: root");
+    }
+
+    #[test]
+    fn in_key_appends_dotted_key() {
+        let mut ctx = Context::new(EnumSet::empty());
+        ctx.in_key("parameters", "petId", |ctx| ctx.error("oops"));
+        assert!(ctx.errors[0] == "#.parameters.petId: oops");
     }
 
     #[test]
@@ -258,10 +344,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_required_string_pushes_error_for_empty() {
+    fn require_non_empty_pushes_error_for_empty_only() {
         let mut ctx = Context::new(EnumSet::empty());
-        validate_required_string("", &mut ctx, "#.info.title".into());
-        validate_required_string("ok", &mut ctx, "#.info.version".into());
+        ctx.in_field("info", |ctx| {
+            ctx.require_non_empty("title", "");
+            ctx.require_non_empty("version", "ok");
+        });
         assert_eq!(ctx.errors.len(), 1);
         assert!(ctx.errors[0] == "#.info.title: must not be empty");
     }

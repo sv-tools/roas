@@ -5,7 +5,7 @@
 //! required when the enclosing step targets an `operationId` /
 //! `operationPath` (enforced in [`crate::v1_0::step`]).
 
-use crate::validation::{Context, ValidateWithContext, validate_required_string};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -42,8 +42,8 @@ pub struct Parameter {
 }
 
 impl ValidateWithContext for Parameter {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.name, ctx, format!("{path}.name"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("name", &self.name);
     }
 }
 
@@ -79,8 +79,8 @@ mod tests {
 
     #[test]
     fn validate_rejects_empty_name() {
-        let mut c = Context::new(EnumSet::empty());
-        Parameter::default().validate_with_context(&mut c, "#.p".into());
+        let mut c = Context::with_path(EnumSet::empty(), "#.p");
+        Parameter::default().validate_with_context(&mut c);
         assert!(c.errors.iter().any(|e| e == "#.p.name: must not be empty"));
     }
 

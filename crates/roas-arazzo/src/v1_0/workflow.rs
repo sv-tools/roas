@@ -9,9 +9,7 @@ use crate::v1_0::parameter::Parameter;
 use crate::v1_0::reusable::ReusableOr;
 use crate::v1_0::step::Step;
 use crate::v1_0::success_action::SuccessAction;
-use crate::validation::{
-    Context, ValidateWithContext, validate_map_keys, validate_required_string,
-};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -74,35 +72,33 @@ pub struct Workflow {
 }
 
 impl ValidateWithContext for Workflow {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.workflow_id, ctx, format!("{path}.workflowId"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("workflowId", &self.workflow_id);
 
         if self.steps.is_empty() {
-            ctx.error(format!("{path}.steps"), "must contain at least one entry");
+            ctx.error_field("steps", "must contain at least one entry");
         }
 
         let mut seen_step_ids = std::collections::BTreeSet::new();
         for (i, step) in self.steps.iter().enumerate() {
-            let step_path = format!("{path}.steps[{i}]");
-            step.validate_with_context(ctx, step_path.clone());
-            if !step.step_id.is_empty() && !seen_step_ids.insert(step.step_id.as_str()) {
-                ctx.error(
-                    format!("{step_path}.stepId"),
-                    format!("duplicate stepId `{}`", step.step_id),
-                );
-            }
+            ctx.in_index("steps", i, |ctx| {
+                step.validate_with_context(ctx);
+                if !step.step_id.is_empty() && !seen_step_ids.insert(step.step_id.as_str()) {
+                    ctx.error_field("stepId", format!("duplicate stepId `{}`", step.step_id));
+                }
+            });
         }
 
         for (i, parameter) in self.parameters.iter().enumerate() {
-            parameter.validate_with_context(ctx, format!("{path}.parameters[{i}]"));
+            ctx.in_index("parameters", i, |ctx| parameter.validate_with_context(ctx));
         }
         for (i, action) in self.success_actions.iter().enumerate() {
-            action.validate_with_context(ctx, format!("{path}.successActions[{i}]"));
+            ctx.in_index("successActions", i, |ctx| action.validate_with_context(ctx));
         }
         for (i, action) in self.failure_actions.iter().enumerate() {
-            action.validate_with_context(ctx, format!("{path}.failureActions[{i}]"));
+            ctx.in_index("failureActions", i, |ctx| action.validate_with_context(ctx));
         }
-        validate_map_keys(&self.outputs, ctx, &format!("{path}.outputs"));
+        ctx.validate_map_keys("outputs", &self.outputs);
     }
 }
 
@@ -113,8 +109,8 @@ mod tests {
     use serde_json::json;
 
     fn validate(wf: &Workflow) -> Vec<String> {
-        let mut ctx = Context::new(EnumSet::empty());
-        wf.validate_with_context(&mut ctx, "#.workflows[0]".into());
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.workflows[0]");
+        wf.validate_with_context(&mut ctx);
         ctx.errors.iter().map(ToString::to_string).collect()
     }
 

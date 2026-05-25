@@ -10,9 +10,7 @@ use crate::v1_0::parameter::Parameter;
 use crate::v1_0::request_body::RequestBody;
 use crate::v1_0::reusable::ReusableOr;
 use crate::v1_0::success_action::SuccessAction;
-use crate::validation::{
-    Context, ValidateWithContext, validate_map_keys, validate_required_string,
-};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -85,8 +83,8 @@ impl Step {
 }
 
 impl ValidateWithContext for Step {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.step_id, ctx, format!("{path}.stepId"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("stepId", &self.step_id);
 
         // Exactly one of operationId / operationPath / workflowId.
         let targets = [
@@ -96,44 +94,42 @@ impl ValidateWithContext for Step {
         ];
         match targets.iter().filter(|set| **set).count() {
             1 => {}
-            0 => ctx.error(
-                path.clone(),
-                "must set exactly one of `operationId`, `operationPath`, or `workflowId`",
-            ),
-            _ => ctx.error(
-                path.clone(),
-                "`operationId`, `operationPath`, and `workflowId` are mutually exclusive",
-            ),
+            0 => {
+                ctx.error("must set exactly one of `operationId`, `operationPath`, or `workflowId`")
+            }
+            _ => {
+                ctx.error("`operationId`, `operationPath`, and `workflowId` are mutually exclusive")
+            }
         }
 
         let is_operation = self.is_operation();
         for (i, parameter) in self.parameters.iter().enumerate() {
-            let param_path = format!("{path}.parameters[{i}]");
-            parameter.validate_with_context(ctx, param_path.clone());
-            if is_operation
-                && let ReusableOr::Item(p) = parameter
-                && p.in_.is_none()
-            {
-                ctx.error(
-                    format!("{param_path}.in"),
-                    "is required for operation steps",
-                );
-            }
+            ctx.in_index("parameters", i, |ctx| {
+                parameter.validate_with_context(ctx);
+                if is_operation
+                    && let ReusableOr::Item(p) = parameter
+                    && p.in_.is_none()
+                {
+                    ctx.error_field("in", "is required for operation steps");
+                }
+            });
         }
 
         if let Some(request_body) = &self.request_body {
-            request_body.validate_with_context(ctx, format!("{path}.requestBody"));
+            ctx.in_field("requestBody", |ctx| request_body.validate_with_context(ctx));
         }
         for (i, criterion) in self.success_criteria.iter().enumerate() {
-            criterion.validate_with_context(ctx, format!("{path}.successCriteria[{i}]"));
+            ctx.in_index("successCriteria", i, |ctx| {
+                criterion.validate_with_context(ctx)
+            });
         }
         for (i, action) in self.on_success.iter().enumerate() {
-            action.validate_with_context(ctx, format!("{path}.onSuccess[{i}]"));
+            ctx.in_index("onSuccess", i, |ctx| action.validate_with_context(ctx));
         }
         for (i, action) in self.on_failure.iter().enumerate() {
-            action.validate_with_context(ctx, format!("{path}.onFailure[{i}]"));
+            ctx.in_index("onFailure", i, |ctx| action.validate_with_context(ctx));
         }
-        validate_map_keys(&self.outputs, ctx, &format!("{path}.outputs"));
+        ctx.validate_map_keys("outputs", &self.outputs);
     }
 }
 
@@ -144,8 +140,8 @@ mod tests {
     use serde_json::json;
 
     fn validate(step: &Step) -> Vec<String> {
-        let mut ctx = Context::new(EnumSet::empty());
-        step.validate_with_context(&mut ctx, "#.steps[0]".into());
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.steps[0]");
+        step.validate_with_context(&mut ctx);
         ctx.errors.iter().map(ToString::to_string).collect()
     }
 
