@@ -3,9 +3,7 @@
 //! Per [§3.2 Info Object](https://spec.openapis.org/overlay/v1.1.0.html#info-object):
 //! the v1.0 fields plus an optional `description`.
 
-use crate::validation::{
-    Context, ValidateWithContext, ValidationOptions, validate_required_string,
-};
+use crate::validation::{Context, ValidateWithContext, ValidationOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -29,12 +27,12 @@ pub struct Info {
 }
 
 impl ValidateWithContext for Info {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
+    fn validate_with_context(&self, ctx: &mut Context) {
         if !ctx.is_option(ValidationOptions::IgnoreEmptyInfoTitle) {
-            validate_required_string(&self.title, ctx, format!("{path}.title"));
+            ctx.require_non_empty("title", &self.title);
         }
         if !ctx.is_option(ValidationOptions::IgnoreEmptyInfoVersion) {
-            validate_required_string(&self.version, ctx, format!("{path}.version"));
+            ctx.require_non_empty("version", &self.version);
         }
     }
 }
@@ -46,7 +44,7 @@ mod tests {
     use serde_json::json;
 
     fn ctx() -> Context {
-        Context::new(EnumSet::empty())
+        Context::with_path(EnumSet::empty(), "#.info")
     }
 
     #[test]
@@ -100,7 +98,7 @@ mod tests {
     fn validate_rejects_empty_title_and_version() {
         let mut c = ctx();
         let info = Info::default();
-        info.validate_with_context(&mut c, "#.info".into());
+        info.validate_with_context(&mut c);
         assert!(
             c.errors
                 .iter()
@@ -117,9 +115,9 @@ mod tests {
     fn validate_ignore_options_suppress_diagnostics() {
         let opts = EnumSet::only(ValidationOptions::IgnoreEmptyInfoTitle)
             | ValidationOptions::IgnoreEmptyInfoVersion;
-        let mut c = Context::new(opts);
+        let mut c = Context::with_path(opts, "#.info");
         let info = Info::default();
-        info.validate_with_context(&mut c, "#.info".into());
+        info.validate_with_context(&mut c);
         assert!(c.errors.is_empty());
     }
 }

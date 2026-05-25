@@ -1,21 +1,24 @@
 //! Validation framework for Overlay documents.
 //!
 //! Modeled after [`roas::validation`]: a public [`Validate`] trait
-//! drives a recursive descent through a per-component crate-internal
-//! trait; each component pushes diagnostics into a context keyed by
-//! a JSONPath-flavor path string. Errors collect rather than fail
-//! fast.
+//! drives a recursive descent through a crate-internal trait. The
+//! current location is held as a single mutable path buffer on the
+//! [`Context`]; nodes `enter` a child segment, recurse, and the segment
+//! is truncated on the way out. The path string is cloned only when an
+//! error is actually recorded, so a valid document allocates no per-node
+//! path strings. Errors collect rather than fail fast.
 //!
 //! [`roas::validation`]: https://docs.rs/roas/latest/roas/validation/index.html
 
 use enumset::{EnumSet, EnumSetType};
-use std::fmt::{self, Display};
+use std::fmt::{self, Display, Write};
 
 /// A single validation finding.
 ///
 /// `path` is a human-readable locator (e.g. `#.actions[3].target`),
 /// not an RFC 6901 JSON Pointer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct ValidationError {
     pub path: String,
     pub message: String,
@@ -62,6 +65,7 @@ impl PartialEq<&str> for ValidationError {
 
 /// The accumulated outcome of a validation pass.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Error {
     pub errors: Vec<ValidationError>,
 }
@@ -81,8 +85,10 @@ impl std::error::Error for Error {}
 /// Per-call validation toggles.
 ///
 /// Each option suppresses one shallow check so callers can opt out of
-/// individual diagnostics without disabling the whole validator.
+/// individual diagnostics without disabling the whole validator. Marked
+/// `#[non_exhaustive]` so future toggles are non-breaking additions.
 #[derive(EnumSetType, Debug)]
+#[non_exhaustive]
 pub enum ValidationOptions {
     /// Allow `info.title` to be empty (still required to be present).
     IgnoreEmptyInfoTitle,
@@ -117,14 +123,18 @@ pub trait Validate {
     fn validate(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error>;
 }
 
-/// Crate-internal: implemented by every component type.
+/// Crate-internal: implemented by every component type. The location is
+/// carried by [`Context`]'s path buffer rather than a per-call string.
 pub(crate) trait ValidateWithContext {
-    fn validate_with_context(&self, ctx: &mut Context, path: String);
+    fn validate_with_context(&self, ctx: &mut Context);
 }
 
 pub(crate) struct Context {
-    pub options: EnumSet<ValidationOptions>,
+    options: EnumSet<ValidationOptions>,
     pub errors: Vec<ValidationError>,
+    /// The current location, e.g. `#.actions[3]`. Mutated in place via
+    /// `in_*`; only cloned when an error is recorded.
+    path: String,
 }
 
 impl Context {
@@ -132,6 +142,7 @@ impl Context {
         Self {
             options,
             errors: Vec::new(),
+            path: "#".to_owned(),
         }
     }
 
@@ -139,8 +150,49 @@ impl Context {
         self.options.contains(option)
     }
 
-    pub fn error(&mut self, path: String, message: impl Into<String>) {
-        self.errors.push(ValidationError::new(path, message.into()));
+    /// Record an error at the current path.
+    pub fn error(&mut self, message: impl Into<String>) {
+        self.errors
+            .push(ValidationError::new(self.path.clone(), message.into()));
+    }
+
+    /// Record an error at `<current>.<field>` without descending into it.
+    pub fn error_field(&mut self, field: &str, message: impl Into<String>) {
+        let mark = self.path.len();
+        self.push_field(field);
+        self.error(message);
+        self.path.truncate(mark);
+    }
+
+    /// Push `.<field>` for the duration of `f`.
+    pub fn in_field<R>(&mut self, field: &str, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mark = self.path.len();
+        self.push_field(field);
+        let result = f(self);
+        self.path.truncate(mark);
+        result
+    }
+
+    /// Push `.<field>[<index>]` for the duration of `f`.
+    pub fn in_index<R>(&mut self, field: &str, index: usize, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mark = self.path.len();
+        self.push_field(field);
+        let _ = write!(self.path, "[{index}]");
+        let result = f(self);
+        self.path.truncate(mark);
+        result
+    }
+
+    /// Error at `<current>.<field>` if the required string is empty.
+    pub fn require_non_empty(&mut self, field: &str, value: &str) {
+        if value.is_empty() {
+            self.error_field(field, "must not be empty");
+        }
+    }
+
+    fn push_field(&mut self, field: &str) {
+        self.path.push('.');
+        self.path.push_str(field);
     }
 
     pub fn into_result(self) -> Result<(), Error> {
@@ -152,13 +204,14 @@ impl Context {
             })
         }
     }
-}
 
-/// Validate that a required string is not empty. Mirrors
-/// `roas::common::helpers::validate_required_string`.
-pub(crate) fn validate_required_string(s: &str, ctx: &mut Context, path: String) {
-    if s.is_empty() {
-        ctx.error(path, "must not be empty");
+    #[cfg(test)]
+    pub fn with_path(options: EnumSet<ValidationOptions>, path: &str) -> Self {
+        Self {
+            options,
+            errors: Vec::new(),
+            path: path.to_owned(),
+        }
     }
 }
 
@@ -189,8 +242,6 @@ mod tests {
     #[test]
     fn validation_error_partial_eq_against_str_matches_display_form() {
         let e = ValidationError::new("#.info.title".into(), "must not be empty".into());
-        // Exercises both PartialEq<&str> (via the literal) and
-        // PartialEq<str> (via deref of an owned String).
         assert!(e == "#.info.title: must not be empty");
         let owned = String::from("#.info.title: must not be empty");
         assert!(e == *owned.as_str());
@@ -207,12 +258,23 @@ mod tests {
     }
 
     #[test]
-    fn context_collects_errors_and_converts_to_result() {
+    fn error_records_at_current_path() {
         let mut ctx = Context::new(EnumSet::empty());
-        ctx.error("#.x".into(), "kaboom");
-        let r = ctx.into_result();
-        let err = r.unwrap_err();
-        assert_eq!(err.errors.len(), 1);
+        ctx.error("kaboom");
+        assert!(ctx.errors[0] == "#: kaboom");
+    }
+
+    #[test]
+    fn in_scopes_compose_and_truncate() {
+        let mut ctx = Context::new(EnumSet::empty());
+        ctx.in_index("actions", 3, |ctx| {
+            ctx.error_field("target", "bad");
+            ctx.error("here");
+        });
+        ctx.error("root");
+        assert!(ctx.errors[0] == "#.actions[3].target: bad");
+        assert!(ctx.errors[1] == "#.actions[3]: here");
+        assert!(ctx.errors[2] == "#: root");
     }
 
     #[test]
@@ -230,10 +292,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_required_string_pushes_error_for_empty() {
+    fn require_non_empty_pushes_error_for_empty_only() {
         let mut ctx = Context::new(EnumSet::empty());
-        validate_required_string("", &mut ctx, "#.info.title".into());
-        validate_required_string("ok", &mut ctx, "#.info.version".into());
+        ctx.in_field("info", |ctx| {
+            ctx.require_non_empty("title", "");
+            ctx.require_non_empty("version", "ok");
+        });
         assert_eq!(ctx.errors.len(), 1);
         assert!(ctx.errors[0] == "#.info.title: must not be empty");
     }

@@ -52,21 +52,21 @@ impl Action {
 }
 
 /// Validate that `value` is a non-empty, syntactically valid RFC 9535
-/// JSONPath, recording diagnostics under `path` (computed once).
-fn validate_jsonpath(value: &str, ctx: &mut Context, path: String) {
+/// JSONPath, recording diagnostics under `<current>.<field>`.
+fn validate_jsonpath(value: &str, ctx: &mut Context, field: &str) {
     if value.is_empty() {
-        ctx.error(path, "must not be empty");
+        ctx.error_field(field, "must not be empty");
     } else if let Err(msg) = compile_path(value) {
-        ctx.error(path, format!("invalid JSONPath query: {msg}"));
+        ctx.error_field(field, format!("invalid JSONPath query: {msg}"));
     }
 }
 
 impl ValidateWithContext for Action {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_jsonpath(&self.target, ctx, format!("{path}.target"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        validate_jsonpath(&self.target, ctx, "target");
 
         if let Some(copy) = &self.copy {
-            validate_jsonpath(copy, ctx, format!("{path}.copy"));
+            validate_jsonpath(copy, ctx, "copy");
         }
 
         // The spec says `update` "has no impact if the `remove` field
@@ -74,27 +74,18 @@ impl ValidateWithContext for Action {
         // `copy`. We reject all three combinations because they
         // almost certainly indicate an authoring mistake.
         if self.is_remove() && self.update.is_some() {
-            ctx.error(
-                path.clone(),
-                "`remove: true` and `update` are mutually exclusive",
-            );
+            ctx.error("`remove: true` and `update` are mutually exclusive");
         }
         if self.is_remove() && self.copy.is_some() {
-            ctx.error(
-                path.clone(),
-                "`remove: true` and `copy` are mutually exclusive",
-            );
+            ctx.error("`remove: true` and `copy` are mutually exclusive");
         }
         if self.update.is_some() && self.copy.is_some() {
-            ctx.error(path.clone(), "`update` and `copy` are mutually exclusive");
+            ctx.error("`update` and `copy` are mutually exclusive");
         }
 
         // Catch the silent-no-op authoring bug.
         if !self.is_remove() && self.update.is_none() && self.copy.is_none() {
-            ctx.error(
-                path,
-                "action must specify one of `update`, `copy`, or `remove: true`",
-            );
+            ctx.error("action must specify one of `update`, `copy`, or `remove: true`");
         }
     }
 }
@@ -106,8 +97,8 @@ mod tests {
     use serde_json::json;
 
     fn validate(action: &Action) -> Vec<String> {
-        let mut ctx = Context::new(EnumSet::empty());
-        action.validate_with_context(&mut ctx, "#.actions[0]".into());
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.actions[0]");
+        action.validate_with_context(&mut ctx);
         ctx.errors.iter().map(|e| e.to_string()).collect()
     }
 
