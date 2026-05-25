@@ -1,14 +1,17 @@
-//! Arazzo v1.0 `Reusable` object and the `ReusableOr<T>` wrapper.
+//! The Arazzo `Reusable` object and the `ReusableOr<T>` wrapper.
 //!
-//! Per [Reusable Object](https://spec.openapis.org/arazzo/v1.0.1.html#reusable-object):
-//! a runtime-expression reference to an object held in
-//! [`Components`](crate::v1_0::Components), optionally overriding its
-//! `value`. Unlike every other object it does **not** allow `x-`
-//! extensions.
+//! Per the Reusable Object
+//! ([v1.0](https://spec.openapis.org/arazzo/v1.0.1.html#reusable-object) /
+//! [v1.1](https://spec.openapis.org/arazzo/v1.1.0.html#reusable-object)):
+//! a runtime-expression reference to an object held in a version's
+//! `Components`, optionally overriding its `value`. Unlike every other
+//! object it does **not** allow `x-` extensions.
 //!
-//! Lists of parameters / success actions / failure actions accept
-//! either a concrete object or a `Reusable`; [`ReusableOr`] models that
-//! `oneOf`, analogous to `roas`'s `RefOr<T>`.
+//! Identical across Arazzo versions, so it lives in `common` (mirroring
+//! how `roas` consolidated its `reference` type). Lists of parameters /
+//! success actions / failure actions accept either a concrete object or
+//! a `Reusable`; [`ReusableOr`] models that `oneOf`, analogous to
+//! `roas`'s `RefOr<T>`.
 
 use crate::validation::{Context, ValidateWithContext};
 use serde::de::DeserializeOwned;
@@ -78,9 +81,21 @@ impl<T: ValidateWithContext> ValidateWithContext for ReusableOr<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1_0::parameter::Parameter;
     use enumset::EnumSet;
     use serde_json::json;
+
+    /// Minimal stand-in for a concrete component (keeps these tests
+    /// independent of any version feature).
+    #[derive(Debug, Deserialize, Default)]
+    struct Demo {
+        name: String,
+    }
+
+    impl ValidateWithContext for Demo {
+        fn validate_with_context(&self, ctx: &mut Context) {
+            ctx.require_non_empty("name", &self.name);
+        }
+    }
 
     #[test]
     fn reusable_round_trips() {
@@ -92,7 +107,7 @@ mod tests {
 
     #[test]
     fn reusable_or_picks_reusable_for_reference_key() {
-        let v: ReusableOr<Parameter> = serde_json::from_value(
+        let v: ReusableOr<Demo> = serde_json::from_value(
             json!({ "reference": "$components.parameters.foo", "value": 1 }),
         )
         .unwrap();
@@ -107,8 +122,7 @@ mod tests {
 
     #[test]
     fn reusable_or_picks_item_for_concrete_object() {
-        let v: ReusableOr<Parameter> =
-            serde_json::from_value(json!({ "name": "petId", "value": "$inputs.petId" })).unwrap();
+        let v: ReusableOr<Demo> = serde_json::from_value(json!({ "name": "petId" })).unwrap();
         match v {
             ReusableOr::Item(p) => assert_eq!(p.name, "petId"),
             ReusableOr::Reusable(_) => panic!("expected item variant"),
@@ -117,11 +131,10 @@ mod tests {
 
     #[test]
     fn malformed_item_surfaces_inner_error_not_opaque_variant_error() {
-        // No `reference` key, so this dispatches to `Item(Parameter)` and
+        // No `reference` key, so this dispatches to `Item(Demo)` and
         // fails with the real missing-field error rather than the
         // untagged-enum catch-all.
-        let err =
-            serde_json::from_value::<ReusableOr<Parameter>>(json!({ "in": "path" })).unwrap_err();
+        let err = serde_json::from_value::<ReusableOr<Demo>>(json!({ "other": 1 })).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("missing field"), "got: {msg}");
         assert!(!msg.contains("did not match any variant"), "got: {msg}");
@@ -129,10 +142,9 @@ mod tests {
 
     #[test]
     fn round_trips_through_yaml() {
-        let v: ReusableOr<Parameter> =
-            serde_yaml_ng::from_str("name: petId\nin: query\nvalue: 1\n").unwrap();
+        let v: ReusableOr<Demo> = serde_yaml_ng::from_str("name: petId\n").unwrap();
         assert!(matches!(v, ReusableOr::Item(_)));
-        let r: ReusableOr<Parameter> =
+        let r: ReusableOr<Demo> =
             serde_yaml_ng::from_str("reference: $components.parameters.foo\n").unwrap();
         assert!(matches!(r, ReusableOr::Reusable(_)));
     }
@@ -140,7 +152,7 @@ mod tests {
     #[test]
     fn validate_reusable_rejects_empty_reference() {
         let mut c = Context::with_path(EnumSet::empty(), "#.parameters[0]");
-        let v: ReusableOr<Parameter> = ReusableOr::Reusable(Reusable::default());
+        let v: ReusableOr<Demo> = ReusableOr::Reusable(Reusable::default());
         v.validate_with_context(&mut c);
         assert!(
             c.errors
@@ -152,7 +164,7 @@ mod tests {
     #[test]
     fn validate_item_delegates_to_inner() {
         let mut c = Context::with_path(EnumSet::empty(), "#.parameters[0]");
-        let v: ReusableOr<Parameter> = ReusableOr::Item(Parameter::default());
+        let v: ReusableOr<Demo> = ReusableOr::Item(Demo::default());
         v.validate_with_context(&mut c);
         assert!(
             c.errors

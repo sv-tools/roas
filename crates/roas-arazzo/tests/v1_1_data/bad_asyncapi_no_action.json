@@ -1,0 +1,13 @@
+{
+  "arazzo": "1.1.0",
+  "info": { "title": "T", "version": "1.0.0" },
+  "sourceDescriptions": [ { "name": "events", "url": "asyncapi.yaml", "type": "asyncapi" } ],
+  "workflows": [
+    {
+      "workflowId": "wf",
+      "steps": [
+        { "stepId": "listen", "channelPath": "$sourceDescriptions.events#/channels/x" }
+      ]
+    }
+  ]
+}
