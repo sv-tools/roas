@@ -1,0 +1,9 @@
+{
+  "arazzo": "1.0.1",
+  "info": { "title": "T", "version": "1.0.0" },
+  "sourceDescriptions": [ { "name": "src", "url": "openapi.yaml" } ],
+  "workflows": [
+    { "workflowId": "dup", "steps": [ { "stepId": "s", "workflowId": "a" } ] },
+    { "workflowId": "dup", "steps": [ { "stepId": "s", "workflowId": "b" } ] }
+  ]
+}

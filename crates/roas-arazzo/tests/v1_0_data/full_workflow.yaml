@@ -1,0 +1,89 @@
+arazzo: 1.0.1
+info:
+  title: Pet purchasing workflow
+  summary: Buy a pet
+  description: Exercises every Arazzo v1.0 object kind.
+  version: "1.0.0"
+  x-owner: platform-team
+sourceDescriptions:
+  - name: petStore
+    url: https://api.example.com/openapi.json
+    type: openapi
+  - name: subWorkflows
+    url: ./other.arazzo.yaml
+    type: arazzo
+workflows:
+  - workflowId: buyPet
+    summary: Find then order a pet
+    dependsOn:
+      - authenticate
+    inputs:
+      type: object
+      properties:
+        petId:
+          type: string
+    parameters:
+      - name: Authorization
+        in: header
+        value: $inputs.token
+      - reference: $components.parameters.locale
+    steps:
+      - stepId: findPet
+        description: Look up a pet by id
+        operationId: getPetById
+        parameters:
+          - name: petId
+            in: path
+            value: $inputs.petId
+        successCriteria:
+          - condition: $statusCode == 200
+          - context: $response.body
+            condition: $[?count(@.tags) > 0]
+            type: jsonpath
+            version: draft-goessner-dispatch-jsonpath-00
+        onSuccess:
+          - name: gotoOrder
+            type: goto
+            stepId: orderPet
+        onFailure:
+          - name: retryFind
+            type: retry
+            retryAfter: 1.5
+            retryLimit: 3
+            criteria:
+              - condition: $statusCode == 503
+          - reference: $components.failureActions.notifyOps
+        outputs:
+          foundPet: $response.body
+      - stepId: orderPet
+        operationId: placeOrder
+        requestBody:
+          contentType: application/json
+          payload:
+            petId: $steps.findPet.outputs.foundPet.id
+          replacements:
+            - target: /quantity
+              value: "1"
+        outputs:
+          orderId: $response.body.id
+    successActions:
+      - name: done
+        type: end
+    failureActions:
+      - name: abort
+        type: end
+    outputs:
+      order: $steps.orderPet.outputs.orderId
+components:
+  parameters:
+    locale:
+      name: locale
+      in: header
+      value: en-US
+  failureActions:
+    notifyOps:
+      name: notifyOps
+      type: end
+  inputs:
+    token:
+      type: string
