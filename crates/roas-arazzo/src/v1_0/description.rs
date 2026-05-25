@@ -43,51 +43,42 @@ pub struct Description {
 impl Description {
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::new(options);
-        let path = "#".to_owned();
 
-        self.info
-            .validate_with_context(&mut ctx, format!("{path}.info"));
+        ctx.in_field("info", |ctx| self.info.validate_with_context(ctx));
 
         if self.source_descriptions.is_empty() {
-            ctx.error(
-                format!("{path}.sourceDescriptions"),
-                "must contain at least one entry",
-            );
+            ctx.error_field("sourceDescriptions", "must contain at least one entry");
         }
         let mut seen_names = BTreeSet::new();
         for (i, source) in self.source_descriptions.iter().enumerate() {
-            let source_path = format!("{path}.sourceDescriptions[{i}]");
-            source.validate_with_context(&mut ctx, source_path.clone());
-            if !source.name.is_empty() && !seen_names.insert(source.name.as_str()) {
-                ctx.error(
-                    format!("{source_path}.name"),
-                    format!("duplicate source name `{}`", source.name),
-                );
-            }
+            ctx.in_index("sourceDescriptions", i, |ctx| {
+                source.validate_with_context(ctx);
+                if !source.name.is_empty() && !seen_names.insert(source.name.as_str()) {
+                    ctx.error_field("name", format!("duplicate source name `{}`", source.name));
+                }
+            });
         }
 
         if self.workflows.is_empty() {
-            ctx.error(
-                format!("{path}.workflows"),
-                "must contain at least one entry",
-            );
+            ctx.error_field("workflows", "must contain at least one entry");
         }
         let mut seen_workflow_ids = BTreeSet::new();
         for (i, workflow) in self.workflows.iter().enumerate() {
-            let workflow_path = format!("{path}.workflows[{i}]");
-            workflow.validate_with_context(&mut ctx, workflow_path.clone());
-            if !workflow.workflow_id.is_empty()
-                && !seen_workflow_ids.insert(workflow.workflow_id.as_str())
-            {
-                ctx.error(
-                    format!("{workflow_path}.workflowId"),
-                    format!("duplicate workflowId `{}`", workflow.workflow_id),
-                );
-            }
+            ctx.in_index("workflows", i, |ctx| {
+                workflow.validate_with_context(ctx);
+                if !workflow.workflow_id.is_empty()
+                    && !seen_workflow_ids.insert(workflow.workflow_id.as_str())
+                {
+                    ctx.error_field(
+                        "workflowId",
+                        format!("duplicate workflowId `{}`", workflow.workflow_id),
+                    );
+                }
+            });
         }
 
         if let Some(components) = &self.components {
-            components.validate_with_context(&mut ctx, format!("{path}.components"));
+            ctx.in_field("components", |ctx| components.validate_with_context(ctx));
         }
 
         ctx.into_result()

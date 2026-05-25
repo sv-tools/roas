@@ -8,7 +8,7 @@
 use crate::v1_0::failure_action::FailureAction;
 use crate::v1_0::parameter::Parameter;
 use crate::v1_0::success_action::SuccessAction;
-use crate::validation::{Context, ValidateWithContext, validate_map_keys};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -47,28 +47,26 @@ pub struct Components {
 }
 
 impl ValidateWithContext for Components {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_map_keys(&self.inputs, ctx, &format!("{path}.inputs"));
-        validate_map_keys(&self.parameters, ctx, &format!("{path}.parameters"));
-        validate_map_keys(
-            &self.success_actions,
-            ctx,
-            &format!("{path}.successActions"),
-        );
-        validate_map_keys(
-            &self.failure_actions,
-            ctx,
-            &format!("{path}.failureActions"),
-        );
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.validate_map_keys("inputs", &self.inputs);
+        ctx.validate_map_keys("parameters", &self.parameters);
+        ctx.validate_map_keys("successActions", &self.success_actions);
+        ctx.validate_map_keys("failureActions", &self.failure_actions);
 
         for (name, parameter) in &self.parameters {
-            parameter.validate_with_context(ctx, format!("{path}.parameters.{name}"));
+            ctx.in_key("parameters", name, |ctx| {
+                parameter.validate_with_context(ctx)
+            });
         }
         for (name, action) in &self.success_actions {
-            action.validate_with_context(ctx, format!("{path}.successActions.{name}"));
+            ctx.in_key("successActions", name, |ctx| {
+                action.validate_with_context(ctx)
+            });
         }
         for (name, action) in &self.failure_actions {
-            action.validate_with_context(ctx, format!("{path}.failureActions.{name}"));
+            ctx.in_key("failureActions", name, |ctx| {
+                action.validate_with_context(ctx)
+            });
         }
     }
 }
@@ -96,14 +94,14 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_key_and_recurses() {
-        let mut ctx = Context::new(EnumSet::empty());
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.components");
         let mut parameters = BTreeMap::new();
         parameters.insert("bad key".to_owned(), Parameter::default());
         let c = Components {
             parameters,
             ..Default::default()
         };
-        c.validate_with_context(&mut ctx, "#.components".into());
+        c.validate_with_context(&mut ctx);
         let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
         assert!(msgs.iter().any(|e| e.contains("key must match")));
         // recursion reaches the empty parameter name

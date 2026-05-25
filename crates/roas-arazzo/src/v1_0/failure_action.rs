@@ -5,7 +5,7 @@
 
 use crate::v1_0::criterion::Criterion;
 use crate::v1_0::success_action::validate_goto_target;
-use crate::validation::{Context, ValidateWithContext, validate_required_string};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -58,20 +58,20 @@ pub struct FailureAction {
 }
 
 impl ValidateWithContext for FailureAction {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.name, ctx, format!("{path}.name"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("name", &self.name);
         validate_goto_target(
             self.type_ == FailureActionType::Goto,
             self.workflow_id.is_some(),
             self.step_id.is_some(),
             ctx,
-            &path,
         );
-        if self.retry_after.is_some_and(|n| n < 0.0) {
-            ctx.error(format!("{path}.retryAfter"), "must not be negative");
+        // Reject negatives and NaN (the schema requires `minimum: 0`).
+        if self.retry_after.is_some_and(|n| n < 0.0 || n.is_nan()) {
+            ctx.error_field("retryAfter", "must not be negative");
         }
         for (i, criterion) in self.criteria.iter().enumerate() {
-            criterion.validate_with_context(ctx, format!("{path}.criteria[{i}]"));
+            ctx.in_index("criteria", i, |ctx| criterion.validate_with_context(ctx));
         }
     }
 }
@@ -83,8 +83,8 @@ mod tests {
     use serde_json::json;
 
     fn validate(a: &FailureAction) -> Vec<String> {
-        let mut ctx = Context::new(EnumSet::empty());
-        a.validate_with_context(&mut ctx, "#.a".into());
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.a");
+        a.validate_with_context(&mut ctx);
         ctx.errors.iter().map(ToString::to_string).collect()
     }
 
@@ -136,6 +136,21 @@ mod tests {
             name: "n".into(),
             type_: FailureActionType::Retry,
             retry_after: Some(-1.0),
+            ..Default::default()
+        };
+        assert!(
+            validate(&a)
+                .iter()
+                .any(|e| e == "#.a.retryAfter: must not be negative")
+        );
+    }
+
+    #[test]
+    fn nan_retry_after_fails_validation() {
+        let a = FailureAction {
+            name: "n".into(),
+            type_: FailureActionType::Retry,
+            retry_after: Some(f64::NAN),
             ..Default::default()
         };
         assert!(

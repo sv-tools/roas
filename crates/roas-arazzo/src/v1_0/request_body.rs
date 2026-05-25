@@ -3,7 +3,7 @@
 //! Per [Request Body Object](https://spec.openapis.org/arazzo/v1.0.1.html#request-body-object)
 //! and [Payload Replacement Object](https://spec.openapis.org/arazzo/v1.0.1.html#payload-replacement-object).
 
-use crate::validation::{Context, ValidateWithContext, validate_required_string};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -30,9 +30,11 @@ pub struct RequestBody {
 }
 
 impl ValidateWithContext for RequestBody {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
+    fn validate_with_context(&self, ctx: &mut Context) {
         for (i, replacement) in self.replacements.iter().enumerate() {
-            replacement.validate_with_context(ctx, format!("{path}.replacements[{i}]"));
+            ctx.in_index("replacements", i, |ctx| {
+                replacement.validate_with_context(ctx)
+            });
         }
     }
 }
@@ -54,8 +56,8 @@ pub struct PayloadReplacement {
 }
 
 impl ValidateWithContext for PayloadReplacement {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.target, ctx, format!("{path}.target"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("target", &self.target);
     }
 }
 
@@ -89,12 +91,12 @@ mod tests {
 
     #[test]
     fn validate_recurses_into_replacements() {
-        let mut c = Context::new(EnumSet::empty());
+        let mut c = Context::with_path(EnumSet::empty(), "#.requestBody");
         let rb = RequestBody {
             replacements: vec![PayloadReplacement::default()],
             ..Default::default()
         };
-        rb.validate_with_context(&mut c, "#.requestBody".into());
+        rb.validate_with_context(&mut c);
         assert!(
             c.errors
                 .iter()

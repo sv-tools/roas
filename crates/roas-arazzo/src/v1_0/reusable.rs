@@ -10,8 +10,9 @@
 //! either a concrete object or a `Reusable`; [`ReusableOr`] models that
 //! `oneOf`, analogous to `roas`'s `RefOr<T>`.
 
-use crate::validation::{Context, ValidateWithContext, validate_required_string};
-use serde::{Deserialize, Serialize};
+use crate::validation::{Context, ValidateWithContext};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Reusable {
@@ -24,28 +25,52 @@ pub struct Reusable {
 }
 
 impl ValidateWithContext for Reusable {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.reference, ctx, format!("{path}.reference"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("reference", &self.reference);
     }
 }
 
 /// Either a concrete object `T` or a [`Reusable`] reference to one.
 ///
-/// `Reusable` is tried first during deserialization; its required
-/// `reference` key distinguishes it from the concrete object, which has
-/// its own distinct required fields.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+/// Serializes untagged (the inner object directly). Deserialization is
+/// hand-written rather than `#[serde(untagged)]`: it dispatches on the
+/// presence of the discriminating `reference` key in a single pass and
+/// then deserializes only the chosen variant, so a malformed `Item`
+/// surfaces its real error (e.g. `missing field \`name\``) instead of
+/// the opaque "data did not match any variant".
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum ReusableOr<T> {
     Reusable(Reusable),
     Item(T),
 }
 
+impl<'de, T> Deserialize<'de> for ReusableOr<T>
+where
+    T: DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("reference").is_some() {
+            serde_json::from_value(value)
+                .map(ReusableOr::Reusable)
+                .map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(ReusableOr::Item)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
 impl<T: ValidateWithContext> ValidateWithContext for ReusableOr<T> {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
+    fn validate_with_context(&self, ctx: &mut Context) {
         match self {
-            ReusableOr::Reusable(r) => r.validate_with_context(ctx, path),
-            ReusableOr::Item(t) => t.validate_with_context(ctx, path),
+            ReusableOr::Reusable(r) => r.validate_with_context(ctx),
+            ReusableOr::Item(t) => t.validate_with_context(ctx),
         }
     }
 }
@@ -91,10 +116,32 @@ mod tests {
     }
 
     #[test]
+    fn malformed_item_surfaces_inner_error_not_opaque_variant_error() {
+        // No `reference` key, so this dispatches to `Item(Parameter)` and
+        // fails with the real missing-field error rather than the
+        // untagged-enum catch-all.
+        let err =
+            serde_json::from_value::<ReusableOr<Parameter>>(json!({ "in": "path" })).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing field"), "got: {msg}");
+        assert!(!msg.contains("did not match any variant"), "got: {msg}");
+    }
+
+    #[test]
+    fn round_trips_through_yaml() {
+        let v: ReusableOr<Parameter> =
+            serde_yaml_ng::from_str("name: petId\nin: query\nvalue: 1\n").unwrap();
+        assert!(matches!(v, ReusableOr::Item(_)));
+        let r: ReusableOr<Parameter> =
+            serde_yaml_ng::from_str("reference: $components.parameters.foo\n").unwrap();
+        assert!(matches!(r, ReusableOr::Reusable(_)));
+    }
+
+    #[test]
     fn validate_reusable_rejects_empty_reference() {
-        let mut c = Context::new(EnumSet::empty());
+        let mut c = Context::with_path(EnumSet::empty(), "#.parameters[0]");
         let v: ReusableOr<Parameter> = ReusableOr::Reusable(Reusable::default());
-        v.validate_with_context(&mut c, "#.parameters[0]".into());
+        v.validate_with_context(&mut c);
         assert!(
             c.errors
                 .iter()
@@ -104,9 +151,9 @@ mod tests {
 
     #[test]
     fn validate_item_delegates_to_inner() {
-        let mut c = Context::new(EnumSet::empty());
+        let mut c = Context::with_path(EnumSet::empty(), "#.parameters[0]");
         let v: ReusableOr<Parameter> = ReusableOr::Item(Parameter::default());
-        v.validate_with_context(&mut c, "#.parameters[0]".into());
+        v.validate_with_context(&mut c);
         assert!(
             c.errors
                 .iter()

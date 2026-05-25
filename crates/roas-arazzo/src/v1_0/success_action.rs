@@ -5,7 +5,7 @@
 //! step / workflow.
 
 use crate::v1_0::criterion::Criterion;
-use crate::validation::{Context, ValidateWithContext, validate_required_string};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -49,35 +49,31 @@ pub struct SuccessAction {
 }
 
 impl ValidateWithContext for SuccessAction {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.name, ctx, format!("{path}.name"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("name", &self.name);
         validate_goto_target(
             self.type_ == SuccessActionType::Goto,
             self.workflow_id.is_some(),
             self.step_id.is_some(),
             ctx,
-            &path,
         );
         for (i, criterion) in self.criteria.iter().enumerate() {
-            criterion.validate_with_context(ctx, format!("{path}.criteria[{i}]"));
+            ctx.in_index("criteria", i, |ctx| criterion.validate_with_context(ctx));
         }
     }
 }
 
 /// Shared `goto`-target rule used by both success and failure actions:
-/// a `goto` requires exactly one of `workflowId` / `stepId`.
+/// a `goto` requires exactly one of `workflowId` / `stepId`. Reported at
+/// the action's current path.
 pub(crate) fn validate_goto_target(
     is_goto: bool,
     has_workflow_id: bool,
     has_step_id: bool,
     ctx: &mut Context,
-    path: &str,
 ) {
     if is_goto && !(has_workflow_id ^ has_step_id) {
-        ctx.error(
-            path.to_owned(),
-            "`goto` requires exactly one of `workflowId` or `stepId`",
-        );
+        ctx.error("`goto` requires exactly one of `workflowId` or `stepId`");
     }
 }
 
@@ -88,8 +84,8 @@ mod tests {
     use serde_json::json;
 
     fn validate(a: &SuccessAction) -> Vec<String> {
-        let mut ctx = Context::new(EnumSet::empty());
-        a.validate_with_context(&mut ctx, "#.a".into());
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.a");
+        a.validate_with_context(&mut ctx);
         ctx.errors.iter().map(ToString::to_string).collect()
     }
 

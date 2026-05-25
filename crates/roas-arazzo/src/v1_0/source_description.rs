@@ -4,7 +4,7 @@
 //! a named reference to an OpenAPI or Arazzo document used by one or
 //! more workflows.
 
-use crate::validation::{Context, ValidateWithContext, is_valid_name, validate_required_string};
+use crate::validation::{Context, ValidateWithContext, is_valid_name};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -40,12 +40,12 @@ pub struct SourceDescription {
 }
 
 impl ValidateWithContext for SourceDescription {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.name, ctx, format!("{path}.name"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("name", &self.name);
         if !self.name.is_empty() && !is_valid_name(&self.name) {
-            ctx.error(format!("{path}.name"), r"must match `^[A-Za-z0-9_\-]+$`");
+            ctx.error_field("name", r"must match `^[A-Za-z0-9_\-]+$`");
         }
-        validate_required_string(&self.url, ctx, format!("{path}.url"));
+        ctx.require_non_empty("url", &self.url);
     }
 }
 
@@ -54,10 +54,6 @@ mod tests {
     use super::*;
     use enumset::EnumSet;
     use serde_json::json;
-
-    fn ctx() -> Context {
-        Context::new(EnumSet::empty())
-    }
 
     #[test]
     fn deserialize_round_trips_with_type() {
@@ -93,9 +89,8 @@ mod tests {
 
     #[test]
     fn validate_rejects_empty_name_and_url() {
-        let mut c = ctx();
-        SourceDescription::default()
-            .validate_with_context(&mut c, "#.sourceDescriptions[0]".into());
+        let mut c = Context::with_path(EnumSet::empty(), "#.sourceDescriptions[0]");
+        SourceDescription::default().validate_with_context(&mut c);
         assert!(
             c.errors
                 .iter()
@@ -110,13 +105,13 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_name_pattern() {
-        let mut c = ctx();
+        let mut c = Context::with_path(EnumSet::empty(), "#.s");
         let sd = SourceDescription {
             name: "bad name".into(),
             url: "u".into(),
             ..Default::default()
         };
-        sd.validate_with_context(&mut c, "#.s".into());
+        sd.validate_with_context(&mut c);
         assert!(c.errors.iter().any(|e| e.contains("must match")));
     }
 }
