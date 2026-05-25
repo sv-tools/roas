@@ -1,28 +1,34 @@
-//! Arazzo v1.0 root document (the *Arazzo Description*).
+//! Arazzo v1.1 root document (the *Arazzo Description*).
+//!
+//! New in v1.1: the optional `$self` field.
 
-use crate::v1_0::components::Components;
-use crate::v1_0::info::Info;
-use crate::v1_0::source_description::SourceDescription;
-use crate::v1_0::version::Version;
-use crate::v1_0::workflow::Workflow;
+use crate::v1_1::components::Components;
+use crate::v1_1::info::Info;
+use crate::v1_1::source_description::SourceDescription;
+use crate::v1_1::version::Version;
+use crate::v1_1::workflow::Workflow;
 use crate::validation::{Context, Error, Validate, ValidateWithContext, ValidationOptions};
 use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Root Arazzo v1.0 document.
+/// Root Arazzo v1.1 document.
 ///
-/// See [Arazzo Description](https://spec.openapis.org/arazzo/v1.0.1.html#arazzo-description).
+/// See [Arazzo Description](https://spec.openapis.org/arazzo/v1.1.0.html#arazzo-description).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Description {
-    /// **Required** `1.0.x` per the schema's pattern `^1\.0\.\d+(-.+)?$`.
+    /// **Required** `1.1.x` per the schema's pattern `^1\.1\.\d+(-.+)?$`.
     pub arazzo: Version,
+
+    /// A self-identifying URI reference for this document. Added in
+    /// v1.1; MUST NOT contain a fragment.
+    #[serde(rename = "$self", skip_serializing_if = "Option::is_none")]
+    pub self_: Option<String>,
 
     /// **Required** Metadata about the Arazzo description.
     pub info: Info,
 
-    /// **Required** Non-empty list of referenced source descriptions
-    /// (OpenAPI or Arazzo documents).
+    /// **Required** Non-empty list of referenced source descriptions.
     #[serde(rename = "sourceDescriptions")]
     pub source_descriptions: Vec<SourceDescription>,
 
@@ -43,6 +49,12 @@ pub struct Description {
 impl Description {
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::new(options);
+
+        if let Some(self_) = &self.self_
+            && self_.contains('#')
+        {
+            ctx.error_field("$self", "must not contain a fragment (`#`)");
+        }
 
         ctx.in_field("info", |ctx| self.info.validate_with_context(ctx));
 
@@ -98,7 +110,7 @@ mod tests {
 
     fn minimal() -> serde_json::Value {
         json!({
-            "arazzo": "1.0.1",
+            "arazzo": "1.1.0",
             "info": { "title": "T", "version": "1.0.0" },
             "sourceDescriptions": [ { "name": "src", "url": "openapi.yaml" } ],
             "workflows": [
@@ -109,36 +121,48 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_minimal_round_trips() {
+    fn deserialize_minimal_round_trips_and_validates() {
         let doc: Description = serde_json::from_value(minimal()).unwrap();
-        assert_eq!(doc.arazzo, Version::V1_0_1());
-        assert_eq!(doc.source_descriptions.len(), 1);
-        assert_eq!(doc.workflows.len(), 1);
-        assert!(doc.components.is_none());
+        assert_eq!(doc.arazzo, Version::V1_1_0());
         doc.validate(EnumSet::empty()).expect("valid");
     }
 
     #[test]
-    fn serialize_preserves_field_names() {
-        let doc: Description = serde_json::from_value(minimal()).unwrap();
-        let v = serde_json::to_value(&doc).unwrap();
-        assert_eq!(v["arazzo"], json!("1.0.1"));
-        assert!(v["sourceDescriptions"].is_array());
-        assert!(v["workflows"].is_array());
-        assert!(v.get("components").is_none());
+    fn self_with_fragment_is_rejected() {
+        let mut value = minimal();
+        value["$self"] = json!("urn:example#frag");
+        let doc: Description = serde_json::from_value(value).unwrap();
+        let err = doc.validate(EnumSet::empty()).unwrap_err();
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e == "#.$self: must not contain a fragment (`#`)")
+        );
     }
 
     #[test]
-    fn deserialize_rejects_wrong_version() {
+    fn self_round_trips_under_dollar_key() {
+        let mut value = minimal();
+        value["$self"] = json!("urn:example:arazzo");
+        let doc: Description = serde_json::from_value(value).unwrap();
+        assert_eq!(doc.self_.as_deref(), Some("urn:example:arazzo"));
+        assert_eq!(
+            serde_json::to_value(&doc).unwrap()["$self"],
+            json!("urn:example:arazzo")
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_v1_0_version() {
         let mut bad = minimal();
-        bad["arazzo"] = json!("2.0.0");
+        bad["arazzo"] = json!("1.0.0");
         assert!(serde_json::from_value::<Description>(bad).is_err());
     }
 
     #[test]
     fn empty_collections_fail_validation() {
         let doc = Description {
-            arazzo: Version::V1_0_1(),
+            arazzo: Version::V1_1_0(),
             info: Info {
                 title: "T".into(),
                 version: "1".into(),
@@ -162,7 +186,7 @@ mod tests {
     #[test]
     fn duplicate_source_names_and_workflow_ids_fail() {
         let doc: Description = serde_json::from_value(json!({
-            "arazzo": "1.0.1",
+            "arazzo": "1.1.0",
             "info": { "title": "T", "version": "1" },
             "sourceDescriptions": [
                 { "name": "dup", "url": "a" },
@@ -170,7 +194,7 @@ mod tests {
             ],
             "workflows": [
                 { "workflowId": "w", "steps": [ { "stepId": "s", "workflowId": "x" } ] },
-                { "workflowId": "w", "steps": [ { "stepId": "s", "workflowId": "y" } ] }
+                { "workflowId": "w", "steps": [ { "stepId": "s2", "workflowId": "y" } ] }
             ]
         }))
         .unwrap();
@@ -184,17 +208,6 @@ mod tests {
             err.errors
                 .iter()
                 .any(|e| e.contains("duplicate workflowId `w`"))
-        );
-    }
-
-    #[test]
-    fn root_extensions_are_captured() {
-        let mut value = minimal();
-        value["x-internal"] = json!(true);
-        let doc: Description = serde_json::from_value(value).unwrap();
-        assert_eq!(
-            doc.extensions.as_ref().unwrap().get("x-internal"),
-            Some(&json!(true))
         );
     }
 }

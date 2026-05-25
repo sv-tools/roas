@@ -51,11 +51,16 @@
 //!
 //! ## Versions
 //!
-//! v1.0.x is implemented behind the default `v1_0` feature. v1.1.x
-//! support is planned for a follow-up release.
+//! v1.0.x ([`v1_0`], default feature) and v1.1.x ([`v1_1`]) are both
+//! implemented; enable whichever you need. With both features enabled,
+//! an `impl From<v1_0::Description> for v1_1::Description` is available
+//! for upconverting an existing v1.0 description.
 
 pub mod common;
 pub mod validation;
 
 #[cfg(feature = "v1_0")]
 pub mod v1_0;
+
+#[cfg(feature = "v1_1")]
+pub mod v1_1;

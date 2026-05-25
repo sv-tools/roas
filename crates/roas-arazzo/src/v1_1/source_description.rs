@@ -1,8 +1,7 @@
-//! Arazzo v1.0 `Source Description` object.
+//! Arazzo v1.1 `Source Description` object.
 //!
-//! Per [Source Description Object](https://spec.openapis.org/arazzo/v1.0.1.html#source-description-object):
-//! a named reference to an OpenAPI or Arazzo document used by one or
-//! more workflows.
+//! Per [Source Description Object](https://spec.openapis.org/arazzo/v1.1.0.html#source-description-object).
+//! New in v1.1: the `asyncapi` source type.
 
 use crate::validation::{Context, ValidateWithContext, is_valid_name};
 use serde::{Deserialize, Serialize};
@@ -17,6 +16,8 @@ pub enum SourceType {
     /// An OpenAPI description.
     #[default]
     Openapi,
+    /// An AsyncAPI description. Added in v1.1.
+    Asyncapi,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
@@ -56,55 +57,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn deserialize_round_trips_with_type() {
-        let sd: SourceDescription = serde_json::from_value(json!({
-            "name": "petStore",
-            "url": "openapi.yaml",
-            "type": "openapi",
-        }))
+    fn asyncapi_type_round_trips() {
+        let sd: SourceDescription = serde_json::from_value(
+            json!({ "name": "events", "url": "asyncapi.yaml", "type": "asyncapi" }),
+        )
         .unwrap();
-        assert_eq!(sd.name, "petStore");
-        assert_eq!(sd.type_, Some(SourceType::Openapi));
-
-        let v = serde_json::to_value(&sd).unwrap();
-        assert_eq!(v["type"], json!("openapi"));
-    }
-
-    #[test]
-    fn deserialize_arazzo_type() {
-        let sd: SourceDescription =
-            serde_json::from_value(json!({ "name": "wf", "url": "wf.yaml", "type": "arazzo" }))
-                .unwrap();
-        assert_eq!(sd.type_, Some(SourceType::Arazzo));
-    }
-
-    #[test]
-    fn type_is_omitted_when_absent() {
-        let sd: SourceDescription =
-            serde_json::from_value(json!({ "name": "n", "url": "u" })).unwrap();
-        assert!(sd.type_.is_none());
-        let v = serde_json::to_value(&sd).unwrap();
-        assert_eq!(v, json!({ "name": "n", "url": "u" }));
-    }
-
-    #[test]
-    fn validate_rejects_empty_name_and_url() {
-        let mut c = Context::with_path(EnumSet::empty(), "#.sourceDescriptions[0]");
-        SourceDescription::default().validate_with_context(&mut c);
-        assert!(
-            c.errors
-                .iter()
-                .any(|e| e == "#.sourceDescriptions[0].name: must not be empty")
-        );
-        assert!(
-            c.errors
-                .iter()
-                .any(|e| e == "#.sourceDescriptions[0].url: must not be empty")
+        assert_eq!(sd.type_, Some(SourceType::Asyncapi));
+        assert_eq!(
+            serde_json::to_value(&sd).unwrap()["type"],
+            json!("asyncapi")
         );
     }
 
     #[test]
-    fn validate_rejects_bad_name_pattern() {
+    fn validate_rejects_bad_name() {
         let mut c = Context::with_path(EnumSet::empty(), "#.s");
         let sd = SourceDescription {
             name: "bad name".into(),

@@ -1,8 +1,11 @@
-//! Arazzo v1.0 `Request Body` and `Payload Replacement` objects.
+//! Arazzo v1.1 `Request Body` and `Payload Replacement` objects.
 //!
-//! Per [Request Body Object](https://spec.openapis.org/arazzo/v1.0.1.html#request-body-object)
-//! and [Payload Replacement Object](https://spec.openapis.org/arazzo/v1.0.1.html#payload-replacement-object).
+//! Per [Request Body Object](https://spec.openapis.org/arazzo/v1.1.0.html#request-body-object)
+//! and [Payload Replacement Object](https://spec.openapis.org/arazzo/v1.1.0.html#payload-replacement-object).
+//! New in v1.1: `PayloadReplacement.targetSelectorType`, and `value` may
+//! be a `Selector`.
 
+use crate::v1_1::selector::{SelectorType, ValueOrSelector};
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,8 +16,7 @@ pub struct RequestBody {
     #[serde(rename = "contentType", skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
 
-    /// The request body payload (any JSON type, typically containing
-    /// runtime expressions).
+    /// The request body payload (any JSON type).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
 
@@ -41,12 +43,17 @@ impl ValidateWithContext for RequestBody {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct PayloadReplacement {
-    /// **Required** A JSON Pointer or XPath expression resolved against
-    /// the request body.
+    /// **Required** A JSONPath, JSON Pointer, or XPath expression
+    /// resolved against the request body.
     pub target: String,
 
-    /// **Required** The value set within the target location.
-    pub value: String,
+    /// The selector expression type for `target`. Added in v1.1.
+    #[serde(rename = "targetSelectorType", skip_serializing_if = "Option::is_none")]
+    pub target_selector_type: Option<SelectorType>,
+
+    /// **Required** The value to set — a literal / runtime expression,
+    /// or a `Selector`.
+    pub value: ValueOrSelector,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
@@ -58,6 +65,12 @@ pub struct PayloadReplacement {
 impl ValidateWithContext for PayloadReplacement {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("target", &self.target);
+        if let Some(selector_type) = &self.target_selector_type {
+            ctx.in_field("targetSelectorType", |ctx| {
+                selector_type.validate_with_context(ctx)
+            });
+        }
+        ctx.in_field("value", |ctx| self.value.validate_with_context(ctx));
     }
 }
 
@@ -68,25 +81,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn deserialize_round_trips() {
+    fn round_trips_with_selector_type() {
         let rb: RequestBody = serde_json::from_value(json!({
             "contentType": "application/json",
-            "payload": { "id": "$inputs.id" },
-            "replacements": [ { "target": "/role", "value": "admin" } ],
+            "replacements": [
+                { "target": "/role", "targetSelectorType": "jsonpointer", "value": "admin" }
+            ],
         }))
         .unwrap();
-        assert_eq!(rb.content_type.as_deref(), Some("application/json"));
         assert_eq!(rb.replacements.len(), 1);
-
-        let v = serde_json::to_value(&rb).unwrap();
-        assert_eq!(v["contentType"], json!("application/json"));
-    }
-
-    #[test]
-    fn empty_request_body_omits_optionals() {
-        let rb = RequestBody::default();
-        let v = serde_json::to_value(&rb).unwrap();
-        assert_eq!(v, json!({}));
+        assert!(rb.replacements[0].target_selector_type.is_some());
     }
 
     #[test]

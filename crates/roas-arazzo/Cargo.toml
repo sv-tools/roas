@@ -17,6 +17,10 @@ publish = true
 default = ["v1_0"]
 # Support for Arazzo v1.0.x.
 v1_0 = []
+# Support for Arazzo v1.1.x. Independent of `v1_0`; enable both to get
+# the additional `From<v1_0::Description> for v1_1::Description`
+# upconversion impl.
+v1_1 = []
 
 # `clap::ValueEnum` impls for `validation::ValidationOptions`, for
 # downstream CLIs.

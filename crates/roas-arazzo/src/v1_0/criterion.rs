@@ -7,7 +7,7 @@
 //! criterion via `anyOf`, so `type` and `version` are flat optional
 //! fields here rather than a nested object.
 
-use crate::validation::{Context, ValidateWithContext, validate_required_string};
+use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -54,12 +54,12 @@ pub struct Criterion {
 }
 
 impl ValidateWithContext for Criterion {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_required_string(&self.condition, ctx, format!("{path}.condition"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        ctx.require_non_empty("condition", &self.condition);
 
         // `dependentRequired`: a `type` requires a `context`.
         if self.type_.is_some() && self.context.is_none() {
-            ctx.error(format!("{path}.context"), "is required when `type` is set");
+            ctx.error_field("context", "is required when `type` is set");
         }
 
         // `version` belongs to the expression-type form (jsonpath/xpath)
@@ -67,22 +67,19 @@ impl ValidateWithContext for Criterion {
         if let Some(version) = &self.version {
             match self.type_ {
                 Some(CriterionType::Jsonpath) if version != JSONPATH_VERSION => {
-                    ctx.error(
-                        format!("{path}.version"),
+                    ctx.error_field(
+                        "version",
                         format!("must be `{JSONPATH_VERSION}` for type `jsonpath`"),
                     );
                 }
                 Some(CriterionType::Xpath) if !XPATH_VERSIONS.contains(&version.as_str()) => {
-                    ctx.error(
-                        format!("{path}.version"),
+                    ctx.error_field(
+                        "version",
                         "must be one of `xpath-10`, `xpath-20`, `xpath-30` for type `xpath`",
                     );
                 }
                 Some(CriterionType::Jsonpath | CriterionType::Xpath) => {}
-                _ => ctx.error(
-                    format!("{path}.version"),
-                    "is only valid with type `jsonpath` or `xpath`",
-                ),
+                _ => ctx.error_field("version", "is only valid with type `jsonpath` or `xpath`"),
             }
         }
     }
@@ -95,8 +92,8 @@ mod tests {
     use serde_json::json;
 
     fn validate(c: &Criterion) -> Vec<String> {
-        let mut ctx = Context::new(EnumSet::empty());
-        c.validate_with_context(&mut ctx, "#.c".into());
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.c");
+        c.validate_with_context(&mut ctx);
         ctx.errors.iter().map(ToString::to_string).collect()
     }
 

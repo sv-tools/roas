@@ -1,0 +1,80 @@
+arazzo: 1.1.0
+$self: urn:example:arazzo:pets
+info:
+  title: Async pet workflow
+  summary: Exercises v1.1 features
+  description: AsyncAPI step, selectors, expression types, action parameters.
+  version: "1.0.0"
+  x-owner: platform-team
+sourceDescriptions:
+  - name: petStore
+    url: https://api.example.com/openapi.json
+    type: openapi
+  - name: events
+    url: https://api.example.com/asyncapi.yaml
+    type: asyncapi
+workflows:
+  - workflowId: buyPet
+    inputs:
+      type: object
+      properties:
+        pet:
+          type: object
+    steps:
+      - stepId: order
+        operationId: placeOrder
+        timeout: 5000
+        parameters:
+          - name: petId
+            in: path
+            value:
+              context: $inputs.pet
+              selector: $.id
+              type: jsonpath
+          - reference: $components.parameters.locale
+        requestBody:
+          contentType: application/json
+          payload:
+            petId: $inputs.petId
+          replacements:
+            - target: /quantity
+              targetSelectorType: jsonpointer
+              value: "1"
+        successCriteria:
+          - condition: $statusCode == 200
+          - context: $response.body
+            condition: $.accepted
+            type:
+              type: jsonpath
+              version: rfc9535
+        onSuccess:
+          - name: notify
+            type: goto
+            workflowId: notifyWf
+            parameters:
+              - name: orderId
+                value: $response.body.id
+        outputs:
+          orderId:
+            context: $response.body
+            selector: $.id
+            type: jsonpath
+      - stepId: await
+        channelPath: $sourceDescriptions.events#/channels/orders
+        action: receive
+        correlationId: $message.headers.correlationId
+        dependsOn:
+          - order
+    outputs:
+      finalId: $steps.order.outputs.orderId
+  - workflowId: notifyWf
+    steps:
+      - stepId: send
+        channelPath: $sourceDescriptions.events#/channels/notify
+        action: send
+components:
+  parameters:
+    locale:
+      name: locale
+      in: header
+      value: en-US

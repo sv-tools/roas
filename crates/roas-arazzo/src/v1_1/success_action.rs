@@ -1,10 +1,11 @@
-//! Arazzo v1.0 `Success Action` object.
+//! Arazzo v1.1 `Success Action` object.
 //!
-//! Per [Success Action Object](https://spec.openapis.org/arazzo/v1.0.1.html#success-action-object):
-//! what to do when a step succeeds — end the workflow or `goto` another
-//! step / workflow.
+//! Per [Success Action Object](https://spec.openapis.org/arazzo/v1.1.0.html#success-action-object).
+//! New in v1.1: `parameters` (requires `workflowId` when present).
 
-use crate::v1_0::criterion::Criterion;
+use crate::common::reusable::ReusableOr;
+use crate::v1_1::criterion::Criterion;
+use crate::v1_1::parameter::Parameter;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -37,6 +38,11 @@ pub struct SuccessAction {
     #[serde(rename = "stepId", skip_serializing_if = "Option::is_none")]
     pub step_id: Option<String>,
 
+    /// Parameters passed to the workflow referenced by `workflowId`.
+    /// Added in v1.1; requires `workflowId`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<ReusableOr<Parameter>>,
+
     /// Assertions determining whether this action runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub criteria: Vec<Criterion>,
@@ -57,6 +63,12 @@ impl ValidateWithContext for SuccessAction {
             self.step_id.is_some(),
             ctx,
         );
+        if !self.parameters.is_empty() && self.workflow_id.is_none() {
+            ctx.error_field("parameters", "are only valid when `workflowId` is set");
+        }
+        for (i, parameter) in self.parameters.iter().enumerate() {
+            ctx.in_index("parameters", i, |ctx| parameter.validate_with_context(ctx));
+        }
         for (i, criterion) in self.criteria.iter().enumerate() {
             ctx.in_index("criteria", i, |ctx| criterion.validate_with_context(ctx));
         }
@@ -95,41 +107,54 @@ mod tests {
             serde_json::from_value(json!({ "name": "done", "type": "end" })).unwrap();
         assert_eq!(a.type_, SuccessActionType::End);
         assert!(validate(&a).is_empty());
-
-        let v = serde_json::to_value(&a).unwrap();
-        assert_eq!(v, json!({ "name": "done", "type": "end" }));
     }
 
     #[test]
-    fn goto_requires_exactly_one_target() {
-        let neither = SuccessAction {
-            name: "g".into(),
-            type_: SuccessActionType::Goto,
-            ..Default::default()
-        };
-        assert!(validate(&neither).iter().any(|e| e.contains("goto")));
+    fn parameters_require_workflow_id() {
+        let a: SuccessAction = serde_json::from_value(json!({
+            "name": "g",
+            "type": "goto",
+            "stepId": "next",
+            "parameters": [ { "name": "p", "value": 1 } ],
+        }))
+        .unwrap();
+        assert!(
+            validate(&a)
+                .iter()
+                .any(|e| e == "#.a.parameters: are only valid when `workflowId` is set")
+        );
 
-        let both = SuccessAction {
-            workflow_id: Some("w".into()),
-            step_id: Some("s".into()),
-            ..neither.clone()
-        };
-        assert!(validate(&both).iter().any(|e| e.contains("goto")));
-
-        let ok = SuccessAction {
-            workflow_id: Some("w".into()),
-            ..neither
-        };
+        let ok: SuccessAction = serde_json::from_value(json!({
+            "name": "g",
+            "type": "goto",
+            "workflowId": "wf",
+            "parameters": [ { "name": "p", "value": 1 } ],
+        }))
+        .unwrap();
         assert!(validate(&ok).is_empty());
     }
 
     #[test]
-    fn validate_recurses_into_criteria() {
+    fn goto_requires_exactly_one_target() {
+        let a = SuccessAction {
+            name: "g".into(),
+            type_: SuccessActionType::Goto,
+            ..Default::default()
+        };
+        assert!(validate(&a).iter().any(|e| e.contains("goto")));
+    }
+
+    #[test]
+    fn criteria_are_recursed() {
         let a = SuccessAction {
             name: "n".into(),
             criteria: vec![Criterion::default()],
             ..Default::default()
         };
-        assert!(validate(&a).iter().any(|e| e.contains("condition")));
+        assert!(
+            validate(&a)
+                .iter()
+                .any(|e| e == "#.a.criteria[0].condition: must not be empty")
+        );
     }
 }

@@ -1,10 +1,12 @@
-//! Arazzo v1.0 `Failure Action` object.
+//! Arazzo v1.1 `Failure Action` object.
 //!
-//! Per [Failure Action Object](https://spec.openapis.org/arazzo/v1.0.1.html#failure-action-object):
-//! what to do when a step fails — end, `goto`, or `retry`.
+//! Per [Failure Action Object](https://spec.openapis.org/arazzo/v1.1.0.html#failure-action-object).
+//! New in v1.1: `parameters` (requires `workflowId` when present).
 
-use crate::v1_0::criterion::Criterion;
-use crate::v1_0::success_action::validate_goto_target;
+use crate::common::reusable::ReusableOr;
+use crate::v1_1::criterion::Criterion;
+use crate::v1_1::parameter::Parameter;
+use crate::v1_1::success_action::validate_goto_target;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -38,6 +40,11 @@ pub struct FailureAction {
     #[serde(rename = "stepId", skip_serializing_if = "Option::is_none")]
     pub step_id: Option<String>,
 
+    /// Parameters passed to the workflow referenced by `workflowId`.
+    /// Added in v1.1; requires `workflowId`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<ReusableOr<Parameter>>,
+
     /// Non-negative seconds to wait before retrying.
     #[serde(rename = "retryAfter", skip_serializing_if = "Option::is_none")]
     pub retry_after: Option<f64>,
@@ -66,9 +73,15 @@ impl ValidateWithContext for FailureAction {
             self.step_id.is_some(),
             ctx,
         );
+        if !self.parameters.is_empty() && self.workflow_id.is_none() {
+            ctx.error_field("parameters", "are only valid when `workflowId` is set");
+        }
         // Reject negatives and NaN (the schema requires `minimum: 0`).
         if self.retry_after.is_some_and(|n| n < 0.0 || n.is_nan()) {
             ctx.error_field("retryAfter", "must not be negative");
+        }
+        for (i, parameter) in self.parameters.iter().enumerate() {
+            ctx.in_index("parameters", i, |ctx| parameter.validate_with_context(ctx));
         }
         for (i, criterion) in self.criteria.iter().enumerate() {
             ctx.in_index("criteria", i, |ctx| criterion.validate_with_context(ctx));
@@ -91,43 +104,27 @@ mod tests {
     #[test]
     fn retry_action_round_trips() {
         let a: FailureAction = serde_json::from_value(json!({
-            "name": "retryStep",
-            "type": "retry",
-            "retryAfter": 1.5,
-            "retryLimit": 3,
+            "name": "retryStep", "type": "retry", "retryAfter": 1.5, "retryLimit": 3,
         }))
         .unwrap();
         assert_eq!(a.type_, FailureActionType::Retry);
-        assert_eq!(a.retry_after, Some(1.5));
-        assert_eq!(a.retry_limit, Some(3));
         assert!(validate(&a).is_empty());
     }
 
     #[test]
-    fn goto_requires_exactly_one_target() {
-        let neither = FailureAction {
+    fn parameters_require_workflow_id() {
+        let a = FailureAction {
             name: "g".into(),
             type_: FailureActionType::Goto,
+            step_id: Some("next".into()),
+            parameters: vec![ReusableOr::Reusable(Default::default())],
             ..Default::default()
         };
-        assert!(validate(&neither).iter().any(|e| e.contains("goto")));
-
-        let ok = FailureAction {
-            step_id: Some("s".into()),
-            ..neither
-        };
-        assert!(validate(&ok).is_empty());
-    }
-
-    #[test]
-    fn negative_retry_limit_is_rejected_on_parse() {
-        // `retryLimit` is a u64 at the type level, so a negative value
-        // fails to deserialize outright.
-        let err = serde_json::from_value::<FailureAction>(
-            json!({ "name": "n", "type": "retry", "retryLimit": -1 }),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("u64") || err.to_string().contains("invalid"));
+        assert!(
+            validate(&a)
+                .iter()
+                .any(|e| e == "#.a.parameters: are only valid when `workflowId` is set")
+        );
     }
 
     #[test]
@@ -146,17 +143,16 @@ mod tests {
     }
 
     #[test]
-    fn nan_retry_after_fails_validation() {
+    fn criteria_are_recursed() {
         let a = FailureAction {
             name: "n".into(),
-            type_: FailureActionType::Retry,
-            retry_after: Some(f64::NAN),
+            criteria: vec![Criterion::default()],
             ..Default::default()
         };
         assert!(
             validate(&a)
                 .iter()
-                .any(|e| e == "#.a.retryAfter: must not be negative")
+                .any(|e| e == "#.a.criteria[0].condition: must not be empty")
         );
     }
 }
