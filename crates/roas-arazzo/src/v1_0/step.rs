@@ -4,11 +4,11 @@
 //! a single call to an API operation or another workflow. Exactly one
 //! of `operationId`, `operationPath`, or `workflowId` must be set.
 
+use crate::common::reusable::ReusableOr;
 use crate::v1_0::criterion::Criterion;
 use crate::v1_0::failure_action::FailureAction;
 use crate::v1_0::parameter::Parameter;
 use crate::v1_0::request_body::RequestBody;
-use crate::v1_0::reusable::ReusableOr;
 use crate::v1_0::success_action::SuccessAction;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};

@@ -1,0 +1,9 @@
+{
+  "arazzo": "1.1.0",
+  "$self": "urn:example:arazzo#fragment",
+  "info": { "title": "T", "version": "1.0.0" },
+  "sourceDescriptions": [ { "name": "src", "url": "openapi.yaml" } ],
+  "workflows": [
+    { "workflowId": "wf", "steps": [ { "stepId": "s", "workflowId": "other" } ] }
+  ]
+}

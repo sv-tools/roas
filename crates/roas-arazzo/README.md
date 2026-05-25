@@ -10,12 +10,14 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 
 ## Versions
 
-| Arazzo version | Feature flag     | Status         |
-|----------------|------------------|----------------|
-| 1.0            | `v1_0` (default) | ✅ implemented  |
-| 1.1            | `v1_1`           | 🔜 planned      |
+| Arazzo version | Feature flag     | Status         | Adds over the previous version                                              |
+|----------------|------------------|----------------|-----------------------------------------------------------------------------|
+| 1.0            | `v1_0` (default) | ✅ implemented  | —                                                                           |
+| 1.1            | `v1_1`           | ✅ implemented  | `$self`, AsyncAPI steps, selectors, expression types, action `parameters`  |
 
-Authoritative JSON Schema for v1.0: <https://spec.openapis.org/arazzo/1.0/schema/2025-10-15>.
+`v1_0` and `v1_1` are independent — enable whichever you need. With both enabled, an `impl From<v1_0::Description> for v1_1::Description` upconverts an existing v1.0 description.
+
+Authoritative JSON Schemas: [v1.0](https://spec.openapis.org/arazzo/1.0/schema/2025-10-15) · [v1.1](https://spec.openapis.org/arazzo/1.1/schema/2026-04-15).
 
 ## Quick start
 

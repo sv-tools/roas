@@ -51,6 +51,10 @@ component_management:
       name: roas-overlay
       paths:
         - crates/roas-overlay/**
+    - component_id: roas-arazzo
+      name: roas-arazzo
+      paths:
+        - crates/roas-arazzo/**
 
     # ---- per OpenAPI spec version (within the `roas` crate) ----
     - component_id: common
@@ -105,3 +109,21 @@ component_management:
       paths:
         - crates/roas-overlay/src/v1_1/**
         - crates/roas-overlay/tests/v1_1_test.rs
+
+    # ---- per Arazzo version (within the `roas-arazzo` crate) ----
+    - component_id: arazzo-common
+      name: arazzo-common
+      paths:
+        - crates/roas-arazzo/src/lib.rs
+        - crates/roas-arazzo/src/validation.rs
+        - crates/roas-arazzo/src/common/**
+    - component_id: arazzo-v1_0
+      name: arazzo-v1.0
+      paths:
+        - crates/roas-arazzo/src/v1_0/**
+        - crates/roas-arazzo/tests/v1_0_test.rs
+    - component_id: arazzo-v1_1
+      name: arazzo-v1.1
+      paths:
+        - crates/roas-arazzo/src/v1_1/**
+        - crates/roas-arazzo/tests/v1_1_test.rs

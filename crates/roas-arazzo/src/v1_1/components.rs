@@ -1,21 +1,19 @@
-//! Arazzo v1.0 `Components` object.
+//! Arazzo v1.1 `Components` object.
 //!
-//! Per [Components Object](https://spec.openapis.org/arazzo/v1.0.1.html#components-object):
-//! reusable inputs, parameters, and success / failure actions
-//! referenced from elsewhere via [`Reusable`](crate::v1_0::Reusable).
-//! All map keys must match `^[a-zA-Z0-9\.\-_]+$`.
+//! Per [Components Object](https://spec.openapis.org/arazzo/v1.1.0.html#components-object):
+//! reusable inputs, parameters, and success / failure actions. All map
+//! keys must match `^[a-zA-Z0-9\.\-_]+$`.
 
-use crate::v1_0::failure_action::FailureAction;
-use crate::v1_0::parameter::Parameter;
-use crate::v1_0::success_action::SuccessAction;
+use crate::v1_1::failure_action::FailureAction;
+use crate::v1_1::parameter::Parameter;
+use crate::v1_1::success_action::SuccessAction;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Components {
-    /// Reusable JSON Schema 2020-12 schemas, referenced from workflow
-    /// inputs. Kept as opaque JSON.
+    /// Reusable JSON Schema 2020-12 schemas. Kept as opaque JSON.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, serde_json::Value>,
 
@@ -78,39 +76,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn deserialize_round_trips() {
-        let c: Components = serde_json::from_value(json!({
-            "parameters": {
-                "petId": { "name": "petId", "in": "path", "value": "$inputs.petId" }
-            }
-        }))
-        .unwrap();
-        assert!(c.parameters.contains_key("petId"));
-
-        let v = serde_json::to_value(&c).unwrap();
-        assert!(v["parameters"]["petId"].is_object());
-        assert!(v.get("inputs").is_none());
-    }
-
-    #[test]
-    fn validate_rejects_bad_key_and_recurses() {
-        let mut ctx = Context::with_path(EnumSet::empty(), "#.components");
-        let mut parameters = BTreeMap::new();
-        parameters.insert("bad key".to_owned(), Parameter::default());
-        let c = Components {
-            parameters,
-            ..Default::default()
-        };
-        c.validate_with_context(&mut ctx);
-        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
-        assert!(msgs.iter().any(|e| e.contains("key must match")));
-        // recursion reaches the empty parameter name
-        assert!(msgs.iter().any(|e| e.contains("name: must not be empty")));
-    }
-
-    #[test]
     fn validate_recurses_into_action_maps() {
         let c: Components = serde_json::from_value(json!({
+            "inputs": { "in1": { "type": "string" } },
             "successActions": { "a": { "name": "", "type": "end" } },
             "failureActions": { "b": { "name": "", "type": "end" } }
         }))
@@ -126,5 +94,20 @@ mod tests {
             msgs.iter()
                 .any(|e| e == "#.components.failureActions.b.name: must not be empty")
         );
+    }
+
+    #[test]
+    fn validate_rejects_bad_key_and_recurses() {
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.components");
+        let mut parameters = BTreeMap::new();
+        parameters.insert("bad key".to_owned(), Parameter::default());
+        let c = Components {
+            parameters,
+            ..Default::default()
+        };
+        c.validate_with_context(&mut ctx);
+        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
+        assert!(msgs.iter().any(|e| e.contains("key must match")));
+        assert!(msgs.iter().any(|e| e.contains("name: must not be empty")));
     }
 }
