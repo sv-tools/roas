@@ -1,6 +1,6 @@
 # roas-cli
 
-Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and convert OpenAPI specs across versions 2.0 / 3.0.x / 3.1.x / 3.2.x, and validate / convert / apply [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 / v1.1) via [`roas-overlay`](https://crates.io/crates/roas-overlay).
+Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and convert OpenAPI specs across versions 2.0 / 3.0.x / 3.1.x / 3.2.x, validate / convert / apply [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 / v1.1) via [`roas-overlay`](https://crates.io/crates/roas-overlay), and validate / convert [OpenAPI Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) workflow descriptions (v1.0 / v1.1) via [`roas-arazzo`](https://crates.io/crates/roas-arazzo).
 
 [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)
 
@@ -40,10 +40,12 @@ roas convert --to v3_2 [FILE]              # upconvert across versions
 roas overlay validate [FILE]               # validate an OpenAPI Overlay document
 roas overlay convert --to v1_1 [FILE]      # upconvert an overlay
 roas overlay apply --overlay O.yaml [SPEC] # apply overlay(s) to a spec
+roas arazzo validate [FILE]                # validate an OpenAPI Arazzo description
+roas arazzo convert --to v1_1 [FILE]       # upconvert an Arazzo description
 roas preview [FILE]                        # open the spec in a browser via Redoc
 ```
 
-The root `validate` and `convert` commands operate on OpenAPI specs; the `overlay` subcommand group operates on OpenAPI Overlay documents.
+The root `validate` and `convert` commands operate on OpenAPI specs; the `overlay` subcommand group operates on OpenAPI Overlay documents, and the `arazzo` group on OpenAPI Arazzo workflow descriptions.
 
 Input can be JSON or YAML. With a file path, the parser is selected by extension (`.yaml` / `.yml` → YAML, everything else → JSON). Pass `-` as the file path, or omit it entirely and pipe the spec, to read from stdin; stdin defaults to JSON. `--format json|yaml` overrides everything.
 
@@ -134,6 +136,19 @@ roas overlay apply --overlay a.yaml --overlay b.yaml spec.json | roas validate
 - **`overlay validate`** — checks structure: the `overlay` version, non-empty `actions`, valid RFC 9535 JSONPath in every `target` (and `copy`), and the mutual-exclusivity rules. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed overlay.
 - **`overlay convert --to <v1_0|v1_1>`** — upconverts an overlay. Only upconversion is supported (v1.0 → v1.1 adds the `copy` action and `info.description`); downconversion errors.
 - **`overlay apply`** — applies overlay(s) to a target spec. The spec is the positional argument (or stdin); `--overlay <FILE>` (repeatable, at least one required) names the overlay(s), applied in order. The spec is treated as untyped JSON, so this works for any OpenAPI version. `--apply-option` (repeatable) accepts `error-on-zero-match` and `error-on-mixed-kind-match`. On any apply error the spec is left untouched and `roas` exits non-zero.
+
+### `arazzo`
+
+Work with [OpenAPI Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) workflow descriptions (v1.0 and v1.1). The Arazzo version is auto-detected from the `arazzo` field. Arazzo *describes* sequences of API calls rather than transforming a spec, so there is no `apply`.
+
+```shell
+roas arazzo validate workflow.yaml             # parse + validate
+roas arazzo convert --to v1_1 workflow.json    # upconvert v1.0 → v1.1
+cat workflow.json | roas arazzo validate       # description on stdin
+```
+
+- **`arazzo validate`** — checks structure: required / non-empty fields, source-name and component/output-key patterns, uniqueness of source names / workflow ids / step ids, the step shape rules (OpenAPI / AsyncAPI / Workflow), criterion type / context / version constraints, and `goto` action targets. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed description.
+- **`arazzo convert --to <v1_0|v1_1>`** — upconverts a description. Only upconversion is supported (v1.0 → v1.1 adds `$self`, AsyncAPI steps, selectors, expression types, and action `parameters`); downconversion errors.
 
 ### `preview`
 

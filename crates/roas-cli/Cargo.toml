@@ -1,6 +1,6 @@
 [package]
 name = "roas-cli"
-version = "0.8.0"
+version = "0.9.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -20,6 +20,7 @@ path = "src/main.rs"
 [dependencies]
 roas = { version = ">=0.17", path = "../roas", features = ["clap", "v2", "v3_0", "v3_1", "v3_2"] }
 roas-overlay = { version = ">=0.2", path = "../roas-overlay", features = ["clap", "v1_0", "v1_1"] }
+roas-arazzo = { version = ">=0.1", path = "../roas-arazzo", features = ["clap", "v1_0", "v1_1"] }
 roas-file-fetcher = { version = ">=0.1", path = "../roas-file-fetcher", features = ["yaml"] }
 roas-http-fetcher = { version = ">=0.2", path = "../roas-http-fetcher", features = ["yaml"] }
 anyhow.workspace = true
