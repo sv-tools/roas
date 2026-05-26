@@ -1,7 +1,8 @@
 //! `roas` command-line front-end.
 //!
 //! The root `validate` and `convert` commands operate on OpenAPI specs;
-//! the `overlay` subcommand group operates on OpenAPI Overlay documents.
+//! the `overlay` subcommand group operates on OpenAPI Overlay documents,
+//! and the `arazzo` group on OpenAPI Arazzo workflow descriptions.
 //!
 //! - `roas validate [FILE]` — parse and validate an OpenAPI spec. Version is
 //!   auto-detected from the document; pass `--from` to force. External
@@ -36,6 +37,12 @@
 //!   apply --overlay <FILE> [SPEC]` applies overlay(s) to a target
 //!   spec (spec on stdin or as the positional arg).
 //!
+//! - `roas arazzo <validate|convert>` — work with OpenAPI Arazzo
+//!   workflow descriptions. `arazzo validate` parses + validates a
+//!   description; `arazzo convert --to v1_1` upconverts one (v1.0 →
+//!   v1.1). Arazzo describes workflows rather than transforming a spec,
+//!   so there is no `apply`.
+//!
 //! - `roas preview [FILE]` — start a local HTTP server on
 //!   `127.0.0.1:<random>` that serves the spec rendered with
 //!   [Redoc](https://redocly.com/redoc) (default) or
@@ -65,10 +72,12 @@ use std::path::{Path, PathBuf};
 // Variants render as kebab-case with the `Ignore` prefix dropped: e.g.
 // `Options::IgnoreMissingTags` ↔ `--ignore missing-tags`.
 
+mod arazzo;
 mod overlay;
 mod preview;
 mod versioned;
 
+use arazzo::ArazzoCommand;
 use overlay::OverlayCommand;
 use preview::PreviewArgs;
 use versioned::{SpecVersion, parse_value, path_looks_like_yaml};
@@ -89,6 +98,9 @@ enum Command {
     /// Work with OpenAPI Overlay documents: validate, convert, or apply.
     #[command(subcommand)]
     Overlay(OverlayCommand),
+    /// Work with OpenAPI Arazzo descriptions: validate or convert.
+    #[command(subcommand)]
+    Arazzo(ArazzoCommand),
     /// Preview the spec in a browser, rendered with Redoc or Swagger UI.
     Preview(PreviewArgs),
     /// Print a shell completion script to stdout.
@@ -275,6 +287,7 @@ fn main() -> Result<()> {
         Command::Validate(args) => run_validate(args),
         Command::Convert(args) => run_convert(args),
         Command::Overlay(cmd) => overlay::run_overlay(cmd),
+        Command::Arazzo(cmd) => arazzo::run_arazzo(cmd),
         Command::Preview(args) => preview::run_preview(args),
         Command::Completions { shell } => run_completions(shell),
         Command::Manpages { out } => run_manpages(&out),
