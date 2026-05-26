@@ -43,16 +43,14 @@ pub struct Overlay {
 impl Overlay {
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::new(options);
-        let path = "#".to_owned();
 
-        self.info
-            .validate_with_context(&mut ctx, format!("{path}.info"));
+        ctx.in_field("info", |ctx| self.info.validate_with_context(ctx));
 
         if self.actions.is_empty() {
-            ctx.error(format!("{path}.actions"), "must contain at least one entry");
+            ctx.error_field("actions", "must contain at least one entry");
         }
         for (i, action) in self.actions.iter().enumerate() {
-            action.validate_with_context(&mut ctx, format!("{path}.actions[{i}]"));
+            ctx.in_index("actions", i, |ctx| action.validate_with_context(ctx));
         }
 
         ctx.into_result()

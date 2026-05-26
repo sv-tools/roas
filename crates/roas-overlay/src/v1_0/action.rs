@@ -45,36 +45,30 @@ impl Action {
 }
 
 /// Validate that `value` is a non-empty, syntactically valid RFC 9535
-/// JSONPath, recording diagnostics under `path` (computed once).
-fn validate_jsonpath(value: &str, ctx: &mut Context, path: String) {
+/// JSONPath, recording diagnostics under `<current>.<field>`.
+fn validate_jsonpath(value: &str, ctx: &mut Context, field: &str) {
     if value.is_empty() {
-        ctx.error(path, "must not be empty");
+        ctx.error_field(field, "must not be empty");
     } else if let Err(msg) = compile_path(value) {
-        ctx.error(path, format!("invalid JSONPath query: {msg}"));
+        ctx.error_field(field, format!("invalid JSONPath query: {msg}"));
     }
 }
 
 impl ValidateWithContext for Action {
-    fn validate_with_context(&self, ctx: &mut Context, path: String) {
-        validate_jsonpath(&self.target, ctx, format!("{path}.target"));
+    fn validate_with_context(&self, ctx: &mut Context) {
+        validate_jsonpath(&self.target, ctx, "target");
         // The spec says `update` "has no impact if the `remove` field
         // of this action object is `true`", but at validation time we
         // reject the combo because it almost certainly indicates an
         // authoring mistake.
         if self.is_remove() && self.update.is_some() {
-            ctx.error(
-                path.clone(),
-                "`remove: true` and `update` are mutually exclusive",
-            );
+            ctx.error("`remove: true` and `update` are mutually exclusive");
         }
         // Catch the silent-no-op authoring bug: an action that does
         // nothing is overwhelmingly a typo (e.g. forgot the `update`
         // payload) rather than a deliberate placeholder.
         if !self.is_remove() && self.update.is_none() {
-            ctx.error(
-                path,
-                "action must specify either `update` or `remove: true`",
-            );
+            ctx.error("action must specify either `update` or `remove: true`");
         }
     }
 }
@@ -86,8 +80,8 @@ mod tests {
     use serde_json::json;
 
     fn validate(action: &Action) -> Vec<String> {
-        let mut ctx = Context::new(EnumSet::empty());
-        action.validate_with_context(&mut ctx, "#.actions[0]".into());
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.actions[0]");
+        action.validate_with_context(&mut ctx);
         ctx.errors.iter().map(|e| e.to_string()).collect()
     }
 
