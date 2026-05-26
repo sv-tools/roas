@@ -260,18 +260,24 @@ jobs:
       # ── Sigstore keyless signing ─────────────────────────────────────────
       # cosign in keyless mode exchanges the workflow's OIDC token for a
       # short-lived Fulcio certificate, signs each tarball, and records
-      # both in Rekor (the public transparency log). Outputs are emitted
-      # as siblings of each archive: `<archive>.sig` (base64 signature)
-      # and `<archive>.crt` (PEM-encoded cert with the OIDC identity).
+      # it in Rekor (the public transparency log). cosign 3.x writes a
+      # single Sigstore protobuf bundle per archive — `<archive>.bundle`
+      # — containing the signature, the Fulcio cert with the OIDC
+      # identity, and the Rekor inclusion proof.
       # Verifiers run:
       #   cosign verify-blob \
-      #     --certificate <archive>.crt \
-      #     --signature   <archive>.sig \
+      #     --bundle <archive>.bundle \
       #     --certificate-identity-regexp 'https://github.com/sv-tools/roas/\.github/workflows/release-stage\.yaml@.*' \
       #     --certificate-oidc-issuer    'https://token.actions.githubusercontent.com' \
       #     <archive>
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin the cosign binary — the installer action is SHA-pinned
+          # but the binary was not, so CI silently moved across the 2.x →
+          # 3.x boundary. 3.x defaults `sign-blob` to the new protobuf
+          # bundle format written via `--bundle`.
+          cosign-release: "v3.0.6"
       - name: Sign release tarballs with cosign (keyless)
         env:
           COSIGN_YES: "true"
@@ -286,8 +292,7 @@ jobs:
           fi
           for archive in "${archives[@]}"; do
             cosign sign-blob --yes \
-              --output-signature   "${archive}.sig" \
-              --output-certificate "${archive}.crt" \
+              --bundle "${archive}.bundle" \
               "$archive"
           done
 
@@ -308,15 +313,14 @@ jobs:
       - name: Attach prebuilt binaries to draft Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
-          # Cosign sig + cert ride along with the tarballs so consumers
-          # don't have to fetch them from a separate location. SLSA
+          # The cosign bundle rides along with the tarballs so consumers
+          # don't have to fetch it from a separate location. SLSA
           # provenance lives in GitHub's attestation store, not on the
           # release.
           files: |
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sha256
-            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.sig
-            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.crt
+            artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz.bundle
           # Look up the existing draft minted by `DraftRelease` and
           # append rather than create a second release.
           draft: true
