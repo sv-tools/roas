@@ -14,7 +14,7 @@
 //!     page-side `EventSource` subscriber calls `window.location.reload()` on
 //!     every event.
 //!
-//! Backed by [`axum`] on top of [`tokio`] / [`hyper`]; the per-process tokio
+//! Backed by [`axum`] on top of [`tokio`] / `hyper`; the per-process tokio
 //! runtime is constructed inside [`run_preview`] so the rest of the CLI
 //! stays sync.
 
