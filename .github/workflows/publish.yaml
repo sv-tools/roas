@@ -192,6 +192,10 @@ jobs:
       # / `gh attestation verify` both work.
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin to the 2.6 line for parity with release-stage.yaml and to
+          # avoid cosign 3.x default-behavior changes in keyless signing.
+          cosign-release: "v2.6.3"
 
       - name: Sign roas-cli container image with cosign (keyless)
         env:
