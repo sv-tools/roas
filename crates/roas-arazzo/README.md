@@ -3,6 +3,7 @@
 Rust implementation of the [OpenAPI Arazzo Specification](https://spec.openapis.org/arazzo/v1.0.1.html): parse and validate Arazzo workflow descriptions.
 
 [![crates.io](https://img.shields.io/crates/v/roas-arazzo.svg)](https://crates.io/crates/roas-arazzo)
+[![docs.rs](https://docs.rs/roas-arazzo/badge.svg)](https://docs.rs/roas-arazzo)
 
 An *Arazzo description* declares deterministic sequences of API calls — *workflows* of *steps*, each invoking an OpenAPI operation or another workflow — together with their inputs, success/failure criteria, and outputs. It complements an OpenAPI description by capturing *how* to use an API, not just *what* it exposes.
 
