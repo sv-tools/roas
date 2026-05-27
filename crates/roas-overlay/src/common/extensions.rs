@@ -5,7 +5,7 @@
 //! Mirrors the analogous helper in the sibling `roas` crate; kept
 //! local so this crate is dependency-free against `roas` itself.
 //!
-//! Only entries whose key starts with `x-` are deserialised / serialised.
+//! Only entries whose key starts with `x-` are deserialized / serialized.
 //! Any non-`x-` key encountered during deserialization is silently
 //! dropped (serde's `#[serde(flatten)]` ensures the typed fields claim
 //! their keys first, so this only sees genuinely unknown ones).
