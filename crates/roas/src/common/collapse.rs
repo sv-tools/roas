@@ -32,7 +32,7 @@ use crate::loader::{Loader, LoaderError};
 /// Error returned by `Spec::collapse` for any OAS version.
 ///
 /// Only fallible legs are loader-driven external-ref resolution and
-/// JSON serialisation of a component for dedup; inline tree
+/// JSON serialization of a component for dedup; inline tree
 /// rewriting itself never fails.
 #[derive(Debug, thiserror::Error)]
 pub enum CollapseError {
@@ -47,12 +47,12 @@ pub enum CollapseError {
         source: LoaderError,
     },
 
-    /// A component couldn't be serialised to JSON for the dedup
+    /// A component couldn't be serialized to JSON for the dedup
     /// map. In practice every concrete component in this crate
     /// is `Serialize` so this only surfaces under custom serde
     /// error paths; it's exposed rather than panicked on so
     /// callers can decide their own fallback.
-    #[error("failed to serialise component for dedup")]
+    #[error("failed to serialize component for dedup")]
     Serialize(#[from] serde_json::Error),
 }
 
@@ -68,7 +68,7 @@ pub struct Bag<T> {
     /// names. Storing a 64-bit digest instead of the full canonical
     /// JSON keeps the dedup map small regardless of component size;
     /// the (astronomically rare) digest collision is resolved by
-    /// re-serialising each candidate and comparing bytes, so two
+    /// re-serializing each candidate and comparing bytes, so two
     /// structurally identical inline values still collapse to the
     /// same component without ever trusting the digest alone.
     seen: HashMap<u64, Vec<String>>,
@@ -132,7 +132,7 @@ impl<T: Serialize> Bag<T> {
         let d = digest(&canonical);
         if let Some(candidates) = self.seen.get(&d) {
             // A digest hit is almost always a real match; confirm by
-            // re-serialising the candidate so a digest collision can
+            // re-serializing the candidate so a digest collision can
             // never silently merge two distinct components.
             for name in candidates {
                 if let Some(RefOr::Item(existing)) = self.entries.get(name)
