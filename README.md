@@ -1,15 +1,16 @@
 # roas
 
-`roas` is a Rust **SDK and command-line tool** for the OpenAPI Specification:
-parse, validate, convert, and round-trip OpenAPI / Swagger documents from
-Rust code *or* from the shell. Every released OpenAPI version is supported:
-v2.0 (Swagger), v3.0.x, v3.1.x, and v3.2.x.
+`roas` is a Rust **SDK and command-line tool** for the OpenAPI ecosystem:
+parse, validate, convert, and round-trip OpenAPI / Swagger documents — plus
+the OpenAPI **Overlay** and **Arazzo** specifications — from Rust code *or*
+from the shell. Every released OpenAPI version is supported: v2.0 (Swagger),
+v3.0.x, v3.1.x, and v3.2.x.
 
 ## Use it as a CLI
 
 [`roas-cli`](crates/roas-cli) ships a `roas` binary with `validate`,
-`convert`, and `preview` subcommands. Install via Cargo, Homebrew, or
-Docker — pick whichever fits the host:
+`convert`, `preview`, `overlay`, and `arazzo` subcommands. Install via Cargo,
+Homebrew, or Docker — pick whichever fits the host:
 
 ```shell
 cargo install roas-cli                                                # any platform with a Rust toolchain
@@ -22,9 +23,9 @@ subcommand reference, piping examples, and the live-reload preview server.
 
 ## Use it as a Rust SDK
 
-- **Parsers and serialisers** — deserialise OpenAPI documents from JSON or YAML
+- **Parsers and serializers** — deserialize OpenAPI documents from JSON or YAML
   into strongly-typed Rust structs (one type tree per spec version) and
-  serialise them back with full round-trip fidelity.
+  serialize them back with full round-trip fidelity.
 - **Description validators** — validate that an OpenAPI description conforms
   to its specification version: required fields, `$ref` resolution, tag /
   `operationId` uniqueness, unused-component detection, and more. Each check
@@ -38,6 +39,14 @@ subcommand reference, piping examples, and the live-reload preview server.
   versions: v2.0 → v3.0.x → v3.1.x → v3.2.x. A chain of `From<v_X::Spec> for
   v_Y::Spec` migrations performs the conversion in pure Rust; the same
   converters are exposed as a CLI sub-command via [`roas-cli`](crates/roas-cli).
+- **OpenAPI Overlay** — parse, validate, and apply
+  [Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 /
+  v1.1) to OpenAPI specs via [`roas-overlay`](crates/roas-overlay), including
+  v1.0 → v1.1 upconversion.
+- **OpenAPI Arazzo** — parse and validate
+  [Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) workflow descriptions
+  (v1.0 / v1.1) via [`roas-arazzo`](crates/roas-arazzo), including v1.0 → v1.1
+  upconversion.
 - **Pluggable loader** — `ResourceFetcher` / `AsyncResourceFetcher` traits
   for resolving external `$ref`s, with first-party fetcher crates for
   [filesystem](crates/roas-file-fetcher) and [HTTP](crates/roas-http-fetcher)
@@ -48,6 +57,8 @@ subcommand reference, piping examples, and the live-reload preview server.
 | Crate                                           | Docs                                                                                         | crates.io                                                                                                         |
 |-------------------------------------------------|----------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
 | [`roas`](crates/roas)                           | [![docs.rs](https://docs.rs/roas/badge.svg)](https://docs.rs/roas)                           | [![crates.io](https://img.shields.io/crates/v/roas.svg)](https://crates.io/crates/roas)                           |
+| [`roas-overlay`](crates/roas-overlay)           | [![docs.rs](https://docs.rs/roas-overlay/badge.svg)](https://docs.rs/roas-overlay)           | [![crates.io](https://img.shields.io/crates/v/roas-overlay.svg)](https://crates.io/crates/roas-overlay)           |
+| [`roas-arazzo`](crates/roas-arazzo)             | [![docs.rs](https://docs.rs/roas-arazzo/badge.svg)](https://docs.rs/roas-arazzo)             | [![crates.io](https://img.shields.io/crates/v/roas-arazzo.svg)](https://crates.io/crates/roas-arazzo)             |
 | [`roas-file-fetcher`](crates/roas-file-fetcher) | [![docs.rs](https://docs.rs/roas-file-fetcher/badge.svg)](https://docs.rs/roas-file-fetcher) | [![crates.io](https://img.shields.io/crates/v/roas-file-fetcher.svg)](https://crates.io/crates/roas-file-fetcher) |
 | [`roas-http-fetcher`](crates/roas-http-fetcher) | [![docs.rs](https://docs.rs/roas-http-fetcher/badge.svg)](https://docs.rs/roas-http-fetcher) | [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher) |
 | [`roas-cli`](crates/roas-cli)                   | —                                                                                            | [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)                   |
@@ -60,6 +71,11 @@ subcommand reference, piping examples, and the live-reload preview server.
 | OpenAPI [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)       | parser, description validator, schema validator, converter to v3.1 / v3.2, documentation rendering via `roas preview`    |
 | OpenAPI [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html)       | parser, description validator, schema validator, converter to v3.2, documentation rendering via `roas preview`           |
 | OpenAPI [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html)       | parser, description validator, schema validator, documentation rendering via `roas preview` (target of all upconverters) |
+
+The OpenAPI [Overlay](https://spec.openapis.org/overlay/v1.0.0.html) (v1.0 /
+v1.1) and [Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) (v1.0 / v1.1)
+specifications are supported too — see [`roas-overlay`](crates/roas-overlay)
+and [`roas-arazzo`](crates/roas-arazzo).
 
 See each crate's `README.md` for usage examples, and `AGENTS.md` at the
 repository root for contributor guidelines.
