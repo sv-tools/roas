@@ -28,8 +28,8 @@
 //! Example `dataValue` — are pure 3.2 additions a user opts into,
 //! not migrations from 3.1 shape, so they're not synthesised.
 //!
-//! The conversion serialises the v3.1 input with serde, runs the
-//! transforms, and deserialises as a v3.2 spec. A valid 3.1 input
+//! The conversion serializes the v3.1 input with serde, runs the
+//! transforms, and deserializes as a v3.2 spec. A valid 3.1 input
 //! produces a structurally valid 3.2 document; semantic regressions
 //! are surfaced by `Spec::validate`.
 
