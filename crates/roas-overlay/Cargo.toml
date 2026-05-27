@@ -1,12 +1,12 @@
 [package]
 name = "roas-overlay"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
+keywords = ["openapi", "overlay", "swagger", "jsonpath", "validation"]
 description = "Rust implementation of the OpenAPI Overlay Specification v1.0 / v1.1 — parse, validate, and apply"
 readme = "README.md"
 categories = ["web-programming", "parser-implementations"]
