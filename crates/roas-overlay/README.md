@@ -3,6 +3,7 @@
 Rust implementation of the [OpenAPI Overlay Specification](https://spec.openapis.org/overlay/v1.0.0.html): parse, validate, and apply Overlay documents to OpenAPI specs.
 
 [![crates.io](https://img.shields.io/crates/v/roas-overlay.svg)](https://crates.io/crates/roas-overlay)
+[![docs.rs](https://docs.rs/roas-overlay/badge.svg)](https://docs.rs/roas-overlay)
 
 An *Overlay* is a sidecar document whose ordered list of *actions* — each a [RFC 9535 JSONPath](https://www.rfc-editor.org/rfc/rfc9535) `target` plus an `update`, `remove`, or v1.1 `copy` instruction — transforms a target OpenAPI document. Common uses: layering environment-specific changes over a base API, adding vendor extensions without forking, removing internal endpoints from a public bundle.
 
