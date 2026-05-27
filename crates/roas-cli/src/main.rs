@@ -482,7 +482,7 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
             if args.print {
                 // Echo the parsed spec so the command can sit in the middle
                 // of a pipeline. Format matches the input: YAML in → YAML out,
-                // JSON in → JSON out. `into_value` re-serialises through the
+                // JSON in → JSON out. `into_value` re-serializes through the
                 // typed Spec, so the output is normalised.
                 let value = detected.into_value()?;
                 print!("{}", serialize_spec(&value, input_format, false)?);
