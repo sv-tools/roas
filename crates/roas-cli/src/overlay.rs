@@ -5,7 +5,7 @@
 //! version-agnostic on the spec side (it operates on the spec as
 //! untyped JSON), so these commands never go through the
 //! [`crate::versioned::DetectedSpec`] machinery — they read the spec
-//! as a `serde_json::Value`, apply, and serialise back.
+//! as a `serde_json::Value`, apply, and serialize back.
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Subcommand, ValueEnum};
@@ -92,10 +92,10 @@ impl DetectedOverlay {
     pub(crate) fn into_value(self) -> Result<Value> {
         match self {
             DetectedOverlay::V1_0(o) => {
-                serde_json::to_value(o).context("serialising Overlay 1.0 document")
+                serde_json::to_value(o).context("serializing Overlay 1.0 document")
             }
             DetectedOverlay::V1_1(o) => {
-                serde_json::to_value(o).context("serialising Overlay 1.1 document")
+                serde_json::to_value(o).context("serializing Overlay 1.1 document")
             }
         }
     }
@@ -121,7 +121,7 @@ pub(crate) fn detect_overlay(value: &Value) -> Result<OverlayVersion> {
     }
 }
 
-/// Detect (or force) the overlay version and deserialise into the
+/// Detect (or force) the overlay version and deserialize into the
 /// matching typed `Overlay`.
 pub(crate) fn detect_or_use_overlay(
     forced: Option<OverlayVersion>,
@@ -133,10 +133,10 @@ pub(crate) fn detect_or_use_overlay(
     };
     Ok(match version {
         OverlayVersion::V1_0 => DetectedOverlay::V1_0(
-            serde_json::from_value(value).context("deserialising as Overlay 1.0")?,
+            serde_json::from_value(value).context("deserializing as Overlay 1.0")?,
         ),
         OverlayVersion::V1_1 => DetectedOverlay::V1_1(
-            serde_json::from_value(value).context("deserialising as Overlay 1.1")?,
+            serde_json::from_value(value).context("deserializing as Overlay 1.1")?,
         ),
     })
 }

@@ -82,7 +82,7 @@ impl DetectedSpec {
     /// to upconvert this spec to the requested target. Returns the
     /// converted spec at its new version, still as a typed
     /// [`DetectedSpec`] so the caller can run further version-specific
-    /// operations (e.g. `Spec::collapse`) before serialising.
+    /// operations (e.g. `Spec::collapse`) before serializing.
     ///
     /// Returns an error if the requested conversion is a downconversion
     /// (the caller's responsibility to reject those before calling).
@@ -182,7 +182,7 @@ impl DetectedSpec {
         }
     }
 
-    /// Serialise the wrapped spec to a [`serde_json::Value`] for
+    /// Serialize the wrapped spec to a [`serde_json::Value`] for
     /// printing.
     pub fn into_value(self) -> Result<Value> {
         match self {
@@ -199,7 +199,7 @@ impl DetectedSpec {
 }
 
 fn to_value<T: serde::Serialize>(version_tag: &str, spec: &T) -> Result<Value> {
-    serde_json::to_value(spec).with_context(|| format!("serialising {version_tag} spec"))
+    serde_json::to_value(spec).with_context(|| format!("serializing {version_tag} spec"))
 }
 
 /// Parse `raw` into a `serde_json::Value`. Format selection is by `is_yaml`:
@@ -213,8 +213,8 @@ pub fn parse_value(raw: &str, is_yaml: bool) -> Result<Value> {
 }
 
 /// Detect the spec version from a parsed `Value` (looking at the `openapi` or
-/// `swagger` field) and re-deserialise into the matching `Spec` type. If
-/// `forced` is provided, skip detection and deserialise as that version.
+/// `swagger` field) and re-deserialize into the matching `Spec` type. If
+/// `forced` is provided, skip detection and deserialize as that version.
 pub fn detect_or_use(forced: Option<SpecVersion>, value: Value) -> Result<DetectedSpec> {
     let version = match forced {
         Some(v) => v,
@@ -268,16 +268,16 @@ fn parse_version(s: &str) -> Option<(u32, u32)> {
 fn parse_as(version: SpecVersion, value: Value) -> Result<DetectedSpec> {
     Ok(match version {
         SpecVersion::V2 => {
-            DetectedSpec::V2(serde_json::from_value(value).context("deserialising as OpenAPI 2.0")?)
+            DetectedSpec::V2(serde_json::from_value(value).context("deserializing as OpenAPI 2.0")?)
         }
         SpecVersion::V3_0 => DetectedSpec::V3_0(
-            serde_json::from_value(value).context("deserialising as OpenAPI 3.0")?,
+            serde_json::from_value(value).context("deserializing as OpenAPI 3.0")?,
         ),
         SpecVersion::V3_1 => DetectedSpec::V3_1(
-            serde_json::from_value(value).context("deserialising as OpenAPI 3.1")?,
+            serde_json::from_value(value).context("deserializing as OpenAPI 3.1")?,
         ),
         SpecVersion::V3_2 => DetectedSpec::V3_2(
-            serde_json::from_value(value).context("deserialising as OpenAPI 3.2")?,
+            serde_json::from_value(value).context("deserializing as OpenAPI 3.2")?,
         ),
     })
 }
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_to_same_version_serialises_as_is() {
+    fn convert_to_same_version_serializes_as_is() {
         let v: Value = serde_json::from_str(
             r#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
         )
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_to_v2_same_version_noop_serialises_swagger() {
+    fn convert_to_v2_same_version_noop_serializes_swagger() {
         let out = v2_spec().convert_to(SpecVersion::V2).unwrap();
         assert_eq!(out["swagger"], "2.0");
     }
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn parse_as_errors_when_forced_version_mismatches_doc() {
-        // A v3.2 doc force-parsed as v2 must fail at deserialise time with
+        // A v3.2 doc force-parsed as v2 must fail at deserialize time with
         // the OpenAPI 2.0 context attached.
         let v: Value = serde_json::from_str(
             r#"{"openapi":"3.2.0","info":{"title":"x","version":"1"},"paths":{}}"#,
@@ -615,7 +615,7 @@ mod tests {
             Err(e) => e.to_string(),
             Ok(_) => panic!("expected Err, got Ok"),
         };
-        assert!(err.contains("deserialising as OpenAPI 2.0"), "got: {err}",);
+        assert!(err.contains("deserializing as OpenAPI 2.0"), "got: {err}",);
     }
 
     #[test]

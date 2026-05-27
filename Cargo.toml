@@ -8,7 +8,6 @@ authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/sv-tools/roas"
 repository = "https://github.com/sv-tools/roas"
-keywords = ["openapi", "swagger"]
 
 [workspace.dependencies]
 anyhow = "1.0.99"

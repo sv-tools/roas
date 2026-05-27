@@ -6,7 +6,7 @@
 //!   * `/` (and `/index.html`) — a small HTML shell that mounts the renderer
 //!     and pulls its bundle from the official CDN.
 //!   * `/spec` (and `/spec.json`) — the input spec, parsed via the existing
-//!     `read_input` / `detect_or_use` pipeline and re-serialised as JSON.
+//!     `read_input` / `detect_or_use` pipeline and re-serialized as JSON.
 //!     The spec may come from a file path or from stdin (pass `-`, or omit
 //!     the path and pipe the spec). `--watch` requires a real file.
 //!   * `/reload` — when `--watch` is on, a Server-Sent-Events endpoint that
@@ -132,7 +132,7 @@ impl SpecSource {
 
     /// Read + parse the spec, returning the JSON string the preview server
     /// hands to the renderer. Uses `convert_to(<same version>)` as a
-    /// "serialise back as a `Value`" pass. For stdin sources, "re-read"
+    /// "serialize back as a `Value`" pass. For stdin sources, "re-read"
     /// just re-parses the buffered body.
     fn build_spec_json(&self) -> Result<String> {
         let (value, from) = match self {

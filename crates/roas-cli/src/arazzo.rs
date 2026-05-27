@@ -78,10 +78,10 @@ impl DetectedArazzo {
     pub(crate) fn into_value(self) -> Result<Value> {
         match self {
             DetectedArazzo::V1_0(d) => {
-                serde_json::to_value(d).context("serialising Arazzo 1.0 description")
+                serde_json::to_value(d).context("serializing Arazzo 1.0 description")
             }
             DetectedArazzo::V1_1(d) => {
-                serde_json::to_value(d).context("serialising Arazzo 1.1 description")
+                serde_json::to_value(d).context("serializing Arazzo 1.1 description")
             }
         }
     }
@@ -107,7 +107,7 @@ pub(crate) fn detect_arazzo(value: &Value) -> Result<ArazzoVersion> {
     }
 }
 
-/// Detect (or force) the Arazzo version and deserialise into the
+/// Detect (or force) the Arazzo version and deserialize into the
 /// matching typed `Description`.
 pub(crate) fn detect_or_use_arazzo(
     forced: Option<ArazzoVersion>,
@@ -119,10 +119,10 @@ pub(crate) fn detect_or_use_arazzo(
     };
     Ok(match version {
         ArazzoVersion::V1_0 => DetectedArazzo::V1_0(
-            serde_json::from_value(value).context("deserialising as Arazzo 1.0")?,
+            serde_json::from_value(value).context("deserializing as Arazzo 1.0")?,
         ),
         ArazzoVersion::V1_1 => DetectedArazzo::V1_1(
-            serde_json::from_value(value).context("deserialising as Arazzo 1.1")?,
+            serde_json::from_value(value).context("deserializing as Arazzo 1.1")?,
         ),
     })
 }
