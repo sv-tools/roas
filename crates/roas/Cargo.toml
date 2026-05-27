@@ -1,12 +1,12 @@
 [package]
 name = "roas"
-version = "0.17.1"
+version = "0.17.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
+keywords = ["openapi", "swagger", "validation", "parser", "loader"]
 description = "Rust OpenAPI Specification — parser, validator, and loader for OpenAPI v2.0 / v3.0.x / v3.1.x / v3.2.x"
 readme = "README.md"
 categories = ["web-programming", "parser-implementations"]

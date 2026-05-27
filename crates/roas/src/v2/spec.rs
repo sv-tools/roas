@@ -487,7 +487,7 @@ impl Spec {
     ///
     /// Errors come from two sources: the loader (fetch / parse /
     /// pointer-not-found via [`CollapseError::External`]) and serde
-    /// serialisation for the dedup map (in practice infallible for
+    /// serialization for the dedup map (in practice infallible for
     /// every component type in this crate, but exposed via
     /// [`CollapseError::Serialize`] rather than panicked on).
     ///

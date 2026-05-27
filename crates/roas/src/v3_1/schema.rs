@@ -2675,7 +2675,7 @@ mod tests {
     fn schema_with_only_description_remains_object() {
         // Anything beyond a literal `{}` (even a `description` with no
         // `type`) falls through to the typed `Single::Object` variant
-        // — `{type: "object"}` is the canonical re-serialised form.
+        // — `{type: "object"}` is the canonical re-serialized form.
         let json = serde_json::json!({"description": "just metadata"});
         let schema: Schema = serde_json::from_value(json).unwrap();
         match &schema {
@@ -3324,7 +3324,7 @@ mod tests {
     #[test]
     fn schema_duplicate_extension_key_rejected() {
         // A JSON object with two identical `x-*` keys must be rejected when
-        // deserialised directly into an AllOfSchema (not buffered through
+        // deserialized directly into an AllOfSchema (not buffered through
         // `Schema::deserialize` which goes via serde_json::Value).
         // The custom `extensions::deserialize` visitor sees both keys via
         // MapAccess and returns an error on the second (line 1611).
@@ -3339,7 +3339,7 @@ mod tests {
 
     #[test]
     fn multi_schema_duplicate_extension_key_rejected() {
-        // Same check for a MultiSchema deserialised directly (not via Schema).
+        // Same check for a MultiSchema deserialized directly (not via Schema).
         let raw = r#"{"type": ["string", "null"], "x-dup": 1, "x-dup": 2}"#;
         let res = serde_json::from_str::<MultiSchema>(raw);
         assert!(

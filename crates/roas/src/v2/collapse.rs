@@ -825,7 +825,7 @@ mod tests {
 
     // ── Recursion: top-level Schema::AllOf with typed (non-object)
     //    children, which is the only shape that escapes the ObjectSchema
-    //    untagged-deserialisation path. Forces the AllOf branch of
+    //    untagged-deserialization path. Forces the AllOf branch of
     //    `recurse_schema` to actually run.
 
     #[test]
