@@ -1,48 +1,41 @@
 # roas
 
-Rust OpenAPI Specification (v2.0, v3.0.X, v3.1.X and v3.2.X) parser and generator.
+Rust OpenAPI Specification — parser, validator, and loader for v2.0 / v3.0.x / v3.1.x / v3.2.x.
 
 [![crates.io](https://img.shields.io/crates/v/roas.svg)](https://crates.io/crates/roas)
 [![docs.rs](https://docs.rs/roas/badge.svg)](https://docs.rs/roas)
 
-Parsing and generating OpenAPI Specification:
+A typed, [`serde`](https://serde.rs)-based model of every supported OpenAPI version, with a collecting validator, cross-version conversion, document merging / collapsing, and optional external-`$ref` loading. JSON and YAML round-trip through the same model.
 
-* [x] OpenAPI Specification [v2.0](https://spec.openapis.org/oas/v2.0.html)
-* [x] OpenAPI Specification [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)
-* [x] OpenAPI Specification [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html)
-* [x] OpenAPI Specification [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html) (**default**)
+## Versions
+
+| OpenAPI version                                      | Feature flag       | Status       |
+|------------------------------------------------------|--------------------|--------------|
+| [2.0](https://spec.openapis.org/oas/v2.0.html)       | `v2`               | ✅ supported |
+| [3.0.x](https://spec.openapis.org/oas/v3.0.4.html)   | `v3_0`             | ✅ supported |
+| [3.1.x](https://spec.openapis.org/oas/v3.1.2.html)   | `v3_1`             | ✅ supported |
+| [3.2.x](https://spec.openapis.org/oas/v3.2.0.html)   | `v3_2` *(default)* | ✅ supported |
+
+Each version lives behind its own feature, so you compile only what you need. With two adjacent versions enabled, a `From` impl upconverts a spec to the newer one.
 
 > [!CAUTION]
-> The project is in early development stage, so the API may change in the future.
-> Consider any 0.x.x version as unstable and subject to breaking changes.
+> The project is in an early development stage, so the API may change.
+> Treat any `0.x` release as unstable and subject to breaking changes.
 
-## Usage
-
-To use `roas`, add it to your `Cargo.toml`:
+## Install
 
 ```shell
 cargo add roas
 ```
 
-or manually add the following lines:
+The default feature is `v3_2`. For another version, disable defaults and enable the one you need:
 
 ```toml
 [dependencies]
-roas = "0.13"
+roas = { version = "0.17", default-features = false, features = ["v3_0"] }
 ```
 
-The default feature is `v3_2`. To parse v2.0, v3.0 or v3.1 specs, enable the
-corresponding feature:
-
-```toml
-[dependencies]
-roas = { version = "0.13", default-features = false, features = ["v3_0"] }
-```
-
-## Examples
-
-The default feature is `v3_2`. The example below also uses `serde_json`
-directly, so add both crates:
+## Quick start
 
 ```shell
 cargo add roas serde_json
@@ -62,5 +55,4 @@ spec.validate(
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](../../LICENSE-APACHE) or [MIT license](../../LICENSE-MIT) at
-your option.
+Licensed under either of [Apache License, Version 2.0](../../LICENSE-APACHE) or [MIT license](../../LICENSE-MIT) at your option.
