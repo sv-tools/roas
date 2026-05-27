@@ -47,8 +47,8 @@
 //! * `discriminator` on a plain `ObjectSchema` is dropped — v3.0 carries
 //!   it only on composition (`allOf` / `oneOf` / `anyOf`) shapes.
 //!
-//! The conversion serialises the v2 input with serde, runs the transforms,
-//! and deserialises as a v3.0 spec. If the input is a valid v2 document the
+//! The conversion serializes the v2 input with serde, runs the transforms,
+//! and deserializes as a v3.0 spec. If the input is a valid v2 document the
 //! output is a structurally valid v3.0 document; semantic regressions are
 //! surfaced by `Spec::validate`.
 
@@ -1952,8 +1952,8 @@ mod tests {
         let value = serde_json::to_value(&v3).unwrap();
         let scheme = &value["components"]["securitySchemes"]["auth"];
         assert_eq!(scheme["type"], "http");
-        // `HttpScheme::Basic` deserialises from the v2 "basic" alias and
-        // re-serialises in its canonical "Basic" form.
+        // `HttpScheme::Basic` deserializes from the v2 "basic" alias and
+        // re-serializes in its canonical "Basic" form.
         assert_eq!(scheme["scheme"], "Basic");
     }
 

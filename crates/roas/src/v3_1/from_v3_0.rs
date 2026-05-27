@@ -38,8 +38,8 @@
 //! * `paths` becomes optional in v3.1, but we always emit it because
 //!   v3.0 always had it.
 //!
-//! The conversion serialises the v3.0 input with serde, runs the
-//! transforms, and deserialises as a v3.1 spec. If the input is a
+//! The conversion serializes the v3.0 input with serde, runs the
+//! transforms, and deserializes as a v3.1 spec. If the input is a
 //! valid v3.0 document the output is a structurally valid v3.1
 //! document; semantic regressions are surfaced by `Spec::validate`.
 
@@ -349,7 +349,7 @@ fn type_includes_string(obj: &Map<String, Value>) -> bool {
 ///   `{type: string, format: binary}` with the empty schema `{}`,
 ///   the form the migration guide recommends. `v3_1::Schema` carries
 ///   a first-class [`crate::v3_1::schema::EmptySchema`] variant that
-///   round-trips cleanly: `{}` deserialises as `Schema::Empty`
+///   round-trips cleanly: `{}` deserializes as `Schema::Empty`
 ///   (added in PR #117) instead of being normalised to
 ///   `{type: object}` by `ObjectSchema::default()`.
 fn walk_content_aware(value: &mut Value) {
@@ -436,7 +436,7 @@ fn rewrite_content_map(content: &mut Map<String, Value>) {
             // `{type: string, format: binary}` → `{}` (the empty
             // schema, JSON Schema 2020-12's "matches anything"
             // idiom). Routes through `Schema::Empty(EmptySchema)`
-            // on the typed deserialisation.
+            // on the typed deserialization.
             //
             // Only fires when the schema has nothing besides `type`
             // and `format` — preserving any additional annotations
@@ -609,7 +609,7 @@ mod tests {
         //
         // The typed `From<v3_0::Spec>` path can't actually deliver a
         // typeless schema to `normalize_nullable` (v3_0's
-        // `ObjectSchema` re-serialises an explicit `type: object`),
+        // `ObjectSchema` re-serializes an explicit `type: object`),
         // so exercise the walker directly on hand-built JSON to pin
         // the defensive behaviour down.
         let mut v: Value = serde_json::json!({"nullable": true, "description": "free-form"});

@@ -1,12 +1,12 @@
 [package]
 name = "roas-file-fetcher"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-keywords.workspace = true
+keywords = ["openapi", "swagger", "loader", "fetcher", "filesystem"]
 description = "Filesystem fetcher for the roas OpenAPI loader, with an async variant and optional YAML support"
 readme = "README.md"
 categories = ["web-programming", "parser-implementations"]
