@@ -21,6 +21,11 @@
 //! ## Applying an overlay
 //!
 //! ```no_run
+//! # // Gate the example on the v1_0 feature so it stays valid under any
+//! # // feature combination (e.g. `--no-default-features --features v1_1`).
+//! # // The hidden cfg block is removed entirely when v1_0 is off, so the
+//! # // doctest compiles to an empty `fn main()` in that case.
+//! # #[cfg(feature = "v1_0")] {
 //! use enumset::EnumSet;
 //! use roas_overlay::apply::Apply;
 //! use roas_overlay::v1_0::Overlay;
@@ -45,6 +50,7 @@
 //! let report = overlay.apply(&mut target, EnumSet::empty()).unwrap();
 //! assert_eq!(report.actions.len(), 1);
 //! assert_eq!(target["info"]["description"], "Patched.");
+//! # }
 //! ```
 
 pub mod apply;
