@@ -17,6 +17,11 @@
 //! ## Parsing and validating
 //!
 //! ```rust
+//! # // Gate the example on the v1_0 feature so it stays valid under any
+//! # // feature combination (e.g. `--no-default-features --features v1_1`).
+//! # // The hidden cfg block is removed entirely when v1_0 is off, so the
+//! # // doctest compiles to an empty `fn main()` in that case.
+//! # #[cfg(feature = "v1_0")] {
 //! use enumset::EnumSet;
 //! use roas_arazzo::v1_0::Description;
 //! use roas_arazzo::validation::Validate;
@@ -44,6 +49,7 @@
 //!
 //! doc.validate(EnumSet::empty()).expect("description is well-formed");
 //! assert_eq!(doc.workflows[0].workflow_id, "getPet");
+//! # }
 //! ```
 //!
 //! YAML descriptions work the same way — parse with `serde_yaml_ng` (or
