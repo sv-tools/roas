@@ -88,6 +88,13 @@ jobs:
       - run: cargo install-tools
       - name: Run tests
         run: cargo llvm-cov nextest ${{ matrix.args }} --all-targets --no-fail-fast --no-tests=pass --verbose
+      # nextest does not execute doctests, so run them with the
+      # standard test harness. Doctests don't contribute to the
+      # llvm-cov report (stable `cargo llvm-cov` skips them), but they
+      # must still be exercised — otherwise a v1_0-only doctest
+      # against a v1_1-only feature combo silently never runs.
+      - name: Run doctests
+        run: cargo test --doc ${{ matrix.args }} --no-fail-fast --verbose
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
