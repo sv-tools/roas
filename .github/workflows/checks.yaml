@@ -94,8 +94,25 @@ jobs:
       # llvm-cov report (stable `cargo llvm-cov` skips them), but they
       # must still be exercised — otherwise a v1_0-only doctest
       # against a v1_1-only feature combo silently never runs.
+      #
+      # Bin-only crates (e.g. `roas-cli`) have no library target, and
+      # `cargo test --doc` bails with "no library targets found" before
+      # it even starts. Treat that specific error as a skip; surface
+      # every other failure.
       - name: Run doctests
-        run: cargo test --doc ${{ matrix.args }} --no-fail-fast --verbose
+        shell: bash
+        run: |
+          log=$(cargo test --doc ${{ matrix.args }} --no-fail-fast --verbose 2>&1) || rc=$?
+          rc=${rc:-0}
+          printf '%s\n' "$log"
+          if [[ $rc -eq 0 ]]; then
+            exit 0
+          fi
+          if grep -qF "no library targets found" <<< "$log"; then
+            echo "::notice::doctests skipped — package has no library target"
+            exit 0
+          fi
+          exit $rc
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
