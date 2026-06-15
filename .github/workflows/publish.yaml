@@ -71,7 +71,7 @@ jobs:
       # requires `id-token: write`. Granted on this job only.
       id-token: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ needs.Resolve.outputs.tag }}
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
@@ -101,7 +101,7 @@ jobs:
       attestations: write         # actions/attest persists the attestation to the GitHub API
       artifact-metadata: write    # required when `actions/attest` creates a storage record alongside the OCI-pushed attestation
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ needs.Resolve.outputs.tag }}
 
@@ -238,7 +238,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout Homebrew tap
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: sv-tools/homebrew-apps
           # Fine-grained PAT (Contents: read+write on
@@ -328,7 +328,7 @@ jobs:
       # Idempotent: re-running for the same version is a no-op when the
       # pin and tag are already in place.
       - name: Checkout roas-action
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: sv-tools/roas-action
           # Fine-grained PAT (Contents: read+write on
