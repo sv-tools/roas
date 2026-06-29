@@ -50,7 +50,7 @@ jobs:
       # triggered this run. For `roas-cli`, `AttachRoasCliBinaries`
       # below appends the prebuilt tarballs to this same draft.
       - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           draft: true
           # The repo carries multiple crates with their own tags; don't
@@ -83,7 +83,7 @@ jobs:
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           target: ${{ matrix.target }}
@@ -139,7 +139,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Extract roas-cli version from tag
         id: v
         run: echo "version=${GITHUB_REF#refs/tags/roas-cli/v}" >> "$GITHUB_OUTPUT"
@@ -184,7 +184,7 @@ jobs:
     if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
       - name: Extract roas-cli version from tag
         id: v
@@ -311,7 +311,7 @@ jobs:
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
 
       - name: Attach prebuilt binaries to draft Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           # The cosign bundle rides along with the tarballs so consumers
           # don't have to fetch it from a separate location. SLSA
