@@ -59,12 +59,22 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────────────
   # roas-cli pre-build matrix. Fires only when the tag is `roas-cli/v…`.
+  #
+  # The `startsWith(github.ref, …)` half of the gate is not redundant with
+  # the `publish` check: `Checks.outputs.publish` lists every crate whose
+  # version differs from crates.io, not the crate being tagged. When a
+  # single PR bumps several crates at once, `roas-cli` is in that list for
+  # *all* of the resulting tags, so the publish check alone lets these jobs
+  # run on e.g. `roas/v0.17.3`. There `${GITHUB_REF#refs/tags/roas-cli/v}`
+  # strips nothing, the tarball name inherits the ref's slashes, and `tar`
+  # fails on the nonexistent directory prefix.
+  #
   # Per-target native runners keep `cargo build` off QEMU, which would
   # otherwise rebuild the whole rust dep tree per architecture.
   # ────────────────────────────────────────────────────────────────────────
   RoasCliBuild:
     needs: Checks
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') && startsWith(github.ref, 'refs/tags/roas-cli/v') }}
     strategy:
       fail-fast: false
       matrix:
@@ -126,7 +136,7 @@ jobs:
     needs:
       - Checks
       - RoasCliBuild
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') && startsWith(github.ref, 'refs/tags/roas-cli/v') }}
     strategy:
       fail-fast: false
       matrix:
@@ -181,7 +191,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────
   RoasCliExtras:
     needs: Checks
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') && startsWith(github.ref, 'refs/tags/roas-cli/v') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -240,7 +250,7 @@ jobs:
       - RoasCliBuild
       - RoasCliExtras
       - DockerImageSmokeTest
-    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') }}
+    if: ${{ contains(fromJSON(needs.Checks.outputs.publish), 'roas-cli') && startsWith(github.ref, 'refs/tags/roas-cli/v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write       # upload assets to the draft GitHub Release
