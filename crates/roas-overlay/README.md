@@ -1,6 +1,6 @@
 # roas-overlay
 
-Rust implementation of the [OpenAPI Overlay Specification](https://spec.openapis.org/overlay/v1.0.0.html): parse, validate, and apply Overlay documents to OpenAPI specs.
+Rust implementation of the [OpenAPI Overlay Specification](https://spec.openapis.org/overlay/v1.1.0.html): parse, validate, and apply Overlay documents to OpenAPI specs.
 
 [![crates.io](https://img.shields.io/crates/v/roas-overlay.svg)](https://crates.io/crates/roas-overlay)
 [![docs.rs](https://docs.rs/roas-overlay/badge.svg)](https://docs.rs/roas-overlay)
@@ -13,8 +13,8 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 
 | Overlay version | Feature flag     | Status         | Adds over the previous version                     |
 |-----------------|------------------|----------------|----------------------------------------------------|
-| 1.0             | `v1_0` (default) | ✅ implemented  | —                                                  |
-| 1.1             | `v1_1`           | ✅ implemented  | `copy` action, `info.description`                  |
+| 1.0             | `v1_0`           | ✅ implemented  | —                                                  |
+| 1.1             | `v1_1` (default) | ✅ implemented  | `copy` action, `info.description`                  |
 
 `v1_0` and `v1_1` are independent — enable whichever you need. With both enabled, an `impl From<v1_0::Overlay> for v1_1::Overlay` is available for upconverting an existing v1.0 document.
 
@@ -23,11 +23,11 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 ```rust
 use enumset::EnumSet;
 use roas_overlay::apply::Apply;
-use roas_overlay::v1_0::Overlay;
+use roas_overlay::v1_1::Overlay;
 use roas_overlay::validation::Validate;
 
 let overlay: Overlay = serde_json::from_str(r#"{
-    "overlay": "1.0.0",
+    "overlay": "1.1.0",
     "info": { "title": "Example", "version": "1.0.0" },
     "actions": [
         { "target": "$.info", "update": { "description": "Patched." } },

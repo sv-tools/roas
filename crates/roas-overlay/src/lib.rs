@@ -1,6 +1,6 @@
 //! OpenAPI Overlay Specification — parser, validator, and applier.
 //!
-//! Implements the [OpenAPI Overlay Specification](https://spec.openapis.org/overlay/v1.0.0.html):
+//! Implements the [OpenAPI Overlay Specification](https://spec.openapis.org/overlay/v1.1.0.html):
 //! a sidecar document format that transforms OpenAPI documents through
 //! an ordered list of [JSONPath](https://www.rfc-editor.org/rfc/rfc9535)
 //! actions (`update`, `remove`, and v1.1's `copy`).
@@ -17,22 +17,23 @@
 //! - [`apply`] — [`Apply`](apply::Apply) trait, [`ApplyOptions`](apply::ApplyOptions),
 //!   [`ApplyReport`](apply::ApplyReport), [`ApplyError`](apply::ApplyError).
 //! - [`v1_0`] — Overlay v1.0 document model + `Validate` / `Apply` impls.
+//! - [`v1_1`] — Overlay v1.1 document model + `Validate` / `Apply` impls.
 //!
 //! ## Applying an overlay
 //!
 //! ```no_run
-//! # // Gate the example on the v1_0 feature so it stays valid under any
-//! # // feature combination (e.g. `--no-default-features --features v1_1`).
-//! # // The hidden cfg block is removed entirely when v1_0 is off, so the
+//! # // Gate the example on the v1_1 feature so it stays valid under any
+//! # // feature combination (e.g. `--no-default-features --features v1_0`).
+//! # // The hidden cfg block is removed entirely when v1_1 is off, so the
 //! # // doctest compiles to an empty `fn main()` in that case.
-//! # #[cfg(feature = "v1_0")] {
+//! # #[cfg(feature = "v1_1")] {
 //! use enumset::EnumSet;
 //! use roas_overlay::apply::Apply;
-//! use roas_overlay::v1_0::Overlay;
+//! use roas_overlay::v1_1::Overlay;
 //!
 //! // Parse the overlay document (JSON or YAML).
 //! let overlay: Overlay = serde_json::from_str(r#"{
-//!     "overlay": "1.0.0",
+//!     "overlay": "1.1.0",
 //!     "info": { "title": "Example", "version": "1.0.0" },
 //!     "actions": [
 //!         { "target": "$.info", "update": { "description": "Patched." } }
@@ -52,6 +53,13 @@
 //! assert_eq!(target["info"]["description"], "Patched.");
 //! # }
 //! ```
+//!
+//! ## Versions
+//!
+//! v1.0.x ([`v1_0`]) and v1.1.x ([`v1_1`], default feature) are both
+//! implemented; enable whichever you need. With both features enabled,
+//! an `impl From<v1_0::Overlay> for v1_1::Overlay` is available for
+//! upconverting an existing v1.0 document.
 
 pub mod apply;
 pub mod common;
