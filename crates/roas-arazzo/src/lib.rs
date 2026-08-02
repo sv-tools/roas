@@ -1,6 +1,6 @@
 //! OpenAPI Arazzo Specification — parser and validator.
 //!
-//! Implements the [Arazzo Specification](https://spec.openapis.org/arazzo/v1.0.1.html):
+//! Implements the [Arazzo Specification](https://spec.openapis.org/arazzo/v1.1.0.html):
 //! a document format that describes sequences of API calls (*workflows*)
 //! and their dependencies, independent of the underlying OpenAPI
 //! descriptions they orchestrate.
@@ -13,22 +13,23 @@
 //!   [`ValidationOptions`](validation::ValidationOptions) flag set,
 //!   `Context` / `ValidationError` types.
 //! - [`v1_0`] — Arazzo v1.0 document model + `Validate` impls.
+//! - [`v1_1`] — Arazzo v1.1 document model + `Validate` impls.
 //!
 //! ## Parsing and validating
 //!
 //! ```rust
-//! # // Gate the example on the v1_0 feature so it stays valid under any
-//! # // feature combination (e.g. `--no-default-features --features v1_1`).
-//! # // The hidden cfg block is removed entirely when v1_0 is off, so the
+//! # // Gate the example on the v1_1 feature so it stays valid under any
+//! # // feature combination (e.g. `--no-default-features --features v1_0`).
+//! # // The hidden cfg block is removed entirely when v1_1 is off, so the
 //! # // doctest compiles to an empty `fn main()` in that case.
-//! # #[cfg(feature = "v1_0")] {
+//! # #[cfg(feature = "v1_1")] {
 //! use enumset::EnumSet;
-//! use roas_arazzo::v1_0::Description;
+//! use roas_arazzo::v1_1::Description;
 //! use roas_arazzo::validation::Validate;
 //!
 //! // Parse an Arazzo description (JSON or YAML).
 //! let doc: Description = serde_json::from_str(r#"{
-//!     "arazzo": "1.0.1",
+//!     "arazzo": "1.1.0",
 //!     "info": { "title": "Example", "version": "1.0.0" },
 //!     "sourceDescriptions": [
 //!         { "name": "petStore", "url": "https://api.example.com/openapi.json", "type": "openapi" }
@@ -53,11 +54,11 @@
 //! ```
 //!
 //! YAML descriptions work the same way — parse with `serde_yaml_ng` (or
-//! any other YAML crate) into [`v1_0::Description`].
+//! any other YAML crate) into [`v1_1::Description`].
 //!
 //! ## Versions
 //!
-//! v1.0.x ([`v1_0`], default feature) and v1.1.x ([`v1_1`]) are both
+//! v1.0.x ([`v1_0`]) and v1.1.x ([`v1_1`], default feature) are both
 //! implemented; enable whichever you need. With both features enabled,
 //! an `impl From<v1_0::Description> for v1_1::Description` is available
 //! for upconverting an existing v1.0 description.

@@ -1,6 +1,6 @@
 # roas-arazzo
 
-Rust implementation of the [OpenAPI Arazzo Specification](https://spec.openapis.org/arazzo/v1.0.1.html): parse and validate Arazzo workflow descriptions.
+Rust implementation of the [OpenAPI Arazzo Specification](https://spec.openapis.org/arazzo/v1.1.0.html): parse and validate Arazzo workflow descriptions.
 
 [![crates.io](https://img.shields.io/crates/v/roas-arazzo.svg)](https://crates.io/crates/roas-arazzo)
 [![docs.rs](https://docs.rs/roas-arazzo/badge.svg)](https://docs.rs/roas-arazzo)
@@ -13,8 +13,8 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 
 | Arazzo version | Feature flag     | Status         | Adds over the previous version                                              |
 |----------------|------------------|----------------|-----------------------------------------------------------------------------|
-| 1.0            | `v1_0` (default) | ✅ implemented  | —                                                                           |
-| 1.1            | `v1_1`           | ✅ implemented  | `$self`, AsyncAPI steps, selectors, expression types, action `parameters`  |
+| 1.0            | `v1_0`           | ✅ implemented  | —                                                                           |
+| 1.1            | `v1_1` (default) | ✅ implemented  | `$self`, AsyncAPI steps, selectors, expression types, action `parameters`  |
 
 `v1_0` and `v1_1` are independent — enable whichever you need. With both enabled, an `impl From<v1_0::Description> for v1_1::Description` upconverts an existing v1.0 description.
 
@@ -24,11 +24,11 @@ Authoritative JSON Schemas: [v1.0](https://spec.openapis.org/arazzo/1.0/schema/2
 
 ```rust
 use enumset::EnumSet;
-use roas_arazzo::v1_0::Description;
+use roas_arazzo::v1_1::Description;
 use roas_arazzo::validation::Validate;
 
 let doc: Description = serde_json::from_str(r#"{
-    "arazzo": "1.0.1",
+    "arazzo": "1.1.0",
     "info": { "title": "Example", "version": "1.0.0" },
     "sourceDescriptions": [
         { "name": "petStore", "url": "https://api.example.com/openapi.json", "type": "openapi" }
