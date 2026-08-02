@@ -1,6 +1,8 @@
 //! OpenAPI Overlay Specification — parser, validator, and applier.
 //!
-//! Implements the [OpenAPI Overlay Specification](https://spec.openapis.org/overlay/v1.1.0.html):
+//! Implements the OpenAPI Overlay Specification
+//! ([v1.0](https://spec.openapis.org/overlay/v1.0.0.html) /
+//! [v1.1](https://spec.openapis.org/overlay/v1.1.0.html)):
 //! a sidecar document format that transforms OpenAPI documents through
 //! an ordered list of [JSONPath](https://www.rfc-editor.org/rfc/rfc9535)
 //! actions (`update`, `remove`, and v1.1's `copy`).

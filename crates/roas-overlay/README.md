@@ -1,6 +1,6 @@
 # roas-overlay
 
-Rust implementation of the [OpenAPI Overlay Specification](https://spec.openapis.org/overlay/v1.1.0.html): parse, validate, and apply Overlay documents to OpenAPI specs.
+Rust implementation of the OpenAPI Overlay Specification ([v1.0](https://spec.openapis.org/overlay/v1.0.0.html) / [v1.1](https://spec.openapis.org/overlay/v1.1.0.html)): parse, validate, and apply Overlay documents to OpenAPI specs.
 
 [![crates.io](https://img.shields.io/crates/v/roas-overlay.svg)](https://crates.io/crates/roas-overlay)
 [![docs.rs](https://docs.rs/roas-overlay/badge.svg)](https://docs.rs/roas-overlay)
