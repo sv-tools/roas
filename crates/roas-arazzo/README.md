@@ -1,6 +1,6 @@
 # roas-arazzo
 
-Rust implementation of the [OpenAPI Arazzo Specification](https://spec.openapis.org/arazzo/v1.1.0.html): parse and validate Arazzo workflow descriptions.
+Rust implementation of the OpenAPI Arazzo Specification ([v1.0](https://spec.openapis.org/arazzo/v1.0.1.html) / [v1.1](https://spec.openapis.org/arazzo/v1.1.0.html)): parse and validate Arazzo workflow descriptions.
 
 [![crates.io](https://img.shields.io/crates/v/roas-arazzo.svg)](https://crates.io/crates/roas-arazzo)
 [![docs.rs](https://docs.rs/roas-arazzo/badge.svg)](https://docs.rs/roas-arazzo)

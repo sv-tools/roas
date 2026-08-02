@@ -13,6 +13,11 @@ categories = ["web-programming", "parser-implementations"]
 include = ["src", "Cargo.toml", "README.md"]
 publish = true
 
+# Document every version module on docs.rs, not just the default one,
+# so the `v1_0` / `v1_1` intra-doc links in the crate docs resolve.
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = ["v1_1"]
 # Support for Arazzo v1.0.x.

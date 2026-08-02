@@ -1,6 +1,8 @@
 //! OpenAPI Arazzo Specification — parser and validator.
 //!
-//! Implements the [Arazzo Specification](https://spec.openapis.org/arazzo/v1.1.0.html):
+//! Implements the Arazzo Specification
+//! ([v1.0](https://spec.openapis.org/arazzo/v1.0.1.html) /
+//! [v1.1](https://spec.openapis.org/arazzo/v1.1.0.html)):
 //! a document format that describes sequences of API calls (*workflows*)
 //! and their dependencies, independent of the underlying OpenAPI
 //! descriptions they orchestrate.
