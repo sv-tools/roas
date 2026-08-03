@@ -203,10 +203,19 @@ impl ValidateWithContext for SecurityScheme {
                     Some(name) => ctx.require_non_empty("name", name),
                 }
             }
-            SecuritySchemeType::Http => match &self.scheme {
-                None => ctx.error_field("scheme", "is required for the `http` type"),
-                Some(scheme) => ctx.require_non_empty("scheme", scheme),
-            },
+            SecuritySchemeType::Http => {
+                match &self.scheme {
+                    None => ctx.error_field("scheme", "is required for the `http` type"),
+                    Some(scheme) => ctx.require_non_empty("scheme", scheme),
+                }
+                // Only the `bearer` branch of the HTTP `oneOf` declares
+                // `bearerFormat`; every other scheme forbids it.
+                if self.bearer_format.is_some()
+                    && self.scheme.as_deref().is_some_and(|s| s != "bearer")
+                {
+                    ctx.error_field("bearerFormat", "is only allowed when `scheme` is `bearer`");
+                }
+            }
             SecuritySchemeType::OAuth2 => match &self.flows {
                 None => ctx.error_field("flows", "is required for the `oauth2` type"),
                 Some(flows) => ctx.in_field("flows", |ctx| flows.validate_with_context(ctx)),
@@ -254,30 +263,38 @@ impl ValidateWithContext for OAuthFlows {
         {
             ctx.error("must define at least one OAuth flow");
         }
-        // Each flow requires the URLs its grant type actually uses.
-        if let Some(flow) = &self.implicit {
-            ctx.in_field("implicit", |ctx| {
-                flow.validate_with_context(ctx);
-                flow.require_url(ctx, "authorizationUrl", &flow.authorization_url);
-            });
-        }
-        if let Some(flow) = &self.password {
-            ctx.in_field("password", |ctx| {
-                flow.validate_with_context(ctx);
-                flow.require_url(ctx, "tokenUrl", &flow.token_url);
-            });
-        }
-        if let Some(flow) = &self.client_credentials {
-            ctx.in_field("clientCredentials", |ctx| {
-                flow.validate_with_context(ctx);
-                flow.require_url(ctx, "tokenUrl", &flow.token_url);
-            });
-        }
-        if let Some(flow) = &self.authorization_code {
-            ctx.in_field("authorizationCode", |ctx| {
-                flow.validate_with_context(ctx);
-                flow.require_url(ctx, "authorizationUrl", &flow.authorization_url);
-                flow.require_url(ctx, "tokenUrl", &flow.token_url);
+
+        // Each grant type pins which URLs it requires *and* which it
+        // forbids; `availableScopes` is required by all four.
+        for (field, flow, required, forbidden) in [
+            (
+                "implicit",
+                self.implicit.as_ref(),
+                &["authorizationUrl"][..],
+                &["tokenUrl"][..],
+            ),
+            (
+                "password",
+                self.password.as_ref(),
+                &["tokenUrl"][..],
+                &["authorizationUrl"][..],
+            ),
+            (
+                "clientCredentials",
+                self.client_credentials.as_ref(),
+                &["tokenUrl"][..],
+                &["authorizationUrl"][..],
+            ),
+            (
+                "authorizationCode",
+                self.authorization_code.as_ref(),
+                &["authorizationUrl", "tokenUrl"][..],
+                &[][..],
+            ),
+        ] {
+            let Some(flow) = flow else { continue };
+            ctx.in_field(field, |ctx| {
+                flow.validate_grant(ctx, field, required, forbidden)
             });
         }
     }
@@ -297,8 +314,12 @@ pub struct OAuthFlow {
 
     /// **Required** The available scopes, keyed by scope name. Renamed
     /// from `scopes` in AsyncAPI 2.x.
-    #[serde(rename = "availableScopes", default)]
-    pub available_scopes: BTreeMap<String, String>,
+    ///
+    /// Every grant type requires it, so presence is what the validator
+    /// checks — an empty map is a legitimate value, and an absent one
+    /// stays absent rather than being invented on serialization.
+    #[serde(rename = "availableScopes", skip_serializing_if = "Option::is_none")]
+    pub available_scopes: Option<BTreeMap<String, String>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
@@ -308,18 +329,40 @@ pub struct OAuthFlow {
 }
 
 impl OAuthFlow {
-    fn require_url(&self, ctx: &mut Context, field: &str, value: &Option<String>) {
-        match value {
-            None => ctx.error_field(field, format!("`{field}` is required for this flow")),
-            Some(url) => ctx.require_non_empty(field, url),
+    fn url(&self, field: &str) -> Option<&String> {
+        match field {
+            "authorizationUrl" => self.authorization_url.as_ref(),
+            "tokenUrl" => self.token_url.as_ref(),
+            _ => None,
         }
     }
-}
 
-impl ValidateWithContext for OAuthFlow {
-    fn validate_with_context(&self, _ctx: &mut Context) {
-        // Per-flow URL requirements are enforced by `OAuthFlows`, which
-        // knows which grant type each flow is.
+    /// Validate this flow against its grant type's contract: the URLs
+    /// it must carry, the URLs it must not, and `availableScopes`.
+    fn validate_grant(
+        &self,
+        ctx: &mut Context,
+        grant: &str,
+        required: &[&str],
+        forbidden: &[&str],
+    ) {
+        for field in required {
+            match self.url(field) {
+                None => ctx.error_field(field, format!("is required for the `{grant}` flow")),
+                Some(url) => ctx.require_non_empty(field, url),
+            }
+        }
+        for field in forbidden {
+            if self.url(field).is_some() {
+                ctx.error_field(field, format!("is not allowed on the `{grant}` flow"));
+            }
+        }
+        if self.available_scopes.is_none() {
+            ctx.error_field(
+                "availableScopes",
+                format!("is required for the `{grant}` flow"),
+            );
+        }
     }
 }
 
@@ -543,6 +586,128 @@ mod tests {
             assert_eq!(scheme_type.as_str(), text);
             assert_eq!(serde_json::to_value(scheme_type).unwrap(), json!(text));
         }
+    }
+
+    #[test]
+    fn each_grant_type_forbids_the_url_it_does_not_use() {
+        // `implicit` has `not: {required: ["tokenUrl"]}`; `password` and
+        // `clientCredentials` forbid `authorizationUrl`.
+        let errors = validate(json!({
+            "type": "oauth2",
+            "flows": {
+                "implicit": {
+                    "authorizationUrl": "https://e/a",
+                    "tokenUrl": "https://e/t",
+                    "availableScopes": {}
+                }
+            }
+        }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e
+                    .contains("flows.implicit.tokenUrl: is not allowed on the `implicit` flow")),
+            "got: {errors:?}"
+        );
+
+        for grant in ["password", "clientCredentials"] {
+            let errors = validate(json!({
+                "type": "oauth2",
+                "flows": {
+                    grant: {
+                        "tokenUrl": "https://e/t",
+                        "authorizationUrl": "https://e/a",
+                        "availableScopes": {}
+                    }
+                }
+            }));
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains(&format!("{grant}.authorizationUrl: is not allowed"))),
+                "{grant}: {errors:?}"
+            );
+        }
+
+        // `authorizationCode` legitimately uses both.
+        let errors = validate(json!({
+            "type": "oauth2",
+            "flows": {
+                "authorizationCode": {
+                    "authorizationUrl": "https://e/a",
+                    "tokenUrl": "https://e/t",
+                    "availableScopes": {}
+                }
+            }
+        }));
+        assert!(errors.is_empty(), "got: {errors:?}");
+    }
+
+    #[test]
+    fn every_grant_type_requires_available_scopes() {
+        for grant in [
+            "implicit",
+            "password",
+            "clientCredentials",
+            "authorizationCode",
+        ] {
+            let errors = validate(json!({
+                "type": "oauth2",
+                "flows": {
+                    grant: { "authorizationUrl": "https://e/a", "tokenUrl": "https://e/t" }
+                }
+            }));
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains(&format!("{grant}.availableScopes: is required"))),
+                "{grant}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_available_scopes_is_not_invented_on_serialization() {
+        let value = json!({
+            "type": "oauth2",
+            "flows": { "implicit": { "authorizationUrl": "https://e/a" } }
+        });
+        let scheme: SecurityScheme = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            scheme
+                .flows
+                .as_ref()
+                .and_then(|f| f.implicit.as_ref())
+                .is_some_and(|f| f.available_scopes.is_none())
+        );
+        assert_eq!(serde_json::to_value(&scheme).unwrap(), value);
+
+        // An empty map is a legitimate value and stays one.
+        let empty = json!({
+            "type": "oauth2",
+            "flows": { "implicit": { "authorizationUrl": "https://e/a", "availableScopes": {} } }
+        });
+        let scheme: SecurityScheme = serde_json::from_value(empty.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&scheme).unwrap(), empty);
+    }
+
+    #[test]
+    fn bearer_format_is_only_allowed_with_the_bearer_scheme() {
+        let errors = validate(json!({
+            "type": "http",
+            "scheme": "basic",
+            "bearerFormat": "JWT"
+        }));
+        assert!(
+            errors.iter().any(|e| e
+                == "#.securitySchemes.s.bearerFormat: is only allowed when `scheme` is `bearer`"),
+            "got: {errors:?}"
+        );
+
+        assert!(
+            validate(json!({ "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }))
+                .is_empty()
+        );
     }
 
     #[test]

@@ -286,8 +286,11 @@ pub struct Schema {
     )]
     pub default: Option<serde_json::Value>,
 
-    #[serde(rename = "enum", default, skip_serializing_if = "Vec::is_empty")]
-    pub enum_values: Vec<serde_json::Value>,
+    /// `minItems: 1` in the meta-schema, so an empty-but-present
+    /// `enum` is an error rather than an absent one — hence the
+    /// `Option`.
+    #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<serde_json::Value>>,
 
     /// An explicit `null` is preserved as `Some(Value::Null)`; absent
     /// is `None`.
@@ -389,14 +392,14 @@ pub struct Schema {
     pub multiple_of: Option<f64>,
 
     // ---- composition ----
-    #[serde(rename = "allOf", default, skip_serializing_if = "Vec::is_empty")]
-    pub all_of: Vec<SubSchema>,
+    #[serde(rename = "allOf", skip_serializing_if = "Option::is_none")]
+    pub all_of: Option<Vec<SubSchema>>,
 
-    #[serde(rename = "anyOf", default, skip_serializing_if = "Vec::is_empty")]
-    pub any_of: Vec<SubSchema>,
+    #[serde(rename = "anyOf", skip_serializing_if = "Option::is_none")]
+    pub any_of: Option<Vec<SubSchema>>,
 
-    #[serde(rename = "oneOf", default, skip_serializing_if = "Vec::is_empty")]
-    pub one_of: Vec<SubSchema>,
+    #[serde(rename = "oneOf", skip_serializing_if = "Option::is_none")]
+    pub one_of: Option<Vec<SubSchema>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub not: Option<Box<SubSchema>>,
@@ -434,8 +437,53 @@ pub struct Schema {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+/// The draft-07 `simpleTypes` enumeration.
+const SIMPLE_TYPES: &[&str] = &[
+    "array", "boolean", "integer", "null", "number", "object", "string",
+];
+
 impl ValidateWithContext for Schema {
     fn validate_with_context(&self, ctx: &mut Context) {
+        // ---- keyword constraints from the draft-07 meta-schema ----
+        match &self.schema_type {
+            Some(SchemaType::Single(name)) if !SIMPLE_TYPES.contains(&name.as_str()) => {
+                ctx.error_field("type", format!("`{name}` is not a JSON Schema type"));
+            }
+            Some(SchemaType::Single(_)) => {}
+            Some(SchemaType::Multiple(names)) => {
+                if names.is_empty() {
+                    ctx.error_field("type", "must contain at least one type");
+                }
+                for (i, name) in names.iter().enumerate() {
+                    if !SIMPLE_TYPES.contains(&name.as_str()) {
+                        ctx.in_index("type", i, |ctx| {
+                            ctx.error(format!("`{name}` is not a JSON Schema type"));
+                        });
+                    } else if names[..i].contains(name) {
+                        ctx.in_index("type", i, |ctx| ctx.error("duplicate type"));
+                    }
+                }
+            }
+            None => {}
+        }
+
+        if let Some(values) = &self.enum_values {
+            if values.is_empty() {
+                ctx.error_field("enum", "must contain at least one value");
+            }
+            for (i, value) in values.iter().enumerate() {
+                if values[..i].contains(value) {
+                    ctx.in_index("enum", i, |ctx| ctx.error("duplicate value"));
+                }
+            }
+        }
+
+        if let Some(multiple_of) = self.multiple_of
+            && multiple_of <= 0.0
+        {
+            ctx.error_field("multipleOf", "must be greater than zero");
+        }
+
         check_bounds(
             ctx,
             "minLength",
@@ -464,9 +512,9 @@ impl ValidateWithContext for Schema {
                 ctx.error_field("discriminator", "must not be empty");
             } else if !self.properties.is_empty()
                 && !self.properties.contains_key(discriminator)
-                && self.one_of.is_empty()
-                && self.any_of.is_empty()
-                && self.all_of.is_empty()
+                && self.one_of.is_none()
+                && self.any_of.is_none()
+                && self.all_of.is_none()
             {
                 ctx.error_field(
                     "discriminator",
@@ -499,10 +547,14 @@ impl ValidateWithContext for Schema {
             items.validate_under_items(ctx);
         }
         for (field, list) in [
-            ("allOf", &self.all_of),
-            ("anyOf", &self.any_of),
-            ("oneOf", &self.one_of),
+            ("allOf", self.all_of.as_ref()),
+            ("anyOf", self.any_of.as_ref()),
+            ("oneOf", self.one_of.as_ref()),
         ] {
+            let Some(list) = list else { continue };
+            if list.is_empty() {
+                ctx.error_field(field, "must contain at least one subschema");
+            }
             for (i, schema) in list.iter().enumerate() {
                 ctx.in_index(field, i, |ctx| schema.validate_with_context(ctx));
             }
@@ -673,6 +725,109 @@ mod tests {
             }
             ref other => panic!("expected a tuple, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn meta_schema_keyword_constraints_are_enforced() {
+        // `type: []`, `oneOf: []`, `enum: []` and `multipleOf: 0` are
+        // all rejected by the meta-schema.
+        let schema: Schema = serde_json::from_value(json!({
+            "type": [],
+            "oneOf": [],
+            "enum": [],
+            "multipleOf": 0.0
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        schema.validate_with_context(&mut ctx);
+        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
+        assert!(
+            msgs.iter()
+                .any(|e| e == "#.payload.type: must contain at least one type")
+        );
+        assert!(
+            msgs.iter()
+                .any(|e| e == "#.payload.oneOf: must contain at least one subschema")
+        );
+        assert!(
+            msgs.iter()
+                .any(|e| e == "#.payload.enum: must contain at least one value")
+        );
+        assert!(
+            msgs.iter()
+                .any(|e| e == "#.payload.multipleOf: must be greater than zero")
+        );
+
+        // …and the empty arrays survive serialization rather than being
+        // silently dropped.
+        assert_eq!(
+            serde_json::to_value(&schema).unwrap(),
+            json!({ "type": [], "oneOf": [], "enum": [], "multipleOf": 0.0 })
+        );
+    }
+
+    #[test]
+    fn type_names_must_be_json_schema_types_and_unique() {
+        let schema: Schema =
+            serde_json::from_value(json!({ "type": ["string", "strng", "string"] })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        schema.validate_with_context(&mut ctx);
+        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
+        assert!(
+            msgs.iter()
+                .any(|e| e == "#.payload.type[1]: `strng` is not a JSON Schema type")
+        );
+        assert!(
+            msgs.iter()
+                .any(|e| e == "#.payload.type[2]: duplicate type")
+        );
+
+        let single: Schema = serde_json::from_value(json!({ "type": "objekt" })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        single.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e == "#.payload.type: `objekt` is not a JSON Schema type")
+        );
+
+        // Every simple type is accepted.
+        for name in SIMPLE_TYPES {
+            let ok: Schema = serde_json::from_value(json!({ "type": name })).unwrap();
+            let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+            ok.validate_with_context(&mut ctx);
+            assert!(ctx.errors.is_empty(), "{name}: {:?}", ctx.errors);
+        }
+    }
+
+    #[test]
+    fn enum_values_must_be_unique() {
+        let schema: Schema = serde_json::from_value(json!({ "enum": ["a", "b", "a"] })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        schema.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e == "#.payload.enum[2]: duplicate value"),
+            "got: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn positive_multiple_of_and_populated_compositions_pass() {
+        let schema: Schema = serde_json::from_value(json!({
+            "multipleOf": 2.5,
+            "allOf": [ { "type": "object" } ],
+            "anyOf": [ true ],
+            "oneOf": [ { "type": "string" } ],
+            "enum": ["a"],
+            "type": ["string", "null"]
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        schema.validate_with_context(&mut ctx);
+        assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
     }
 
     #[test]
