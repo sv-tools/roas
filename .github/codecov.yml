@@ -127,3 +127,16 @@ component_management:
       paths:
         - crates/roas-arazzo/src/v1_1/**
         - crates/roas-arazzo/tests/v1_1_test.rs
+
+    # ---- per AsyncAPI version (within the `roas-asyncapi` crate) ----
+    - component_id: asyncapi-common
+      name: asyncapi-common
+      paths:
+        - crates/roas-asyncapi/src/lib.rs
+        - crates/roas-asyncapi/src/validation.rs
+        - crates/roas-asyncapi/src/common/**
+    - component_id: asyncapi-v3_0
+      name: asyncapi-v3.0
+      paths:
+        - crates/roas-asyncapi/src/v3_0/**
+        - crates/roas-asyncapi/tests/v3_0_test.rs

@@ -1,0 +1,37 @@
+[package]
+name = "roas-asyncapi"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["asyncapi", "openapi", "kafka", "validation", "parser"]
+description = "Rust implementation of the AsyncAPI Specification v3.0 — parse and validate"
+readme = "README.md"
+categories = ["web-programming", "parser-implementations"]
+include = ["src", "Cargo.toml", "README.md"]
+publish = true
+
+# Document every version module on docs.rs, not just the default one,
+# so the version intra-doc links in the crate docs resolve.
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["v3_0"]
+# Support for AsyncAPI v3.0.x.
+v3_0 = []
+
+# `clap::ValueEnum` impls for `validation::ValidationOptions`, for
+# downstream CLIs.
+clap = ["dep:clap"]
+
+[dependencies]
+clap = { workspace = true, optional = true }
+enumset.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_yaml_ng.workspace = true
