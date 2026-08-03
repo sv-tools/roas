@@ -465,18 +465,7 @@ const SIMPLE_TYPES: &[&str] = &[
 fn json_instance_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (a, b) {
-        (Value::Number(a), Value::Number(b)) => {
-            if let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) {
-                return a == b;
-            }
-            if let (Some(a), Some(b)) = (a.as_u64(), b.as_u64()) {
-                return a == b;
-            }
-            match (a.as_f64(), b.as_f64()) {
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            }
-        }
+        (Value::Number(a), Value::Number(b)) => numbers_eq(a, b),
         (Value::Array(a), Value::Array(b)) => {
             a.len() == b.len() && a.iter().zip(b).all(|(a, b)| json_instance_eq(a, b))
         }
@@ -486,6 +475,37 @@ fn json_instance_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
                     .all(|(key, a)| b.get(key).is_some_and(|b| json_instance_eq(a, b)))
         }
         _ => a == b,
+    }
+}
+
+/// Two JSON numbers with the same mathematical value.
+///
+/// Integers are compared as integers — going through `f64` would make
+/// distinct values above 2^53 collide, e.g. `9007199254740993` and
+/// `9007199254740992.0`. A mixed integer / float pair is equal only when
+/// the float is integral and converts back to exactly that integer.
+fn numbers_eq(a: &serde_json::Number, b: &serde_json::Number) -> bool {
+    /// `None` when the number is not an exact integer.
+    fn as_integer(n: &serde_json::Number) -> Option<i128> {
+        n.as_u64()
+            .map(i128::from)
+            .or_else(|| n.as_i64().map(i128::from))
+    }
+
+    match (as_integer(a), as_integer(b)) {
+        (Some(a), Some(b)) => a == b,
+        (Some(int), None) | (None, Some(int)) => {
+            let float = if as_integer(a).is_some() { b } else { a };
+            // `serde_json` numbers never exceed u64 / i64, so the cast
+            // below cannot saturate into a false match.
+            float
+                .as_f64()
+                .is_some_and(|f| f.is_finite() && f.fract() == 0.0 && f as i128 == int)
+        }
+        (None, None) => match (a.as_f64(), b.as_f64()) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        },
     }
 }
 
@@ -563,13 +583,13 @@ impl ValidateWithContext for Schema {
         }
 
         // "The property name used MUST be defined at this schema and it
-        // MUST be in the required property list." Composition keywords
-        // put those declarations in subschemas this validator does not
-        // resolve, so the check only runs when there are none.
+        // MUST be in the required property list." *This* schema — the
+        // one carrying the discriminator — so a composition keyword
+        // does not delegate the obligation to its subschemas.
         if let Some(discriminator) = &self.discriminator {
             if discriminator.is_empty() {
                 ctx.error_field("discriminator", "must not be empty");
-            } else if self.one_of.is_none() && self.any_of.is_none() && self.all_of.is_none() {
+            } else {
                 if !self.properties.contains_key(discriminator) {
                     ctx.error_field(
                         "discriminator",
@@ -915,6 +935,48 @@ mod tests {
     }
 
     #[test]
+    fn large_integers_do_not_collide_through_f64() {
+        // 2^53 + 1 and 2^53 are distinct integers that share an `f64`
+        // representation, so comparing via `as_f64` would call them
+        // equal.
+        let schema: Schema = serde_json::from_value(json!({
+            "enum": [9007199254740993i64, 9007199254740992.0]
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        schema.validate_with_context(&mut ctx);
+        assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
+
+        // The exact pairing is still a duplicate.
+        let exact: Schema = serde_json::from_value(json!({
+            "enum": [9007199254740992i64, 9007199254740992.0]
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        exact.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e == "#.payload.enum[1]: duplicate value"),
+            "got: {:?}",
+            ctx.errors
+        );
+
+        // A float with a fractional part never equals an integer, and
+        // an out-of-range float does not saturate into a match.
+        for values in [
+            json!([2, 2.5]),
+            json!([1, 1e300]),
+            json!([-1, 18446744073709551615u64]),
+        ] {
+            let schema: Schema = serde_json::from_value(json!({ "enum": values })).unwrap();
+            let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+            schema.validate_with_context(&mut ctx);
+            assert!(ctx.errors.is_empty(), "{values}: {:?}", ctx.errors);
+        }
+    }
+
+    #[test]
     fn discriminator_must_be_declared_and_required() {
         // Named but nothing declared at all.
         let bare: Schema = serde_json::from_value(json!({ "discriminator": "kind" })).unwrap();
@@ -1065,8 +1127,8 @@ mod tests {
             ctx.errors
         );
 
-        // A discriminator alongside a composition keyword is fine — the
-        // property lives in the composed subschemas.
+        // A composition keyword does not delegate the obligation: the
+        // property must be defined at *this* schema either way.
         let composed: Schema = serde_json::from_value(json!({
             "discriminator": "kind",
             "properties": { "other": { "type": "string" } },
@@ -1075,6 +1137,28 @@ mod tests {
         .unwrap();
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
         composed.validate_with_context(&mut ctx);
+        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
+        assert!(
+            msgs.iter()
+                .any(|e| e.contains("is not declared in `properties`"))
+        );
+        assert!(
+            msgs.iter()
+                .any(|e| e.contains("must be listed in `required`"))
+        );
+
+        // The idiomatic base schema — which declares and requires the
+        // discriminator, and is inherited via `allOf` elsewhere — still
+        // passes with a composition keyword present.
+        let base: Schema = serde_json::from_value(json!({
+            "discriminator": "petType",
+            "required": ["petType"],
+            "properties": { "petType": { "type": "string" } },
+            "oneOf": [ { "$ref": "#/components/schemas/cat" } ]
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        base.validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
     }
 

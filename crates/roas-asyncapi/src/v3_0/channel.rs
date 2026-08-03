@@ -30,11 +30,12 @@ where
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Channel {
     /// The channel address — a topic, routing key, event type, or path.
-    /// `null` marks an address that is unknown at design time; absent
-    /// means the address is the channel key itself.
     ///
-    /// The two are distinct in the specification, so the outer `Option`
-    /// tracks presence and the inner one the explicit `null`.
+    /// "When `null` or absent, it MUST be interpreted as unknown", which
+    /// is how an address generated dynamically at runtime is spelled;
+    /// [`Channel::address`] returns `None` for both. The outer `Option`
+    /// exists only so the two forms round-trip as written — an explicit
+    /// `null` stays `null` and an absent field stays absent.
     #[serde(
         default,
         deserialize_with = "deserialize_address",
@@ -87,7 +88,8 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// The address as a string, if one is set and not explicitly `null`.
+    /// The address as a string, or `None` when it is unknown — which
+    /// covers both an explicit `null` and an absent field.
     #[must_use]
     pub fn address(&self) -> Option<&str> {
         self.address.as_ref()?.as_deref()
