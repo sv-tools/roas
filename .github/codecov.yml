@@ -140,3 +140,8 @@ component_management:
       paths:
         - crates/roas-asyncapi/src/v3_0/**
         - crates/roas-asyncapi/tests/v3_0_test.rs
+    - component_id: asyncapi-v3_1
+      name: asyncapi-v3.1
+      paths:
+        - crates/roas-asyncapi/src/v3_1/**
+        - crates/roas-asyncapi/tests/v3_1_test.rs

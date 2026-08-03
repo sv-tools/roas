@@ -13,23 +13,32 @@
 //! - [`validation`] — [`Validate`](validation::Validate) trait,
 //!   [`ValidationOptions`](validation::ValidationOptions) flag set,
 //!   `Context` / `ValidationError` types.
-//! - [`v3_0`] — AsyncAPI v3.0 document model + `Validate` impls.
+//! - `v3_0` — AsyncAPI v3.0 document model + `Validate` impls, behind
+//!   the `v3_0` feature.
+//! - `v3_1` — AsyncAPI v3.1 document model + `Validate` impls, behind
+//!   the `v3_1` feature (on by default).
+//!
+//! The version modules are named rather than linked above: a link to a
+//! module the current feature set switched off is a broken intra-doc
+//! link, which `cargo doc` reports and `RUSTDOCFLAGS="-D warnings"`
+//! fails on. docs.rs builds this crate with every feature, so both
+//! appear in the sidebar there.
 //!
 //! ## Parsing and validating
 //!
 //! ```rust
-//! # // Gate the example on the v3_0 feature so it stays valid under any
+//! # // Gate the example on the v3_1 feature so it stays valid under any
 //! # // feature combination. The hidden cfg block is removed entirely
-//! # // when v3_0 is off, so the doctest compiles to an empty
+//! # // when v3_1 is off, so the doctest compiles to an empty
 //! # // `fn main()` in that case.
-//! # #[cfg(feature = "v3_0")] {
+//! # #[cfg(feature = "v3_1")] {
 //! use enumset::EnumSet;
-//! use roas_asyncapi::v3_0::Document;
+//! use roas_asyncapi::v3_1::Document;
 //! use roas_asyncapi::validation::Validate;
 //!
 //! // Parse an AsyncAPI document (JSON or YAML).
 //! let doc: Document = serde_json::from_str(r##"{
-//!     "asyncapi": "3.0.0",
+//!     "asyncapi": "3.1.0",
 //!     "info": { "title": "Streetlights", "version": "1.0.0" },
 //!     "servers": {
 //!         "production": { "host": "broker.example.com:9092", "protocol": "kafka" }
@@ -56,7 +65,7 @@
 //! ```
 //!
 //! YAML documents work the same way — parse with `serde_yaml_ng` (or
-//! any other YAML crate) into [`v3_0::Document`].
+//! any other YAML crate) into a version module's `Document`.
 //!
 //! ## Scope
 //!
@@ -69,11 +78,19 @@
 //!
 //! ## Versions
 //!
-//! v3.0.x ([`v3_0`], default feature) is implemented; v3.1 and 2.6
-//! follow.
+//! v3.0.0 (`v3_0`) and v3.1.0 (`v3_1`, the default feature) are both
+//! implemented; enable whichever you need. Each version's schema pins
+//! its `asyncapi` field to exactly that string, so a document is parsed
+//! by one module or rejected. With both features enabled, an
+//! `impl From<v3_0::Document> for v3_1::Document` is available for
+//! upconverting a 3.0 document — v3.1 left the object model untouched,
+//! so nothing is dropped or approximated. Support for 2.6 follows.
 
 pub mod common;
 pub mod validation;
 
 #[cfg(feature = "v3_0")]
 pub mod v3_0;
+
+#[cfg(feature = "v3_1")]
+pub mod v3_1;

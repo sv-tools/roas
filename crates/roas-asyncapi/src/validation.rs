@@ -3,7 +3,7 @@
 //! Modeled after [`roas::validation`] / `roas-arazzo`: a public
 //! [`Validate`] trait drives a recursive descent through a
 //! crate-internal trait. The current location is held as a single
-//! mutable path buffer on the [`Context`]; nodes `enter` a child
+//! mutable path buffer on the `Context`; nodes `enter` a child
 //! segment, recurse, and the segment is truncated on the way out. The
 //! path string is cloned only when an error is actually recorded, so a
 //! valid document allocates no per-node path strings. Errors collect

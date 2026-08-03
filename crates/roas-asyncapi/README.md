@@ -13,19 +13,21 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 
 | AsyncAPI version | Feature flag     | Status          | Notes                                                     |
 |------------------|------------------|-----------------|-----------------------------------------------------------|
-| 3.0              | `v3_0` (default) | ✅ implemented  | —                                                          |
-| 3.1              | —                | 🚧 planned      | A thin delta over 3.0: new `schemaFormat` values, `ros2` bindings |
+| 3.0              | `v3_0`           | ✅ implemented  | —                                                          |
+| 3.1              | `v3_1` (default) | ✅ implemented  | Adds its own `schemaFormat` values and the `ros2` bindings |
 | 2.6              | —                | 🚧 planned      | The pre-v3 model: channels keyed by path, `publish` / `subscribe` |
+
+`v3_0` and `v3_1` are independent — enable whichever you need. With both enabled, an `impl From<v3_0::Document> for v3_1::Document` upconverts a 3.0 document; since 3.1 left the object model untouched, nothing is dropped or approximated and only the `asyncapi` version string changes.
 
 ## Quick start
 
 ```rust
 use enumset::EnumSet;
-use roas_asyncapi::v3_0::Document;
+use roas_asyncapi::v3_1::Document;
 use roas_asyncapi::validation::Validate;
 
 let doc: Document = serde_json::from_str(r##"{
-    "asyncapi": "3.0.0",
+    "asyncapi": "3.1.0",
     "info": { "title": "Streetlights", "version": "1.0.0" },
     "servers": {
         "production": { "host": "broker.example.com:9092", "protocol": "kafka" }
@@ -58,7 +60,7 @@ YAML documents work the same way — parse with `serde_yaml_ng` (or any other YA
 
 - **Cross-reference integrity** — an operation's `channel` names a declared channel; its `messages` are a subset of *that* channel's messages (a message borrowed from another channel is reported, as is a component message the channel does not list, one that is not declared at all, or a local pointer that names something other than a message); a channel's `servers` name declared servers; the same for an operation's `reply`.
 - **Runtime expressions** — `correlationId.location`, `parameter.location`, and `reply.address.location` are parsed against the `$message.header#/…` / `$message.payload#/…` grammar. The `#` is mandatory, per the schema pattern; `$message.payload#` selects the whole payload.
-- **`schemaFormat`** — required to be non-empty. It is *not* checked against a fixed list: the specification types it as `anyOf: [string, <enum>]`, so a custom dialect is legal and simply keeps its schema as raw JSON. The documented formats (every 2.0.0–2.6.0 and 3.0.0 AsyncAPI dialect, OpenAPI 3.0.0, Avro 1.9.0, RAML 1.0, JSON Schema draft-07) are exposed as `SUPPORTED_SCHEMA_FORMATS` / `is_supported_schema_format` for callers that want to ask.
+- **`schemaFormat`** — required to be non-empty. It is *not* checked against a fixed list: the specification types it as `anyOf: [string, <enum>]`, so a custom dialect is legal and simply keeps its schema as raw JSON. The documented formats are exposed per version as `SUPPORTED_SCHEMA_FORMATS` / `is_supported_schema_format` for callers that want to ask: every 2.0.0–2.6.0 and 3.0.0 AsyncAPI dialect plus OpenAPI 3.0.0, Avro 1.9.0, RAML 1.0 and JSON Schema draft-07, and in `v3_1` the three `version=3.1.0` dialects on top.
 - **Channel address ↔ parameters** — every `{placeholder}` in an address is declared, and every declared parameter is used. Server `host` / `pathname` placeholders are checked against `variables` the same way.
 - **Security-scheme variants** — each `type` gets both halves of its contract: the fields it requires (`http` needs `scheme`, `oauth2` needs `flows`, `httpApiKey` needs `name` + `in`) and the fields it forbids, since every branch of the specification's `oneOf` is `additionalProperties: false`. `bearerFormat` is accepted only alongside `scheme: bearer`. Each OAuth grant type is checked the same way — required URLs plus `availableScopes`, and the URL its grant type does *not* use (`implicit` forbids `tokenUrl`; `password` and `clientCredentials` forbid `authorizationUrl`).
 - **Schema keyword constraints** — from the draft-07 meta-schema: `type` names a real JSON Schema type and its array form is non-empty and duplicate-free, `enum` is non-empty and duplicate-free under draft-07 instance equality (so `1` and `1.0` collide), `allOf` / `anyOf` / `oneOf` are non-empty, `multipleOf` is positive, tuple-form `items` is non-empty, `required` entries are unique, a `discriminator` names a property that this schema itself declares and requires (a composition keyword does not delegate that to its subschemas), and bounds are not inverted.

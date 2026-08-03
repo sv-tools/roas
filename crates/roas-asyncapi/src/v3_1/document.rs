@@ -1,6 +1,6 @@
-//! AsyncAPI v3.0 root document.
+//! AsyncAPI v3.1 root document.
 //!
-//! Per [AsyncAPI Object](https://www.asyncapi.com/docs/reference/specification/v3.0.0#A2SObject).
+//! Per [AsyncAPI Object](https://www.asyncapi.com/docs/reference/specification/v3.1.0#A2SObject).
 //!
 //! Beyond the per-object checks, the root validator resolves the
 //! document's internal wiring: an operation's `channel` must name a
@@ -12,21 +12,21 @@
 //! self-contained document.
 
 use crate::common::reference::{RefOr, Reference};
-use crate::v3_0::channel::Channel;
-use crate::v3_0::components::Components;
-use crate::v3_0::info::Info;
-use crate::v3_0::operation::Operation;
-use crate::v3_0::server::Server;
-use crate::v3_0::version::Version;
+use crate::v3_1::channel::Channel;
+use crate::v3_1::components::Components;
+use crate::v3_1::info::Info;
+use crate::v3_1::operation::Operation;
+use crate::v3_1::server::Server;
+use crate::v3_1::version::Version;
 use crate::validation::{Context, Error, Validate, ValidateWithContext, ValidationOptions};
 use enumset::EnumSet;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Root AsyncAPI v3.0 document.
+/// Root AsyncAPI v3.1 document.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Document {
-    /// **Required** Exactly `3.0.0` — the AsyncAPI specification
+    /// **Required** Exactly `3.1.0` — the AsyncAPI specification
     /// version, which the schema pins with `const`.
     pub asyncapi: Version,
 
@@ -380,14 +380,14 @@ mod tests {
 
     fn minimal() -> serde_json::Value {
         json!({
-            "asyncapi": "3.0.0",
+            "asyncapi": "3.1.0",
             "info": { "title": "Streetlights", "version": "1.0.0" }
         })
     }
 
     fn wired() -> serde_json::Value {
         json!({
-            "asyncapi": "3.0.0",
+            "asyncapi": "3.1.0",
             "info": { "title": "T", "version": "1" },
             "servers": { "production": { "host": "broker:9092", "protocol": "kafka" } },
             "channels": {
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn minimal_document_parses_validates_and_round_trips() {
         let doc: Document = serde_json::from_value(minimal()).unwrap();
-        assert_eq!(doc.asyncapi, Version::V3_0_0());
+        assert_eq!(doc.asyncapi, Version::V3_1_0());
         doc.validate(EnumSet::empty()).expect("valid");
         assert_eq!(serde_json::to_value(&doc).unwrap(), minimal());
     }
@@ -431,12 +431,12 @@ mod tests {
 
     #[test]
     fn rejects_other_spec_versions_at_parse_time() {
-        for version in ["2.6.0", "3.1.0"] {
+        for version in ["2.6.0", "3.0.0"] {
             let mut value = minimal();
             value["asyncapi"] = json!(version);
             assert!(
                 serde_json::from_value::<Document>(value).is_err(),
-                "{version} must not parse as v3.0"
+                "{version} must not parse as v3.1"
             );
         }
     }
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn component_messages_count_when_the_channel_lists_them() {
         let value = json!({
-            "asyncapi": "3.0.0",
+            "asyncapi": "3.1.0",
             "info": { "title": "T", "version": "1" },
             "channels": {
                 "user": {
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn components_channels_and_servers_resolve_too() {
         let value = json!({
-            "asyncapi": "3.0.0",
+            "asyncapi": "3.1.0",
             "info": { "title": "T", "version": "1" },
             "operations": {
                 "send": {
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn external_references_are_skipped_unless_strictness_is_requested() {
         let value = json!({
-            "asyncapi": "3.0.0",
+            "asyncapi": "3.1.0",
             "info": { "title": "T", "version": "1" },
             "operations": {
                 "send": { "action": "send", "channel": { "$ref": "./other.yaml#/channels/user" } }
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn a_channel_that_is_itself_a_ref_stops_deeper_checks() {
         let value = json!({
-            "asyncapi": "3.0.0",
+            "asyncapi": "3.1.0",
             "info": { "title": "T", "version": "1" },
             "channels": { "user": { "$ref": "./channels.yaml#/user" } },
             "operations": {
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn nested_object_errors_still_surface_from_the_root() {
         let value = json!({
-            "asyncapi": "3.0.0",
+            "asyncapi": "3.1.0",
             "info": { "title": "", "version": "" },
             "components": { "servers": { "s": { "host": "", "protocol": "" } } }
         });

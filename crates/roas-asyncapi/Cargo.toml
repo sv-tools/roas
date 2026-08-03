@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 keywords = ["asyncapi", "openapi", "kafka", "validation", "parser"]
-description = "Rust implementation of the AsyncAPI Specification v3.0 — parse and validate"
+description = "Rust implementation of the AsyncAPI Specification v3.0 / v3.1 — parse and validate"
 readme = "README.md"
 categories = ["web-programming", "parser-implementations"]
 include = ["src", "Cargo.toml", "README.md"]
@@ -19,9 +19,14 @@ publish = true
 all-features = true
 
 [features]
-default = ["v3_0"]
-# Support for AsyncAPI v3.0.x.
+default = ["v3_1"]
+# Support for AsyncAPI v3.0.0 — the schema pins `asyncapi` to that
+# exact string, so there is no patch range.
 v3_0 = []
+# Support for AsyncAPI v3.1.0 (default), likewise pinned. Independent
+# of `v3_0`; enable both to get the additional
+# `From<v3_0::Document> for v3_1::Document` upconversion impl.
+v3_1 = []
 
 # `clap::ValueEnum` impls for `validation::ValidationOptions`, for
 # downstream CLIs.
