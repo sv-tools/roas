@@ -211,6 +211,10 @@ impl Items {
                 ctx.in_field("items", |ctx| schema.validate_with_context(ctx));
             }
             Items::Tuple(schemas) => {
+                // The tuple form is a `schemaArray`: `minItems: 1`.
+                if schemas.is_empty() {
+                    ctx.error_field("items", "must contain at least one subschema");
+                }
                 for (i, schema) in schemas.iter().enumerate() {
                     ctx.in_index("items", i, |ctx| schema.validate_with_context(ctx));
                 }
@@ -231,7 +235,16 @@ pub enum Dependency {
 impl ValidateWithContext for Dependency {
     fn validate_with_context(&self, ctx: &mut Context) {
         match self {
-            Dependency::Required(_) => {}
+            // The property-name form is a `stringArray`, so entries
+            // must be unique. The dependency is already the current
+            // path, so the index goes in the message.
+            Dependency::Required(names) => {
+                for (i, name) in names.iter().enumerate() {
+                    if names[..i].contains(name) {
+                        ctx.error(format!("duplicate entry `{name}` at index {i}"));
+                    }
+                }
+            }
             Dependency::Schema(schema) => schema.validate_with_context(ctx),
         }
     }
@@ -442,6 +455,50 @@ const SIMPLE_TYPES: &[&str] = &[
     "array", "boolean", "integer", "null", "number", "object", "string",
 ];
 
+/// JSON instance equality, per
+/// [draft-07 §4.2.3](https://json-schema.org/draft-07/json-schema-core#rfc.section.4.2.3).
+///
+/// Numbers are equal when they have the same *mathematical* value, so
+/// `1` and `1.0` are the same instance. `serde_json`'s `PartialEq`
+/// compares the stored representation instead and would call them
+/// different, which is why `uniqueItems` cannot use it.
+fn json_instance_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => {
+            if let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) {
+                return a == b;
+            }
+            if let (Some(a), Some(b)) = (a.as_u64(), b.as_u64()) {
+                return a == b;
+            }
+            match (a.as_f64(), b.as_f64()) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            }
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| json_instance_eq(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, a)| b.get(key).is_some_and(|b| json_instance_eq(a, b)))
+        }
+        _ => a == b,
+    }
+}
+
+/// Report the index of every entry that repeats an earlier one, per the
+/// meta-schema's `uniqueItems` on `stringArray`.
+fn check_unique_strings(ctx: &mut Context, field: &str, values: &[String]) {
+    for (i, value) in values.iter().enumerate() {
+        if values[..i].contains(value) {
+            ctx.in_index(field, i, |ctx| ctx.error("duplicate entry"));
+        }
+    }
+}
+
 impl ValidateWithContext for Schema {
     fn validate_with_context(&self, ctx: &mut Context) {
         // ---- keyword constraints from the draft-07 meta-schema ----
@@ -472,7 +529,7 @@ impl ValidateWithContext for Schema {
                 ctx.error_field("enum", "must contain at least one value");
             }
             for (i, value) in values.iter().enumerate() {
-                if values[..i].contains(value) {
+                if values[..i].iter().any(|seen| json_instance_eq(seen, value)) {
                     ctx.in_index("enum", i, |ctx| ctx.error("duplicate value"));
                 }
             }
@@ -505,29 +562,32 @@ impl ValidateWithContext for Schema {
             ctx.error_field("minimum", "must not be greater than `maximum`");
         }
 
-        // A `discriminator` names a property, which must be declared and
-        // required for the discriminator to be usable.
+        // "The property name used MUST be defined at this schema and it
+        // MUST be in the required property list." Composition keywords
+        // put those declarations in subschemas this validator does not
+        // resolve, so the check only runs when there are none.
         if let Some(discriminator) = &self.discriminator {
             if discriminator.is_empty() {
                 ctx.error_field("discriminator", "must not be empty");
-            } else if !self.properties.is_empty()
-                && !self.properties.contains_key(discriminator)
-                && self.one_of.is_none()
-                && self.any_of.is_none()
-                && self.all_of.is_none()
-            {
-                ctx.error_field(
-                    "discriminator",
-                    format!("property `{discriminator}` is not declared in `properties`"),
-                );
+            } else if self.one_of.is_none() && self.any_of.is_none() && self.all_of.is_none() {
+                if !self.properties.contains_key(discriminator) {
+                    ctx.error_field(
+                        "discriminator",
+                        format!("property `{discriminator}` is not declared in `properties`"),
+                    );
+                }
+                if !self.required.contains(discriminator) {
+                    ctx.error_field(
+                        "discriminator",
+                        format!("property `{discriminator}` must be listed in `required`"),
+                    );
+                }
             }
         }
 
-        for (i, name) in self.required.iter().enumerate() {
-            if name.is_empty() {
-                ctx.in_index("required", i, |ctx| ctx.error("must not be empty"));
-            }
-        }
+        // `required` is a `stringArray`: entries must be unique. An
+        // empty property name is legal — JSON objects may have one.
+        check_unique_strings(ctx, "required", &self.required);
 
         for (field, map) in [
             ("properties", &self.properties),
@@ -815,6 +875,134 @@ mod tests {
     }
 
     #[test]
+    fn enum_uniqueness_uses_json_instance_equality() {
+        // Draft-07 compares numbers by mathematical value, so `1` and
+        // `1.0` are the same instance even though `serde_json`'s
+        // `PartialEq` calls them different.
+        for values in [
+            json!([1, 1.0]),
+            json!([1.5, 1.50]),
+            json!([0, -0.0]),
+            json!([{ "a": 1 }, { "a": 1.0 }]),
+            json!([[1, 2], [1.0, 2.0]]),
+        ] {
+            let schema: Schema = serde_json::from_value(json!({ "enum": values })).unwrap();
+            let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+            schema.validate_with_context(&mut ctx);
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e == "#.payload.enum[1]: duplicate value"),
+                "{values} should be a duplicate, got: {:?}",
+                ctx.errors
+            );
+        }
+
+        // …and genuinely distinct values still pass.
+        for values in [
+            json!([1, 2]),
+            json!([1, "1"]),
+            json!([{ "a": 1 }, { "a": 2 }]),
+            json!([{ "a": 1 }, { "b": 1 }]),
+            json!([[1, 2], [2, 1]]),
+            json!([null, false]),
+        ] {
+            let schema: Schema = serde_json::from_value(json!({ "enum": values })).unwrap();
+            let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+            schema.validate_with_context(&mut ctx);
+            assert!(ctx.errors.is_empty(), "{values}: {:?}", ctx.errors);
+        }
+    }
+
+    #[test]
+    fn discriminator_must_be_declared_and_required() {
+        // Named but nothing declared at all.
+        let bare: Schema = serde_json::from_value(json!({ "discriminator": "kind" })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        bare.validate_with_context(&mut ctx);
+        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
+        assert!(
+            msgs.iter()
+                .any(|e| e.contains("is not declared in `properties`"))
+        );
+        assert!(
+            msgs.iter()
+                .any(|e| e.contains("must be listed in `required`"))
+        );
+
+        // Declared, but not required.
+        let optional: Schema = serde_json::from_value(json!({
+            "discriminator": "kind",
+            "properties": { "kind": { "type": "string" } }
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        optional.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e
+                    == "#.payload.discriminator: property `kind` must be listed in `required`"),
+            "got: {:?}",
+            ctx.errors
+        );
+
+        // Declared and required.
+        let ok: Schema = serde_json::from_value(json!({
+            "discriminator": "kind",
+            "required": ["kind"],
+            "properties": { "kind": { "type": "string" } }
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        ok.validate_with_context(&mut ctx);
+        assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn string_arrays_allow_empty_names_but_not_duplicates() {
+        // `stringArray` constrains uniqueness, not non-emptiness — an
+        // empty property name is a legal JSON object key.
+        let schema: Schema = serde_json::from_value(json!({ "required": ["", "a", "a"] })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        schema.validate_with_context(&mut ctx);
+        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(msgs, vec!["#.payload.required[2]: duplicate entry"]);
+
+        // The `dependencies` property-name form is a `stringArray` too.
+        let dependent: Schema =
+            serde_json::from_value(json!({ "dependencies": { "card": ["a", "a"] } })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        dependent.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e == "#.payload.dependencies.card: duplicate entry `a` at index 1"),
+            "got: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn an_empty_items_tuple_is_rejected() {
+        let schema: Schema = serde_json::from_value(json!({ "items": [] })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        schema.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e == "#.payload.items: must contain at least one subschema"),
+            "got: {:?}",
+            ctx.errors
+        );
+        // …and it round-trips rather than being dropped.
+        assert_eq!(
+            serde_json::to_value(&schema).unwrap(),
+            json!({ "items": [] })
+        );
+    }
+
+    #[test]
     fn positive_multiple_of_and_populated_compositions_pass() {
         let schema: Schema = serde_json::from_value(json!({
             "multipleOf": 2.5,
@@ -903,7 +1091,7 @@ mod tests {
             "oneOf": [ { "minimum": 5.0, "maximum": 1.0 } ],
             "not": { "discriminator": "" },
             "externalDocs": { "url": "" },
-            "required": [""]
+            "required": ["a", "a"]
         }))
         .unwrap();
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
@@ -931,7 +1119,7 @@ mod tests {
         );
         assert!(
             msgs.iter()
-                .any(|e| e == "#.payload.required[0]: must not be empty")
+                .any(|e| e == "#.payload.required[1]: duplicate entry")
         );
     }
 
