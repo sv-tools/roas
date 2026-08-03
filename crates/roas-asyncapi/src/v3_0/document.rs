@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 /// Root AsyncAPI v3.0 document.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Document {
-    /// **Required** `3.0.x` — the AsyncAPI specification version.
+    /// **Required** Exactly `3.0.0` — the AsyncAPI specification
+    /// version, which the schema pins with `const`.
     pub asyncapi: Version,
 
     /// A unique identifier of the application this document describes,

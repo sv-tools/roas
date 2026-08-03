@@ -20,11 +20,12 @@ all-features = true
 
 [features]
 default = ["v3_1"]
-# Support for AsyncAPI v3.0.x.
+# Support for AsyncAPI v3.0.0 — the schema pins `asyncapi` to that
+# exact string, so there is no patch range.
 v3_0 = []
-# Support for AsyncAPI v3.1.x (default). Independent of `v3_0`; enable
-# both to get the additional `From<v3_0::Document> for v3_1::Document`
-# upconversion impl.
+# Support for AsyncAPI v3.1.0 (default), likewise pinned. Independent
+# of `v3_0`; enable both to get the additional
+# `From<v3_0::Document> for v3_1::Document` upconversion impl.
 v3_1 = []
 
 # `clap::ValueEnum` impls for `validation::ValidationOptions`, for
