@@ -1,0 +1,13 @@
+{
+  "asyncapi": "3.1.0",
+  "info": { "title": "Broken parameters", "version": "1.0.0" },
+  "channels": {
+    "lightMeasured": {
+      "address": "streetlights/{streetlightId}/lighting/{metric}",
+      "parameters": {
+        "streetlightId": { "location": "not-a-runtime-expression" },
+        "unused": { "enum": ["a"], "default": "b" }
+      }
+    }
+  }
+}

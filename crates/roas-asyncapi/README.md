@@ -13,19 +13,21 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 
 | AsyncAPI version | Feature flag     | Status          | Notes                                                     |
 |------------------|------------------|-----------------|-----------------------------------------------------------|
-| 3.0              | `v3_0` (default) | ✅ implemented  | —                                                          |
-| 3.1              | —                | 🚧 planned      | A thin delta over 3.0: new `schemaFormat` values, `ros2` bindings |
+| 3.0              | `v3_0`           | ✅ implemented  | —                                                          |
+| 3.1              | `v3_1` (default) | ✅ implemented  | Adds its own `schemaFormat` values and the `ros2` bindings |
 | 2.6              | —                | 🚧 planned      | The pre-v3 model: channels keyed by path, `publish` / `subscribe` |
+
+`v3_0` and `v3_1` are independent — enable whichever you need. With both enabled, an `impl From<v3_0::Document> for v3_1::Document` upconverts a 3.0 document; since 3.1 left the object model untouched, nothing is dropped or approximated and only the `asyncapi` version string changes.
 
 ## Quick start
 
 ```rust
 use enumset::EnumSet;
-use roas_asyncapi::v3_0::Document;
+use roas_asyncapi::v3_1::Document;
 use roas_asyncapi::validation::Validate;
 
 let doc: Document = serde_json::from_str(r##"{
-    "asyncapi": "3.0.0",
+    "asyncapi": "3.1.0",
     "info": { "title": "Streetlights", "version": "1.0.0" },
     "servers": {
         "production": { "host": "broker.example.com:9092", "protocol": "kafka" }

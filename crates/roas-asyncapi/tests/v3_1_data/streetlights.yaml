@@ -1,0 +1,159 @@
+# A request/reply-shaped AsyncAPI 3.0 document exercising servers with
+# variables, channel parameters, component messages and traits, security
+# schemes, and protocol bindings.
+asyncapi: 3.1.0
+id: urn:example:streetlights
+info:
+  title: Streetlights Kafka API
+  version: 1.0.0
+  description: Smart lighting telemetry and control.
+  contact:
+    name: Lighting Ops
+    email: ops@example.com
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  tags:
+    - name: telemetry
+  externalDocs:
+    url: https://example.com/docs
+defaultContentType: application/json
+
+servers:
+  production:
+    host: '{stage}.broker.example.com:9092'
+    protocol: kafka-secure
+    protocolVersion: '3.5'
+    pathname: /events
+    title: Production broker
+    variables:
+      stage:
+        enum: ['prod', 'staging']
+        default: prod
+    security:
+      - $ref: '#/components/securitySchemes/saslScram'
+    tags:
+      - name: prod
+    bindings:
+      kafka:
+        schemaRegistryUrl: https://registry.example.com
+        bindingVersion: 0.5.0
+
+channels:
+  lightMeasured:
+    address: smartylighting/streetlights/{streetlightId}/lighting/measured
+    title: Light measured
+    servers:
+      - $ref: '#/servers/production'
+    parameters:
+      streetlightId:
+        description: The streetlight id
+        location: $message.payload#/streetlightId
+    messages:
+      lightMeasured:
+        $ref: '#/components/messages/lightMeasured'
+    bindings:
+      kafka:
+        topic: light-measured
+        bindingVersion: 0.5.0
+
+  turnOnOff:
+    address: null
+    summary: Dynamic command channel, addressed at runtime.
+    messages:
+      turnOn:
+        name: TurnOn
+        payload:
+          type: object
+          properties:
+            command:
+              type: string
+              enum: ['on', 'off']
+
+  commandReplies:
+    address: smartylighting/streetlights/replies
+    messages:
+      ack:
+        name: Ack
+        payload:
+          type: object
+
+operations:
+  receiveLightMeasurement:
+    action: receive
+    channel:
+      $ref: '#/channels/lightMeasured'
+    summary: Consume telemetry from streetlights.
+    messages:
+      - $ref: '#/channels/lightMeasured/messages/lightMeasured'
+    traits:
+      - $ref: '#/components/operationTraits/kafka'
+    bindings:
+      kafka:
+        groupId:
+          type: string
+        bindingVersion: 0.5.0
+
+  sendTurnOn:
+    action: send
+    channel:
+      $ref: '#/channels/turnOnOff'
+    reply:
+      channel:
+        $ref: '#/channels/commandReplies'
+      address:
+        location: $message.header#/replyTo
+      messages:
+        - $ref: '#/channels/commandReplies/messages/ack'
+
+components:
+  messages:
+    lightMeasured:
+      name: LightMeasured
+      title: Light measured
+      contentType: application/json
+      correlationId:
+        location: $message.header#/correlationId
+      headers:
+        type: object
+        properties:
+          correlationId:
+            type: string
+      payload:
+        type: object
+        required: [lumens]
+        properties:
+          streetlightId:
+            type: string
+          lumens:
+            type: integer
+            minimum: 0
+      traits:
+        - $ref: '#/components/messageTraits/commonHeaders'
+      examples:
+        - name: simple
+          payload:
+            streetlightId: '1'
+            lumens: 100
+
+  messageTraits:
+    commonHeaders:
+      headers:
+        type: object
+        properties:
+          sentAt:
+            type: string
+            format: date-time
+
+  operationTraits:
+    kafka:
+      bindings:
+        kafka:
+          clientId:
+            type: string
+          bindingVersion: 0.5.0
+
+  securitySchemes:
+    saslScram:
+      type: scramSha512
+      description: SASL/SCRAM authentication.

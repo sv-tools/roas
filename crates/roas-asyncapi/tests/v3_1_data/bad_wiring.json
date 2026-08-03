@@ -1,0 +1,29 @@
+{
+  "asyncapi": "3.1.0",
+  "info": { "title": "Broken wiring", "version": "1.0.0" },
+  "servers": {
+    "production": { "host": "broker.example.com:9092", "protocol": "kafka" }
+  },
+  "channels": {
+    "userSignedUp": {
+      "address": "user/signedup",
+      "servers": [{ "$ref": "#/servers/staging" }],
+      "messages": { "signup": { "name": "UserSignedUp" } }
+    },
+    "other": {
+      "address": "other",
+      "messages": { "ping": { "name": "Ping" } }
+    }
+  },
+  "operations": {
+    "receiveSignups": {
+      "action": "receive",
+      "channel": { "$ref": "#/channels/userSignedUp" },
+      "messages": [{ "$ref": "#/channels/other/messages/ping" }]
+    },
+    "sendToNowhere": {
+      "action": "send",
+      "channel": { "$ref": "#/channels/missing" }
+    }
+  }
+}

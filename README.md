@@ -48,9 +48,10 @@ subcommand reference, piping examples, and the live-reload preview server.
   (v1.0 / v1.1) via [`roas-arazzo`](crates/roas-arazzo), including v1.0 → v1.1
   upconversion.
 - **AsyncAPI** — parse and validate
-  [AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.0.0)
-  documents (v3.0) via [`roas-asyncapi`](crates/roas-asyncapi), the
-  event-driven counterpart to an OpenAPI description.
+  [AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.1.0)
+  documents (v3.0 / v3.1) via [`roas-asyncapi`](crates/roas-asyncapi), the
+  event-driven counterpart to an OpenAPI description, including
+  v3.0 → v3.1 upconversion.
 - **Pluggable loader** — `ResourceFetcher` / `AsyncResourceFetcher` traits
   for resolving external `$ref`s, with first-party fetcher crates for
   [filesystem](crates/roas-file-fetcher) and [HTTP](crates/roas-http-fetcher)
@@ -81,8 +82,8 @@ The OpenAPI [Overlay](https://spec.openapis.org/overlay/v1.0.0.html) (v1.0 /
 v1.1) and [Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) (v1.0 / v1.1)
 specifications are supported too — see [`roas-overlay`](crates/roas-overlay)
 and [`roas-arazzo`](crates/roas-arazzo) — as is
-[AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.0.0) (v3.0)
-via [`roas-asyncapi`](crates/roas-asyncapi).
+[AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.1.0)
+(v3.0 / v3.1) via [`roas-asyncapi`](crates/roas-asyncapi).
 
 See each crate's `README.md` for usage examples, and `AGENTS.md` at the
 repository root for contributor guidelines.

@@ -1,0 +1,471 @@
+{
+  "asyncapi": "3.0.0",
+  "id": "urn:example:app",
+  "info": {
+    "title": "T",
+    "version": "1.0.0",
+    "description": "d",
+    "termsOfService": "https://e/tos",
+    "contact": {
+      "name": "n",
+      "url": "https://e",
+      "email": "a@e.com"
+    },
+    "license": {
+      "name": "MIT",
+      "url": "https://e/l"
+    },
+    "tags": [
+      {
+        "name": "t",
+        "externalDocs": {
+          "url": "https://e/d"
+        }
+      }
+    ],
+    "externalDocs": {
+      "url": "https://e/docs"
+    },
+    "x-info": 1
+  },
+  "defaultContentType": "application/json",
+  "servers": {
+    "prod": {
+      "host": "broker:9092",
+      "protocol": "kafka",
+      "pathname": "/events",
+      "protocolVersion": "3.5",
+      "title": "P",
+      "summary": "s",
+      "description": "d",
+      "variables": {
+        "v": {
+          "enum": [
+            "a"
+          ],
+          "default": "a",
+          "examples": [
+            "a"
+          ]
+        }
+      },
+      "security": [
+        {
+          "type": "scramSha512"
+        }
+      ],
+      "tags": [
+        {
+          "name": "prod"
+        }
+      ],
+      "externalDocs": {
+        "url": "https://e"
+      },
+      "bindings": {
+        "kafka": {
+          "bindingVersion": "0.5.0"
+        }
+      }
+    }
+  },
+  "channels": {
+    "user": {
+      "address": "user/{id}",
+      "title": "C",
+      "summary": "s",
+      "description": "d",
+      "servers": [
+        {
+          "$ref": "#/servers/prod"
+        }
+      ],
+      "parameters": {
+        "id": {
+          "enum": [
+            "1"
+          ],
+          "default": "1",
+          "location": "$message.payload#/id"
+        }
+      },
+      "messages": {
+        "signup": {
+          "$ref": "#/components/messages/signup"
+        }
+      },
+      "tags": [
+        {
+          "name": "c"
+        }
+      ],
+      "externalDocs": {
+        "url": "https://e"
+      },
+      "bindings": {
+        "kafka": {
+          "topic": "t"
+        }
+      }
+    },
+    "dynamic": {
+      "address": null
+    },
+    "replies": {
+      "address": "replies",
+      "messages": {
+        "ack": {
+          "name": "Ack"
+        }
+      }
+    }
+  },
+  "operations": {
+    "receive": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/user"
+      },
+      "messages": [
+        {
+          "$ref": "#/components/messages/signup"
+        }
+      ],
+      "traits": [
+        {
+          "$ref": "#/components/operationTraits/common"
+        }
+      ],
+      "title": "O",
+      "summary": "s",
+      "description": "d",
+      "security": [
+        {
+          "type": "userPassword"
+        }
+      ],
+      "tags": [
+        {
+          "name": "o"
+        }
+      ],
+      "externalDocs": {
+        "url": "https://e"
+      },
+      "bindings": {
+        "kafka": {}
+      },
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        },
+        "address": {
+          "location": "$message.header#/replyTo",
+          "description": "d"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/replies/messages/ack"
+          }
+        ]
+      }
+    },
+    "send": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/dynamic"
+      }
+    }
+  },
+  "components": {
+    "messages": {
+      "signup": {
+        "name": "Signup",
+        "title": "S",
+        "summary": "s",
+        "description": "d",
+        "contentType": "application/json",
+        "deprecated": false,
+        "correlationId": {
+          "location": "$message.header#/id"
+        },
+        "headers": {
+          "type": "object"
+        },
+        "payload": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "id"
+          ],
+          "$id": "https://e/s.json",
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "$comment": "c",
+          "definitions": {
+            "d": true
+          },
+          "dependencies": {
+            "a": [
+              "b"
+            ],
+            "c": {
+              "type": "string"
+            }
+          },
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "patternProperties": {
+            "^x-": true
+          },
+          "propertyNames": {
+            "pattern": "^[a-z]+$"
+          },
+          "additionalProperties": false,
+          "items": [
+            {
+              "type": "string"
+            }
+          ],
+          "additionalItems": true,
+          "contains": {
+            "type": "string"
+          },
+          "enum": [
+            {
+              "id": "1"
+            }
+          ],
+          "const": null,
+          "default": null,
+          "examples": [
+            {
+              "id": "1"
+            }
+          ],
+          "allOf": [
+            true
+          ],
+          "anyOf": [
+            true
+          ],
+          "oneOf": [
+            true
+          ],
+          "not": false,
+          "if": true,
+          "then": true,
+          "else": true,
+          "minProperties": 1,
+          "maxProperties": 2,
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "minLength": 1,
+          "maxLength": 2,
+          "pattern": "^a$",
+          "contentMediaType": "text/plain",
+          "contentEncoding": "base64",
+          "minimum": 1.0,
+          "maximum": 2.0,
+          "exclusiveMinimum": 0.0,
+          "exclusiveMaximum": 3.0,
+          "multipleOf": 1.0,
+          "format": "uuid",
+          "title": "P",
+          "description": "d",
+          "readOnly": true,
+          "writeOnly": false,
+          "deprecated": false,
+          "externalDocs": {
+            "url": "https://e"
+          },
+          "x-schema": 1
+        },
+        "examples": [
+          {
+            "name": "e",
+            "payload": null
+          }
+        ],
+        "traits": [
+          {
+            "$ref": "#/components/messageTraits/common"
+          }
+        ],
+        "tags": [
+          {
+            "name": "m"
+          }
+        ],
+        "externalDocs": {
+          "url": "https://e"
+        },
+        "bindings": {
+          "kafka": {}
+        }
+      }
+    },
+    "messageTraits": {
+      "common": {
+        "contentType": "application/json",
+        "examples": [
+          {
+            "headers": {
+              "a": 1
+            }
+          }
+        ]
+      }
+    },
+    "operationTraits": {
+      "common": {
+        "title": "t",
+        "bindings": {
+          "kafka": {}
+        }
+      }
+    },
+    "schemas": {
+      "avro": {
+        "schemaFormat": "application/vnd.apache.avro;version=1.9.0",
+        "schema": {
+          "type": "record"
+        }
+      }
+    },
+    "securitySchemes": {
+      "oauth": {
+        "type": "oauth2",
+        "scopes": [
+          "read"
+        ],
+        "flows": {
+          "implicit": {
+            "authorizationUrl": "https://e/a",
+            "availableScopes": {
+              "read": "r"
+            }
+          },
+          "password": {
+            "tokenUrl": "https://e/t",
+            "availableScopes": {}
+          },
+          "clientCredentials": {
+            "tokenUrl": "https://e/t",
+            "refreshUrl": "https://e/r",
+            "availableScopes": {}
+          },
+          "authorizationCode": {
+            "authorizationUrl": "https://e/a",
+            "tokenUrl": "https://e/t",
+            "availableScopes": {}
+          }
+        }
+      },
+      "apiKey": {
+        "type": "apiKey",
+        "in": "user"
+      },
+      "httpApiKey": {
+        "type": "httpApiKey",
+        "in": "header",
+        "name": "X-Key"
+      },
+      "http": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      },
+      "oidc": {
+        "type": "openIdConnect",
+        "openIdConnectUrl": "https://e/o",
+        "scopes": [
+          "read"
+        ]
+      }
+    },
+    "servers": {
+      "s": {
+        "host": "h",
+        "protocol": "p"
+      }
+    },
+    "channels": {
+      "c": {
+        "address": "c"
+      }
+    },
+    "operations": {
+      "o": {
+        "action": "send",
+        "channel": {
+          "$ref": "#/channels/c"
+        }
+      }
+    },
+    "serverVariables": {
+      "sv": {
+        "default": "a"
+      }
+    },
+    "parameters": {
+      "p": {
+        "description": "d"
+      }
+    },
+    "correlationIds": {
+      "cid": {
+        "location": "$message.header#/id"
+      }
+    },
+    "replies": {
+      "r": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        }
+      }
+    },
+    "replyAddresses": {
+      "ra": {
+        "location": "$message.header#/replyTo"
+      }
+    },
+    "externalDocs": {
+      "ed": {
+        "url": "https://e"
+      }
+    },
+    "tags": {
+      "tg": {
+        "name": "t"
+      }
+    },
+    "serverBindings": {
+      "sb": {
+        "kafka": {}
+      }
+    },
+    "channelBindings": {
+      "cb": {
+        "kafka": {}
+      }
+    },
+    "operationBindings": {
+      "ob": {
+        "kafka": {}
+      }
+    },
+    "messageBindings": {
+      "mb": {
+        "kafka": {}
+      }
+    },
+    "x-components": 1
+  },
+  "x-root": 1
+}

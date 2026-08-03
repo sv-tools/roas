@@ -1,0 +1,16 @@
+# Every reference points outside this document, so the cross-reference
+# checks have nothing local to resolve.
+asyncapi: 3.1.0
+info:
+  title: Split across files
+  version: 1.0.0
+channels:
+  user:
+    $ref: './channels.yaml#/user'
+operations:
+  sendSignup:
+    action: send
+    channel:
+      $ref: './channels.yaml#/user'
+    messages:
+      - $ref: './messages.yaml#/signup'
