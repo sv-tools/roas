@@ -47,6 +47,10 @@ subcommand reference, piping examples, and the live-reload preview server.
   [Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) workflow descriptions
   (v1.0 / v1.1) via [`roas-arazzo`](crates/roas-arazzo), including v1.0 → v1.1
   upconversion.
+- **AsyncAPI** — parse and validate
+  [AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.0.0)
+  documents (v3.0) via [`roas-asyncapi`](crates/roas-asyncapi), the
+  event-driven counterpart to an OpenAPI description.
 - **Pluggable loader** — `ResourceFetcher` / `AsyncResourceFetcher` traits
   for resolving external `$ref`s, with first-party fetcher crates for
   [filesystem](crates/roas-file-fetcher) and [HTTP](crates/roas-http-fetcher)
@@ -59,6 +63,7 @@ subcommand reference, piping examples, and the live-reload preview server.
 | [`roas`](crates/roas)                           | [![docs.rs](https://docs.rs/roas/badge.svg)](https://docs.rs/roas)                           | [![crates.io](https://img.shields.io/crates/v/roas.svg)](https://crates.io/crates/roas)                           |
 | [`roas-overlay`](crates/roas-overlay)           | [![docs.rs](https://docs.rs/roas-overlay/badge.svg)](https://docs.rs/roas-overlay)           | [![crates.io](https://img.shields.io/crates/v/roas-overlay.svg)](https://crates.io/crates/roas-overlay)           |
 | [`roas-arazzo`](crates/roas-arazzo)             | [![docs.rs](https://docs.rs/roas-arazzo/badge.svg)](https://docs.rs/roas-arazzo)             | [![crates.io](https://img.shields.io/crates/v/roas-arazzo.svg)](https://crates.io/crates/roas-arazzo)             |
+| [`roas-asyncapi`](crates/roas-asyncapi)         | [![docs.rs](https://docs.rs/roas-asyncapi/badge.svg)](https://docs.rs/roas-asyncapi)         | [![crates.io](https://img.shields.io/crates/v/roas-asyncapi.svg)](https://crates.io/crates/roas-asyncapi)         |
 | [`roas-file-fetcher`](crates/roas-file-fetcher) | [![docs.rs](https://docs.rs/roas-file-fetcher/badge.svg)](https://docs.rs/roas-file-fetcher) | [![crates.io](https://img.shields.io/crates/v/roas-file-fetcher.svg)](https://crates.io/crates/roas-file-fetcher) |
 | [`roas-http-fetcher`](crates/roas-http-fetcher) | [![docs.rs](https://docs.rs/roas-http-fetcher/badge.svg)](https://docs.rs/roas-http-fetcher) | [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher) |
 | [`roas-cli`](crates/roas-cli)                   | —                                                                                            | [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)                   |
@@ -75,7 +80,9 @@ subcommand reference, piping examples, and the live-reload preview server.
 The OpenAPI [Overlay](https://spec.openapis.org/overlay/v1.0.0.html) (v1.0 /
 v1.1) and [Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) (v1.0 / v1.1)
 specifications are supported too — see [`roas-overlay`](crates/roas-overlay)
-and [`roas-arazzo`](crates/roas-arazzo).
+and [`roas-arazzo`](crates/roas-arazzo) — as is
+[AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.0.0) (v3.0)
+via [`roas-asyncapi`](crates/roas-asyncapi).
 
 See each crate's `README.md` for usage examples, and `AGENTS.md` at the
 repository root for contributor guidelines.
