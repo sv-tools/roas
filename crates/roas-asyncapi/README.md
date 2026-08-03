@@ -64,6 +64,8 @@ YAML documents work the same way — parse with `serde_yaml_ng` (or any other YA
 - **Schema keyword constraints** — from the draft-07 meta-schema: `type` names a real JSON Schema type and its array form is non-empty and duplicate-free, `enum` is non-empty and duplicate-free under draft-07 instance equality (so `1` and `1.0` collide), `allOf` / `anyOf` / `oneOf` are non-empty, `multipleOf` is positive, tuple-form `items` is non-empty, `required` entries are unique, a `discriminator` names a property that this schema itself declares and requires (a composition keyword does not delegate that to its subschemas), and bounds are not inverted.
 - **Other coherence** — a `default` is one of the `enum` values, and a message example defines `headers` and/or `payload`.
 
+One limit is worth stating: `enum` uniqueness compares numbers after the parser has rounded non-integer literals to `f64`, so two decimals differing only past `f64`'s precision (17+ significant digits) are treated as one. Preserving the exact text would need `serde_json`'s `arbitrary_precision`, which changes how every `serde_json::Value` serializes through other serializers — YAML output becomes `$serde_json::private::Number` maps — and Cargo feature unification would impose that on the sibling crates as well.
+
 `ValidationOptions` (EnumSet): `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion`, `IgnoreUnusedChannelParameter`, and `ErrorOnExternalReference`. Behind the `clap` feature, the enum implements `clap::ValueEnum` so downstream CLIs can surface it directly.
 
 ## Scope

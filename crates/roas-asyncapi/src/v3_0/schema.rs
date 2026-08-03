@@ -484,6 +484,24 @@ fn json_instance_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 /// distinct values above 2^53 collide, e.g. `9007199254740993` and
 /// `9007199254740992.0`. A mixed integer / float pair is equal only when
 /// the float is integral and converts back to exactly that integer.
+///
+/// ## Limits of the comparison
+///
+/// Non-integer literals are rounded to `f64` by the parser, before this
+/// function ever sees them, so two decimals that differ only past
+/// `f64`'s precision are indistinguishable here: `0.1` and
+/// `0.10000000000000001` both arrive as `0.1` and are reported as
+/// duplicates, and `9223372036854775807.0` arrives as
+/// `9223372036854775808.0` so it does not match the integer
+/// `9223372036854775807`.
+///
+/// Fixing that needs the original text, which means `serde_json`'s
+/// `arbitrary_precision`. That feature changes how *every*
+/// `serde_json::Value` serializes through other serializers — a YAML
+/// dump becomes `$serde_json::private::Number` marker maps — and Cargo
+/// feature unification would impose it on the sibling crates too. Both
+/// costs are worse than the edge case, which needs 17+ significant
+/// digits to trigger.
 fn numbers_eq(a: &serde_json::Number, b: &serde_json::Number) -> bool {
     /// `None` when the number is not an exact integer.
     fn as_integer(n: &serde_json::Number) -> Option<i128> {
@@ -974,6 +992,40 @@ mod tests {
             schema.validate_with_context(&mut ctx);
             assert!(ctx.errors.is_empty(), "{values}: {:?}", ctx.errors);
         }
+    }
+
+    /// Pins the documented limit of `enum` uniqueness: the parser
+    /// rounds non-integer literals to `f64` before the comparison runs,
+    /// so decimals that differ only past `f64`'s precision cannot be
+    /// told apart. See `numbers_eq` for why preserving the exact text
+    /// costs more than it is worth here. If this test ever starts
+    /// failing, the underlying representation changed and the note on
+    /// `numbers_eq` needs revisiting.
+    #[test]
+    fn f64_rounding_bounds_what_enum_uniqueness_can_see() {
+        // Distinct decimals, but the same `f64` — reported as a
+        // duplicate even though draft-07 calls them different. Parsed
+        // from text, since a Rust literal would round identically (and
+        // clippy would flag it as excessive precision).
+        let rounded: Schema =
+            serde_json::from_str(r#"{"enum": [0.1, 0.10000000000000001]}"#).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        rounded.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e == "#.payload.enum[1]: duplicate value")
+        );
+
+        // The mirror image: `9223372036854775807.0` is parsed as
+        // 2^63, so it no longer matches the integer 2^63 - 1.
+        let widened: Schema = serde_json::from_value(json!({
+            "enum": [9223372036854775807i64, 9223372036854775807.0]
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        widened.validate_with_context(&mut ctx);
+        assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
     }
 
     #[test]
