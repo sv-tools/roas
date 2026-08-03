@@ -3,10 +3,12 @@
 //! Per [Security Scheme Object](https://www.asyncapi.com/docs/reference/specification/v3.0.0#securitySchemeObject).
 //!
 //! The schema spells this as a `oneOf` over nine shapes that share a
-//! `type` discriminator. It is modeled here as one struct with a typed
-//! `type` plus the union of the optional fields; the validator enforces
-//! which of them each `type` requires, so a wrong combination is a
-//! diagnostic rather than an opaque "matched no variant" parse error.
+//! `type` discriminator, each with `additionalProperties: false`. It is
+//! modeled here as one struct with a typed `type` plus the union of the
+//! optional fields; the validator enforces both directions of each
+//! variant's contract — the fields the `type` requires, and the fields
+//! it forbids — so a wrong combination is a precise diagnostic rather
+//! than an opaque "matched no variant" parse error.
 
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
@@ -104,8 +106,81 @@ pub struct SecurityScheme {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+impl SecurityScheme {
+    /// The fields this scheme's `type` may carry, beyond `type`,
+    /// `description`, and `x-` extensions.
+    fn allowed_fields(&self) -> &'static [&'static str] {
+        match self.scheme_type {
+            SecuritySchemeType::ApiKey => &["in"],
+            SecuritySchemeType::HttpApiKey => &["in", "name"],
+            SecuritySchemeType::Http => &["scheme", "bearerFormat"],
+            SecuritySchemeType::OAuth2 => &["flows", "scopes"],
+            SecuritySchemeType::OpenIdConnect => &["openIdConnectUrl", "scopes"],
+            _ => &[],
+        }
+    }
+
+    /// Report any field that belongs to a different variant. Each
+    /// variant is `additionalProperties: false` in the schema, so
+    /// carrying a foreign field breaks the `oneOf`.
+    fn check_forbidden_fields(&self, ctx: &mut Context) {
+        let allowed = self.allowed_fields();
+        let present: [(&str, bool); 6] = [
+            ("in", self.in_.is_some()),
+            ("name", self.name.is_some()),
+            ("scheme", self.scheme.is_some()),
+            ("bearerFormat", self.bearer_format.is_some()),
+            ("flows", self.flows.is_some()),
+            ("openIdConnectUrl", self.open_id_connect_url.is_some()),
+        ];
+        for (field, is_present) in present {
+            if is_present && !allowed.contains(&field) {
+                ctx.error_field(
+                    field,
+                    format!(
+                        "is not allowed on a `{}` security scheme",
+                        self.scheme_type.as_str()
+                    ),
+                );
+            }
+        }
+        if !self.scopes.is_empty() && !allowed.contains(&"scopes") {
+            ctx.error_field(
+                "scopes",
+                format!(
+                    "is not allowed on a `{}` security scheme",
+                    self.scheme_type.as_str()
+                ),
+            );
+        }
+    }
+}
+
+impl SecuritySchemeType {
+    /// The `type` value as it appears in a document.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserPassword => "userPassword",
+            Self::ApiKey => "apiKey",
+            Self::X509 => "X509",
+            Self::SymmetricEncryption => "symmetricEncryption",
+            Self::AsymmetricEncryption => "asymmetricEncryption",
+            Self::HttpApiKey => "httpApiKey",
+            Self::Http => "http",
+            Self::OAuth2 => "oauth2",
+            Self::OpenIdConnect => "openIdConnect",
+            Self::Plain => "plain",
+            Self::ScramSha256 => "scramSha256",
+            Self::ScramSha512 => "scramSha512",
+            Self::Gssapi => "gssapi",
+        }
+    }
+}
+
 impl ValidateWithContext for SecurityScheme {
     fn validate_with_context(&self, ctx: &mut Context) {
+        self.check_forbidden_fields(ctx);
         match self.scheme_type {
             SecuritySchemeType::ApiKey => match self.in_ {
                 None => ctx.error_field("in", "is required for the `apiKey` type"),
@@ -391,6 +466,83 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("authorizationCode.tokenUrl"))
         );
+    }
+
+    #[test]
+    fn fields_belonging_to_another_variant_are_rejected() {
+        // Each `oneOf` branch is `additionalProperties: false`, so a
+        // `userPassword` scheme carrying `flows` breaks the contract.
+        let errors = validate(json!({ "type": "userPassword", "flows": {} }));
+        assert!(
+            errors.iter().any(|e| e
+                == "#.securitySchemes.s.flows: is not allowed on a `userPassword` security scheme"),
+            "got: {errors:?}"
+        );
+
+        let errors = validate(json!({
+            "type": "http",
+            "scheme": "bearer",
+            "in": "header",
+            "name": "X-Key",
+            "openIdConnectUrl": "https://e/x",
+            "scopes": ["read"]
+        }));
+        for field in ["in", "name", "openIdConnectUrl", "scopes"] {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains(&format!(".{field}: is not allowed"))),
+                "expected {field} to be rejected, got: {errors:?}"
+            );
+        }
+        // `bearerFormat` belongs to `http`, so it is not reported.
+        assert!(!errors.iter().any(|e| e.contains("bearerFormat")));
+    }
+
+    #[test]
+    fn each_variant_keeps_its_own_fields() {
+        for value in [
+            json!({ "type": "apiKey", "in": "user" }),
+            json!({ "type": "httpApiKey", "in": "header", "name": "X-Key" }),
+            json!({ "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }),
+            json!({
+                "type": "oauth2",
+                "scopes": ["read"],
+                "flows": { "clientCredentials": { "tokenUrl": "https://e/t", "availableScopes": {} } }
+            }),
+            json!({ "type": "openIdConnect", "openIdConnectUrl": "https://e/x", "scopes": ["read"] }),
+        ] {
+            let errors = validate(value.clone());
+            assert!(errors.is_empty(), "{value}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn type_renders_as_its_document_spelling() {
+        for (scheme_type, text) in [
+            (SecuritySchemeType::UserPassword, "userPassword"),
+            (SecuritySchemeType::ApiKey, "apiKey"),
+            (SecuritySchemeType::X509, "X509"),
+            (
+                SecuritySchemeType::SymmetricEncryption,
+                "symmetricEncryption",
+            ),
+            (
+                SecuritySchemeType::AsymmetricEncryption,
+                "asymmetricEncryption",
+            ),
+            (SecuritySchemeType::HttpApiKey, "httpApiKey"),
+            (SecuritySchemeType::Http, "http"),
+            (SecuritySchemeType::OAuth2, "oauth2"),
+            (SecuritySchemeType::OpenIdConnect, "openIdConnect"),
+            (SecuritySchemeType::Plain, "plain"),
+            (SecuritySchemeType::ScramSha256, "scramSha256"),
+            (SecuritySchemeType::ScramSha512, "scramSha512"),
+            (SecuritySchemeType::Gssapi, "gssapi"),
+        ] {
+            assert_eq!(scheme_type.as_str(), text);
+            assert_eq!(serde_json::to_value(scheme_type).unwrap(), json!(text));
+        }
     }
 
     #[test]

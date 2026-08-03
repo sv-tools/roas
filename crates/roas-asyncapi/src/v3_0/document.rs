@@ -280,24 +280,44 @@ impl Document {
                 continue;
             }
 
-            // A component message counts when the channel lists that
-            // very reference among its own messages.
-            if message.component_key("messages").is_some()
-                && let Some(channel) = resolved.channel
-                && !channel.messages.values().any(|candidate| {
-                    candidate
-                        .reference()
-                        .is_some_and(|r| r.reference == message.reference)
-                })
-            {
-                report(
-                    ctx,
-                    format!(
-                        "message `{}` is not one of the channel's `messages`",
-                        message.reference
-                    ),
-                );
+            // A component message must exist, and count as one of the
+            // channel's own messages.
+            if let Some(component_key) = message.component_key("messages") {
+                let declared = self
+                    .components
+                    .as_ref()
+                    .is_some_and(|c| c.messages.contains_key(&component_key));
+                if !declared {
+                    report(
+                        ctx,
+                        format!("message `{}` is not declared", message.reference),
+                    );
+                } else if let Some(channel) = resolved.channel
+                    && !channel.messages.values().any(|candidate| {
+                        candidate
+                            .reference()
+                            .is_some_and(|r| r.reference == message.reference)
+                    })
+                {
+                    report(
+                        ctx,
+                        format!(
+                            "message `{}` is not one of the channel's `messages`",
+                            message.reference
+                        ),
+                    );
+                }
+                continue;
             }
+
+            // Any other document-local pointer cannot be a message.
+            report(
+                ctx,
+                format!(
+                    "`{}` must point at a message (`#/channels/…/messages/…` or `#/components/messages/…`)",
+                    message.reference
+                ),
+            );
         }
     }
 
@@ -520,18 +540,44 @@ mod tests {
     }
 
     #[test]
-    fn message_refs_that_cannot_be_resolved_locally_are_skipped() {
-        // External and empty message refs are left alone; an unknown
-        // local shape is not second-guessed either.
+    fn only_unresolvable_message_refs_are_skipped() {
+        // External and empty refs cannot be checked here…
         let mut value = wired();
-        value["operations"]["receiveSignups"]["messages"] = json!([
-            { "$ref": "./messages.yaml#/signup" },
-            { "$ref": "" },
-            { "$ref": "#/components/schemas/notAMessage" }
-        ]);
+        value["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "./messages.yaml#/signup" }, { "$ref": "" } ]);
         let errors = errors_for(value);
         assert!(
-            !errors.iter().any(|e| e.contains("channel's `messages`")),
+            !errors.iter().any(|e| e.contains("must point at a message")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn local_message_refs_of_the_wrong_kind_are_reported() {
+        // …but a local pointer that names something other than a
+        // message is resolvable, and wrong.
+        let mut value = wired();
+        value["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "#/components/schemas/notAMessage" } ]);
+        let errors = errors_for(value);
+        assert!(
+            errors.iter().any(|e| e.contains("must point at a message")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn component_message_refs_must_be_declared() {
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"] =
+            json!({ "signup": { "$ref": "#/components/messages/ghost" } });
+        value["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "#/components/messages/ghost" } ]);
+        let errors = errors_for(value);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("message `#/components/messages/ghost` is not declared")),
             "got: {errors:?}"
         );
     }

@@ -6,8 +6,13 @@
 //! [`Schema`] models the default dialect — JSON Schema draft-07 plus
 //! AsyncAPI's `discriminator` / `externalDocs` / `deprecated` additions.
 //! A payload in another dialect (Avro, OpenAPI, RAML) is carried by
-//! [`MultiFormatSchema`], whose `schema` stays raw JSON because its shape
-//! is defined by whatever `schemaFormat` names.
+//! [`MultiFormatSchema`], whose `schema` stays raw JSON because its
+//! shape is defined by whatever `schemaFormat` names.
+//!
+//! The two are told apart exactly as the specification's `anySchema`
+//! does — by the presence of a `schema` property, *not* by
+//! `schemaFormat`, which is optional and defaults to this document's
+//! own dialect.
 
 use crate::common::reference::RefOr;
 use crate::v3_0::external_documentation::ExternalDocumentation;
@@ -15,10 +20,14 @@ use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
-/// Every `schemaFormat` value AsyncAPI 3.0 accepts.
+/// The `schemaFormat` values AsyncAPI 3.0 documents as "formats tooling
+/// MUST support".
 ///
-/// The list is closed in the specification's JSON Schema; 3.1 adds its
-/// own `version=3.1.0` entries on top of these.
+/// This is advisory, not a closed set: the schema types `schemaFormat`
+/// as `anyOf: [string, <this enum>]`, so a custom dialect is legal and
+/// its `schema` simply stays raw JSON. Use
+/// [`is_supported_schema_format`] to ask whether a format is one this
+/// list names.
 pub const SUPPORTED_SCHEMA_FORMATS: &[&str] = &[
     "application/vnd.aai.asyncapi;version=2.0.0",
     "application/vnd.aai.asyncapi;version=2.1.0",
@@ -55,18 +64,32 @@ pub const SUPPORTED_SCHEMA_FORMATS: &[&str] = &[
     "application/schema+yaml;version=draft-07",
 ];
 
-/// Whether `format` is a `schemaFormat` AsyncAPI 3.0 accepts.
+/// Whether `format` is one of the [`SUPPORTED_SCHEMA_FORMATS`].
+///
+/// A `false` answer does not make a document invalid — see that
+/// constant.
 #[must_use]
 pub fn is_supported_schema_format(format: &str) -> bool {
     SUPPORTED_SCHEMA_FORMATS.contains(&format)
+}
+
+/// Keep an explicit `null` distinct from an absent property. Plain
+/// `Option<Value>` collapses both to `None`, which would drop a valid
+/// `"default": null` or `"const": null`.
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// A schema in a named format, for payloads that are not plain AsyncAPI
 /// Schema Objects.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct MultiFormatSchema {
-    /// The format of the `schema` value, as a media type. Defaults to
-    /// the AsyncAPI Schema Object dialect of this document's version.
+    /// The format of the `schema` value, as a media type. When absent
+    /// it defaults to this document's own AsyncAPI Schema dialect,
+    /// which makes the object equivalent to a Schema Object.
     #[serde(rename = "schemaFormat", skip_serializing_if = "Option::is_none")]
     pub schema_format: Option<String>,
 
@@ -83,34 +106,29 @@ pub struct MultiFormatSchema {
 
 impl ValidateWithContext for MultiFormatSchema {
     fn validate_with_context(&self, ctx: &mut Context) {
+        // `schemaFormat` accepts any media type, so only an empty one
+        // is a mistake — an unrecognized dialect is legal and simply
+        // leaves `schema` unparsed.
         if let Some(format) = &self.schema_format {
-            if format.is_empty() {
-                ctx.error_field("schemaFormat", "must not be empty");
-            } else if !is_supported_schema_format(format) {
-                ctx.error_field(
-                    "schemaFormat",
-                    format!("`{format}` is not a schema format supported by AsyncAPI 3.0"),
-                );
-            }
-        }
-        if self.schema.is_null() {
-            ctx.error_field("schema", "must not be null");
+            ctx.require_non_empty("schemaFormat", format);
         }
     }
 }
 
-/// Either a plain [`Schema`] in the default dialect, or a
-/// [`MultiFormatSchema`] naming its own format.
+/// Either a [`Schema`] in the default dialect, a [`MultiFormatSchema`]
+/// naming its own format, or a boolean schema.
 ///
-/// Deserialization dispatches on the presence of the discriminating
-/// `schemaFormat` key, so a malformed schema reports its real error
-/// rather than an untagged-enum catch-all.
-/// The `Schema` arm is boxed: a full JSON Schema is an order of
-/// magnitude larger than a multi-format wrapper, and this type appears
-/// in every message header and payload.
+/// Deserialization mirrors the specification's `anySchema`: a boolean
+/// is a boolean schema, an object carrying a `schema` property is a
+/// Multi Format Schema, and anything else is a Schema Object. The
+/// `Schema` arm is boxed because a full JSON Schema is an order of
+/// magnitude larger than the other two, and this type appears in every
+/// message header and payload.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SchemaOrMultiFormat {
+    /// A JSON Schema boolean: `true` accepts anything, `false` nothing.
+    Bool(bool),
     MultiFormat(MultiFormatSchema),
     Schema(Box<Schema>),
 }
@@ -127,41 +145,94 @@ impl<'de> Deserialize<'de> for SchemaOrMultiFormat {
         D: Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        if value.get("schemaFormat").is_some() {
-            serde_json::from_value(value)
-                .map(SchemaOrMultiFormat::MultiFormat)
-                .map_err(serde::de::Error::custom)
-        } else {
-            serde_json::from_value(value)
-                .map(SchemaOrMultiFormat::Schema)
-                .map_err(serde::de::Error::custom)
+        if let serde_json::Value::Bool(b) = value {
+            return Ok(SchemaOrMultiFormat::Bool(b));
         }
+        if value.get("schema").is_some() {
+            return serde_json::from_value(value)
+                .map(SchemaOrMultiFormat::MultiFormat)
+                .map_err(serde::de::Error::custom);
+        }
+        serde_json::from_value(value)
+            .map(|schema| SchemaOrMultiFormat::Schema(Box::new(schema)))
+            .map_err(serde::de::Error::custom)
     }
 }
 
 impl ValidateWithContext for SchemaOrMultiFormat {
     fn validate_with_context(&self, ctx: &mut Context) {
         match self {
+            SchemaOrMultiFormat::Bool(_) => {}
             SchemaOrMultiFormat::MultiFormat(m) => m.validate_with_context(ctx),
             SchemaOrMultiFormat::Schema(s) => s.validate_with_context(ctx),
         }
     }
 }
 
-/// `additionalProperties` / `items`-style fields that accept a boolean
-/// shorthand as well as a schema.
+/// A subschema: JSON Schema allows `true` / `false` wherever a schema
+/// is expected, so every child position accepts either.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
-pub enum BoolOrSchema {
+pub enum SubSchema {
     Bool(bool),
     Schema(Box<RefOr<Schema>>),
 }
 
-impl ValidateWithContext for BoolOrSchema {
+impl Default for SubSchema {
+    fn default() -> Self {
+        Self::Schema(Box::new(RefOr::Item(Schema::default())))
+    }
+}
+
+impl ValidateWithContext for SubSchema {
     fn validate_with_context(&self, ctx: &mut Context) {
         match self {
-            BoolOrSchema::Bool(_) => {}
-            BoolOrSchema::Schema(s) => s.validate_with_context(ctx),
+            SubSchema::Bool(_) => {}
+            SubSchema::Schema(s) => s.validate_with_context(ctx),
+        }
+    }
+}
+
+/// `items` is a single schema (every element) or a tuple of schemas
+/// (positional), per draft-07.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum Items {
+    Tuple(Vec<SubSchema>),
+    Single(Box<SubSchema>),
+}
+
+impl Items {
+    /// Validate under `items`, indexing each entry of the tuple form so
+    /// diagnostics read `…items[1]` rather than `…items`.
+    fn validate_under_items(&self, ctx: &mut Context) {
+        match self {
+            Items::Single(schema) => {
+                ctx.in_field("items", |ctx| schema.validate_with_context(ctx));
+            }
+            Items::Tuple(schemas) => {
+                for (i, schema) in schemas.iter().enumerate() {
+                    ctx.in_index("items", i, |ctx| schema.validate_with_context(ctx));
+                }
+            }
+        }
+    }
+}
+
+/// A `dependencies` entry: either a schema that applies when the
+/// property is present, or the property names it requires.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum Dependency {
+    Required(Vec<String>),
+    Schema(SubSchema),
+}
+
+impl ValidateWithContext for Dependency {
+    fn validate_with_context(&self, ctx: &mut Context) {
+        match self {
+            Dependency::Required(_) => {}
+            Dependency::Schema(schema) => schema.validate_with_context(ctx),
         }
     }
 }
@@ -176,12 +247,24 @@ pub enum SchemaType {
 }
 
 /// An AsyncAPI Schema Object — JSON Schema draft-07 plus AsyncAPI's own
-/// additions.
+/// additions (`discriminator`, `externalDocs`, `deprecated`).
 ///
-/// Keywords outside this set are dropped on parse, matching how the
-/// sibling crates treat unknown fields.
+/// Every draft-07 keyword is modeled, so a schema round-trips
+/// unchanged; keywords from other dialects belong in a
+/// [`MultiFormatSchema`] instead.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Schema {
+    // ---- identification ----
+    #[serde(rename = "$id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// The `$schema` dialect declaration.
+    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<String>,
+
+    #[serde(rename = "$comment", skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub schema_type: Option<SchemaType>,
 
@@ -194,21 +277,37 @@ pub struct Schema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// An explicit `null` is preserved as `Some(Value::Null)`; absent
+    /// is `None`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub default: Option<serde_json::Value>,
 
     #[serde(rename = "enum", default, skip_serializing_if = "Vec::is_empty")]
     pub enum_values: Vec<serde_json::Value>,
 
-    #[serde(rename = "const", skip_serializing_if = "Option::is_none")]
+    /// An explicit `null` is preserved as `Some(Value::Null)`; absent
+    /// is `None`.
+    #[serde(
+        rename = "const",
+        default,
+        deserialize_with = "deserialize_present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub const_value: Option<serde_json::Value>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<serde_json::Value>,
 
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definitions: BTreeMap<String, SubSchema>,
+
     // ---- objects ----
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub properties: BTreeMap<String, RefOr<Schema>>,
+    pub properties: BTreeMap<String, SubSchema>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required: Vec<String>,
@@ -217,17 +316,20 @@ pub struct Schema {
         rename = "additionalProperties",
         skip_serializing_if = "Option::is_none"
     )]
-    pub additional_properties: Option<BoolOrSchema>,
+    pub additional_properties: Option<SubSchema>,
 
     #[serde(
         rename = "patternProperties",
         default,
         skip_serializing_if = "BTreeMap::is_empty"
     )]
-    pub pattern_properties: BTreeMap<String, RefOr<Schema>>,
+    pub pattern_properties: BTreeMap<String, SubSchema>,
 
     #[serde(rename = "propertyNames", skip_serializing_if = "Option::is_none")]
-    pub property_names: Option<Box<RefOr<Schema>>>,
+    pub property_names: Option<Box<SubSchema>>,
+
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, Dependency>,
 
     #[serde(rename = "minProperties", skip_serializing_if = "Option::is_none")]
     pub min_properties: Option<u64>,
@@ -237,10 +339,13 @@ pub struct Schema {
 
     // ---- arrays ----
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<Box<BoolOrSchema>>,
+    pub items: Option<Items>,
+
+    #[serde(rename = "additionalItems", skip_serializing_if = "Option::is_none")]
+    pub additional_items: Option<Box<SubSchema>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contains: Option<Box<RefOr<Schema>>>,
+    pub contains: Option<Box<SubSchema>>,
 
     #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
     pub min_items: Option<u64>,
@@ -261,6 +366,12 @@ pub struct Schema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
 
+    #[serde(rename = "contentMediaType", skip_serializing_if = "Option::is_none")]
+    pub content_media_type: Option<String>,
+
+    #[serde(rename = "contentEncoding", skip_serializing_if = "Option::is_none")]
+    pub content_encoding: Option<String>,
+
     // ---- numbers ----
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum: Option<f64>,
@@ -279,25 +390,25 @@ pub struct Schema {
 
     // ---- composition ----
     #[serde(rename = "allOf", default, skip_serializing_if = "Vec::is_empty")]
-    pub all_of: Vec<RefOr<Schema>>,
+    pub all_of: Vec<SubSchema>,
 
     #[serde(rename = "anyOf", default, skip_serializing_if = "Vec::is_empty")]
-    pub any_of: Vec<RefOr<Schema>>,
+    pub any_of: Vec<SubSchema>,
 
     #[serde(rename = "oneOf", default, skip_serializing_if = "Vec::is_empty")]
-    pub one_of: Vec<RefOr<Schema>>,
+    pub one_of: Vec<SubSchema>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub not: Option<Box<RefOr<Schema>>>,
+    pub not: Option<Box<SubSchema>>,
 
     #[serde(rename = "if", skip_serializing_if = "Option::is_none")]
-    pub if_schema: Option<Box<RefOr<Schema>>>,
+    pub if_schema: Option<Box<SubSchema>>,
 
     #[serde(rename = "then", skip_serializing_if = "Option::is_none")]
-    pub then_schema: Option<Box<RefOr<Schema>>>,
+    pub then_schema: Option<Box<SubSchema>>,
 
     #[serde(rename = "else", skip_serializing_if = "Option::is_none")]
-    pub else_schema: Option<Box<RefOr<Schema>>>,
+    pub else_schema: Option<Box<SubSchema>>,
 
     // ---- AsyncAPI additions ----
     /// The property name used to differentiate between other schemas.
@@ -370,21 +481,22 @@ impl ValidateWithContext for Schema {
             }
         }
 
-        for (name, schema) in &self.properties {
-            ctx.in_key("properties", name, |ctx| schema.validate_with_context(ctx));
+        for (field, map) in [
+            ("properties", &self.properties),
+            ("patternProperties", &self.pattern_properties),
+            ("definitions", &self.definitions),
+        ] {
+            for (name, schema) in map {
+                ctx.in_key(field, name, |ctx| schema.validate_with_context(ctx));
+            }
         }
-        for (name, schema) in &self.pattern_properties {
-            ctx.in_key("patternProperties", name, |ctx| {
-                schema.validate_with_context(ctx);
+        for (name, dependency) in &self.dependencies {
+            ctx.in_key("dependencies", name, |ctx| {
+                dependency.validate_with_context(ctx);
             });
         }
         if let Some(items) = &self.items {
-            ctx.in_field("items", |ctx| items.validate_with_context(ctx));
-        }
-        if let Some(additional) = &self.additional_properties {
-            ctx.in_field("additionalProperties", |ctx| {
-                additional.validate_with_context(ctx);
-            });
+            items.validate_under_items(ctx);
         }
         for (field, list) in [
             ("allOf", &self.all_of),
@@ -396,12 +508,14 @@ impl ValidateWithContext for Schema {
             }
         }
         for (field, schema) in [
-            ("not", &self.not),
-            ("if", &self.if_schema),
-            ("then", &self.then_schema),
-            ("else", &self.else_schema),
-            ("contains", &self.contains),
-            ("propertyNames", &self.property_names),
+            ("additionalProperties", self.additional_properties.as_ref()),
+            ("propertyNames", self.property_names.as_deref()),
+            ("additionalItems", self.additional_items.as_deref()),
+            ("contains", self.contains.as_deref()),
+            ("not", self.not.as_deref()),
+            ("if", self.if_schema.as_deref()),
+            ("then", self.then_schema.as_deref()),
+            ("else", self.else_schema.as_deref()),
         ] {
             if let Some(schema) = schema {
                 ctx.in_field(field, |ctx| schema.validate_with_context(ctx));
@@ -441,19 +555,124 @@ mod tests {
             "properties": {
                 "id": { "type": "string", "format": "uuid" },
                 "tags": { "type": "array", "items": { "type": "string" } },
-                "ref": { "$ref": "#/components/schemas/other" }
+                "ref": { "$ref": "#/components/schemas/other" },
+                "anything": true
             },
             "additionalProperties": false,
             "x-extra": 1
         });
         let schema: Schema = serde_json::from_value(value.clone()).unwrap();
         assert!(matches!(schema.schema_type, Some(SchemaType::Single(ref t)) if t == "object"));
-        assert_eq!(schema.properties.len(), 3);
+        assert_eq!(schema.properties.len(), 4);
+        assert!(matches!(
+            schema.properties["anything"],
+            SubSchema::Bool(true)
+        ));
         assert!(matches!(
             schema.additional_properties,
-            Some(BoolOrSchema::Bool(false))
+            Some(SubSchema::Bool(false))
         ));
         assert_eq!(serde_json::to_value(&schema).unwrap(), value);
+    }
+
+    #[test]
+    fn every_draft_07_keyword_round_trips() {
+        let value = json!({
+            "$id": "https://example.com/user.json",
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "$comment": "internal note",
+            "definitions": { "positiveInt": { "type": "integer", "minimum": 0.0 } },
+            "dependencies": {
+                "creditCard": ["billingAddress"],
+                "shipping": { "required": ["address"] }
+            },
+            "items": [ { "type": "string" }, { "type": "integer" } ],
+            "additionalItems": false,
+            "contentMediaType": "application/json",
+            "contentEncoding": "base64",
+            "propertyNames": { "pattern": "^[a-z]+$" },
+            "contains": { "type": "string" },
+            "if": { "required": ["a"] },
+            "then": { "required": ["b"] },
+            "else": true,
+            "not": { "type": "null" },
+            "allOf": [ { "type": "object" } ],
+            "anyOf": [ true ],
+            "oneOf": [ { "type": "string" } ],
+            "uniqueItems": true,
+            "multipleOf": 2.0,
+            "exclusiveMinimum": 1.0,
+            "exclusiveMaximum": 9.0,
+            "readOnly": true,
+            "writeOnly": false,
+            "deprecated": true,
+            "discriminator": "kind",
+            "externalDocs": { "url": "https://example.com" }
+        });
+        let schema: Schema = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(schema.id.as_deref(), Some("https://example.com/user.json"));
+        assert_eq!(schema.definitions.len(), 1);
+        assert!(matches!(
+            schema.dependencies["creditCard"],
+            Dependency::Required(_)
+        ));
+        assert!(matches!(
+            schema.dependencies["shipping"],
+            Dependency::Schema(_)
+        ));
+        assert!(matches!(schema.items, Some(Items::Tuple(ref t)) if t.len() == 2));
+        assert_eq!(serde_json::to_value(&schema).unwrap(), value);
+    }
+
+    #[test]
+    fn explicit_null_default_and_const_survive_a_round_trip() {
+        let value = json!({ "default": null, "const": null });
+        let schema: Schema = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(schema.default, Some(serde_json::Value::Null));
+        assert_eq!(schema.const_value, Some(serde_json::Value::Null));
+        assert_eq!(serde_json::to_value(&schema).unwrap(), value);
+
+        // An absent keyword stays absent.
+        let bare: Schema = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(bare.default, None);
+        assert_eq!(bare.const_value, None);
+        assert_eq!(serde_json::to_value(&bare).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn single_form_items_validate_under_items_without_an_index() {
+        let schema: Schema =
+            serde_json::from_value(json!({ "items": { "minItems": 2, "maxItems": 1 } })).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+        schema.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e.contains("#.payload.items.minItems")),
+            "got: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn single_and_tuple_items_are_distinguished() {
+        let single: Schema =
+            serde_json::from_value(json!({ "items": { "type": "string" } })).unwrap();
+        assert!(matches!(single.items, Some(Items::Single(_))));
+        assert_eq!(
+            serde_json::to_value(&single).unwrap(),
+            json!({ "items": { "type": "string" } })
+        );
+
+        let tuple: Schema =
+            serde_json::from_value(json!({ "items": [ { "type": "string" }, false ] })).unwrap();
+        match tuple.items {
+            Some(Items::Tuple(ref t)) => {
+                assert_eq!(t.len(), 2);
+                assert!(matches!(t[1], SubSchema::Bool(false)));
+            }
+            ref other => panic!("expected a tuple, got {other:?}"),
+        }
     }
 
     #[test]
@@ -520,7 +739,12 @@ mod tests {
     fn nested_schema_errors_carry_their_path() {
         let schema: Schema = serde_json::from_value(json!({
             "properties": { "a": { "minItems": 2, "maxItems": 1 } },
-            "items": { "minLength": 2, "maxLength": 1 },
+            "patternProperties": { "^x-": { "minLength": 2, "maxLength": 1 } },
+            "definitions": { "d": { "minimum": 5.0, "maximum": 1.0 } },
+            "dependencies": { "dep": { "minItems": 2, "maxItems": 1 } },
+            "items": [ { "minItems": 2, "maxItems": 1 } ],
+            "additionalItems": { "discriminator": "" },
+            "additionalProperties": { "minLength": 5, "maxLength": 1 },
             "oneOf": [ { "minimum": 5.0, "maximum": 1.0 } ],
             "not": { "discriminator": "" },
             "externalDocs": { "url": "" },
@@ -530,22 +754,22 @@ mod tests {
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
         schema.validate_with_context(&mut ctx);
         let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
-        assert!(
-            msgs.iter()
-                .any(|e| e.starts_with("#.payload.properties.a.minItems"))
-        );
-        assert!(
-            msgs.iter()
-                .any(|e| e.starts_with("#.payload.items.minLength"))
-        );
-        assert!(
-            msgs.iter()
-                .any(|e| e.starts_with("#.payload.oneOf[0].minimum"))
-        );
-        assert!(
-            msgs.iter()
-                .any(|e| e.starts_with("#.payload.not.discriminator"))
-        );
+        for expected in [
+            "#.payload.properties.a.minItems",
+            "#.payload.patternProperties.^x-.minLength",
+            "#.payload.definitions.d.minimum",
+            "#.payload.dependencies.dep.minItems",
+            "#.payload.items[0].minItems",
+            "#.payload.additionalItems.discriminator",
+            "#.payload.additionalProperties.minLength",
+            "#.payload.oneOf[0].minimum",
+            "#.payload.not.discriminator",
+        ] {
+            assert!(
+                msgs.iter().any(|e| e.starts_with(expected)),
+                "expected {expected}, got: {msgs:?}"
+            );
+        }
         assert!(
             msgs.iter()
                 .any(|e| e == "#.payload.externalDocs.url: must not be empty")
@@ -557,29 +781,8 @@ mod tests {
     }
 
     #[test]
-    fn pattern_and_additional_properties_are_validated_as_schemas() {
-        let schema: Schema = serde_json::from_value(json!({
-            "patternProperties": { "^x-": { "minItems": 2, "maxItems": 1 } },
-            "additionalProperties": { "minLength": 5, "maxLength": 1 }
-        }))
-        .unwrap();
-        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
-        schema.validate_with_context(&mut ctx);
-        let msgs: Vec<_> = ctx.errors.iter().map(ToString::to_string).collect();
-        assert!(
-            msgs.iter()
-                .any(|e| e.starts_with("#.payload.patternProperties.^x-.minItems")),
-            "got: {msgs:?}"
-        );
-        assert!(
-            msgs.iter()
-                .any(|e| e.starts_with("#.payload.additionalProperties.minLength")),
-            "got: {msgs:?}"
-        );
-    }
-
-    #[test]
-    fn multi_format_schema_is_picked_by_schema_format_key() {
+    fn multi_format_schema_is_picked_by_the_schema_key() {
+        // With a `schemaFormat`…
         let value = json!({
             "schemaFormat": "application/vnd.apache.avro;version=1.9.0",
             "schema": { "type": "record", "name": "User" }
@@ -588,6 +791,23 @@ mod tests {
         assert!(matches!(parsed, SchemaOrMultiFormat::MultiFormat(_)));
         assert_eq!(serde_json::to_value(&parsed).unwrap(), value);
 
+        // …and without one: `schemaFormat` is optional and defaults to
+        // this document's dialect, so `schema` alone still selects the
+        // Multi Format Schema Object rather than dropping the payload.
+        let bare = json!({ "schema": { "type": "string" } });
+        let parsed: SchemaOrMultiFormat = serde_json::from_value(bare.clone()).unwrap();
+        match &parsed {
+            SchemaOrMultiFormat::MultiFormat(m) => {
+                assert!(m.schema_format.is_none());
+                assert_eq!(m.schema, json!({ "type": "string" }));
+            }
+            other => panic!("expected a multi-format schema, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), bare);
+    }
+
+    #[test]
+    fn plain_and_boolean_schemas_are_recognized() {
         let plain: SchemaOrMultiFormat =
             serde_json::from_value(json!({ "type": "string" })).unwrap();
         assert!(matches!(plain, SchemaOrMultiFormat::Schema(_)));
@@ -595,28 +815,47 @@ mod tests {
             SchemaOrMultiFormat::default(),
             SchemaOrMultiFormat::Schema(_)
         ));
+
+        for (value, expected) in [(json!(true), true), (json!(false), false)] {
+            let parsed: SchemaOrMultiFormat = serde_json::from_value(value.clone()).unwrap();
+            assert!(matches!(parsed, SchemaOrMultiFormat::Bool(b) if b == expected));
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), value);
+
+            let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
+            parsed.validate_with_context(&mut ctx);
+            assert!(ctx.errors.is_empty());
+        }
     }
 
     #[test]
-    fn unsupported_schema_format_is_reported() {
+    fn a_schema_property_named_schema_still_parses_as_multi_format() {
+        // `schema` is not a JSON Schema keyword, so the specification's
+        // `anySchema` treats its presence as the discriminator.
+        let parsed: SchemaOrMultiFormat =
+            serde_json::from_value(json!({ "schema": true })).unwrap();
+        assert!(matches!(parsed, SchemaOrMultiFormat::MultiFormat(_)));
+    }
+
+    #[test]
+    fn custom_schema_formats_are_accepted() {
+        // The documented list is what tooling MUST support, not a
+        // closed set: a custom dialect is legal and keeps its schema as
+        // raw JSON.
         let parsed: SchemaOrMultiFormat = serde_json::from_value(json!({
-            "schemaFormat": "application/vnd.aai.asyncapi;version=9.9.9",
-            "schema": { "type": "string" }
+            "schemaFormat": "application/vnd.example.custom+json;version=1.0",
+            "schema": { "shape": "whatever the dialect says" }
         }))
         .unwrap();
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload");
         parsed.validate_with_context(&mut ctx);
-        assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("is not a schema format supported by AsyncAPI 3.0")),
-            "got: {:?}",
-            ctx.errors
-        );
+        assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
+        assert!(!is_supported_schema_format(
+            "application/vnd.example.custom+json;version=1.0"
+        ));
     }
 
     #[test]
-    fn every_supported_format_passes_and_empty_is_rejected() {
+    fn every_documented_format_is_recognized_and_empty_is_rejected() {
         for format in SUPPORTED_SCHEMA_FORMATS {
             assert!(is_supported_schema_format(format), "{format} should pass");
             let m = MultiFormatSchema {
@@ -642,20 +881,15 @@ mod tests {
                 .iter()
                 .any(|e| e == "#.payload.schemaFormat: must not be empty")
         );
-        assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e == "#.payload.schema: must not be null")
-        );
     }
 
     #[test]
-    fn bool_or_schema_validates_only_the_schema_arm() {
+    fn sub_schema_validates_only_the_schema_arm() {
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload.additionalProperties");
-        BoolOrSchema::Bool(true).validate_with_context(&mut ctx);
+        SubSchema::Bool(true).validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty());
 
-        let nested = BoolOrSchema::Schema(Box::new(RefOr::Item(Schema {
+        let nested = SubSchema::Schema(Box::new(RefOr::Item(Schema {
             discriminator: Some(String::new()),
             ..Default::default()
         })));
@@ -666,5 +900,14 @@ mod tests {
                 .iter()
                 .any(|e| e == "#.payload.additionalProperties.discriminator: must not be empty")
         );
+        assert!(matches!(SubSchema::default(), SubSchema::Schema(_)));
+    }
+
+    #[test]
+    fn dependency_required_form_needs_no_validation() {
+        let dependency: Dependency = serde_json::from_value(json!(["a", "b"])).unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.payload.dependencies.d");
+        dependency.validate_with_context(&mut ctx);
+        assert!(ctx.errors.is_empty());
     }
 }

@@ -42,8 +42,8 @@ pub use operation::{
 };
 pub use parameter::Parameter;
 pub use schema::{
-    BoolOrSchema, MultiFormatSchema, SUPPORTED_SCHEMA_FORMATS, Schema, SchemaOrMultiFormat,
-    SchemaType, is_supported_schema_format,
+    Dependency, Items, MultiFormatSchema, SUPPORTED_SCHEMA_FORMATS, Schema, SchemaOrMultiFormat,
+    SchemaType, SubSchema, is_supported_schema_format,
 };
 pub use security_scheme::{
     ApiKeyLocation, OAuthFlow, OAuthFlows, SecurityScheme, SecuritySchemeType,

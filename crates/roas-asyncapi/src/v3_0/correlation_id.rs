@@ -52,7 +52,8 @@ mod tests {
         for location in [
             "$message.header#/correlationId",
             "$message.payload#/user/id",
-            "$message.payload",
+            // `#` alone selects the whole payload.
+            "$message.payload#",
         ] {
             let id: CorrelationId =
                 serde_json::from_value(json!({ "location": location })).unwrap();
@@ -75,16 +76,20 @@ mod tests {
         CorrelationId::default().validate_with_context(&mut ctx);
         assert!(ctx.errors[0] == "#.correlationId.location: must not be empty");
 
-        let bad: CorrelationId =
-            serde_json::from_value(json!({ "location": "$request.header#/id" })).unwrap();
-        let mut ctx = Context::with_path(EnumSet::empty(), "#.correlationId");
-        bad.validate_with_context(&mut ctx);
-        assert!(
-            ctx.errors
-                .iter()
-                .any(|e| e.contains("is not a valid runtime expression")),
-            "got: {:?}",
-            ctx.errors
-        );
+        // A wrong prefix, and a bare source with no `#` fragment — the
+        // schema pattern requires it.
+        for location in ["$request.header#/id", "$message.payload"] {
+            let bad: CorrelationId =
+                serde_json::from_value(json!({ "location": location })).unwrap();
+            let mut ctx = Context::with_path(EnumSet::empty(), "#.correlationId");
+            bad.validate_with_context(&mut ctx);
+            assert!(
+                ctx.errors
+                    .iter()
+                    .any(|e| e.contains("is not a valid runtime expression")),
+                "{location}: {:?}",
+                ctx.errors
+            );
+        }
     }
 }

@@ -14,8 +14,21 @@ use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::schema::SchemaOrMultiFormat;
 use crate::v3_0::tag::Tag;
 use crate::validation::{Context, ValidateWithContext};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
+
+/// Keep an explicit `"payload": null` (→ `Some(Value::Null)`) distinct
+/// from an absent one (→ `None`). A plain `Option<Value>` collapses
+/// both, which would turn a valid null-payload example into "must
+/// define `headers` and/or `payload`".
+fn deserialize_present_payload<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Message {
@@ -209,8 +222,15 @@ pub struct MessageExample {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<BTreeMap<String, serde_json::Value>>,
 
-    /// Example of the message payload.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Example of the message payload, which may be of any type —
+    /// including an explicit `null`, which is preserved as
+    /// `Some(Value::Null)` because *presence* is what satisfies the
+    /// headers-and/or-payload requirement.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_payload",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub payload: Option<serde_json::Value>,
 
     /// `x-`-prefixed Specification Extensions.
@@ -293,7 +313,7 @@ mod tests {
     fn nested_errors_carry_their_path() {
         let errors = errors_for(json!({
             "headers": { "minItems": 2, "maxItems": 1 },
-            "payload": { "schemaFormat": "text/plain", "schema": {} },
+            "payload": { "schemaFormat": "", "schema": {} },
             "correlationId": { "location": "nope" },
             "contentType": "",
             "tags": [ { "name": "" } ],
@@ -348,6 +368,22 @@ mod tests {
                 .iter()
                 .any(|e| e == "#.messages.signup.traits[0].contentType: must not be empty")
         );
+    }
+
+    #[test]
+    fn an_explicit_null_payload_is_a_present_payload() {
+        // `payload` accepts any type including null, and it is
+        // *presence* that satisfies the headers-or-payload rule.
+        let value = json!({ "name": "empty", "payload": null });
+        let example: MessageExample = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(example.payload, Some(serde_json::Value::Null));
+
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.examples[0]");
+        example.validate_with_context(&mut ctx);
+        assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
+
+        // …and it survives serialization rather than being dropped.
+        assert_eq!(serde_json::to_value(&example).unwrap(), value);
     }
 
     #[test]

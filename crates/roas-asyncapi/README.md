@@ -56,9 +56,9 @@ YAML documents work the same way — parse with `serde_yaml_ng` (or any other YA
 
 `Validate::validate` returns every diagnostic it finds rather than failing on the first one. Diagnostics carry a JSONPath-flavor `path` (e.g. `#.channels.lightMeasured.parameters`). Beyond required / non-empty fields and the component-key pattern (`^[A-Za-z0-9\.\-_]+$`), the checks are:
 
-- **Cross-reference integrity** — an operation's `channel` names a declared channel; its `messages` are a subset of *that* channel's messages (a message borrowed from another channel is reported, as is a component message the channel does not list); a channel's `servers` name declared servers; the same for an operation's `reply`.
-- **Runtime expressions** — `correlationId.location`, `parameter.location`, and `reply.address.location` are parsed against the `$message.header#/…` / `$message.payload#/…` grammar.
-- **`schemaFormat`** — checked against the closed set AsyncAPI 3.0 accepts (every 2.0.0–2.6.0 and 3.0.0 AsyncAPI dialect, OpenAPI 3.0.0, Avro 1.9.0, RAML 1.0, and JSON Schema draft-07).
+- **Cross-reference integrity** — an operation's `channel` names a declared channel; its `messages` are a subset of *that* channel's messages (a message borrowed from another channel is reported, as is a component message the channel does not list, one that is not declared at all, or a local pointer that names something other than a message); a channel's `servers` name declared servers; the same for an operation's `reply`.
+- **Runtime expressions** — `correlationId.location`, `parameter.location`, and `reply.address.location` are parsed against the `$message.header#/…` / `$message.payload#/…` grammar. The `#` is mandatory, per the schema pattern; `$message.payload#` selects the whole payload.
+- **`schemaFormat`** — required to be non-empty. It is *not* checked against a fixed list: the specification types it as `anyOf: [string, <enum>]`, so a custom dialect is legal and simply keeps its schema as raw JSON. The documented formats (every 2.0.0–2.6.0 and 3.0.0 AsyncAPI dialect, OpenAPI 3.0.0, Avro 1.9.0, RAML 1.0, JSON Schema draft-07) are exposed as `SUPPORTED_SCHEMA_FORMATS` / `is_supported_schema_format` for callers that want to ask.
 - **Channel address ↔ parameters** — every `{placeholder}` in an address is declared, and every declared parameter is used. Server `host` / `pathname` placeholders are checked against `variables` the same way.
 - **Per-object coherence** — a security scheme carries what its `type` requires (`http` needs `scheme`, `oauth2` needs `flows`, each OAuth flow needs the URLs its grant type uses), a `default` is one of the `enum` values, schema bounds are not inverted, and a message example defines `headers` and/or `payload`.
 
@@ -71,7 +71,7 @@ The model and its validators are the whole surface. Out of scope for this releas
 - **`$ref` resolution across documents.** Cross-reference checks run on document-local pointers; an external `$ref` is accepted without further checking unless `ErrorOnExternalReference` asks for a self-contained document.
 - **Trait merging.** `message.traits` and `operation.traits` are parsed and validated, not applied.
 - **Typed protocol bindings.** AsyncAPI 3.0 types ~17 protocols across server / channel / operation / message, each with its own independently versioned `bindingVersion`. Bindings are held as raw JSON keyed by protocol, so they round-trip losslessly and typed accessors can be layered on later without a breaking change.
-- **Payload dialects other than the default.** A payload naming an Avro / OpenAPI / RAML `schemaFormat` keeps its schema as raw JSON; only the AsyncAPI Schema Object dialect is typed.
+- **Payload dialects other than the default.** Only the AsyncAPI Schema Object dialect — JSON Schema draft-07 plus `discriminator` / `externalDocs` / `deprecated` — is typed, and every draft-07 keyword is modeled so a schema round-trips unchanged. A payload carrying a `schema` property is a Multi Format Schema Object (that presence is the discriminator, exactly as the specification's `anySchema` defines it, not the optional `schemaFormat`), and its `schema` stays raw JSON whatever dialect it names.
 
 ## License
 
