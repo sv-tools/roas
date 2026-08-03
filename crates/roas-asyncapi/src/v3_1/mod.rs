@@ -18,7 +18,7 @@
 //! `impl From<v3_0::Document> for Document` upconverts a 3.0 document.
 //!
 //! Protocol bindings are held as raw JSON — see
-//! [`Bindings`](crate::common::bindings::Bindings) for why.
+//! [`Bindings`] for why.
 
 pub mod channel;
 pub mod components;

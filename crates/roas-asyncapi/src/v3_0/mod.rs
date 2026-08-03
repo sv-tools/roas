@@ -11,7 +11,7 @@
 //! view.
 //!
 //! Protocol bindings are held as raw JSON — see
-//! [`Bindings`](crate::common::bindings::Bindings) for why.
+//! [`Bindings`] for why.
 
 pub mod channel;
 pub mod components;
