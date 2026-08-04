@@ -14,7 +14,7 @@ use crate::common::bindings::Bindings;
 use crate::common::reference::RefOr;
 use crate::v2_6::correlation_id::CorrelationId;
 use crate::v2_6::external_documentation::ExternalDocumentation;
-use crate::v2_6::schema::SubSchema;
+use crate::v2_6::schema::{SchemaType, SubSchema};
 use crate::v2_6::tag::Tag;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -245,7 +245,7 @@ impl ValidateWithContext for Message {
             ctx.require_non_empty("messageId", message_id);
         }
         if let Some(headers) = &self.headers {
-            ctx.in_field("headers", |ctx| headers.validate_with_context(ctx));
+            validate_headers(ctx, headers);
         }
         // A payload in the default dialect is a Schema Object and gets
         // the schema checks; one in a named foreign dialect does not.
@@ -275,15 +275,48 @@ impl ValidateWithContext for Message {
     }
 }
 
+/// Validate a headers schema, which must describe an *object*.
+///
+/// The schema pins `headers` to `allOf: [schema.json, { properties: {
+/// type: { const: "object" } } }]`, so a declared `type` has to be
+/// `object`. A boolean schema declares no type and stays valid.
+fn validate_headers(ctx: &mut Context, headers: &SubSchema) {
+    ctx.in_field("headers", |ctx| {
+        headers.validate_with_context(ctx);
+        if let SubSchema::Schema(schema) = headers {
+            match &schema.schema_type {
+                Some(SchemaType::Single(name)) if name != "object" => {
+                    ctx.error_field("type", format!("must be `object`, not `{name}`"));
+                }
+                Some(SchemaType::Multiple(names)) if !names.iter().all(|name| name == "object") => {
+                    ctx.error_field("type", "must be `object`");
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 /// Validate a tag list and enforce the schema's `uniqueItems: true`.
 ///
 /// Lives here because every object carrying tags needs it; the
 /// comparison is whole-value, as `uniqueItems` specifies.
 pub(crate) fn validate_tags(ctx: &mut Context, tags: &[Tag]) {
+    // `uniqueItems` compares JSON *instances*, where `1` and `1.0` are
+    // the same value — so serialize and use the schema module's
+    // instance equality rather than Rust's `PartialEq`, which would let
+    // two tags differing only by `x-order: 1` vs `1.0` through.
+    let as_json: Vec<serde_json::Value> = tags
+        .iter()
+        .map(|tag| serde_json::to_value(tag).unwrap_or(serde_json::Value::Null))
+        .collect();
     for (i, tag) in tags.iter().enumerate() {
         ctx.in_index("tags", i, |ctx| {
             tag.validate_with_context(ctx);
-            if tags[..i].contains(tag) {
+            if as_json[..i]
+                .iter()
+                .any(|seen| crate::v2_6::schema::json_instance_eq(seen, &as_json[i]))
+            {
                 ctx.error("duplicate tag");
             }
         });
@@ -353,7 +386,7 @@ impl ValidateWithContext for MessageTrait {
             ctx.require_non_empty("contentType", content_type);
         }
         if let Some(headers) = &self.headers {
-            ctx.in_field("headers", |ctx| headers.validate_with_context(ctx));
+            validate_headers(ctx, headers);
         }
         if let Some(correlation_id) = &self.correlation_id {
             ctx.in_field("correlationId", |ctx| {
@@ -574,6 +607,44 @@ mod tests {
                 .any(|e| e == "#.publish.message.oneOf[0].oneOf[0].contentType: must not be empty"),
             "got: {:?}",
             ctx.errors
+        );
+    }
+
+    #[test]
+    fn headers_must_describe_an_object() {
+        let errors = errors_for(json!({ "headers": { "type": "string" } }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e == "#.messages.signup.headers.type: must be `object`, not `string`"),
+            "got: {errors:?}"
+        );
+
+        assert!(errors_for(json!({ "headers": { "type": "object" } })).is_empty());
+        // No declared type, or a boolean schema, stays valid.
+        assert!(errors_for(json!({ "headers": { "properties": {} } })).is_empty());
+        assert!(errors_for(json!({ "headers": true })).is_empty());
+
+        // The list form must not admit anything but `object`.
+        assert!(
+            errors_for(json!({ "headers": { "type": ["object", "null"] } }))
+                .iter()
+                .any(|e| e.contains("headers.type: must be `object`"))
+        );
+    }
+
+    #[test]
+    fn tag_uniqueness_uses_json_instance_equality() {
+        // `x-order: 1` and `x-order: 1.0` are the same JSON instance,
+        // so these are duplicate tags.
+        let errors = errors_for(json!({
+            "tags": [ { "name": "a", "x-order": 1 }, { "name": "a", "x-order": 1.0 } ]
+        }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e == "#.messages.signup.tags[1]: duplicate tag"),
+            "got: {errors:?}"
         );
     }
 

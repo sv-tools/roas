@@ -53,9 +53,7 @@ fn streetlights_yaml_parses_validates_and_round_trips() {
 
     // Operations hang off the channel path, from the consumer's point
     // of view.
-    let measured = doc.channels["smartylighting/streetlights/{streetlightId}/lighting/measured"]
-        .item()
-        .expect("inline channel");
+    let measured = &doc.channels["smartylighting/streetlights/{streetlightId}/lighting/measured"];
     assert!(measured.publish.is_some());
     assert!(measured.subscribe.is_none());
     assert_eq!(measured.servers, vec!["production"]);
@@ -67,9 +65,7 @@ fn streetlights_yaml_parses_validates_and_round_trips() {
     assert!(parameter.schema.is_some());
 
     // An operation's message may be a set of alternatives.
-    let turn = doc.channels["smartylighting/streetlights/{streetlightId}/command/turn"]
-        .item()
-        .expect("inline channel");
+    let turn = &doc.channels["smartylighting/streetlights/{streetlightId}/command/turn"];
     let subscribe = turn.subscribe.as_ref().expect("subscribe operation");
     match subscribe.message.as_ref().expect("message") {
         OperationMessage::OneOf(one_of) => assert_eq!(one_of.one_of.len(), 2),

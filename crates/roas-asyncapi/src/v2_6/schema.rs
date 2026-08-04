@@ -9,7 +9,6 @@
 //! payload directly, so [`Message`](crate::v2_6::Message) holds an
 //! untyped payload and this type covers the default dialect only.
 
-use crate::common::reference::RefOr;
 use crate::v2_6::external_documentation::ExternalDocumentation;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -31,12 +30,12 @@ where
 #[serde(untagged)]
 pub enum SubSchema {
     Bool(bool),
-    Schema(Box<RefOr<Schema>>),
+    Schema(Box<Schema>),
 }
 
 impl Default for SubSchema {
     fn default() -> Self {
-        Self::Schema(Box::new(RefOr::Item(Schema::default())))
+        Self::Schema(Box::default())
     }
 }
 
@@ -125,6 +124,16 @@ pub enum SchemaType {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Schema {
     // ---- identification ----
+    /// The draft-07 `$ref` keyword.
+    ///
+    /// It is a *keyword*, not a replacement for the schema, so
+    /// `description` and `x-` extensions may sit alongside it and are
+    /// preserved. draft-07 says an implementation ignores such siblings
+    /// when applying the schema; this crate keeps them so a document
+    /// round-trips as written.
+    #[serde(rename = "$ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+
     #[serde(rename = "$id", skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
@@ -319,7 +328,7 @@ const SIMPLE_TYPES: &[&str] = &[
 /// `1` and `1.0` are the same instance. `serde_json`'s `PartialEq`
 /// compares the stored representation instead and would call them
 /// different, which is why `uniqueItems` cannot use it.
-fn json_instance_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+pub(crate) fn json_instance_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (a, b) {
         (Value::Number(a), Value::Number(b)) => numbers_eq(a, b),
@@ -1122,10 +1131,10 @@ mod tests {
         SubSchema::Bool(true).validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty());
 
-        let nested = SubSchema::Schema(Box::new(RefOr::Item(Schema {
+        let nested = SubSchema::Schema(Box::new(Schema {
             discriminator: Some(String::new()),
             ..Default::default()
-        })));
+        }));
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload.additionalProperties");
         nested.validate_with_context(&mut ctx);
         assert!(

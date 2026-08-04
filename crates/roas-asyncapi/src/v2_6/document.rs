@@ -8,7 +8,7 @@
 //! and a security requirement must name a declared scheme — listing
 //! scopes only where the scheme's type allows them.
 
-use crate::common::reference::RefOr;
+use crate::common::reference::{RefOr, Reference};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
 use crate::v2_6::external_documentation::ExternalDocumentation;
@@ -49,7 +49,10 @@ pub struct Document {
 
     /// **Required** The channels this application uses, keyed by their
     /// path. Unlike v3, the key *is* the address.
-    pub channels: BTreeMap<String, RefOr<ChannelItem>>,
+    ///
+    /// A channel item carries any `$ref` as its own field, so this is
+    /// not a `RefOr` — see [`ChannelItem::reference`].
+    pub channels: BTreeMap<String, ChannelItem>,
 
     /// Reusable objects referenced throughout the document.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,38 +74,48 @@ pub struct Document {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// How many `$ref` hops to follow before declaring a cycle. Component
-/// channels referencing each other is legal but pointless, so the bound
-/// only needs to be past any sane document.
-const MAX_REF_DEPTH: usize = 32;
-
 impl Document {
     /// Resolve a channel entry, following document-local
     /// `#/components/channels/…` references.
     ///
     /// Returns `None` for an external reference, one that names nothing,
     /// or a cycle — none of which this crate can see through.
-    pub fn resolve_channel<'a>(
-        &'a self,
-        channel: &'a RefOr<ChannelItem>,
-    ) -> Option<&'a ChannelItem> {
+    pub fn resolve_channel<'a>(&'a self, channel: &'a ChannelItem) -> Option<&'a ChannelItem> {
         let mut current = channel;
-        // A component channel may itself be a `$ref`, so follow the
-        // chain — and stop if it ever revisits a key.
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        for _ in 0..MAX_REF_DEPTH {
-            match current {
-                RefOr::Item(item) => return Some(item),
-                RefOr::Reference(reference) => {
-                    let key = reference.component_key("channels")?;
-                    if !seen.insert(key.clone()) {
-                        return None;
-                    }
-                    current = self.components.as_ref()?.channels.get(&key)?;
-                }
+        // Follow the chain, stopping if it ever revisits a pointer —
+        // which also bounds the walk, so no separate hop limit is
+        // needed.
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        loop {
+            let Some(reference) = current.reference.as_deref() else {
+                return Some(current);
+            };
+            if !seen.insert(reference) {
+                return None;
             }
+            current = self.channel_at(reference)?;
         }
-        None
+    }
+
+    /// The channel a document-local pointer names, whether it points
+    /// into the root `channels` map or into `components.channels`.
+    ///
+    /// Root channel keys are paths, so their pointers carry RFC 6901
+    /// escapes (`~1` for `/`), which [`Reference::local_key`] decodes.
+    fn channel_at(&self, reference: &str) -> Option<&ChannelItem> {
+        let reference = Reference {
+            reference: reference.to_owned(),
+        };
+        if let Some(key) = reference.component_key("channels") {
+            return self.components.as_ref()?.channels.get(&key);
+        }
+        let pointer = reference.local_pointer()?;
+        let key = pointer.strip_prefix("/channels/")?;
+        if key.is_empty() {
+            return None;
+        }
+        let key = key.replace("~1", "/").replace("~0", "~");
+        self.channels.get(&key)
     }
 
     /// Every operation in the document, with the channel path and the
@@ -159,9 +172,57 @@ impl Document {
     }
 
     /// The security scheme declared under `components.securitySchemes`,
-    /// when it is inline and resolvable.
+    /// following a document-local `$ref` so a referenced scheme is
+    /// judged by its real type.
     fn security_scheme(&self, name: &str) -> Option<&SecurityScheme> {
-        self.components.as_ref()?.security_schemes.get(name)?.item()
+        let mut entry = self.components.as_ref()?.security_schemes.get(name)?;
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        loop {
+            match entry {
+                RefOr::Item(scheme) => return Some(scheme),
+                RefOr::Reference(reference) => {
+                    let key = reference.component_key("securitySchemes")?;
+                    if !seen.insert(key.clone()) {
+                        return None;
+                    }
+                    entry = self.components.as_ref()?.security_schemes.get(&key)?;
+                }
+            }
+        }
+    }
+
+    /// Check that a document-local message `$ref` lands on a declared
+    /// component message.
+    fn validate_message_refs(&self, ctx: &mut Context, message: &OperationMessage) {
+        match message {
+            OperationMessage::Single(single) => {
+                if let RefOr::Reference(reference) = single.as_ref() {
+                    if reference.is_external() || reference.reference.is_empty() {
+                        return;
+                    }
+                    let declared = reference
+                        .component_key("messages")
+                        .and_then(|key| Some(self.components.as_ref()?.messages.contains_key(&key)))
+                        .unwrap_or(false);
+                    if !declared {
+                        ctx.error_field(
+                            "$ref",
+                            format!(
+                                "message `{}` is not declared in `components.messages`",
+                                reference.reference
+                            ),
+                        );
+                    }
+                }
+            }
+            OperationMessage::OneOf(one_of) => {
+                for (i, alternative) in one_of.one_of.iter().enumerate() {
+                    ctx.in_index("oneOf", i, |ctx| {
+                        self.validate_message_refs(ctx, alternative);
+                    });
+                }
+            }
+        }
     }
 
     /// Whether `components.securitySchemes` names `name` at all — a
@@ -229,26 +290,29 @@ impl Document {
                 ctx.error_field("channels", "a channel path must not be empty");
             }
             ctx.in_key("channels", path, |ctx| {
-                match channel {
-                    RefOr::Reference(reference) => {
-                        reference.validate_with_context(ctx);
-                        // A local `$ref` resolves, so the target's
-                        // parameters are still checked against this
-                        // path — the placeholders belong to the key,
-                        // not to the referenced item.
-                        if let Some(item) = self.resolve_channel(channel) {
-                            item.validate_against_path(ctx, path);
-                        } else if !reference.is_external() && !reference.reference.is_empty() {
-                            ctx.error_field(
-                                "$ref",
-                                format!(
-                                    "`{}` does not resolve to a declared channel",
-                                    reference.reference
-                                ),
-                            );
+                // The item's own fields are checked either way; a
+                // `$ref` additionally has to land on a channel, and the
+                // *resolved* item's parameters are what this path's
+                // placeholders must match.
+                channel.validate_with_context(ctx);
+                match self.resolve_channel(channel) {
+                    Some(resolved) => resolved.validate_against_path(ctx, path),
+                    None => {
+                        if let Some(reference) = channel.reference.as_deref() {
+                            let reference = Reference {
+                                reference: reference.to_owned(),
+                            };
+                            if !reference.is_external() && !reference.reference.is_empty() {
+                                ctx.error_field(
+                                    "$ref",
+                                    format!(
+                                        "`{}` does not resolve to a declared channel",
+                                        reference.reference
+                                    ),
+                                );
+                            }
                         }
                     }
-                    RefOr::Item(item) => item.validate_against_path(ctx, path),
                 }
                 if let Some(item) = self.resolve_channel(channel) {
                     // A channel's servers are plain names into `servers`.
@@ -265,6 +329,11 @@ impl Document {
                         if let Some(operation) = operation {
                             ctx.in_field(kind, |ctx| {
                                 self.validate_security(ctx, "security", &operation.security);
+                                if let Some(message) = &operation.message {
+                                    ctx.in_field("message", |ctx| {
+                                        self.validate_message_refs(ctx, message);
+                                    });
+                                }
                             });
                         }
                     }
@@ -589,6 +658,97 @@ mod tests {
             }
         });
         assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn a_referenced_security_scheme_is_resolved_before_judging_scopes() {
+        let mut value = minimal();
+        value["components"] = json!({
+            "securitySchemes": {
+                "alias": { "$ref": "#/components/securitySchemes/basic" },
+                "basic": { "type": "userPassword" }
+            }
+        });
+        value["channels"] = json!({
+            "user": { "publish": { "security": [ { "alias": ["read"] } ] } }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e
+                    .contains("must not list scopes: the `userPassword` scheme type takes none")),
+            "a referenced scheme must be followed to its type",
+        );
+    }
+
+    #[test]
+    fn a_message_reference_must_name_a_declared_component_message() {
+        let mut value = minimal();
+        value["channels"] = json!({
+            "user": { "publish": { "message": { "$ref": "#/components/messages/missing" } } }
+        });
+        assert!(errors_for(value).iter().any(|e| e.contains(
+            "message `#/components/messages/missing` is not declared in `components.messages`"
+        )),);
+
+        // Declared is fine; external is left alone; `oneOf` members are
+        // checked individually.
+        let mut value = minimal();
+        value["components"] = json!({ "messages": { "signup": { "name": "S" } } });
+        value["channels"] = json!({
+            "user": {
+                "publish": {
+                    "message": {
+                        "oneOf": [
+                            { "$ref": "#/components/messages/signup" },
+                            { "$ref": "./other.yaml#/signup" }
+                        ]
+                    }
+                }
+            }
+        });
+        assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn a_root_channel_pointer_resolves_too() {
+        // `#/channels/<path>` is as legal as the components form, and
+        // the path's `/` is RFC 6901-escaped.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "user/signedup": { "publish": { "operationId": "handle" } },
+                "alias": { "$ref": "#/channels/user~1signedup" }
+            }
+        });
+        let doc: Document = serde_json::from_value(value.clone()).unwrap();
+        assert!(doc.resolve_channel(&doc.channels["alias"]).is_some());
+        // Both the target and the alias contribute their operation, so
+        // the duplicate `operationId` is reported.
+        assert_eq!(doc.operations().len(), 2);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("duplicate operationId `handle`")),
+        );
+    }
+
+    #[test]
+    fn a_channel_item_keeps_its_ref_siblings() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "user": { "$ref": "#/components/channels/target", "description": "d" }
+            },
+            "components": { "channels": { "target": { "publish": {} } } }
+        });
+        let doc: Document = serde_json::from_value(value.clone()).unwrap();
+        let channel = &doc.channels["user"];
+        assert_eq!(channel.description.as_deref(), Some("d"));
+        assert!(channel.is_reference());
+        assert_eq!(serde_json::to_value(&doc).unwrap(), value);
     }
 
     #[test]

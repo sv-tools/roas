@@ -19,6 +19,14 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ChannelItem {
+    /// A reference to another Channel Item.
+    ///
+    /// `$ref` is a *field* of the Channel Item here, not a replacement
+    /// for it, so it may sit alongside `description`, `servers`,
+    /// `parameters` and the rest — all of which survive a round-trip.
+    #[serde(rename = "$ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+
     /// An optional description of this channel item.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -59,8 +67,13 @@ pub struct ChannelItem {
 }
 
 impl ChannelItem {
-    /// Validate against the channel path this item is keyed by, whose
-    /// `{placeholders}` its `parameters` must match.
+    /// Check this item's `parameters` against the `{placeholders}` of
+    /// the channel path it is keyed by.
+    ///
+    /// Only that pairing — the item's own fields are validated by
+    /// [`ValidateWithContext`], which the caller runs separately, since
+    /// a `$ref`'d channel is validated where it is declared while its
+    /// parameters answer to the path that references it.
     pub(crate) fn validate_against_path(&self, ctx: &mut Context, path: &str) {
         let used = placeholders(path);
         for name in &used {
@@ -81,12 +94,22 @@ impl ChannelItem {
                 }
             }
         }
-        self.validate_with_context(ctx);
+    }
+}
+
+impl ChannelItem {
+    /// Whether this item is (also) a reference to another one.
+    #[must_use]
+    pub fn is_reference(&self) -> bool {
+        self.reference.is_some()
     }
 }
 
 impl ValidateWithContext for ChannelItem {
     fn validate_with_context(&self, ctx: &mut Context) {
+        if let Some(reference) = &self.reference {
+            ctx.require_non_empty("$ref", reference);
+        }
         ctx.validate_map_keys("parameters", &self.parameters);
 
         for (i, server) in self.servers.iter().enumerate() {
@@ -123,6 +146,7 @@ mod tests {
     fn errors_against(path: &str, value: serde_json::Value) -> Vec<String> {
         let item: ChannelItem = serde_json::from_value(value).unwrap();
         let mut ctx = Context::with_path(EnumSet::empty(), "#.channels.user");
+        item.validate_with_context(&mut ctx);
         item.validate_against_path(&mut ctx, path);
         ctx.errors.iter().map(ToString::to_string).collect()
     }
@@ -173,6 +197,7 @@ mod tests {
             EnumSet::only(ValidationOptions::IgnoreUnusedChannelParameter),
             "#.channels.user",
         );
+        item.validate_with_context(&mut ctx);
         item.validate_against_path(&mut ctx, "user/signedup");
         assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
     }

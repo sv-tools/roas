@@ -5,10 +5,14 @@
 //! 2.6 holds fourteen maps; v3 added `operations`, `replies`,
 //! `replyAddresses`, `tags`, and `externalDocs` to that set.
 //!
-//! Only `messages`, `securitySchemes`, and `correlationIds` accept a
-//! `$ref` in place of the object — the other maps are typed directly,
-//! matching the schema field by field. `schemas` uses [`SubSchema`]
-//! because draft-07 allows a boolean where a schema is expected.
+//! Which maps accept a `$ref` *in place of* the object is decided per
+//! map by the schema, following its delegation: `messages`,
+//! `parameters`, `servers`, `serverVariables`, `securitySchemes`, and
+//! `correlationIds` do; the trait and binding maps do not.
+//!
+//! `channels` and `schemas` are neither — there `$ref` is a *field* of
+//! the object itself, so it coexists with siblings and is modeled as
+//! one, on [`ChannelItem`] and on the Schema Object.
 
 use crate::common::bindings::Bindings;
 use crate::common::reference::RefOr;
@@ -55,12 +59,12 @@ macro_rules! component_maps {
 
 component_maps! {
     schemas: SubSchema => "schemas",
-    servers: Server => "servers",
-    channels: RefOr<ChannelItem> => "channels",
-    server_variables: ServerVariable => "serverVariables",
+    servers: RefOr<Server> => "servers",
+    channels: ChannelItem => "channels",
+    server_variables: RefOr<ServerVariable> => "serverVariables",
     messages: RefOr<Message> => "messages",
     security_schemes: RefOr<SecurityScheme> => "securitySchemes",
-    parameters: Parameter => "parameters",
+    parameters: RefOr<Parameter> => "parameters",
     correlation_ids: RefOr<CorrelationId> => "correlationIds",
     operation_traits: OperationTrait => "operationTraits",
     message_traits: MessageTrait => "messageTraits",
@@ -119,6 +123,34 @@ mod tests {
     }
 
     #[test]
+    fn a_component_channel_keeps_its_ref_siblings() {
+        // `$ref` is a Channel Item *field*, so it coexists with the
+        // rest instead of replacing them.
+        let value = json!({
+            "channels": {
+                "user": { "$ref": "#/channels/other", "description": "d", "deprecated": true }
+            }
+        });
+        let components: Components = serde_json::from_value(value.clone()).unwrap();
+        let channel = &components.channels["user"];
+        assert_eq!(channel.reference.as_deref(), Some("#/channels/other"));
+        assert_eq!(channel.description.as_deref(), Some("d"));
+        assert!(channel.is_reference());
+        assert_eq!(serde_json::to_value(&components).unwrap(), value);
+    }
+
+    #[test]
+    fn a_schema_keeps_its_ref_siblings() {
+        let value = json!({
+            "schemas": {
+                "user": { "$ref": "#/components/schemas/base", "description": "d", "x-note": 1 }
+            }
+        });
+        let components: Components = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&components).unwrap(), value);
+    }
+
+    #[test]
     fn schemas_accept_the_boolean_form() {
         // `components.schemas: { "Never": false }` is a legal draft-07
         // schema map.
@@ -140,14 +172,25 @@ mod tests {
         let components: Components = serde_json::from_value(referenced.clone()).unwrap();
         assert_eq!(serde_json::to_value(&components).unwrap(), referenced);
 
-        // A `$ref` where the schema expects the object itself does not
-        // parse.
-        assert!(
-            serde_json::from_value::<Components>(json!({
-                "servers": { "s": { "$ref": "#/x" } }
-            }))
-            .is_err(),
-        );
+        // `servers`, `serverVariables` and `parameters` delegate to
+        // definitions that also allow a Reference, so those round-trip
+        // as references rather than collapsing to `{}`.
+        let delegated = json!({
+            "servers": { "s": { "$ref": "#/x" } },
+            "serverVariables": { "v": { "$ref": "#/x" } },
+            "parameters": { "p": { "$ref": "#/x" } }
+        });
+        let components: Components = serde_json::from_value(delegated.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&components).unwrap(), delegated);
+
+        // The trait and binding maps take the object itself, so a
+        // `$ref` there is not a reference — and a trait has no required
+        // field to reject it, which is exactly why the distinction is
+        // worth pinning.
+        let components: Components =
+            serde_json::from_value(json!({ "operationTraits": { "t": { "summary": "s" } } }))
+                .unwrap();
+        assert_eq!(components.operation_traits.len(), 1);
     }
 
     #[test]
