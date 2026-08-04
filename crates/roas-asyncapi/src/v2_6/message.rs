@@ -288,8 +288,11 @@ fn validate_headers(ctx: &mut Context, headers: &SubSchema) {
                 Some(SchemaType::Single(name)) if name != "object" => {
                     ctx.error_field("type", format!("must be `object`, not `{name}`"));
                 }
-                Some(SchemaType::Multiple(names)) if !names.iter().all(|name| name == "object") => {
-                    ctx.error_field("type", "must be `object`");
+                // `const: "object"` constrains the whole `type` value,
+                // so the list form cannot satisfy it — not even
+                // `["object"]`.
+                Some(SchemaType::Multiple(_)) => {
+                    ctx.error_field("type", "must be the string `object`, not a list");
                 }
                 _ => {}
             }
@@ -625,12 +628,16 @@ mod tests {
         assert!(errors_for(json!({ "headers": { "properties": {} } })).is_empty());
         assert!(errors_for(json!({ "headers": true })).is_empty());
 
-        // The list form must not admit anything but `object`.
-        assert!(
-            errors_for(json!({ "headers": { "type": ["object", "null"] } }))
-                .iter()
-                .any(|e| e.contains("headers.type: must be `object`"))
-        );
+        // The list form never satisfies `const: "object"`, not even
+        // when every member is `object`.
+        for headers in [json!(["object", "null"]), json!(["object"])] {
+            assert!(
+                errors_for(json!({ "headers": { "type": headers } }))
+                    .iter()
+                    .any(|e| e.contains("must be the string `object`, not a list")),
+                "{headers} must be rejected"
+            );
+        }
     }
 
     #[test]

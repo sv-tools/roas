@@ -74,67 +74,292 @@ pub struct Document {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-impl Document {
-    /// Resolve a channel entry, following document-local
-    /// `#/components/channels/…` references.
+/// What following a document-local pointer turned out to be.
+///
+/// The distinctions matter: an external terminus is accepted (this
+/// crate does not fetch other documents), while a local pointer that
+/// names nothing, revisits itself, or has a shape that cannot denote
+/// the kind of object expected is a document bug.
+#[derive(Debug)]
+pub(crate) enum Resolution<'a, T> {
+    /// Resolved to a concrete object in this document.
+    Found(&'a T),
+    /// The chain ends at a reference into another document.
+    External,
+    /// A local pointer that names nothing.
+    Missing,
+    /// The chain revisits a pointer it already followed.
+    Cycle,
+    /// A local pointer whose shape cannot denote this kind of object.
+    Unrecognized,
+}
+
+impl<'a, T> Resolution<'a, T> {
+    /// The object, if the pointer resolved inside this document.
     ///
-    /// Returns `None` for an external reference, one that names nothing,
-    /// or a cycle — none of which this crate can see through.
-    pub fn resolve_channel<'a>(&'a self, channel: &'a ChannelItem) -> Option<&'a ChannelItem> {
+    /// Takes `self` so the borrow is the document's, not this
+    /// `Resolution`'s — callers routinely resolve into a temporary.
+    pub(crate) fn found(self) -> Option<&'a T> {
+        match self {
+            Resolution::Found(item) => Some(item),
+            _ => None,
+        }
+    }
+
+    /// Why this pointer is a document bug, if it is one. `None` means
+    /// it resolved or left the document.
+    fn problem(&self) -> Option<&'static str> {
+        match self {
+            Resolution::Found(_) | Resolution::External => None,
+            Resolution::Missing => Some("names nothing in this document"),
+            Resolution::Cycle => Some("is part of a reference cycle"),
+            Resolution::Unrecognized => Some("does not point at an object of the expected kind"),
+        }
+    }
+}
+
+/// Whether a local pointer has the shape of a channel pointer, used to
+/// tell "names nothing" from "wrong kind entirely".
+fn channel_pointer_shape(pointer: &str) -> bool {
+    pointer.starts_with("/channels/") || pointer.starts_with("/components/channels/")
+}
+
+/// The same, for a message pointer.
+fn message_pointer_shape(pointer: &str) -> bool {
+    pointer.starts_with("/components/messages/") || pointer.starts_with("/channels/")
+}
+
+/// Split one RFC 6901 segment off a pointer, decoding its escapes.
+///
+/// `~1` is an encoded `/`, so `source/path` is *two* segments and
+/// cannot be one channel key — `source~1path` is how that key is
+/// spelled.
+fn split_segment(pointer: &str) -> (String, &str) {
+    let (segment, rest) = match pointer.find('/') {
+        Some(i) => (&pointer[..i], &pointer[i..]),
+        None => (pointer, ""),
+    };
+    (segment.replace("~1", "/").replace("~0", "~"), rest)
+}
+
+impl Document {
+    /// Resolve a channel item, following its `$ref` field through both
+    /// `#/channels/…` and `#/components/channels/…` pointers.
+    ///
+    /// An item without a `$ref` resolves to itself.
+    pub(crate) fn resolve_channel<'a>(
+        &'a self,
+        channel: &'a ChannelItem,
+    ) -> Resolution<'a, ChannelItem> {
         let mut current = channel;
-        // Follow the chain, stopping if it ever revisits a pointer —
-        // which also bounds the walk, so no separate hop limit is
-        // needed.
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         loop {
             let Some(reference) = current.reference.as_deref() else {
-                return Some(current);
+                return Resolution::Found(current);
             };
-            if !seen.insert(reference) {
-                return None;
+            let reference = Reference {
+                reference: reference.to_owned(),
+            };
+            if reference.is_external() {
+                return Resolution::External;
             }
-            current = self.channel_at(reference)?;
+            let Some(pointer) = reference.local_pointer() else {
+                return Resolution::Unrecognized;
+            };
+            if !seen.insert(current.reference.as_deref().unwrap_or_default()) {
+                return Resolution::Cycle;
+            }
+            match self.channel_at(pointer) {
+                Some(next) => current = next,
+                None => {
+                    return match channel_pointer_shape(pointer) {
+                        true => Resolution::Missing,
+                        false => Resolution::Unrecognized,
+                    };
+                }
+            }
         }
     }
 
-    /// The channel a document-local pointer names, whether it points
-    /// into the root `channels` map or into `components.channels`.
-    ///
-    /// Root channel keys are paths, so their pointers carry RFC 6901
-    /// escapes (`~1` for `/`), which [`Reference::local_key`] decodes.
-    fn channel_at(&self, reference: &str) -> Option<&ChannelItem> {
-        let reference = Reference {
-            reference: reference.to_owned(),
-        };
-        if let Some(key) = reference.component_key("channels") {
-            return self.components.as_ref()?.channels.get(&key);
+    /// The channel a document-local pointer names.
+    fn channel_at(&self, pointer: &str) -> Option<&ChannelItem> {
+        if let Some(rest) = pointer.strip_prefix("/components/channels/") {
+            let (key, rest) = split_segment(rest);
+            return rest
+                .is_empty()
+                .then(|| self.components.as_ref()?.channels.get(&key))?;
         }
-        let pointer = reference.local_pointer()?;
-        let key = pointer.strip_prefix("/channels/")?;
-        if key.is_empty() {
+        let rest = pointer.strip_prefix("/channels/")?;
+        let (key, rest) = split_segment(rest);
+        rest.is_empty().then(|| self.channels.get(&key))?
+    }
+
+    /// Whether a local pointer at least *looks* like it names a channel,
+    /// used to tell "names nothing" from "wrong kind entirely".
+    fn security_scheme_at(&self, name: &str) -> Resolution<'_, SecurityScheme> {
+        let Some(components) = self.components.as_ref() else {
+            return Resolution::Missing;
+        };
+        let Some(mut entry) = components.security_schemes.get(name) else {
+            return Resolution::Missing;
+        };
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        loop {
+            match entry {
+                RefOr::Item(scheme) => return Resolution::Found(scheme),
+                RefOr::Reference(reference) => {
+                    if reference.is_external() {
+                        return Resolution::External;
+                    }
+                    let Some(key) = reference.component_key("securitySchemes") else {
+                        return Resolution::Unrecognized;
+                    };
+                    if !seen.insert(key.clone()) {
+                        return Resolution::Cycle;
+                    }
+                    match components.security_schemes.get(&key) {
+                        Some(next) => entry = next,
+                        None => return Resolution::Missing,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve a `RefOr<Server>`, following `#/components/servers/…`.
+    fn resolve_server<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
+        let mut current = entry;
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        loop {
+            match current {
+                RefOr::Item(server) => return Resolution::Found(server),
+                RefOr::Reference(reference) => {
+                    if reference.is_external() {
+                        return Resolution::External;
+                    }
+                    let Some(key) = reference.component_key("servers") else {
+                        return Resolution::Unrecognized;
+                    };
+                    if !seen.insert(key.clone()) {
+                        return Resolution::Cycle;
+                    }
+                    match self.components.as_ref().and_then(|c| c.servers.get(&key)) {
+                        Some(next) => current = next,
+                        None => return Resolution::Missing,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve a message `$ref`, following component aliases and
+    /// pointers into a channel's operations.
+    fn resolve_message(&self, reference: &Reference) -> Resolution<'_, Message> {
+        let mut current = reference.clone();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        loop {
+            if current.is_external() {
+                return Resolution::External;
+            }
+            let Some(pointer) = current.local_pointer() else {
+                return Resolution::Unrecognized;
+            };
+            if !seen.insert(current.reference.clone()) {
+                return Resolution::Cycle;
+            }
+            match self.message_at(pointer) {
+                Some(RefOr::Item(message)) => return Resolution::Found(message),
+                Some(RefOr::Reference(next)) => current = next.clone(),
+                None => {
+                    return if message_pointer_shape(pointer) {
+                        Resolution::Missing
+                    } else {
+                        Resolution::Unrecognized
+                    };
+                }
+            }
+        }
+    }
+
+    /// The message entry a document-local pointer names — either a
+    /// component message or one hanging off a channel's operation.
+    fn message_at(&self, pointer: &str) -> Option<&RefOr<Message>> {
+        if let Some(rest) = pointer.strip_prefix("/components/messages/") {
+            let (key, rest) = split_segment(rest);
+            if !rest.is_empty() {
+                return None;
+            }
+            return self.components.as_ref()?.messages.get(&key);
+        }
+
+        // `#/channels/<path>/publish|subscribe/message[/oneOf/<i>]`
+        let rest = pointer.strip_prefix("/channels/")?;
+        let (key, rest) = split_segment(rest);
+        let channel = self.channels.get(&key)?;
+        let channel = self.resolve_channel(channel).found()?;
+        let (kind, rest) = split_segment(rest.strip_prefix('/')?);
+        let operation = match kind.as_str() {
+            "publish" => channel.publish.as_ref()?,
+            "subscribe" => channel.subscribe.as_ref()?,
+            _ => return None,
+        };
+        let (field, rest) = split_segment(rest.strip_prefix('/')?);
+        if field != "message" {
             return None;
         }
-        let key = key.replace("~1", "/").replace("~0", "~");
-        self.channels.get(&key)
+        let mut message = operation.message.as_ref()?;
+        let mut rest = rest;
+        // Walk any `oneOf/<index>` steps.
+        while !rest.is_empty() {
+            let (step, tail) = split_segment(rest.strip_prefix('/')?);
+            if step != "oneOf" {
+                return None;
+            }
+            let (index, tail) = split_segment(tail.strip_prefix('/')?);
+            let index: usize = index.parse().ok()?;
+            let OperationMessage::OneOf(one_of) = message else {
+                return None;
+            };
+            message = one_of.one_of.get(index)?;
+            rest = tail;
+        }
+        match message {
+            OperationMessage::Single(single) => Some(single.as_ref()),
+            OperationMessage::OneOf(_) => None,
+        }
     }
 
     /// Every operation in the document, with the channel path and the
-    /// half it came from. Channels that are a document-local `$ref` are
-    /// resolved first.
+    /// half it came from.
+    ///
+    /// A channel item contributes its own operations *and* those of the
+    /// channel it references, since `$ref` siblings are preserved here
+    /// rather than discarded.
     pub fn operations(&self) -> Vec<(&str, OperationKind, &Operation)> {
         let mut found = Vec::new();
         for (path, channel) in &self.channels {
-            let Some(channel) = self.resolve_channel(channel) else {
-                continue;
-            };
-            if let Some(operation) = &channel.publish {
-                found.push((path.as_str(), OperationKind::Publish, operation));
-            }
-            if let Some(operation) = &channel.subscribe {
-                found.push((path.as_str(), OperationKind::Subscribe, operation));
+            for item in self.channel_and_target(channel) {
+                if let Some(operation) = &item.publish {
+                    found.push((path.as_str(), OperationKind::Publish, operation));
+                }
+                if let Some(operation) = &item.subscribe {
+                    found.push((path.as_str(), OperationKind::Subscribe, operation));
+                }
             }
         }
         found
+    }
+
+    /// A channel item together with the item it references, when that
+    /// resolves to a *different* object.
+    fn channel_and_target<'a>(&'a self, channel: &'a ChannelItem) -> Vec<&'a ChannelItem> {
+        let mut items = vec![channel];
+        if let Some(target) = self.resolve_channel(channel).found()
+            && !std::ptr::eq(target, channel)
+        {
+            items.push(target);
+        }
+        items
     }
 
     /// Every message the document declares, inline or in `components`,
@@ -171,48 +396,18 @@ impl Document {
         found
     }
 
-    /// The security scheme declared under `components.securitySchemes`,
-    /// following a document-local `$ref` so a referenced scheme is
-    /// judged by its real type.
-    fn security_scheme(&self, name: &str) -> Option<&SecurityScheme> {
-        let mut entry = self.components.as_ref()?.security_schemes.get(name)?;
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        loop {
-            match entry {
-                RefOr::Item(scheme) => return Some(scheme),
-                RefOr::Reference(reference) => {
-                    let key = reference.component_key("securitySchemes")?;
-                    if !seen.insert(key.clone()) {
-                        return None;
-                    }
-                    entry = self.components.as_ref()?.security_schemes.get(&key)?;
-                }
-            }
-        }
-    }
-
-    /// Check that a document-local message `$ref` lands on a declared
-    /// component message.
+    /// Check that a message `$ref` resolves inside this document.
     fn validate_message_refs(&self, ctx: &mut Context, message: &OperationMessage) {
         match message {
             OperationMessage::Single(single) => {
-                if let RefOr::Reference(reference) = single.as_ref() {
-                    if reference.is_external() || reference.reference.is_empty() {
-                        return;
-                    }
-                    let declared = reference
-                        .component_key("messages")
-                        .and_then(|key| Some(self.components.as_ref()?.messages.contains_key(&key)))
-                        .unwrap_or(false);
-                    if !declared {
-                        ctx.error_field(
-                            "$ref",
-                            format!(
-                                "message `{}` is not declared in `components.messages`",
-                                reference.reference
-                            ),
-                        );
-                    }
+                if let RefOr::Reference(reference) = single.as_ref()
+                    && !reference.reference.is_empty()
+                    && let Some(problem) = self.resolve_message(reference).problem()
+                {
+                    ctx.error_field(
+                        "$ref",
+                        format!("message `{}` {problem}", reference.reference),
+                    );
                 }
             }
             OperationMessage::OneOf(one_of) => {
@@ -225,27 +420,29 @@ impl Document {
         }
     }
 
-    /// Whether `components.securitySchemes` names `name` at all — a
-    /// `$ref`'d entry counts as declared even though it cannot be
-    /// inspected.
-    fn declares_security_scheme(&self, name: &str) -> bool {
-        self.components
-            .as_ref()
-            .is_some_and(|c| c.security_schemes.contains_key(name))
-    }
-
-    /// Check that every requirement names a declared scheme, and lists
-    /// scopes only where the scheme's type allows them.
+    /// Check that every requirement names a scheme that resolves, and
+    /// lists scopes only where that scheme's type allows them.
     fn validate_security(&self, ctx: &mut Context, field: &str, security: &[SecurityRequirement]) {
         for (i, requirement) in security.iter().enumerate() {
             for (name, scopes) in &requirement.0 {
-                if !self.declares_security_scheme(name) {
+                let declared = self
+                    .components
+                    .as_ref()
+                    .is_some_and(|c| c.security_schemes.contains_key(name));
+                if !declared {
                     ctx.in_index(field, i, |ctx| {
                         ctx.error_field(name, "is not declared in `components.securitySchemes`");
                     });
                     continue;
                 }
-                if let Some(scheme) = self.security_scheme(name)
+                let resolution = self.security_scheme_at(name);
+                if let Some(problem) = resolution.problem() {
+                    ctx.in_index(field, i, |ctx| {
+                        ctx.error_field(name, problem);
+                    });
+                    continue;
+                }
+                if let Some(scheme) = resolution.found()
                     && !scopes.is_empty()
                     && !scheme.scheme_type.takes_scopes()
                 {
@@ -279,10 +476,35 @@ impl Document {
         for (name, server) in &self.servers {
             ctx.in_key("servers", name, |ctx| {
                 server.validate_with_context(ctx);
-                if let Some(server) = server.item() {
+                // Follow a `$ref` so a referenced server's security is
+                // checked as well as an inline one's.
+                let resolution = self.resolve_server(server);
+                if let Some(problem) = resolution.problem()
+                    && let RefOr::Reference(reference) = server
+                {
+                    ctx.error_field(
+                        "$ref",
+                        format!("server `{}` {problem}", reference.reference),
+                    );
+                }
+                if let Some(server) = resolution.found() {
                     self.validate_security(ctx, "security", &server.security);
                 }
             });
+        }
+
+        // Component servers are reachable only through a `$ref`, so
+        // their own security requirements are checked here.
+        if let Some(components) = &self.components {
+            for (name, server) in &components.servers {
+                if let Some(server) = server.item() {
+                    ctx.in_key("components", "servers", |ctx| {
+                        ctx.in_field(name, |ctx| {
+                            self.validate_security(ctx, "security", &server.security);
+                        });
+                    });
+                }
+            }
         }
 
         for (path, channel) in &self.channels {
@@ -295,26 +517,26 @@ impl Document {
                 // *resolved* item's parameters are what this path's
                 // placeholders must match.
                 channel.validate_with_context(ctx);
-                match self.resolve_channel(channel) {
-                    Some(resolved) => resolved.validate_against_path(ctx, path),
-                    None => {
-                        if let Some(reference) = channel.reference.as_deref() {
-                            let reference = Reference {
-                                reference: reference.to_owned(),
-                            };
-                            if !reference.is_external() && !reference.reference.is_empty() {
-                                ctx.error_field(
-                                    "$ref",
-                                    format!(
-                                        "`{}` does not resolve to a declared channel",
-                                        reference.reference
-                                    ),
-                                );
-                            }
+                let resolution = self.resolve_channel(channel);
+                match &resolution {
+                    Resolution::Found(resolved) => resolved.validate_against_path(ctx, path),
+                    // An external terminus is accepted; anything else
+                    // local is a document bug.
+                    other => {
+                        if let Some(problem) = other.problem()
+                            && let Some(reference) = channel.reference.as_deref()
+                            && !reference.is_empty()
+                        {
+                            ctx.error_field("$ref", format!("channel `{reference}` {problem}"));
                         }
+                        // The item's own parameters still answer to the
+                        // path it is keyed by.
+                        channel.validate_against_path(ctx, path);
                     }
                 }
-                if let Some(item) = self.resolve_channel(channel) {
+                // `$ref` siblings are preserved, so the item as written
+                // is checked as well as the channel it references.
+                for item in self.channel_and_target(channel) {
                     // A channel's servers are plain names into `servers`.
                     for (i, server) in item.servers.iter().enumerate() {
                         if !server.is_empty() && !self.servers.contains_key(server) {
@@ -570,7 +792,7 @@ mod tests {
         assert!(
             errors_for(value)
                 .iter()
-                .any(|e| e.contains("does not resolve to a declared channel")),
+                .any(|e| e.contains("names nothing in this document")),
         );
     }
 
@@ -590,7 +812,7 @@ mod tests {
             }
         });
         let doc: Document = serde_json::from_value(value).unwrap();
-        assert!(doc.resolve_channel(&doc.channels["user"]).is_none());
+        assert!(doc.resolve_channel(&doc.channels["user"]).found().is_none());
         assert!(doc.operations().is_empty());
         // Validation still terminates and reports the unresolvable ref.
         let _ = doc.validate(EnumSet::empty());
@@ -687,9 +909,9 @@ mod tests {
         value["channels"] = json!({
             "user": { "publish": { "message": { "$ref": "#/components/messages/missing" } } }
         });
-        assert!(errors_for(value).iter().any(|e| e.contains(
-            "message `#/components/messages/missing` is not declared in `components.messages`"
-        )),);
+        assert!(errors_for(value).iter().any(|e| {
+            e.contains("message `#/components/messages/missing` names nothing in this document")
+        }),);
 
         // Declared is fine; external is left alone; `oneOf` members are
         // checked individually.
@@ -723,7 +945,11 @@ mod tests {
             }
         });
         let doc: Document = serde_json::from_value(value.clone()).unwrap();
-        assert!(doc.resolve_channel(&doc.channels["alias"]).is_some());
+        assert!(
+            doc.resolve_channel(&doc.channels["alias"])
+                .found()
+                .is_some()
+        );
         // Both the target and the alias contribute their operation, so
         // the duplicate `operationId` is reported.
         assert_eq!(doc.operations().len(), 2);
@@ -732,6 +958,341 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("duplicate operationId `handle`")),
         );
+    }
+
+    #[test]
+    fn ref_siblings_are_validated_as_well_as_the_target() {
+        // A `$ref` sibling survives serialization, so it is checked
+        // too: this item's own `servers` names nothing, and its own
+        // operation joins the target's.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": { "production": { "url": "kafka://e", "protocol": "kafka" } },
+            "channels": {
+                "user": {
+                    "$ref": "#/components/channels/target",
+                    "servers": ["missing"],
+                    "publish": { "operationId": "own" }
+                }
+            },
+            "components": {
+                "channels": { "target": { "subscribe": { "operationId": "target" } } }
+            }
+        });
+        let doc: Document = serde_json::from_value(value.clone()).unwrap();
+        let ids: Vec<_> = doc
+            .operations()
+            .iter()
+            .filter_map(|(_, _, op)| op.operation_id.as_deref())
+            .collect();
+        assert!(
+            ids.contains(&"own"),
+            "the item's own operation counts: {ids:?}"
+        );
+        assert!(ids.contains(&"target"), "so does the target's: {ids:?}");
+
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("server `missing` is not declared")),
+            "a sibling `servers` list is still checked",
+        );
+    }
+
+    #[test]
+    fn a_message_pointer_into_a_channel_operation_resolves() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": { "publish": { "message": { "name": "S" } } },
+                "target": {
+                    "subscribe": { "message": { "$ref": "#/channels/source/publish/message" } }
+                }
+            }
+        });
+        assert!(
+            errors_for(value).is_empty(),
+            "a legal local pointer must resolve"
+        );
+
+        // …including into a `oneOf` member.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": {
+                    "publish": { "message": { "oneOf": [ { "name": "A" }, { "name": "B" } ] } }
+                },
+                "target": {
+                    "subscribe": {
+                        "message": { "$ref": "#/channels/source/publish/message/oneOf/1" }
+                    }
+                }
+            }
+        });
+        assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn a_message_alias_chain_must_terminate_somewhere_real() {
+        // components alias → missing target.
+        let mut value = minimal();
+        value["components"] = json!({
+            "messages": { "alias": { "$ref": "#/components/messages/missing" } }
+        });
+        value["channels"] = json!({
+            "user": { "publish": { "message": { "$ref": "#/components/messages/alias" } } }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("names nothing in this document")),
+            "an alias to a missing message must be reported",
+        );
+
+        // A cycle terminates and is named as one.
+        let mut value = minimal();
+        value["components"] = json!({
+            "messages": {
+                "a": { "$ref": "#/components/messages/b" },
+                "b": { "$ref": "#/components/messages/a" }
+            }
+        });
+        value["channels"] = json!({
+            "user": { "publish": { "message": { "$ref": "#/components/messages/a" } } }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("is part of a reference cycle")),
+        );
+    }
+
+    #[test]
+    fn a_dangling_security_alias_is_reported() {
+        let mut value = minimal();
+        value["components"] = json!({
+            "securitySchemes": { "alias": { "$ref": "#/components/securitySchemes/missing" } }
+        });
+        value["channels"] = json!({
+            "user": { "publish": { "security": [ { "alias": [] } ] } }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("names nothing in this document")),
+            "an alias that resolves to nothing must not count as declared",
+        );
+
+        // A cyclic alias likewise.
+        let mut value = minimal();
+        value["components"] = json!({
+            "securitySchemes": {
+                "a": { "$ref": "#/components/securitySchemes/b" },
+                "b": { "$ref": "#/components/securitySchemes/a" }
+            }
+        });
+        value["channels"] = json!({ "user": { "publish": { "security": [ { "a": [] } ] } } });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("is part of a reference cycle")),
+        );
+    }
+
+    #[test]
+    fn a_chain_ending_outside_the_document_is_accepted() {
+        // root alias → component channel → external `$ref`.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "alias": { "$ref": "#/components/channels/hop" } },
+            "components": {
+                "channels": { "hop": { "$ref": "./other.yaml#/channels/real" } }
+            }
+        });
+        assert!(
+            errors_for(value).is_empty(),
+            "an external terminus is not a document bug",
+        );
+    }
+
+    #[test]
+    fn a_referenced_server_still_has_its_security_checked() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "servers": { "prod": { "$ref": "#/components/servers/real" } },
+            "components": {
+                "servers": {
+                    "real": {
+                        "url": "kafka://e",
+                        "protocol": "kafka",
+                        "security": [ { "missing": [] } ]
+                    }
+                }
+            }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("is not declared in `components.securitySchemes`")),
+            "a referenced server's security must be checked",
+        );
+    }
+
+    #[test]
+    fn a_root_channel_pointer_must_escape_its_separators() {
+        // `#/channels/source/path` is two segments, so it cannot name
+        // the key `source/path` — RFC 6901 wants `source~1path`.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source/path": { "publish": {} },
+                "alias": { "$ref": "#/channels/source/path" }
+            }
+        });
+        let doc: Document = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            doc.resolve_channel(&doc.channels["alias"])
+                .found()
+                .is_none()
+        );
+        assert!(
+            !errors_for(value).is_empty(),
+            "the unescaped pointer must be reported"
+        );
+
+        // The escaped spelling resolves.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source/path": { "publish": {} },
+                "alias": { "$ref": "#/channels/source~1path" }
+            }
+        });
+        assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn pointers_of_the_wrong_kind_are_told_apart_from_missing_ones() {
+        // A local pointer that cannot denote a channel at all.
+        let mut value = minimal();
+        value["channels"] = json!({ "user": { "$ref": "#/components/schemas/thing" } });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+
+        // …and the same for a message.
+        let mut value = minimal();
+        value["channels"] = json!({
+            "user": { "publish": { "message": { "$ref": "#/components/schemas/thing" } } }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+    }
+
+    #[test]
+    fn external_aliases_terminate_every_resolver() {
+        // Security scheme, server, and message chains that leave the
+        // document are all accepted.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": { "prod": { "$ref": "#/components/servers/hop" } },
+            "channels": {
+                "user": {
+                    "publish": {
+                        "security": [ { "alias": [] } ],
+                        "message": { "$ref": "#/components/messages/hop" }
+                    }
+                }
+            },
+            "components": {
+                "servers": { "hop": { "$ref": "./other.yaml#/servers/real" } },
+                "securitySchemes": { "alias": { "$ref": "./other.yaml#/schemes/real" } },
+                "messages": { "hop": { "$ref": "./other.yaml#/messages/real" } }
+            }
+        });
+        assert!(
+            errors_for(value).is_empty(),
+            "external termini are accepted"
+        );
+    }
+
+    #[test]
+    fn server_aliases_are_resolved_like_the_others() {
+        // Missing target.
+        let mut value = minimal();
+        value["servers"] = json!({ "prod": { "$ref": "#/components/servers/ghost" } });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("names nothing in this document")),
+        );
+
+        // Wrong kind of pointer.
+        let mut value = minimal();
+        value["servers"] = json!({ "prod": { "$ref": "#/components/schemas/thing" } });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+
+        // Cycle.
+        let mut value = minimal();
+        value["servers"] = json!({ "prod": { "$ref": "#/components/servers/a" } });
+        value["components"] = json!({
+            "servers": {
+                "a": { "$ref": "#/components/servers/b" },
+                "b": { "$ref": "#/components/servers/a" }
+            }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("is part of a reference cycle")),
+        );
+    }
+
+    #[test]
+    fn message_pointers_into_channels_reject_every_wrong_step() {
+        let base = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": {
+                    "publish": { "message": { "oneOf": [ { "name": "A" } ] } },
+                    "subscribe": { "message": { "name": "S" } }
+                },
+                "target": { "subscribe": {} }
+            }
+        });
+        for pointer in [
+            "#/channels/ghost/publish/message",            // no such channel
+            "#/channels/source/deliver/message",           // no such operation half
+            "#/channels/source/publish/payload",           // not the message field
+            "#/channels/source/publish/message/oneOf/9",   // index past the end
+            "#/channels/source/publish/message/oneOf/x",   // non-numeric index
+            "#/channels/source/publish/message/anyOf/0",   // not a oneOf step
+            "#/channels/source/subscribe/message/oneOf/0", // not a set at all
+            "#/channels/source/publish/message",           // terminates on a set
+        ] {
+            let mut value = base.clone();
+            value["channels"]["target"]["subscribe"]["message"] = json!({ "$ref": pointer });
+            assert!(!errors_for(value).is_empty(), "{pointer} must not resolve");
+        }
     }
 
     #[test]
