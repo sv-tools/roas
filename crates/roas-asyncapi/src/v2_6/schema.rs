@@ -289,7 +289,7 @@ pub struct Schema {
     pub discriminator: Option<String>,
 
     #[serde(rename = "externalDocs", skip_serializing_if = "Option::is_none")]
-    pub external_docs: Option<RefOr<ExternalDocumentation>>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<bool>,

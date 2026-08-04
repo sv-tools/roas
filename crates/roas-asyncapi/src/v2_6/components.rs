@@ -4,6 +4,11 @@
 //!
 //! 2.6 holds fourteen maps; v3 added `operations`, `replies`,
 //! `replyAddresses`, `tags`, and `externalDocs` to that set.
+//!
+//! Only `messages`, `securitySchemes`, and `correlationIds` accept a
+//! `$ref` in place of the object — the other maps are typed directly,
+//! matching the schema field by field. `schemas` uses [`SubSchema`]
+//! because draft-07 allows a boolean where a schema is expected.
 
 use crate::common::bindings::Bindings;
 use crate::common::reference::RefOr;
@@ -12,7 +17,7 @@ use crate::v2_6::correlation_id::CorrelationId;
 use crate::v2_6::message::{Message, MessageTrait};
 use crate::v2_6::operation::OperationTrait;
 use crate::v2_6::parameter::Parameter;
-use crate::v2_6::schema::Schema;
+use crate::v2_6::schema::SubSchema;
 use crate::v2_6::security_scheme::SecurityScheme;
 use crate::v2_6::server::{Server, ServerVariable};
 use crate::validation::{Context, ValidateWithContext};
@@ -49,20 +54,20 @@ macro_rules! component_maps {
 }
 
 component_maps! {
-    schemas: RefOr<Schema> => "schemas",
-    servers: RefOr<Server> => "servers",
+    schemas: SubSchema => "schemas",
+    servers: Server => "servers",
     channels: RefOr<ChannelItem> => "channels",
-    server_variables: RefOr<ServerVariable> => "serverVariables",
+    server_variables: ServerVariable => "serverVariables",
     messages: RefOr<Message> => "messages",
     security_schemes: RefOr<SecurityScheme> => "securitySchemes",
-    parameters: RefOr<Parameter> => "parameters",
+    parameters: Parameter => "parameters",
     correlation_ids: RefOr<CorrelationId> => "correlationIds",
-    operation_traits: RefOr<OperationTrait> => "operationTraits",
-    message_traits: RefOr<MessageTrait> => "messageTraits",
-    server_bindings: RefOr<Bindings> => "serverBindings",
-    channel_bindings: RefOr<Bindings> => "channelBindings",
-    operation_bindings: RefOr<Bindings> => "operationBindings",
-    message_bindings: RefOr<Bindings> => "messageBindings",
+    operation_traits: OperationTrait => "operationTraits",
+    message_traits: MessageTrait => "messageTraits",
+    server_bindings: Bindings => "serverBindings",
+    channel_bindings: Bindings => "channelBindings",
+    operation_bindings: Bindings => "operationBindings",
+    message_bindings: Bindings => "messageBindings",
 }
 
 #[cfg(test)]
@@ -111,6 +116,38 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(serde_json::to_value(&components).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn schemas_accept_the_boolean_form() {
+        // `components.schemas: { "Never": false }` is a legal draft-07
+        // schema map.
+        let value = json!({ "schemas": { "Never": false, "Any": true } });
+        let components: Components = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(components.schemas.len(), 2);
+        assert_eq!(serde_json::to_value(&components).unwrap(), value);
+    }
+
+    #[test]
+    fn only_the_maps_the_schema_allows_take_a_reference() {
+        // `messages`, `securitySchemes` and `correlationIds` are
+        // `oneOf: [Reference, …]`; the rest are typed directly.
+        let referenced = json!({
+            "messages": { "a": { "$ref": "#/components/messages/b" } },
+            "securitySchemes": { "s": { "$ref": "#/x" } },
+            "correlationIds": { "c": { "$ref": "#/x" } }
+        });
+        let components: Components = serde_json::from_value(referenced.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&components).unwrap(), referenced);
+
+        // A `$ref` where the schema expects the object itself does not
+        // parse.
+        assert!(
+            serde_json::from_value::<Components>(json!({
+                "servers": { "s": { "$ref": "#/x" } }
+            }))
+            .is_err(),
+        );
     }
 
     #[test]

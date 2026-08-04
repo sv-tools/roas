@@ -68,11 +68,11 @@ pub struct Operation {
 
     /// Additional external documentation for this operation.
     #[serde(rename = "externalDocs", skip_serializing_if = "Option::is_none")]
-    pub external_docs: Option<RefOr<ExternalDocumentation>>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// Protocol-specific definitions for the operation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<Bindings>,
 
     /// Traits to apply to the operation. Validated but not merged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -97,9 +97,7 @@ impl ValidateWithContext for Operation {
         for (i, requirement) in self.security.iter().enumerate() {
             ctx.in_index("security", i, |ctx| requirement.validate_with_context(ctx));
         }
-        for (i, tag) in self.tags.iter().enumerate() {
-            ctx.in_index("tags", i, |ctx| tag.validate_with_context(ctx));
-        }
+        crate::v2_6::message::validate_tags(ctx, &self.tags);
         if let Some(docs) = &self.external_docs {
             ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }
@@ -136,10 +134,10 @@ pub struct OperationTrait {
     pub tags: Vec<Tag>,
 
     #[serde(rename = "externalDocs", skip_serializing_if = "Option::is_none")]
-    pub external_docs: Option<RefOr<ExternalDocumentation>>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<Bindings>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
@@ -156,9 +154,7 @@ impl ValidateWithContext for OperationTrait {
         for (i, requirement) in self.security.iter().enumerate() {
             ctx.in_index("security", i, |ctx| requirement.validate_with_context(ctx));
         }
-        for (i, tag) in self.tags.iter().enumerate() {
-            ctx.in_index("tags", i, |ctx| tag.validate_with_context(ctx));
-        }
+        crate::v2_6::message::validate_tags(ctx, &self.tags);
         if let Some(docs) = &self.external_docs {
             ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }

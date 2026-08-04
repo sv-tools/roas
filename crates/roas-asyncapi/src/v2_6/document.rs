@@ -13,6 +13,7 @@ use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
 use crate::v2_6::external_documentation::ExternalDocumentation;
 use crate::v2_6::info::Info;
+use crate::v2_6::message::{Message, OperationMessage};
 use crate::v2_6::operation::{Operation, OperationKind};
 use crate::v2_6::security_scheme::{SecurityRequirement, SecurityScheme};
 use crate::v2_6::server::Server;
@@ -61,7 +62,7 @@ pub struct Document {
 
     /// Additional external documentation. v3 moved this under `info`.
     #[serde(rename = "externalDocs", skip_serializing_if = "Option::is_none")]
-    pub external_docs: Option<RefOr<ExternalDocumentation>>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// `x-`-prefixed Specification Extensions on the root.
     #[serde(flatten)]
@@ -70,13 +71,47 @@ pub struct Document {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+/// How many `$ref` hops to follow before declaring a cycle. Component
+/// channels referencing each other is legal but pointless, so the bound
+/// only needs to be past any sane document.
+const MAX_REF_DEPTH: usize = 32;
+
 impl Document {
+    /// Resolve a channel entry, following document-local
+    /// `#/components/channels/…` references.
+    ///
+    /// Returns `None` for an external reference, one that names nothing,
+    /// or a cycle — none of which this crate can see through.
+    pub fn resolve_channel<'a>(
+        &'a self,
+        channel: &'a RefOr<ChannelItem>,
+    ) -> Option<&'a ChannelItem> {
+        let mut current = channel;
+        // A component channel may itself be a `$ref`, so follow the
+        // chain — and stop if it ever revisits a key.
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for _ in 0..MAX_REF_DEPTH {
+            match current {
+                RefOr::Item(item) => return Some(item),
+                RefOr::Reference(reference) => {
+                    let key = reference.component_key("channels")?;
+                    if !seen.insert(key.clone()) {
+                        return None;
+                    }
+                    current = self.components.as_ref()?.channels.get(&key)?;
+                }
+            }
+        }
+        None
+    }
+
     /// Every operation in the document, with the channel path and the
-    /// half it came from.
+    /// half it came from. Channels that are a document-local `$ref` are
+    /// resolved first.
     pub fn operations(&self) -> Vec<(&str, OperationKind, &Operation)> {
         let mut found = Vec::new();
         for (path, channel) in &self.channels {
-            let Some(channel) = channel.item() else {
+            let Some(channel) = self.resolve_channel(channel) else {
                 continue;
             };
             if let Some(operation) = &channel.publish {
@@ -84,6 +119,40 @@ impl Document {
             }
             if let Some(operation) = &channel.subscribe {
                 found.push((path.as_str(), OperationKind::Subscribe, operation));
+            }
+        }
+        found
+    }
+
+    /// Every message the document declares, inline or in `components`,
+    /// walking through `oneOf` sets.
+    fn messages(&self) -> Vec<&Message> {
+        fn collect<'a>(message: &'a OperationMessage, found: &mut Vec<&'a Message>) {
+            match message {
+                OperationMessage::Single(single) => {
+                    if let Some(message) = single.item() {
+                        found.push(message);
+                    }
+                }
+                OperationMessage::OneOf(one_of) => {
+                    for alternative in &one_of.one_of {
+                        collect(alternative, found);
+                    }
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        if let Some(components) = &self.components {
+            for message in components.messages.values() {
+                if let Some(message) = message.item() {
+                    found.push(message);
+                }
+            }
+        }
+        for (_, _, operation) in self.operations() {
+            if let Some(message) = &operation.message {
+                collect(message, &mut found);
             }
         }
         found
@@ -161,10 +230,27 @@ impl Document {
             }
             ctx.in_key("channels", path, |ctx| {
                 match channel {
-                    RefOr::Reference(reference) => reference.validate_with_context(ctx),
+                    RefOr::Reference(reference) => {
+                        reference.validate_with_context(ctx);
+                        // A local `$ref` resolves, so the target's
+                        // parameters are still checked against this
+                        // path — the placeholders belong to the key,
+                        // not to the referenced item.
+                        if let Some(item) = self.resolve_channel(channel) {
+                            item.validate_against_path(ctx, path);
+                        } else if !reference.is_external() && !reference.reference.is_empty() {
+                            ctx.error_field(
+                                "$ref",
+                                format!(
+                                    "`{}` does not resolve to a declared channel",
+                                    reference.reference
+                                ),
+                            );
+                        }
+                    }
                     RefOr::Item(item) => item.validate_against_path(ctx, path),
                 }
-                if let Some(item) = channel.item() {
+                if let Some(item) = self.resolve_channel(channel) {
                     // A channel's servers are plain names into `servers`.
                     for (i, server) in item.servers.iter().enumerate() {
                         if !server.is_empty() && !self.servers.contains_key(server) {
@@ -215,29 +301,23 @@ impl Document {
             }
         }
 
-        // The same uniqueness rule applies to `messageId`.
+        // The same uniqueness rule applies to `messageId`, across
+        // every message in the document — component *and* inline,
+        // including the members of a `oneOf` set.
         let mut message_ids: BTreeSet<&str> = BTreeSet::new();
-        if let Some(components) = &self.components {
-            for (key, message) in &components.messages {
-                let Some(message) = message.item() else {
-                    continue;
-                };
-                let Some(message_id) = message.message_id.as_deref() else {
-                    continue;
-                };
-                if !message_id.is_empty() && !message_ids.insert(message_id) {
-                    ctx.in_key("components", "messages", |ctx| {
-                        ctx.in_key(key, "messageId", |ctx| {
-                            ctx.error(format!("duplicate messageId `{message_id}`"));
-                        });
-                    });
-                }
+        for message in self.messages() {
+            let Some(message_id) = message.message_id.as_deref() else {
+                continue;
+            };
+            if !message_id.is_empty() && !message_ids.insert(message_id) {
+                ctx.error_field(
+                    "messageId",
+                    format!("duplicate messageId `{message_id}` in the document"),
+                );
             }
         }
 
-        for (i, tag) in self.tags.iter().enumerate() {
-            ctx.in_index("tags", i, |ctx| tag.validate_with_context(ctx));
-        }
+        crate::v2_6::message::validate_tags(&mut ctx, &self.tags);
         if let Some(docs) = &self.external_docs {
             ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }
@@ -380,7 +460,83 @@ mod tests {
     }
 
     #[test]
-    fn message_ids_must_be_unique() {
+    fn a_local_channel_reference_is_resolved_for_document_checks() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": { "production": { "url": "kafka://e", "protocol": "kafka" } },
+            "channels": {
+                "user/{userId}": { "$ref": "#/components/channels/user" }
+            },
+            "components": {
+                "channels": {
+                    "user": {
+                        "servers": ["staging"],
+                        "publish": { "operationId": "handle" }
+                    }
+                }
+            }
+        });
+        let errors = errors_for(value);
+        // The referenced channel's server list is checked…
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("server `staging` is not declared")),
+            "got: {errors:?}"
+        );
+        // …and its parameters are checked against *this* path.
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("`{userId}` in the channel path is not declared")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_local_channel_reference_that_names_nothing_is_reported() {
+        let mut value = minimal();
+        value["channels"] = json!({ "user": { "$ref": "#/components/channels/ghost" } });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not resolve to a declared channel")),
+        );
+    }
+
+    #[test]
+    fn a_channel_reference_cycle_terminates() {
+        // Two component channels pointing at each other must not hang
+        // the resolver.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "user": { "$ref": "#/components/channels/a" } },
+            "components": {
+                "channels": {
+                    "a": { "$ref": "#/components/channels/b" },
+                    "b": { "$ref": "#/components/channels/a" }
+                }
+            }
+        });
+        let doc: Document = serde_json::from_value(value).unwrap();
+        assert!(doc.resolve_channel(&doc.channels["user"]).is_none());
+        assert!(doc.operations().is_empty());
+        // Validation still terminates and reports the unresolvable ref.
+        let _ = doc.validate(EnumSet::empty());
+    }
+
+    #[test]
+    fn an_external_channel_reference_is_left_alone() {
+        let mut value = minimal();
+        value["channels"] = json!({ "user": { "$ref": "./channels.yaml#/user" } });
+        assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn message_ids_must_be_unique_across_the_whole_document() {
+        // Two component messages…
         let mut value = minimal();
         value["components"] = json!({
             "messages": {
@@ -388,12 +544,68 @@ mod tests {
                 "b": { "messageId": "signup" }
             }
         });
-        let errors = errors_for(value);
         assert!(
-            errors
+            errors_for(value)
                 .iter()
                 .any(|e| e.contains("duplicate messageId `signup`")),
-            "got: {errors:?}"
+        );
+
+        // …a component message and an inline one…
+        let mut value = minimal();
+        value["components"] = json!({ "messages": { "a": { "messageId": "signup" } } });
+        value["channels"] = json!({
+            "user": { "publish": { "message": { "messageId": "signup" } } }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("duplicate messageId `signup`")),
+            "an inline message must collide with a component one",
+        );
+
+        // …and two inline messages inside a `oneOf` set.
+        let mut value = minimal();
+        value["channels"] = json!({
+            "user": {
+                "publish": {
+                    "message": {
+                        "oneOf": [ { "messageId": "dup" }, { "messageId": "dup" } ]
+                    }
+                }
+            }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("duplicate messageId `dup`")),
+            "oneOf members must be walked",
+        );
+
+        // Distinct ids are fine.
+        let mut value = minimal();
+        value["channels"] = json!({
+            "user": {
+                "publish": { "message": { "oneOf": [ { "messageId": "a" }, { "messageId": "b" } ] } }
+            }
+        });
+        assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn root_tags_must_be_unique_and_external_docs_takes_no_reference() {
+        let mut value = minimal();
+        value["tags"] = json!([ { "name": "a" }, { "name": "a" } ]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e == "#.tags[1]: duplicate tag"),
+        );
+
+        let mut value = minimal();
+        value["externalDocs"] = json!({ "$ref": "#/anything" });
+        assert!(
+            serde_json::from_value::<Document>(value).is_err(),
+            "2.6 requires a concrete External Documentation Object",
         );
     }
 

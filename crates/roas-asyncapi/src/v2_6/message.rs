@@ -14,11 +14,69 @@ use crate::common::bindings::Bindings;
 use crate::common::reference::RefOr;
 use crate::v2_6::correlation_id::CorrelationId;
 use crate::v2_6::external_documentation::ExternalDocumentation;
-use crate::v2_6::schema::Schema;
+use crate::v2_6::schema::SubSchema;
 use crate::v2_6::tag::Tag;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
+
+/// The `schemaFormat` values that make a payload an AsyncAPI Schema
+/// Object — the document's own dialect in each of its three flavors,
+/// for every 2.x version.
+///
+/// When `schemaFormat` is absent it defaults to this dialect too, so a
+/// payload is a Schema Object unless the message names some *other*
+/// format (Avro, OpenAPI, RAML, draft-07 …), in which case its shape is
+/// that format's business and the payload stays raw JSON.
+pub const ASYNCAPI_SCHEMA_FORMATS: &[&str] = &[
+    "application/vnd.aai.asyncapi;version=2.0.0",
+    "application/vnd.aai.asyncapi;version=2.1.0",
+    "application/vnd.aai.asyncapi;version=2.2.0",
+    "application/vnd.aai.asyncapi;version=2.3.0",
+    "application/vnd.aai.asyncapi;version=2.4.0",
+    "application/vnd.aai.asyncapi;version=2.5.0",
+    "application/vnd.aai.asyncapi;version=2.6.0",
+    "application/vnd.aai.asyncapi+json;version=2.0.0",
+    "application/vnd.aai.asyncapi+json;version=2.1.0",
+    "application/vnd.aai.asyncapi+json;version=2.2.0",
+    "application/vnd.aai.asyncapi+json;version=2.3.0",
+    "application/vnd.aai.asyncapi+json;version=2.4.0",
+    "application/vnd.aai.asyncapi+json;version=2.5.0",
+    "application/vnd.aai.asyncapi+json;version=2.6.0",
+    "application/vnd.aai.asyncapi+yaml;version=2.0.0",
+    "application/vnd.aai.asyncapi+yaml;version=2.1.0",
+    "application/vnd.aai.asyncapi+yaml;version=2.2.0",
+    "application/vnd.aai.asyncapi+yaml;version=2.3.0",
+    "application/vnd.aai.asyncapi+yaml;version=2.4.0",
+    "application/vnd.aai.asyncapi+yaml;version=2.5.0",
+    "application/vnd.aai.asyncapi+yaml;version=2.6.0",
+];
+
+/// Whether a payload declared with this `schemaFormat` must be an
+/// AsyncAPI Schema Object.
+#[must_use]
+pub fn payload_is_asyncapi_schema(schema_format: Option<&str>) -> bool {
+    match schema_format {
+        None => true,
+        Some(format) => ASYNCAPI_SCHEMA_FORMATS.contains(&format),
+    }
+}
+
+/// Validate a payload that must be an AsyncAPI Schema Object.
+///
+/// The field is stored as raw JSON so any dialect round-trips, so the
+/// typing happens here: parse it as a [`SubSchema`] and run the usual
+/// schema checks, reporting a parse failure as a diagnostic rather than
+/// letting a malformed schema through.
+fn validate_schema_payload(ctx: &mut Context, payload: &serde_json::Value) {
+    match serde_json::from_value::<SubSchema>(payload.clone()) {
+        Ok(schema) => ctx.in_field("payload", |ctx| schema.validate_with_context(ctx)),
+        Err(err) => ctx.error_field(
+            "payload",
+            format!("is not a valid AsyncAPI Schema Object: {err}"),
+        ),
+    }
+}
 
 /// Keep an explicit `"payload": null` distinct from an absent one, so a
 /// null-payload example or message round-trips as written.
@@ -78,8 +136,12 @@ impl ValidateWithContext for OperationMessage {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct MessageOneOf {
     /// **Required** The alternatives this operation may carry.
+    ///
+    /// Each entry is a whole message *definition*, not just a message
+    /// object: the schema recurses into `message.json`, so an
+    /// alternative may itself be a `$ref` or another `oneOf` set.
     #[serde(rename = "oneOf")]
-    pub one_of: Vec<RefOr<Message>>,
+    pub one_of: Vec<OperationMessage>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
@@ -113,7 +175,7 @@ pub struct Message {
     /// Schema definition of the application headers, which must
     /// describe an object.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<RefOr<Schema>>,
+    pub headers: Option<SubSchema>,
 
     /// Definition of the message payload. Left as raw JSON because
     /// `schemaFormat` may name a dialect this crate does not type; an
@@ -152,10 +214,10 @@ pub struct Message {
     pub tags: Vec<Tag>,
 
     #[serde(rename = "externalDocs", skip_serializing_if = "Option::is_none")]
-    pub external_docs: Option<RefOr<ExternalDocumentation>>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<Bindings>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<MessageExample>,
@@ -185,14 +247,19 @@ impl ValidateWithContext for Message {
         if let Some(headers) = &self.headers {
             ctx.in_field("headers", |ctx| headers.validate_with_context(ctx));
         }
+        // A payload in the default dialect is a Schema Object and gets
+        // the schema checks; one in a named foreign dialect does not.
+        if let Some(payload) = &self.payload
+            && payload_is_asyncapi_schema(self.schema_format.as_deref())
+        {
+            validate_schema_payload(ctx, payload);
+        }
         if let Some(correlation_id) = &self.correlation_id {
             ctx.in_field("correlationId", |ctx| {
                 correlation_id.validate_with_context(ctx);
             });
         }
-        for (i, tag) in self.tags.iter().enumerate() {
-            ctx.in_index("tags", i, |ctx| tag.validate_with_context(ctx));
-        }
+        validate_tags(ctx, &self.tags);
         if let Some(docs) = &self.external_docs {
             ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }
@@ -208,6 +275,21 @@ impl ValidateWithContext for Message {
     }
 }
 
+/// Validate a tag list and enforce the schema's `uniqueItems: true`.
+///
+/// Lives here because every object carrying tags needs it; the
+/// comparison is whole-value, as `uniqueItems` specifies.
+pub(crate) fn validate_tags(ctx: &mut Context, tags: &[Tag]) {
+    for (i, tag) in tags.iter().enumerate() {
+        ctx.in_index("tags", i, |ctx| {
+            tag.validate_with_context(ctx);
+            if tags[..i].contains(tag) {
+                ctx.error("duplicate tag");
+            }
+        });
+    }
+}
+
 /// A trait that MAY be applied to a [`Message`].
 ///
 /// Carries every Message field except `payload` and `traits`.
@@ -220,7 +302,7 @@ pub struct MessageTrait {
     pub schema_format: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<RefOr<Schema>>,
+    pub headers: Option<SubSchema>,
 
     #[serde(rename = "correlationId", skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<RefOr<CorrelationId>>,
@@ -247,10 +329,10 @@ pub struct MessageTrait {
     pub tags: Vec<Tag>,
 
     #[serde(rename = "externalDocs", skip_serializing_if = "Option::is_none")]
-    pub external_docs: Option<RefOr<ExternalDocumentation>>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<Bindings>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<MessageExample>,
@@ -278,9 +360,7 @@ impl ValidateWithContext for MessageTrait {
                 correlation_id.validate_with_context(ctx);
             });
         }
-        for (i, tag) in self.tags.iter().enumerate() {
-            ctx.in_index("tags", i, |ctx| tag.validate_with_context(ctx));
-        }
+        crate::v2_6::message::validate_tags(ctx, &self.tags);
         if let Some(docs) = &self.external_docs {
             ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }
@@ -384,6 +464,146 @@ mod tests {
             errors_for(json!({ "schemaFormat": "" }))
                 .iter()
                 .any(|e| e.contains("schemaFormat: must not be empty"))
+        );
+    }
+
+    #[test]
+    fn a_default_dialect_payload_is_validated_as_a_schema() {
+        // Absent `schemaFormat` means the payload is an AsyncAPI Schema
+        // Object, so the schema checks apply to it.
+        let errors = errors_for(json!({ "payload": { "type": "bogus", "allOf": [] } }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e == "#.messages.signup.payload.type: `bogus` is not a JSON Schema type"),
+            "got: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(
+                |e| e == "#.messages.signup.payload.allOf: must contain at least one subschema"
+            ),
+            "got: {errors:?}"
+        );
+
+        // Naming an AsyncAPI dialect explicitly is the same thing.
+        let errors = errors_for(json!({
+            "schemaFormat": "application/vnd.aai.asyncapi;version=2.6.0",
+            "payload": { "type": "bogus" }
+        }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("is not a JSON Schema type"))
+        );
+
+        // A payload that is not a schema at all is reported rather than
+        // silently accepted.
+        let errors = errors_for(json!({ "payload": ["not", "a", "schema"] }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("is not a valid AsyncAPI Schema Object")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_foreign_dialect_payload_is_left_alone() {
+        // Avro's `type: record` is not a JSON Schema type, and must not
+        // be judged as one.
+        for format in [
+            "application/vnd.apache.avro;version=1.9.0",
+            "application/schema+json;version=draft-07",
+            "application/vnd.example.custom+json;version=1.0",
+        ] {
+            let errors = errors_for(json!({
+                "schemaFormat": format,
+                "payload": { "type": "record", "name": "User", "allOf": [] }
+            }));
+            assert!(errors.is_empty(), "{format}: {errors:?}");
+            assert!(!payload_is_asyncapi_schema(Some(format)));
+        }
+        assert!(payload_is_asyncapi_schema(None));
+        for format in ASYNCAPI_SCHEMA_FORMATS {
+            assert!(payload_is_asyncapi_schema(Some(format)), "{format}");
+        }
+    }
+
+    #[test]
+    fn boolean_schemas_are_accepted_where_a_schema_is_expected() {
+        // draft-07 allows `true` / `false` as a whole schema.
+        let value = json!({ "headers": true, "payload": false });
+        let message: Message = serde_json::from_value(value.clone()).unwrap();
+        assert!(matches!(message.headers, Some(SubSchema::Bool(true))));
+        assert_eq!(serde_json::to_value(&message).unwrap(), value);
+        assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn a_nested_one_of_round_trips() {
+        // The schema recurses into the whole message definition, so an
+        // alternative may itself be a `$ref` or another `oneOf`.
+        let value = json!({
+            "oneOf": [
+                { "name": "A" },
+                { "$ref": "#/components/messages/b" },
+                { "oneOf": [ { "name": "C" }, { "$ref": "#/components/messages/d" } ] }
+            ]
+        });
+        let message: OperationMessage = serde_json::from_value(value.clone()).unwrap();
+        match &message {
+            OperationMessage::OneOf(one_of) => {
+                assert_eq!(one_of.one_of.len(), 3);
+                assert!(matches!(one_of.one_of[2], OperationMessage::OneOf(_)));
+            }
+            other => panic!("expected the oneOf form, got {other:?}"),
+        }
+        // The nested alternative survives instead of collapsing to `{}`.
+        assert_eq!(serde_json::to_value(&message).unwrap(), value);
+
+        // Errors inside a nested alternative still carry their path.
+        let broken: OperationMessage = serde_json::from_value(json!({
+            "oneOf": [ { "oneOf": [ { "contentType": "" } ] } ]
+        }))
+        .unwrap();
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.publish.message");
+        broken.validate_with_context(&mut ctx);
+        assert!(
+            ctx.errors
+                .iter()
+                .any(|e| e == "#.publish.message.oneOf[0].oneOf[0].contentType: must not be empty"),
+            "got: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn tags_must_be_unique() {
+        let errors = errors_for(json!({
+            "tags": [ { "name": "a" }, { "name": "b" }, { "name": "a" } ]
+        }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e == "#.messages.signup.tags[2]: duplicate tag"),
+            "got: {errors:?}"
+        );
+
+        // Same name, different description, is a different tag value.
+        let errors = errors_for(json!({
+            "tags": [ { "name": "a" }, { "name": "a", "description": "d" } ]
+        }));
+        assert!(errors.is_empty(), "got: {errors:?}");
+    }
+
+    #[test]
+    fn external_docs_does_not_accept_a_reference() {
+        // 2.6 points at `externalDocs.json` directly, with no
+        // `oneOf: [Reference, …]`, so a `$ref` is not a valid value.
+        assert!(
+            serde_json::from_value::<Message>(json!({ "externalDocs": { "$ref": "#/x" } }))
+                .is_err(),
+            "a `$ref` must not parse as an External Documentation Object",
         );
     }
 

@@ -8,7 +8,6 @@
 
 use crate::common::bindings::Bindings;
 use crate::common::reference::RefOr;
-use crate::v2_6::external_documentation::ExternalDocumentation;
 use crate::v2_6::security_scheme::SecurityRequirement;
 use crate::v2_6::tag::Tag;
 use crate::validation::{Context, ValidateWithContext};
@@ -47,11 +46,7 @@ pub struct Server {
 
     /// Protocol-specific definitions for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
-
-    /// Additional external documentation for this server.
-    #[serde(rename = "externalDocs", skip_serializing_if = "Option::is_none")]
-    pub external_docs: Option<RefOr<ExternalDocumentation>>,
+    pub bindings: Option<Bindings>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
@@ -81,14 +76,9 @@ impl ValidateWithContext for Server {
         for (i, requirement) in self.security.iter().enumerate() {
             ctx.in_index("security", i, |ctx| requirement.validate_with_context(ctx));
         }
-        for (i, tag) in self.tags.iter().enumerate() {
-            ctx.in_index("tags", i, |ctx| tag.validate_with_context(ctx));
-        }
+        crate::v2_6::message::validate_tags(ctx, &self.tags);
         if let Some(bindings) = &self.bindings {
             ctx.in_field("bindings", |ctx| bindings.validate_with_context(ctx));
-        }
-        if let Some(docs) = &self.external_docs {
-            ctx.in_field("externalDocs", |ctx| docs.validate_with_context(ctx));
         }
     }
 }
@@ -133,6 +123,14 @@ pub struct ServerVariable {
 
 impl ValidateWithContext for ServerVariable {
     fn validate_with_context(&self, ctx: &mut Context) {
+        // `uniqueItems: true` on the enumeration.
+        for (i, value) in self.enum_values.iter().enumerate() {
+            if self.enum_values[..i].contains(value) {
+                ctx.in_index("enum", i, |ctx| {
+                    ctx.error(format!("duplicate value `{value}`"))
+                });
+            }
+        }
         if let Some(default) = &self.default
             && !self.enum_values.is_empty()
             && !self.enum_values.contains(default)
@@ -172,7 +170,6 @@ mod tests {
             "security": [ { "user_pass": [] } ],
             "tags": [ { "name": "prod" } ],
             "bindings": { "amqp": { "bindingVersion": "0.3.0" } },
-            "externalDocs": { "url": "https://example.com" },
             "x-team": "infra"
         });
         let server: Server = serde_json::from_value(value.clone()).unwrap();
@@ -227,8 +224,7 @@ mod tests {
             "variables": { "v": { "enum": ["a"], "default": "b" } },
             "security": [ { "auth": ["read", "read"] } ],
             "tags": [ { "name": "" } ],
-            "bindings": { "amqp": 1 },
-            "externalDocs": { "url": "" }
+            "bindings": { "amqp": 1 }
         }));
         assert!(
             errors
@@ -250,10 +246,42 @@ mod tests {
                 .iter()
                 .any(|e| e.starts_with("#.servers.prod.bindings.amqp"))
         );
+    }
+
+    #[test]
+    fn tags_and_variable_enums_must_be_unique() {
+        let errors = errors_for(json!({
+            "url": "amqp://e",
+            "protocol": "amqp",
+            "tags": [ { "name": "a" }, { "name": "a" } ],
+            "variables": { "v": { "enum": ["a", "b", "a"] } }
+        }));
         assert!(
             errors
                 .iter()
-                .any(|e| e == "#.servers.prod.externalDocs.url: must not be empty")
+                .any(|e| e == "#.servers.prod.tags[1]: duplicate tag")
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e == "#.servers.prod.variables.v.enum[2]: duplicate value `a`"),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_has_no_external_docs_field_in_2_6() {
+        // The 2.6 Server Object has no `externalDocs`; it is dropped as
+        // an unknown key rather than parsed.
+        let server: Server = serde_json::from_value(json!({
+            "url": "amqp://e",
+            "protocol": "amqp",
+            "externalDocs": { "url": "https://e" }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&server).unwrap(),
+            json!({ "url": "amqp://e", "protocol": "amqp" })
         );
     }
 

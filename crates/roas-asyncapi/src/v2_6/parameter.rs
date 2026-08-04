@@ -2,14 +2,13 @@
 //!
 //! Per [Parameter Object](https://www.asyncapi.com/docs/reference/specification/v2.6.0#parameterObject).
 //!
-//! A 2.6 parameter carries a full [`Schema`], which is the field v3
+//! A 2.6 parameter carries a full [`SubSchema`], which is the field v3
 //! dropped: there a parameter is always a string constrained by `enum`
 //! / `default` / `examples`. Converting 2.6 → 3.0 therefore cannot
 //! preserve a non-string parameter schema.
 
-use crate::common::reference::RefOr;
 use crate::common::runtime_expression;
-use crate::v2_6::schema::Schema;
+use crate::v2_6::schema::SubSchema;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -22,7 +21,7 @@ pub struct Parameter {
 
     /// Definition of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<RefOr<Schema>>,
+    pub schema: Option<SubSchema>,
 
     /// A runtime expression locating the parameter value inside the
     /// message, e.g. `$message.payload#/user/id`.
@@ -90,6 +89,17 @@ mod tests {
         let mut ctx = Context::with_path(EnumSet::empty(), "#.parameters.p");
         parameter.validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty());
+    }
+
+    #[test]
+    fn a_boolean_schema_is_accepted() {
+        // draft-07 allows `true` / `false` wherever a schema is
+        // expected, and a 2.6 parameter takes a full schema.
+        for value in [json!({ "schema": true }), json!({ "schema": false })] {
+            let parameter: Parameter = serde_json::from_value(value.clone()).unwrap();
+            assert!(matches!(parameter.schema, Some(SubSchema::Bool(_))));
+            assert_eq!(serde_json::to_value(&parameter).unwrap(), value);
+        }
     }
 
     #[test]

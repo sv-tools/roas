@@ -49,7 +49,7 @@ pub struct ChannelItem {
 
     /// Protocol-specific definitions for the channel.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<Bindings>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]

@@ -2,7 +2,6 @@
 //!
 //! Per [Tag Object](https://www.asyncapi.com/docs/reference/specification/v2.6.0#tagObject).
 
-use crate::common::reference::RefOr;
 use crate::v2_6::external_documentation::ExternalDocumentation;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
@@ -19,7 +18,7 @@ pub struct Tag {
 
     /// Additional external documentation for this tag.
     #[serde(rename = "externalDocs", skip_serializing_if = "Option::is_none")]
-    pub external_docs: Option<RefOr<ExternalDocumentation>>,
+    pub external_docs: Option<ExternalDocumentation>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
