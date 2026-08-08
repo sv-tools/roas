@@ -15,7 +15,7 @@ use crate::v2_6::parameter::Parameter;
 use crate::v2_6::server::placeholders;
 use crate::validation::{Context, ValidateWithContext, ValidationOptions};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct ChannelItem {
@@ -67,17 +67,20 @@ pub struct ChannelItem {
 }
 
 impl ChannelItem {
-    /// Check this item's `parameters` against the `{placeholders}` of
-    /// the channel path it is keyed by.
+    /// Check a channel path's `{placeholders}` against the parameters
+    /// declared anywhere along its `$ref` chain.
     ///
-    /// Only that pairing — the item's own fields are validated by
-    /// [`ValidateWithContext`], which the caller runs separately, since
-    /// a `$ref`'d channel is validated where it is declared while its
-    /// parameters answer to the path that references it.
-    pub(crate) fn validate_against_path(&self, ctx: &mut Context, path: &str) {
+    /// `$ref` siblings are preserved, so a parameter may sit beside the
+    /// reference, on the target, or on a hop in between — any of which
+    /// satisfies the path.
+    pub(crate) fn validate_path_parameters(ctx: &mut Context, path: &str, chain: &[&ChannelItem]) {
+        let declared: BTreeSet<&str> = chain
+            .iter()
+            .flat_map(|item| item.parameters.keys().map(String::as_str))
+            .collect();
         let used = placeholders(path);
         for name in &used {
-            if !self.parameters.contains_key(*name) {
+            if !declared.contains(*name) {
                 ctx.error_field(
                     "parameters",
                     format!("`{{{name}}}` in the channel path is not declared in `parameters`"),
@@ -85,8 +88,8 @@ impl ChannelItem {
             }
         }
         if !ctx.is_option(ValidationOptions::IgnoreUnusedChannelParameter) {
-            for name in self.parameters.keys() {
-                if !used.contains(&name.as_str()) {
+            for name in declared {
+                if !used.contains(&name) {
                     ctx.error_field(
                         "parameters",
                         format!("`{name}` is declared but never used in the channel path"),
@@ -109,6 +112,7 @@ impl ValidateWithContext for ChannelItem {
     fn validate_with_context(&self, ctx: &mut Context) {
         if let Some(reference) = &self.reference {
             ctx.require_non_empty("$ref", reference);
+            crate::common::reference::check_external(ctx, reference);
         }
         ctx.validate_map_keys("parameters", &self.parameters);
 
@@ -147,7 +151,7 @@ mod tests {
         let item: ChannelItem = serde_json::from_value(value).unwrap();
         let mut ctx = Context::with_path(EnumSet::empty(), "#.channels.user");
         item.validate_with_context(&mut ctx);
-        item.validate_against_path(&mut ctx, path);
+        ChannelItem::validate_path_parameters(&mut ctx, path, &[&item]);
         ctx.errors.iter().map(ToString::to_string).collect()
     }
 
@@ -198,7 +202,7 @@ mod tests {
             "#.channels.user",
         );
         item.validate_with_context(&mut ctx);
-        item.validate_against_path(&mut ctx, "user/signedup");
+        ChannelItem::validate_path_parameters(&mut ctx, "user/signedup", &[&item]);
         assert!(ctx.errors.is_empty(), "got: {:?}", ctx.errors);
     }
 

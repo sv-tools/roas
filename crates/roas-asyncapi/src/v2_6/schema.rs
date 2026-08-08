@@ -405,6 +405,10 @@ fn check_unique_strings(ctx: &mut Context, field: &str, values: &[String]) {
 
 impl ValidateWithContext for Schema {
     fn validate_with_context(&self, ctx: &mut Context) {
+        if let Some(reference) = &self.reference {
+            ctx.require_non_empty("$ref", reference);
+            crate::common::reference::check_external(ctx, reference);
+        }
         // ---- keyword constraints from the draft-07 meta-schema ----
         match &self.schema_type {
             Some(SchemaType::Single(name)) if !SIMPLE_TYPES.contains(&name.as_str()) => {

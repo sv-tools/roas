@@ -129,17 +129,57 @@ fn message_pointer_shape(pointer: &str) -> bool {
     pointer.starts_with("/components/messages/") || pointer.starts_with("/channels/")
 }
 
-/// Split one RFC 6901 segment off a pointer, decoding its escapes.
+/// Split one RFC 6901 segment off a pointer and decode it.
 ///
-/// `~1` is an encoded `/`, so `source/path` is *two* segments and
-/// cannot be one channel key — `source~1path` is how that key is
-/// spelled.
-fn split_segment(pointer: &str) -> (String, &str) {
+/// A pointer travels in a URI fragment, so it is percent-encoded (RFC
+/// 3986) around escapes for the pointer's own separators (RFC 6901):
+/// `%20` is a space, `~1` is a `/`, and `~0` is a `~`. `source/path` is
+/// therefore *two* segments and cannot name one channel — that key is
+/// spelled `source~1path`.
+///
+/// Returns `None` when the segment is malformed: a `~` followed by
+/// anything but `0` or `1`, or a truncated / non-hex `%` escape. RFC
+/// 6901 leaves those undefined rather than literal.
+fn split_segment(pointer: &str) -> Option<(String, &str)> {
     let (segment, rest) = match pointer.find('/') {
         Some(i) => (&pointer[..i], &pointer[i..]),
         None => (pointer, ""),
     };
-    (segment.replace("~1", "/").replace("~0", "~"), rest)
+    Some((decode_segment(segment)?, rest))
+}
+
+/// Percent-decode, then undo the RFC 6901 escapes.
+fn decode_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut percent_decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = segment.get(i + 1..i + 3)?;
+            percent_decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            percent_decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let decoded = String::from_utf8(percent_decoded).ok()?;
+
+    let mut out = String::with_capacity(decoded.len());
+    let mut chars = decoded.chars();
+    while let Some(c) = chars.next() {
+        if c != '~' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('0') => out.push('~'),
+            Some('1') => out.push('/'),
+            // `~` must be followed by `0` or `1`.
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 impl Document {
@@ -181,21 +221,25 @@ impl Document {
         }
     }
 
-    /// The channel a document-local pointer names.
-    fn channel_at(&self, pointer: &str) -> Option<&ChannelItem> {
-        if let Some(rest) = pointer.strip_prefix("/components/channels/") {
-            let (key, rest) = split_segment(rest);
-            return rest
-                .is_empty()
-                .then(|| self.components.as_ref()?.channels.get(&key))?;
-        }
-        let rest = pointer.strip_prefix("/channels/")?;
-        let (key, rest) = split_segment(rest);
-        rest.is_empty().then(|| self.channels.get(&key))?
+    /// The channel a document-local pointer names, in either map.
+    fn channel_at<'a>(&'a self, pointer: &str) -> Option<&'a ChannelItem> {
+        let (map, rest) = self.channel_map_at(pointer)?;
+        let (key, rest) = split_segment(rest)?;
+        rest.is_empty().then(|| map.get(&key))?
     }
 
-    /// Whether a local pointer at least *looks* like it names a channel,
-    /// used to tell "names nothing" from "wrong kind entirely".
+    /// The channel map a pointer addresses, and what follows the map's
+    /// own prefix.
+    fn channel_map_at<'a, 'p>(
+        &'a self,
+        pointer: &'p str,
+    ) -> Option<(&'a BTreeMap<String, ChannelItem>, &'p str)> {
+        if let Some(rest) = pointer.strip_prefix("/components/channels/") {
+            return Some((&self.components.as_ref()?.channels, rest));
+        }
+        Some((&self.channels, pointer.strip_prefix("/channels/")?))
+    }
+
     fn security_scheme_at(&self, name: &str) -> Resolution<'_, SecurityScheme> {
         let Some(components) = self.components.as_ref() else {
             return Resolution::Missing;
@@ -237,13 +281,30 @@ impl Document {
                     if reference.is_external() {
                         return Resolution::External;
                     }
-                    let Some(key) = reference.component_key("servers") else {
+                    let Some(pointer) = reference.local_pointer() else {
                         return Resolution::Unrecognized;
                     };
-                    if !seen.insert(key.clone()) {
+                    if !seen.insert(pointer.to_owned()) {
                         return Resolution::Cycle;
                     }
-                    match self.components.as_ref().and_then(|c| c.servers.get(&key)) {
+                    // Either map may hold the target: `#/servers/…` as
+                    // well as `#/components/servers/…`.
+                    let entry = if let Some(rest) = pointer.strip_prefix("/components/servers/") {
+                        match split_segment(rest) {
+                            Some((key, "")) => {
+                                self.components.as_ref().and_then(|c| c.servers.get(&key))
+                            }
+                            _ => return Resolution::Unrecognized,
+                        }
+                    } else if let Some(rest) = pointer.strip_prefix("/servers/") {
+                        match split_segment(rest) {
+                            Some((key, "")) => self.servers.get(&key),
+                            _ => return Resolution::Unrecognized,
+                        }
+                    } else {
+                        return Resolution::Unrecognized;
+                    };
+                    match entry {
                         Some(next) => current = next,
                         None => return Resolution::Missing,
                     }
@@ -283,27 +344,32 @@ impl Document {
 
     /// The message entry a document-local pointer names — either a
     /// component message or one hanging off a channel's operation.
-    fn message_at(&self, pointer: &str) -> Option<&RefOr<Message>> {
+    ///
+    /// A JSON Pointer walks the document *as written*: the channel it
+    /// steps through is the item at that key, not whatever that item's
+    /// `$ref` resolves to, so a message declared beside a `$ref` is
+    /// reachable and one on the target is not (through this pointer).
+    fn message_at<'a>(&'a self, pointer: &str) -> Option<&'a RefOr<Message>> {
         if let Some(rest) = pointer.strip_prefix("/components/messages/") {
-            let (key, rest) = split_segment(rest);
+            let (key, rest) = split_segment(rest)?;
             if !rest.is_empty() {
                 return None;
             }
             return self.components.as_ref()?.messages.get(&key);
         }
 
-        // `#/channels/<path>/publish|subscribe/message[/oneOf/<i>]`
-        let rest = pointer.strip_prefix("/channels/")?;
-        let (key, rest) = split_segment(rest);
-        let channel = self.channels.get(&key)?;
-        let channel = self.resolve_channel(channel).found()?;
-        let (kind, rest) = split_segment(rest.strip_prefix('/')?);
+        // `#/channels/<path>/publish|subscribe/message[/oneOf/<i>]`,
+        // and the same under `#/components/channels/…`.
+        let (map, rest) = self.channel_map_at(pointer)?;
+        let (key, rest) = split_segment(rest)?;
+        let channel = map.get(&key)?;
+        let (kind, rest) = split_segment(rest.strip_prefix('/')?)?;
         let operation = match kind.as_str() {
             "publish" => channel.publish.as_ref()?,
             "subscribe" => channel.subscribe.as_ref()?,
             _ => return None,
         };
-        let (field, rest) = split_segment(rest.strip_prefix('/')?);
+        let (field, rest) = split_segment(rest.strip_prefix('/')?)?;
         if field != "message" {
             return None;
         }
@@ -311,11 +377,11 @@ impl Document {
         let mut rest = rest;
         // Walk any `oneOf/<index>` steps.
         while !rest.is_empty() {
-            let (step, tail) = split_segment(rest.strip_prefix('/')?);
+            let (step, tail) = split_segment(rest.strip_prefix('/')?)?;
             if step != "oneOf" {
                 return None;
             }
-            let (index, tail) = split_segment(tail.strip_prefix('/')?);
+            let (index, tail) = split_segment(tail.strip_prefix('/')?)?;
             let index: usize = index.parse().ok()?;
             let OperationMessage::OneOf(one_of) = message else {
                 return None;
@@ -338,7 +404,7 @@ impl Document {
     pub fn operations(&self) -> Vec<(&str, OperationKind, &Operation)> {
         let mut found = Vec::new();
         for (path, channel) in &self.channels {
-            for item in self.channel_and_target(channel) {
+            for item in self.channel_chain(channel) {
                 if let Some(operation) = &item.publish {
                     found.push((path.as_str(), OperationKind::Publish, operation));
                 }
@@ -350,16 +416,34 @@ impl Document {
         found
     }
 
-    /// A channel item together with the item it references, when that
-    /// resolves to a *different* object.
-    fn channel_and_target<'a>(&'a self, channel: &'a ChannelItem) -> Vec<&'a ChannelItem> {
-        let mut items = vec![channel];
-        if let Some(target) = self.resolve_channel(channel).found()
-            && !std::ptr::eq(target, channel)
-        {
-            items.push(target);
+    /// Every channel item along a `$ref` chain, starting with the one
+    /// given.
+    ///
+    /// `$ref` siblings are preserved here rather than discarded, so an
+    /// intermediate hop can declare servers, parameters and operations
+    /// of its own — all of which the document has to check.
+    fn channel_chain<'a>(&'a self, channel: &'a ChannelItem) -> Vec<&'a ChannelItem> {
+        let mut chain = vec![channel];
+        let mut current = channel;
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        while let Some(reference) = current.reference.as_deref() {
+            if !seen.insert(reference) {
+                break;
+            }
+            let Some(pointer) = Reference {
+                reference: reference.to_owned(),
+            }
+            .local_pointer()
+            .map(str::to_owned) else {
+                break;
+            };
+            let Some(next) = self.channel_at(&pointer) else {
+                break;
+            };
+            chain.push(next);
+            current = next;
         }
-        items
+        chain
     }
 
     /// Every message the document declares, inline or in `components`,
@@ -518,25 +602,19 @@ impl Document {
                 // placeholders must match.
                 channel.validate_with_context(ctx);
                 let resolution = self.resolve_channel(channel);
-                match &resolution {
-                    Resolution::Found(resolved) => resolved.validate_against_path(ctx, path),
-                    // An external terminus is accepted; anything else
-                    // local is a document bug.
-                    other => {
-                        if let Some(problem) = other.problem()
-                            && let Some(reference) = channel.reference.as_deref()
-                            && !reference.is_empty()
-                        {
-                            ctx.error_field("$ref", format!("channel `{reference}` {problem}"));
-                        }
-                        // The item's own parameters still answer to the
-                        // path it is keyed by.
-                        channel.validate_against_path(ctx, path);
-                    }
+                if let Some(problem) = resolution.problem()
+                    && let Some(reference) = channel.reference.as_deref()
+                    && !reference.is_empty()
+                {
+                    ctx.error_field("$ref", format!("channel `{reference}` {problem}"));
                 }
+                // The path's placeholders answer to the parameters
+                // declared anywhere along the chain, since `$ref`
+                // siblings are kept.
+                ChannelItem::validate_path_parameters(ctx, path, &self.channel_chain(channel));
                 // `$ref` siblings are preserved, so the item as written
                 // is checked as well as the channel it references.
-                for item in self.channel_and_target(channel) {
+                for item in self.channel_chain(channel) {
                     // A channel's servers are plain names into `servers`.
                     for (i, server) in item.servers.iter().enumerate() {
                         if !server.is_empty() && !self.servers.contains_key(server) {
@@ -1293,6 +1371,212 @@ mod tests {
             value["channels"]["target"]["subscribe"]["message"] = json!({ "$ref": pointer });
             assert!(!errors_for(value).is_empty(), "{pointer} must not resolve");
         }
+    }
+
+    #[test]
+    fn every_hop_of_a_ref_chain_is_validated() {
+        // A → B → C: B's own siblings must not be skipped.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": { "prod": { "url": "kafka://e", "protocol": "kafka" } },
+            "channels": { "a": { "$ref": "#/components/channels/b" } },
+            "components": {
+                "channels": {
+                    "b": {
+                        "$ref": "#/components/channels/c",
+                        "servers": ["missing"],
+                        "publish": { "operationId": "onB" }
+                    },
+                    "c": { "subscribe": { "operationId": "onC" } }
+                }
+            }
+        });
+        let doc: Document = serde_json::from_value(value.clone()).unwrap();
+        let ids: Vec<_> = doc
+            .operations()
+            .iter()
+            .filter_map(|(_, _, op)| op.operation_id.as_deref())
+            .collect();
+        assert!(
+            ids.contains(&"onB"),
+            "the middle hop's operation counts: {ids:?}"
+        );
+        assert!(ids.contains(&"onC"), "so does the terminal one: {ids:?}");
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("server `missing` is not declared")),
+            "a middle hop's servers are checked too",
+        );
+    }
+
+    #[test]
+    fn parameters_may_sit_anywhere_along_the_chain() {
+        // Declared beside the `$ref`, with the target declaring none.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "user/{id}": {
+                    "$ref": "#/components/channels/target",
+                    "parameters": { "id": { "schema": { "type": "string" } } }
+                }
+            },
+            "components": { "channels": { "target": { "publish": {} } } }
+        });
+        assert!(
+            errors_for(value).is_empty(),
+            "a sibling parameter satisfies the path"
+        );
+
+        // …and on the target, with the reference declaring none.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "user/{id}": { "$ref": "#/components/channels/target" } },
+            "components": {
+                "channels": {
+                    "target": { "parameters": { "id": { "schema": { "type": "string" } } } }
+                }
+            }
+        });
+        assert!(errors_for(value).is_empty());
+
+        // A placeholder declared nowhere is still reported.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "user/{id}": { "$ref": "#/components/channels/target" } },
+            "components": { "channels": { "target": { "publish": {} } } }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("`{id}` in the channel path is not declared")),
+        );
+    }
+
+    #[test]
+    fn message_pointers_walk_the_document_as_written() {
+        // A message declared *beside* a channel's `$ref` is reachable
+        // by pointer, because a JSON Pointer does not resolve as it
+        // walks.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": {
+                    "$ref": "#/components/channels/elsewhere",
+                    "publish": { "message": { "name": "Beside" } }
+                },
+                "target": {
+                    "subscribe": { "message": { "$ref": "#/channels/source/publish/message" } }
+                }
+            },
+            "components": { "channels": { "elsewhere": { "subscribe": {} } } }
+        });
+        assert!(
+            errors_for(value).is_empty(),
+            "a sibling message is reachable"
+        );
+
+        // Pointers through a component channel work too.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "target": {
+                    "subscribe": {
+                        "message": { "$ref": "#/components/channels/source/publish/message" }
+                    }
+                }
+            },
+            "components": {
+                "channels": { "source": { "publish": { "message": { "name": "S" } } } }
+            }
+        });
+        assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn a_server_may_reference_another_root_server() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "servers": {
+                "base": { "url": "kafka://e", "protocol": "kafka" },
+                "alias": { "$ref": "#/servers/base" }
+            }
+        });
+        assert!(
+            errors_for(value).is_empty(),
+            "`#/servers/…` is a legal target"
+        );
+    }
+
+    #[test]
+    fn pointer_segments_are_percent_decoded_and_escape_checked() {
+        // `%20` decodes to a space…
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source path": { "publish": {} },
+                "alias": { "$ref": "#/channels/source%20path" }
+            }
+        });
+        let doc: Document = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            doc.resolve_channel(&doc.channels["alias"])
+                .found()
+                .is_some()
+        );
+        assert!(errors_for(value).is_empty());
+
+        // …while `~2` is not a valid escape, so the pointer is not a
+        // literal key.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source~2path": { "publish": {} },
+                "alias": { "$ref": "#/channels/source~2path" }
+            }
+        });
+        assert!(
+            !errors_for(value).is_empty(),
+            "an invalid tilde escape must not resolve",
+        );
+    }
+
+    #[test]
+    fn strict_mode_reports_external_refs_on_channel_items_and_schemas() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "user": { "$ref": "./other.yaml#/channels/user" } },
+            "components": {
+                "schemas": { "s": { "$ref": "./other.yaml#/schemas/s" } }
+            }
+        });
+        let doc: Document = serde_json::from_value(value).unwrap();
+        doc.validate(EnumSet::empty())
+            .expect("external refs pass by default");
+
+        let err = doc
+            .validate(EnumSet::only(ValidationOptions::ErrorOnExternalReference))
+            .unwrap_err();
+        let errors: Vec<_> = err.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|e| e.contains("external reference"))
+                .count(),
+            2,
+            "both the channel item and the schema `$ref` count: {errors:?}",
+        );
     }
 
     #[test]
