@@ -1,0 +1,24 @@
+{
+  "asyncapi": "2.6.0",
+  "info": { "title": "Broken wiring", "version": "1.0.0" },
+  "servers": {
+    "production": { "url": "kafka://broker:9092", "protocol": "kafka" }
+  },
+  "channels": {
+    "user/signedup": {
+      "servers": ["staging"],
+      "publish": {
+        "operationId": "handleUser",
+        "security": [{ "saslScram": ["read"] }, { "missingScheme": [] }]
+      }
+    },
+    "user/deleted": {
+      "subscribe": { "operationId": "handleUser" }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "saslScram": { "type": "scramSha512" }
+    }
+  }
+}

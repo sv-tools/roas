@@ -70,20 +70,29 @@ impl Reference {
     }
 }
 
+/// Report a `$ref` that leaves the document, when the caller asked for
+/// a self-contained one.
+///
+/// Shared with the version modules that carry `$ref` as a *field* of an
+/// object — an AsyncAPI 2.6 Channel Item, a Schema Object — rather than
+/// as a whole [`Reference`], so
+/// [`ErrorOnExternalReference`](crate::validation::ValidationOptions::ErrorOnExternalReference)
+/// means the same thing wherever a reference appears.
+pub(crate) fn check_external(ctx: &mut Context, reference: &str) {
+    let is_external = !reference.is_empty() && !reference.starts_with('#');
+    if is_external && ctx.is_option(crate::validation::ValidationOptions::ErrorOnExternalReference)
+    {
+        ctx.error_field(
+            "$ref",
+            format!("external reference `{reference}` cannot be resolved by this crate"),
+        );
+    }
+}
+
 impl ValidateWithContext for Reference {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("$ref", &self.reference);
-        if self.is_external()
-            && ctx.is_option(crate::validation::ValidationOptions::ErrorOnExternalReference)
-        {
-            ctx.error_field(
-                "$ref",
-                format!(
-                    "external reference `{}` cannot be resolved by this crate",
-                    self.reference
-                ),
-            );
-        }
+        check_external(ctx, &self.reference);
     }
 }
 

@@ -20,6 +20,9 @@ all-features = true
 
 [features]
 default = ["v3_1"]
+# Support for AsyncAPI v2.6.0 — the pre-v3 model, pinned to that exact
+# version by the schema's single-value enum.
+v2_6 = []
 # Support for AsyncAPI v3.0.0 — the schema pins `asyncapi` to that
 # exact string, so there is no patch range.
 v3_0 = []

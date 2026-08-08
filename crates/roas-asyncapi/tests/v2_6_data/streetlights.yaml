@@ -1,0 +1,144 @@
+# An AsyncAPI 2.6 document in the shape v3 replaced: channels keyed by
+# path, publish/subscribe operations, a parameter carrying a full
+# schema, OpenAPI-style security requirements, and a message declaring
+# its own schemaFormat.
+asyncapi: 2.6.0
+id: urn:example:streetlights
+info:
+  title: Streetlights Kafka API
+  version: 1.0.0
+  description: Smart lighting telemetry and control.
+  contact:
+    name: Lighting Ops
+    email: ops@example.com
+  license:
+    name: Apache 2.0
+defaultContentType: application/json
+
+servers:
+  production:
+    url: '{stage}.broker.example.com:9092'
+    protocol: kafka-secure
+    protocolVersion: '3.5'
+    description: Production broker
+    variables:
+      stage:
+        enum: ['prod', 'staging']
+        default: prod
+    security:
+      - saslScram: []
+    tags:
+      - name: prod
+    bindings:
+      kafka:
+        schemaRegistryUrl: https://registry.example.com
+        bindingVersion: 0.5.0
+
+channels:
+  smartylighting/streetlights/{streetlightId}/lighting/measured:
+    description: Telemetry from a single streetlight.
+    servers:
+      - production
+    parameters:
+      streetlightId:
+        description: The streetlight id
+        schema:
+          type: string
+          pattern: '^[0-9]+$'
+        location: $message.payload#/streetlightId
+    publish:
+      operationId: receiveLightMeasurement
+      summary: Consume telemetry from streetlights.
+      traits:
+        - $ref: '#/components/operationTraits/kafka'
+      message:
+        $ref: '#/components/messages/lightMeasured'
+    bindings:
+      kafka:
+        topic: light-measured
+        bindingVersion: 0.5.0
+
+  smartylighting/streetlights/{streetlightId}/command/turn:
+    parameters:
+      streetlightId:
+        schema:
+          type: string
+    subscribe:
+      operationId: sendTurnCommand
+      security:
+        - saslScram: []
+      message:
+        oneOf:
+          - name: TurnOn
+            payload:
+              type: object
+              properties:
+                command:
+                  type: string
+                  enum: ['on']
+          - name: TurnOff
+            payload:
+              type: object
+              properties:
+                command:
+                  type: string
+                  enum: ['off']
+
+components:
+  messages:
+    lightMeasured:
+      messageId: lightMeasured
+      name: LightMeasured
+      title: Light measured
+      contentType: application/json
+      schemaFormat: 'application/vnd.aai.asyncapi;version=2.6.0'
+      correlationId:
+        location: $message.header#/correlationId
+      headers:
+        type: object
+        properties:
+          correlationId:
+            type: string
+      payload:
+        type: object
+        required: [lumens]
+        properties:
+          streetlightId:
+            type: string
+          lumens:
+            type: integer
+            minimum: 0
+      traits:
+        - $ref: '#/components/messageTraits/commonHeaders'
+      examples:
+        - name: simple
+          payload:
+            streetlightId: '1'
+            lumens: 100
+
+  messageTraits:
+    commonHeaders:
+      headers:
+        type: object
+        properties:
+          sentAt:
+            type: string
+            format: date-time
+
+  operationTraits:
+    kafka:
+      bindings:
+        kafka:
+          clientId:
+            type: string
+          bindingVersion: 0.5.0
+
+  securitySchemes:
+    saslScram:
+      type: scramSha512
+      description: SASL/SCRAM authentication.
+
+tags:
+  - name: telemetry
+externalDocs:
+  url: https://example.com/docs

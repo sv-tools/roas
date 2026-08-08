@@ -13,6 +13,8 @@
 //! - [`validation`] — [`Validate`](validation::Validate) trait,
 //!   [`ValidationOptions`](validation::ValidationOptions) flag set,
 //!   `Context` / `ValidationError` types.
+//! - `v2_6` — AsyncAPI v2.6 document model + `Validate` impls, behind
+//!   the `v2_6` feature.
 //! - `v3_0` — AsyncAPI v3.0 document model + `Validate` impls, behind
 //!   the `v3_0` feature.
 //! - `v3_1` — AsyncAPI v3.1 document model + `Validate` impls, behind
@@ -78,16 +80,23 @@
 //!
 //! ## Versions
 //!
-//! v3.0.0 (`v3_0`) and v3.1.0 (`v3_1`, the default feature) are both
-//! implemented; enable whichever you need. Each version's schema pins
+//! v2.6.0 (`v2_6`), v3.0.0 (`v3_0`), and v3.1.0 (`v3_1`, the default
+//! feature) are all implemented; enable whichever you need. 2.6 is a
+//! different document rather than an earlier draft of the same one —
+//! channels keyed by path, `publish` / `subscribe` operations, and
+//! parameters carrying full schemas. Each version's schema pins
 //! its `asyncapi` field to exactly that string, so a document is parsed
 //! by one module or rejected. With both features enabled, an
 //! `impl From<v3_0::Document> for v3_1::Document` is available for
 //! upconverting a 3.0 document — v3.1 left the object model untouched,
-//! so nothing is dropped or approximated. Support for 2.6 follows.
+//! so nothing is dropped or approximated. A 2.6 → 3.0 conversion, which
+//! has genuinely lossy cases, follows.
 
 pub mod common;
 pub mod validation;
+
+#[cfg(feature = "v2_6")]
+pub mod v2_6;
 
 #[cfg(feature = "v3_0")]
 pub mod v3_0;

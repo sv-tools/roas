@@ -1,6 +1,6 @@
 # roas-asyncapi
 
-Rust implementation of the [AsyncAPI Specification](https://www.asyncapi.com/docs/reference/specification/v3.0.0): parse and validate AsyncAPI documents.
+Rust implementation of the AsyncAPI Specification ([v2.6](https://www.asyncapi.com/docs/reference/specification/v2.6.0) / [v3.0](https://www.asyncapi.com/docs/reference/specification/v3.0.0) / [v3.1](https://www.asyncapi.com/docs/reference/specification/v3.1.0)): parse and validate AsyncAPI documents.
 
 [![crates.io](https://img.shields.io/crates/v/roas-asyncapi.svg)](https://crates.io/crates/roas-asyncapi)
 [![docs.rs](https://docs.rs/roas-asyncapi/badge.svg)](https://docs.rs/roas-asyncapi)
@@ -15,9 +15,9 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 |------------------|------------------|-----------------|-----------------------------------------------------------|
 | 3.0              | `v3_0`           | ✅ implemented  | —                                                          |
 | 3.1              | `v3_1` (default) | ✅ implemented  | Adds its own `schemaFormat` values and the `ros2` bindings |
-| 2.6              | —                | 🚧 planned      | The pre-v3 model: channels keyed by path, `publish` / `subscribe` |
+| 2.6              | `v2_6`           | ✅ implemented  | The pre-v3 model: channels keyed by path, `publish` / `subscribe` |
 
-`v3_0` and `v3_1` are independent — enable whichever you need. With both enabled, an `impl From<v3_0::Document> for v3_1::Document` upconverts a 3.0 document; since 3.1 left the object model untouched, nothing is dropped or approximated and only the `asyncapi` version string changes.
+`v2_6`, `v3_0`, and `v3_1` are independent — enable whichever you need. With `v3_0` and `v3_1` both enabled, an `impl From<v3_0::Document> for v3_1::Document` upconverts a 3.0 document; since 3.1 left the object model untouched, nothing is dropped or approximated and only the `asyncapi` version string changes. A 2.6 → 3.0 conversion, which has genuinely lossy cases, follows separately.
 
 ## Quick start
 
@@ -69,6 +69,23 @@ YAML documents work the same way — parse with `serde_yaml_ng` (or any other YA
 One limit is worth stating: `enum` uniqueness compares numbers after the parser has rounded non-integer literals to `f64`, so two decimals differing only past `f64`'s precision (17+ significant digits) are treated as one. Preserving the exact text would need `serde_json`'s `arbitrary_precision`, which changes how every `serde_json::Value` serializes through other serializers — YAML output becomes `$serde_json::private::Number` maps — and Cargo feature unification would impose that on the sibling crates as well.
 
 `ValidationOptions` (EnumSet): `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion`, `IgnoreUnusedChannelParameter`, and `ErrorOnExternalReference`. Behind the `clap` feature, the enum implements `clap::ValueEnum` so downstream CLIs can surface it directly.
+
+## What 2.6 does differently
+
+2.6 is a different document rather than an earlier draft of v3, so `v2_6` is its own model rather than a variation on `v3_0`:
+
+| | 2.6 | 3.x |
+|---|---|---|
+| Channels | required, keyed by the channel *path* | keyed by a name, with a separate `address` |
+| Operations | `publish` / `subscribe` under a channel, from the *consumer's* point of view | a top-level map, `send` / `receive` from the *application's* point of view |
+| Messages | one message, or `{ "oneOf": [...] }`, on the operation | the channel's `messages` map, referenced by the operation |
+| Payload dialect | `schemaFormat` on the message, payload alongside it | a Multi Format Schema Object wrapping both |
+| Parameters | carry a full `Schema` | strings constrained by `enum` / `default` / `examples` |
+| Security | OpenAPI-style requirement maps (name → scopes) | inline schemes; OAuth's `scopes` renamed `availableScopes` |
+| `tags` / `externalDocs` | at the document root | under `info` |
+| Servers | one `url` | `host` + `pathname` |
+
+The `publish` / `subscribe` inversion is the migration trap worth naming: 2.6's `publish` describes messages *others* publish to the channel, so the application being described receives them — which is why it maps to v3's `receive`, not `send`.
 
 ## Scope
 
