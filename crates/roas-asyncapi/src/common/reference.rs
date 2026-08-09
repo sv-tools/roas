@@ -84,6 +84,11 @@ pub(crate) fn pointer_tokens(pointer: &str) -> Option<Vec<String>> {
 
 /// Parse an RFC 6901 array index: digits only, and no leading zero
 /// unless the index *is* zero.
+///
+/// Only the version modules that step through arrays by pointer need
+/// this; gating it keeps a feature build that includes none of them
+/// free of dead code.
+#[cfg(any(feature = "v2_6", test))]
 #[must_use]
 pub(crate) fn array_index(token: &str) -> Option<usize> {
     if token.len() > 1 && token.starts_with('0') {
