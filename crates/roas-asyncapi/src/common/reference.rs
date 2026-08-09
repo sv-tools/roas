@@ -23,6 +23,78 @@ pub struct Reference {
     pub reference: String,
 }
 
+/// Decode one RFC 6901 reference token.
+///
+/// A pointer travels in a URI fragment, so it is percent-encoded (RFC
+/// 3986) *around* the pointer's own escapes (RFC 6901): the fragment is
+/// percent-decoded first, then `~1` becomes `/` and `~0` becomes `~`.
+///
+/// Returns `None` for a malformed token — a truncated or non-hex `%`
+/// escape, or a `~` not followed by `0` or `1` — which RFC 6901 leaves
+/// undefined rather than literal.
+#[must_use]
+pub(crate) fn decode_token(token: &str) -> Option<String> {
+    let bytes = token.as_bytes();
+    let mut percent_decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = token.get(i + 1..i + 3)?;
+            percent_decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            percent_decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let decoded = String::from_utf8(percent_decoded).ok()?;
+
+    let mut out = String::with_capacity(decoded.len());
+    let mut chars = decoded.chars();
+    while let Some(c) = chars.next() {
+        if c != '~' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('0') => out.push('~'),
+            Some('1') => out.push('/'),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Split a document-local fragment into decoded RFC 6901 tokens.
+///
+/// The fragment is percent-decoded per token *before* tokenizing, so a
+/// `%2F` is a literal `/` inside a key rather than a separator — the
+/// separator is the raw `/` in the fragment.
+#[must_use]
+pub(crate) fn pointer_tokens(pointer: &str) -> Option<Vec<String>> {
+    if pointer.is_empty() {
+        return Some(Vec::new());
+    }
+    pointer
+        .strip_prefix('/')?
+        .split('/')
+        .map(decode_token)
+        .collect()
+}
+
+/// Parse an RFC 6901 array index: digits only, and no leading zero
+/// unless the index *is* zero.
+#[must_use]
+pub(crate) fn array_index(token: &str) -> Option<usize> {
+    if token.len() > 1 && token.starts_with('0') {
+        return None;
+    }
+    if !token.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok()
+}
+
 impl Reference {
     /// The fragment part of a document-local reference.
     ///
@@ -48,25 +120,22 @@ impl Reference {
     /// containing a slash round-trips.
     #[must_use]
     pub fn local_key(&self) -> Option<String> {
-        let pointer = self.local_pointer()?;
-        let last = pointer.rsplit('/').next()?;
-        if last.is_empty() {
-            return None;
-        }
-        Some(last.replace("~1", "/").replace("~0", "~"))
+        let tokens = pointer_tokens(self.local_pointer()?)?;
+        let last = tokens.last()?;
+        (!last.is_empty()).then(|| last.clone())
     }
 
     /// Whether this is a local reference into `#/components/<kind>/…`,
     /// returning the component key when it is.
     #[must_use]
     pub fn component_key(&self, kind: &str) -> Option<String> {
-        let pointer = self.local_pointer()?;
-        let rest = pointer.strip_prefix("/components/")?.strip_prefix(kind)?;
-        let key = rest.strip_prefix('/')?;
-        if key.is_empty() || key.contains('/') {
-            return None;
+        let tokens = pointer_tokens(self.local_pointer()?)?;
+        match tokens.as_slice() {
+            [components, this_kind, key] if components == "components" && this_kind == kind => {
+                (!key.is_empty()).then(|| key.clone())
+            }
+            _ => None,
         }
-        Some(key.replace("~1", "/").replace("~0", "~"))
     }
 }
 
@@ -245,6 +314,60 @@ mod tests {
             reference: "#/channels/user".into(),
         };
         assert_eq!(not_components.component_key("channels"), None);
+    }
+
+    #[test]
+    fn tokens_are_percent_decoded_then_unescaped() {
+        assert_eq!(
+            pointer_tokens("/channels/source%2Fpath").unwrap(),
+            vec!["channels", "source/path"],
+            "`%2F` is a literal `/` inside one token",
+        );
+        assert_eq!(
+            pointer_tokens("/channels/source~1path").unwrap(),
+            vec!["channels", "source/path"],
+        );
+        assert_eq!(pointer_tokens("").unwrap(), Vec::<String>::new());
+        assert_eq!(decode_token("a%20b").unwrap(), "a b");
+        assert_eq!(decode_token("a~0b").unwrap(), "a~b");
+
+        // Malformed escapes are not literal.
+        for bad in ["a~2b", "a~", "a%2", "a%zz"] {
+            assert!(decode_token(bad).is_none(), "{bad} must not decode");
+        }
+        assert!(pointer_tokens("/channels/bad~2escape").is_none());
+        assert!(pointer_tokens("no-leading-slash").is_none());
+    }
+
+    #[test]
+    fn array_indices_follow_rfc_6901() {
+        assert_eq!(array_index("0"), Some(0));
+        assert_eq!(array_index("12"), Some(12));
+        for bad in ["01", "007", "-1", "1.0", "x", "", " 1"] {
+            assert!(array_index(bad).is_none(), "{bad} must not be an index");
+        }
+    }
+
+    #[test]
+    fn component_keys_are_decoded_too() {
+        let r = Reference {
+            reference: "#/components/securitySchemes/oauth%2Dscheme".into(),
+        };
+        assert_eq!(
+            r.component_key("securitySchemes").as_deref(),
+            Some("oauth-scheme")
+        );
+
+        // Wrong kind, extra depth, and malformed escapes all decline.
+        assert_eq!(r.component_key("messages"), None);
+        let deep = Reference {
+            reference: "#/components/messages/a/b".into(),
+        };
+        assert_eq!(deep.component_key("messages"), None);
+        let malformed = Reference {
+            reference: "#/components/messages/a~9b".into(),
+        };
+        assert_eq!(malformed.component_key("messages"), None);
     }
 
     #[test]

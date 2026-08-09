@@ -8,7 +8,7 @@
 //! and a security requirement must name a declared scheme — listing
 //! scopes only where the scheme's type allows them.
 
-use crate::common::reference::{RefOr, Reference};
+use crate::common::reference::{RefOr, Reference, array_index, pointer_tokens};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
 use crate::v2_6::external_documentation::ExternalDocumentation;
@@ -118,68 +118,24 @@ impl<'a, T> Resolution<'a, T> {
     }
 }
 
-/// Whether a local pointer has the shape of a channel pointer, used to
-/// tell "names nothing" from "wrong kind entirely".
-fn channel_pointer_shape(pointer: &str) -> bool {
-    pointer.starts_with("/channels/") || pointer.starts_with("/components/channels/")
-}
-
-/// The same, for a message pointer.
-fn message_pointer_shape(pointer: &str) -> bool {
-    pointer.starts_with("/components/messages/") || pointer.starts_with("/channels/")
-}
-
-/// Split one RFC 6901 segment off a pointer and decode it.
+/// Walk a JSON Pointer over the document as plain JSON.
 ///
-/// A pointer travels in a URI fragment, so it is percent-encoded (RFC
-/// 3986) around escapes for the pointer's own separators (RFC 6901):
-/// `%20` is a space, `~1` is a `/`, and `~0` is a `~`. `source/path` is
-/// therefore *two* segments and cannot name one channel — that key is
-/// spelled `source~1path`.
-///
-/// Returns `None` when the segment is malformed: a `~` followed by
-/// anything but `0` or `1`, or a truncated / non-hex `%` escape. RFC
-/// 6901 leaves those undefined rather than literal.
-fn split_segment(pointer: &str) -> Option<(String, &str)> {
-    let (segment, rest) = match pointer.find('/') {
-        Some(i) => (&pointer[..i], &pointer[i..]),
-        None => (pointer, ""),
-    };
-    Some((decode_segment(segment)?, rest))
-}
-
-/// Percent-decode, then undo the RFC 6901 escapes.
-fn decode_segment(segment: &str) -> Option<String> {
-    let bytes = segment.as_bytes();
-    let mut percent_decoded = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = segment.get(i + 1..i + 3)?;
-            percent_decoded.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            percent_decoded.push(bytes[i]);
-            i += 1;
-        }
-    }
-    let decoded = String::from_utf8(percent_decoded).ok()?;
-
-    let mut out = String::with_capacity(decoded.len());
-    let mut chars = decoded.chars();
-    while let Some(c) = chars.next() {
-        if c != '~' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('0') => out.push('~'),
-            Some('1') => out.push('/'),
-            // `~` must be followed by `0` or `1`.
+/// `$ref` is an unrestricted URI-reference, so a pointer may legally
+/// name something this crate does not model as its own type — a
+/// message-shaped `x-` extension at the root, say. The typed resolvers
+/// answer "which object is this"; this answers the weaker but broader
+/// "is there anything here at all", which is what tells a wrong-kind
+/// pointer from one that simply names nothing.
+fn walk_json<'v>(value: &'v serde_json::Value, tokens: &[String]) -> Option<&'v serde_json::Value> {
+    let mut current = value;
+    for token in tokens {
+        current = match current {
+            serde_json::Value::Object(map) => map.get(token)?,
+            serde_json::Value::Array(items) => items.get(array_index(token)?)?,
             _ => return None,
-        }
+        };
     }
-    Some(out)
+    Some(current)
 }
 
 impl Document {
@@ -211,33 +167,53 @@ impl Document {
             }
             match self.channel_at(pointer) {
                 Some(next) => current = next,
-                None => {
-                    return match channel_pointer_shape(pointer) {
-                        true => Resolution::Missing,
-                        false => Resolution::Unrecognized,
-                    };
-                }
+                None => return self.classify_unresolved(pointer),
             }
+        }
+    }
+
+    /// Decide what an unresolved local pointer *is*, for pointers the
+    /// typed resolvers could not follow.
+    ///
+    /// A well-formed pointer that lands on real JSON is accepted: this
+    /// crate simply does not model whatever is there, which is not the
+    /// document's fault. Anything else is malformed or dangling.
+    fn classify_unresolved<T>(&self, pointer: &str) -> Resolution<'_, T> {
+        let Some(tokens) = pointer_tokens(pointer) else {
+            // Malformed escapes — not a usable pointer at all.
+            return Resolution::Unrecognized;
+        };
+        let Ok(snapshot) = serde_json::to_value(self) else {
+            return Resolution::Unrecognized;
+        };
+        match walk_json(&snapshot, &tokens) {
+            Some(_) => Resolution::External,
+            None => Resolution::Missing,
         }
     }
 
     /// The channel a document-local pointer names, in either map.
     fn channel_at<'a>(&'a self, pointer: &str) -> Option<&'a ChannelItem> {
-        let (map, rest) = self.channel_map_at(pointer)?;
-        let (key, rest) = split_segment(rest)?;
-        rest.is_empty().then(|| map.get(&key))?
+        let tokens = pointer_tokens(pointer)?;
+        let (map, key) = self.channel_map_for(&tokens)?;
+        (key.len() == 1).then(|| map.get(&key[0]))?
     }
 
-    /// The channel map a pointer addresses, and what follows the map's
-    /// own prefix.
-    fn channel_map_at<'a, 'p>(
+    /// The channel map a token sequence addresses, and the tokens left
+    /// after the map's own prefix.
+    fn channel_map_for<'a, 't>(
         &'a self,
-        pointer: &'p str,
-    ) -> Option<(&'a BTreeMap<String, ChannelItem>, &'p str)> {
-        if let Some(rest) = pointer.strip_prefix("/components/channels/") {
-            return Some((&self.components.as_ref()?.channels, rest));
+        tokens: &'t [String],
+    ) -> Option<(&'a BTreeMap<String, ChannelItem>, &'t [String])> {
+        match tokens {
+            [components, channels, rest @ ..]
+                if components == "components" && channels == "channels" =>
+            {
+                Some((&self.components.as_ref()?.channels, rest))
+            }
+            [channels, rest @ ..] if channels == "channels" => Some((&self.channels, rest)),
+            _ => None,
         }
-        Some((&self.channels, pointer.strip_prefix("/channels/")?))
     }
 
     fn security_scheme_at(&self, name: &str) -> Resolution<'_, SecurityScheme> {
@@ -289,20 +265,17 @@ impl Document {
                     }
                     // Either map may hold the target: `#/servers/…` as
                     // well as `#/components/servers/…`.
-                    let entry = if let Some(rest) = pointer.strip_prefix("/components/servers/") {
-                        match split_segment(rest) {
-                            Some((key, "")) => {
-                                self.components.as_ref().and_then(|c| c.servers.get(&key))
-                            }
-                            _ => return Resolution::Unrecognized,
-                        }
-                    } else if let Some(rest) = pointer.strip_prefix("/servers/") {
-                        match split_segment(rest) {
-                            Some((key, "")) => self.servers.get(&key),
-                            _ => return Resolution::Unrecognized,
-                        }
-                    } else {
+                    let Some(tokens) = pointer_tokens(pointer) else {
                         return Resolution::Unrecognized;
+                    };
+                    let entry = match tokens.as_slice() {
+                        [components, servers, key]
+                            if components == "components" && servers == "servers" =>
+                        {
+                            self.components.as_ref().and_then(|c| c.servers.get(key))
+                        }
+                        [servers, key] if servers == "servers" => self.servers.get(key),
+                        _ => return Resolution::Unrecognized,
                     };
                     match entry {
                         Some(next) => current = next,
@@ -331,13 +304,7 @@ impl Document {
             match self.message_at(pointer) {
                 Some(RefOr::Item(message)) => return Resolution::Found(message),
                 Some(RefOr::Reference(next)) => current = next.clone(),
-                None => {
-                    return if message_pointer_shape(pointer) {
-                        Resolution::Missing
-                    } else {
-                        Resolution::Unrecognized
-                    };
-                }
+                None => return self.classify_unresolved(pointer),
             }
         }
     }
@@ -350,44 +317,39 @@ impl Document {
     /// `$ref` resolves to, so a message declared beside a `$ref` is
     /// reachable and one on the target is not (through this pointer).
     fn message_at<'a>(&'a self, pointer: &str) -> Option<&'a RefOr<Message>> {
-        if let Some(rest) = pointer.strip_prefix("/components/messages/") {
-            let (key, rest) = split_segment(rest)?;
-            if !rest.is_empty() {
-                return None;
-            }
-            return self.components.as_ref()?.messages.get(&key);
+        let tokens = pointer_tokens(pointer)?;
+        if let [components, messages, key] = tokens.as_slice()
+            && components == "components"
+            && messages == "messages"
+        {
+            return self.components.as_ref()?.messages.get(key);
         }
 
-        // `#/channels/<path>/publish|subscribe/message[/oneOf/<i>]`,
-        // and the same under `#/components/channels/…`.
-        let (map, rest) = self.channel_map_at(pointer)?;
-        let (key, rest) = split_segment(rest)?;
-        let channel = map.get(&key)?;
-        let (kind, rest) = split_segment(rest.strip_prefix('/')?)?;
+        // `<channel map>/<path>/publish|subscribe/message[/oneOf/<i>]`
+        let (map, rest) = self.channel_map_for(&tokens)?;
+        let [key, kind, field, steps @ ..] = rest else {
+            return None;
+        };
+        let channel = map.get(key)?;
         let operation = match kind.as_str() {
             "publish" => channel.publish.as_ref()?,
             "subscribe" => channel.subscribe.as_ref()?,
             _ => return None,
         };
-        let (field, rest) = split_segment(rest.strip_prefix('/')?)?;
         if field != "message" {
             return None;
         }
         let mut message = operation.message.as_ref()?;
-        let mut rest = rest;
         // Walk any `oneOf/<index>` steps.
-        while !rest.is_empty() {
-            let (step, tail) = split_segment(rest.strip_prefix('/')?)?;
+        for pair in steps.chunks(2) {
+            let [step, index] = pair else { return None };
             if step != "oneOf" {
                 return None;
             }
-            let (index, tail) = split_segment(tail.strip_prefix('/')?)?;
-            let index: usize = index.parse().ok()?;
             let OperationMessage::OneOf(one_of) = message else {
                 return None;
             };
-            message = one_of.one_of.get(index)?;
-            rest = tail;
+            message = one_of.one_of.get(array_index(index)?)?;
         }
         match message {
             OperationMessage::Single(single) => Some(single.as_ref()),
@@ -449,16 +411,26 @@ impl Document {
     /// Every message the document declares, inline or in `components`,
     /// walking through `oneOf` sets.
     fn messages(&self) -> Vec<&Message> {
-        fn collect<'a>(message: &'a OperationMessage, found: &mut Vec<&'a Message>) {
+        fn collect<'a>(
+            document: &'a Document,
+            message: &'a OperationMessage,
+            found: &mut Vec<&'a Message>,
+        ) {
             match message {
-                OperationMessage::Single(single) => {
-                    if let Some(message) = single.item() {
-                        found.push(message);
+                // A referenced message is still *this* document's
+                // message, so it counts toward the document-wide
+                // `messageId` uniqueness rule.
+                OperationMessage::Single(single) => match single.as_ref() {
+                    RefOr::Item(message) => found.push(message),
+                    RefOr::Reference(reference) => {
+                        if let Some(message) = document.resolve_message(reference).found() {
+                            found.push(message);
+                        }
                     }
-                }
+                },
                 OperationMessage::OneOf(one_of) => {
                     for alternative in &one_of.one_of {
-                        collect(alternative, found);
+                        collect(document, alternative, found);
                     }
                 }
             }
@@ -467,17 +439,34 @@ impl Document {
         let mut found = Vec::new();
         if let Some(components) = &self.components {
             for message in components.messages.values() {
-                if let Some(message) = message.item() {
-                    found.push(message);
+                match message {
+                    RefOr::Item(message) => found.push(message),
+                    RefOr::Reference(reference) => {
+                        if let Some(message) = self.resolve_message(reference).found() {
+                            found.push(message);
+                        }
+                    }
                 }
             }
         }
         for (_, _, operation) in self.operations() {
             if let Some(message) = &operation.message {
-                collect(message, &mut found);
+                collect(self, message, &mut found);
             }
         }
-        found
+
+        // The same message is reachable more than once — as a
+        // component and through every reference to it — but it is one
+        // message, so it cannot collide with itself. Identity, not
+        // value: two distinct messages may be equal field for field and
+        // still both be errors if they share an id.
+        let mut distinct: Vec<&Message> = Vec::with_capacity(found.len());
+        for message in found {
+            if !distinct.iter().any(|seen| std::ptr::eq(*seen, message)) {
+                distinct.push(message);
+            }
+        }
+        distinct
     }
 
     /// Check that a message `$ref` resolves inside this document.
@@ -1258,25 +1247,50 @@ mod tests {
     }
 
     #[test]
-    fn pointers_of_the_wrong_kind_are_told_apart_from_missing_ones() {
-        // A local pointer that cannot denote a channel at all.
+    fn a_pointer_that_names_nothing_is_reported_wherever_it_points() {
+        // Outside the locations this crate models *and* absent from the
+        // document: dangling either way.
         let mut value = minimal();
-        value["channels"] = json!({ "user": { "$ref": "#/components/schemas/thing" } });
+        value["channels"] = json!({ "user": { "$ref": "#/components/schemas/ghost" } });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("names nothing in this document")),
+        );
+
+        let mut value = minimal();
+        value["channels"] = json!({
+            "user": { "publish": { "message": { "$ref": "#/components/schemas/ghost" } } }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("names nothing in this document")),
+        );
+
+        // A malformed pointer is a different problem again.
+        let mut value = minimal();
+        value["channels"] = json!({ "user": { "$ref": "#/channels/bad~2escape" } });
         assert!(
             errors_for(value)
                 .iter()
                 .any(|e| e.contains("does not point at an object of the expected kind")),
         );
+    }
 
-        // …and the same for a message.
+    #[test]
+    fn a_pointer_into_an_unmodeled_location_is_accepted() {
+        // `$ref` is an unrestricted URI-reference, so a message-shaped
+        // root extension is a legal target even though this crate does
+        // not model it as a `Message`.
         let mut value = minimal();
+        value["x-shared-message"] = json!({ "name": "Shared", "payload": { "type": "object" } });
         value["channels"] = json!({
-            "user": { "publish": { "message": { "$ref": "#/components/schemas/thing" } } }
+            "user": { "publish": { "message": { "$ref": "#/x-shared-message" } } }
         });
         assert!(
-            errors_for(value)
-                .iter()
-                .any(|e| e.contains("does not point at an object of the expected kind")),
+            errors_for(value).is_empty(),
+            "a pointer at real JSON elsewhere in the document is legal",
         );
     }
 
@@ -1365,12 +1379,20 @@ mod tests {
             "#/channels/source/publish/message/oneOf/x",   // non-numeric index
             "#/channels/source/publish/message/anyOf/0",   // not a oneOf step
             "#/channels/source/subscribe/message/oneOf/0", // not a set at all
-            "#/channels/source/publish/message",           // terminates on a set
+            "#/channels/source/publish/message/oneOf/01",  // leading zero
         ] {
             let mut value = base.clone();
             value["channels"]["target"]["subscribe"]["message"] = json!({ "$ref": pointer });
             assert!(!errors_for(value).is_empty(), "{pointer} must not resolve");
         }
+
+        // Pointing at the `oneOf` set itself lands on real JSON, so it
+        // is accepted: the crate does not model a set as a message, but
+        // the pointer is not the document's mistake.
+        let mut value = base;
+        value["channels"]["target"]["subscribe"]["message"] =
+            json!({ "$ref": "#/channels/source/publish/message" });
+        assert!(errors_for(value).is_empty());
     }
 
     #[test]
@@ -1576,6 +1598,111 @@ mod tests {
                 .count(),
             2,
             "both the channel item and the schema `$ref` count: {errors:?}",
+        );
+    }
+
+    #[test]
+    fn message_ids_collide_through_references_too() {
+        // Two *distinct* messages sharing an id, one of them reached
+        // only through a pointer into a component channel.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "a": { "publish": { "message": { "messageId": "dup" } } },
+                "b": {
+                    "subscribe": {
+                        "message": { "$ref": "#/components/channels/source/publish/message" }
+                    }
+                }
+            },
+            "components": {
+                "channels": {
+                    "source": { "publish": { "message": { "messageId": "dup" } } }
+                }
+            }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("duplicate messageId `dup`")),
+            "a referenced message counts toward the document-wide rule",
+        );
+    }
+
+    #[test]
+    fn one_message_reached_twice_does_not_collide_with_itself() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "a": { "publish": { "message": { "$ref": "#/components/messages/shared" } } },
+                "b": { "subscribe": { "message": { "$ref": "#/components/messages/shared" } } }
+            },
+            "components": { "messages": { "shared": { "messageId": "once" } } }
+        });
+        assert!(errors_for(value).is_empty(), "identity, not reachability");
+    }
+
+    #[test]
+    fn percent_encoded_separators_stay_inside_a_key() {
+        // `%2F` decodes to a literal `/` *within* one token, so this
+        // names the single key `source/path`.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source/path": { "publish": {} },
+                "alias": { "$ref": "#/channels/source%2Fpath" }
+            }
+        });
+        let doc: Document = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            doc.resolve_channel(&doc.channels["alias"])
+                .found()
+                .is_some()
+        );
+        assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn a_security_alias_key_is_percent_decoded() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "user": { "publish": { "security": [ { "alias": [] } ] } } },
+            "components": {
+                "securitySchemes": {
+                    "alias": { "$ref": "#/components/securitySchemes/oauth%2Dscheme" },
+                    "oauth-scheme": { "type": "userPassword" }
+                }
+            }
+        });
+        assert!(
+            errors_for(value).is_empty(),
+            "`%2D` names the `-` in `oauth-scheme`",
+        );
+    }
+
+    #[test]
+    fn array_indices_reject_leading_zeros() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": {
+                    "publish": { "message": { "oneOf": [ { "name": "A" }, { "name": "B" } ] } }
+                },
+                "target": {
+                    "subscribe": {
+                        "message": { "$ref": "#/channels/source/publish/message/oneOf/01" }
+                    }
+                }
+            }
+        });
+        assert!(
+            !errors_for(value).is_empty(),
+            "RFC 6901 forbids a leading zero in an array index",
         );
     }
 
