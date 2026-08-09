@@ -1,0 +1,12 @@
+{
+  "asyncapi": "2.6.0",
+  "info": { "title": "Broken parameters", "version": "1.0.0" },
+  "channels": {
+    "streetlights/{streetlightId}/lighting/{metric}": {
+      "parameters": {
+        "streetlightId": { "location": "not-a-runtime-expression" },
+        "unused": { "schema": { "type": "string" } }
+      }
+    }
+  }
+}
