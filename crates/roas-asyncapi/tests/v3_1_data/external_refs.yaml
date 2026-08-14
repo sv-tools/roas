@@ -1,5 +1,7 @@
-# Every reference points outside this document, so the cross-reference
-# checks have nothing local to resolve.
+# A document split across files. The root maps stay the index — the
+# specification requires a root operation to name a channel in the root
+# Channels Object — and it is the entries themselves that point out of
+# this file, so the cross-reference checks have nothing local to resolve.
 asyncapi: 3.1.0
 info:
   title: Split across files
@@ -11,6 +13,10 @@ operations:
   sendSignup:
     action: send
     channel:
-      $ref: './channels.yaml#/user'
+      $ref: '#/channels/user'
     messages:
-      - $ref: './messages.yaml#/signup'
+      - $ref: '#/channels/user/messages/signup'
+components:
+  messages:
+    signup:
+      $ref: './messages.yaml#/signup'

@@ -12,6 +12,7 @@
 
 use crate::common::pointer;
 use crate::common::reference::RefOr;
+use crate::validation::Context;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -119,24 +120,23 @@ const SINGLETONS: &[&str] = &["info", "asyncapi", "id", "defaultContentType"];
 /// An **entry of another map** — `#/servers/prod` where a channel
 /// belongs.
 ///
-/// A longer pointer qualifies for none of them: it is walking deeper
-/// into the document, which is legitimate —
-/// `#/channels/user/publish/message` names a message even though it
-/// passes through `channels`.
+/// Depth does not enter into it: what names the kind is the token
+/// *before* the last one, wherever that falls. `#/channels/c/messages/m`
+/// is a message however deep it sits, and using it where a channel
+/// belongs is the same mistake as `#/components/messages/m` there.
+/// A token that is not a kind name at all — `publish` in v2.6's
+/// `#/channels/user/publish/message` — says nothing either way, and the
+/// pointer is judged on what it finds instead.
 fn names_something_else(path: &[String], expected: &str) -> bool {
-    let named = match path {
-        // The whole document.
-        [] => return true,
-        [components] if components == "components" => return true,
-        [single] => {
-            return SINGLETONS.contains(&single.as_str()) || KINDS.contains(&single.as_str());
-        }
-        [components, kind] if components == "components" => return KINDS.contains(&kind.as_str()),
-        [components, kind, _] if components == "components" => kind,
-        [kind, _] => kind,
-        _ => return false,
-    };
-    named != expected && KINDS.contains(&named.as_str())
+    match path {
+        // Containers: the whole document, `#/components`, a map.
+        [] => true,
+        [components] if components == "components" => true,
+        [single] => SINGLETONS.contains(&single.as_str()) || KINDS.contains(&single.as_str()),
+        [components, kind] if components == "components" => KINDS.contains(&kind.as_str()),
+        // The token before the last one names the kind, at any depth.
+        [.., named, _] => named != expected && KINDS.contains(&named.as_str()),
+    }
 }
 
 /// Decide what an unresolved local pointer *is*, by walking the
@@ -260,6 +260,135 @@ where
             None => return (path, classify_unresolved(document, local, expected_kind)),
         }
     }
+}
+
+/// Check every document-local `$ref` in the document, wherever it sits.
+///
+/// The typed checks above judge the references a version *wires* —
+/// which channel an operation names, which messages belong to it — and
+/// they are the better error when they apply. But a reference is a
+/// document bug whether or not anything is wired through it, and a
+/// dangling pointer inside a channel's `messages`, a server's
+/// `variables`, or an operation's `traits` would otherwise be found
+/// only if some other check happened to walk that way.
+///
+/// This walks the serialized document instead of the model, so it needs
+/// no per-position code and covers positions the model holds as opaque
+/// JSON. It reports only what it can see structurally — a pointer that
+/// names nothing, or a chain that loops — and stays quiet where a typed
+/// check has already spoken, so the specific error wins.
+///
+/// `x-` extensions are skipped: what a `$ref` means inside one is the
+/// extension's business.
+pub(crate) fn check_every_reference<D>(ctx: &mut Context, document: &D)
+where
+    D: Serialize,
+{
+    let snapshot = serde_json::to_value(document).unwrap_or_default();
+    visit(ctx, &snapshot, &snapshot);
+}
+
+fn visit(ctx: &mut Context, root: &serde_json::Value, node: &serde_json::Value) {
+    match node {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(reference)) = map.get("$ref") {
+                check_one(ctx, root, reference);
+            }
+            for (key, value) in map {
+                if key.starts_with("x-") || key == "$ref" {
+                    continue;
+                }
+                ctx.in_field(key, |ctx| visit(ctx, root, value));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                ctx.in_element(index, |ctx| visit(ctx, root, item));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Follow one reference through the document as plain JSON.
+fn check_one(ctx: &mut Context, root: &serde_json::Value, reference: &str) {
+    // External references land in a document this crate cannot see, and
+    // an empty one is reported for being empty.
+    let Some(local) = reference.strip_prefix('#') else {
+        return;
+    };
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut pointer = local.to_owned();
+    let problem = loop {
+        if !seen.insert(pointer.clone()) {
+            break "is part of a reference cycle";
+        }
+        match walk_as_written(root, &pointer) {
+            // Nothing to say: either it resolved, or what would have
+            // resolved it is in another document.
+            Walk::Deferred => return,
+            Walk::Missing => break "names nothing in this document",
+            Walk::Unrecognized => break "is not a usable JSON Pointer",
+            Walk::Landed(target) => {
+                // Keep following while the target is itself a
+                // reference, which is how a cycle shows up.
+                match target.get("$ref").and_then(serde_json::Value::as_str) {
+                    Some(next) => match next.strip_prefix('#') {
+                        Some(next) => pointer = next.to_owned(),
+                        None => return,
+                    },
+                    None => return,
+                }
+            }
+        }
+    };
+    if !ctx.has_error_at_field("$ref") {
+        ctx.error_field("$ref", format!("`{reference}` {problem}"));
+    }
+}
+
+/// Where a structural walk ended.
+enum Walk<'v> {
+    Landed(&'v serde_json::Value),
+    /// The walk failed, but passed a `$ref` on the way — so what it was
+    /// looking for may well exist, just not in this document as
+    /// written. Not something to report.
+    Deferred,
+    Missing,
+    Unrecognized,
+}
+
+/// Walk a pointer over the document exactly as written.
+///
+/// A JSON Pointer does not resolve as it walks: `#/channels/c/publish`
+/// names what is written beside a `$ref` in `c`, not what that `$ref`
+/// points at. But when the walk *fails* after passing one, the missing
+/// step is very likely inside what the reference names — a split-file
+/// document walks `#/channels/user/messages/m` through a `channels.user`
+/// that is only a `$ref` — so a failure downstream of a reference is
+/// left unjudged.
+fn walk_as_written<'v>(root: &'v serde_json::Value, pointer: &str) -> Walk<'v> {
+    let Some(tokens) = pointer::tokens(pointer) else {
+        return Walk::Unrecognized;
+    };
+    let mut current = root;
+    let mut deferred = false;
+    for token in &tokens {
+        deferred |= current.get("$ref").is_some();
+        let next = match current {
+            serde_json::Value::Object(map) => map.get(token),
+            serde_json::Value::Array(items) => {
+                pointer::array_index(token).and_then(|index| items.get(index))
+            }
+            _ => None,
+        };
+        match next {
+            Some(value) => current = value,
+            None if deferred => return Walk::Deferred,
+            None => return Walk::Missing,
+        }
+    }
+    Walk::Landed(current)
 }
 
 #[cfg(test)]

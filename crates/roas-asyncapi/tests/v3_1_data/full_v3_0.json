@@ -112,7 +112,7 @@
       "address": null
     },
     "replies": {
-      "address": "replies",
+      "address": null,
       "messages": {
         "ack": {
           "name": "Ack"

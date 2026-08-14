@@ -52,7 +52,7 @@ macro_rules! component_maps {
 }
 
 component_maps! {
-    schemas: RefOr<SchemaOrMultiFormat> => "schemas",
+    schemas: SchemaOrMultiFormat => "schemas",
     servers: RefOr<Server> => "servers",
     channels: RefOr<Channel> => "channels",
     operations: RefOr<Operation> => "operations",
