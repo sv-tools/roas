@@ -18,7 +18,7 @@ use crate::v3_1::channel::Channel;
 use crate::v3_1::components::Components;
 use crate::v3_1::info::Info;
 use crate::v3_1::message::Message;
-use crate::v3_1::operation::Operation;
+use crate::v3_1::operation::{Operation, OperationReply};
 use crate::v3_1::server::Server;
 use crate::v3_1::version::Version;
 use crate::validation::{Context, Error, Validate, ValidateWithContext, ValidationOptions};
@@ -70,40 +70,81 @@ pub struct Document {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// The component key a pointer names, when it names one of `field`'s
-/// entries — either `#/<field>/<key>` or `#/components/<field>/<key>`.
-fn key_in(path: &[String], field: &str) -> Option<String> {
-    match path {
-        [c, this, key] if c == "components" && this == field => Some(key.clone()),
-        [this, key] if this == field => Some(key.clone()),
-        _ => None,
-    }
+/// Check the declared aliases of every `components` map that has no
+/// root counterpart, which is all of them but servers, channels, and
+/// operations.
+macro_rules! declared_components {
+    ($self:ident, $ctx:ident, $components:ident, $( $field:ident => $name:literal ),+ $(,)?) => {
+        $(
+            $self.check_declared($ctx, $name, &$components.$field, None, Some(&$components.$field));
+        )+
+    };
+}
+
+/// Where an object sits in the document.
+///
+/// The specification's reference rules turn on this. A channel,
+/// operation, or reply in the root "MUST point to a channel definition
+/// located in the root Channels Object, and MUST NOT point to a channel
+/// definition located in the Components Object or anywhere else", while
+/// one under `components` "MAY point to a Channel Object in any
+/// location".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Root,
+    Components,
 }
 
 /// A channel `$ref` that landed on a declared channel.
 struct ResolvedChannel<'a> {
-    /// The channel's key, used to check that an operation's messages
-    /// come from *this* channel.
-    key: String,
-    /// The channel itself, or `None` when the entry is a `$ref` and
-    /// deeper checks cannot continue.
+    /// Where the chain ended, as decoded pointer tokens.
+    ///
+    /// The whole path, not just the key: `#/channels/events` and
+    /// `#/components/channels/events` are different channels that may
+    /// both declare a message `m`, and an operation may only name the
+    /// messages of the one it selected.
+    at: Vec<String>,
+    /// The channel itself, or `None` when the chain left the document
+    /// and deeper checks cannot continue.
     channel: Option<&'a Channel>,
+}
+
+/// Render decoded tokens back into a JSON Pointer, for error messages.
+fn as_pointer(path: &[String]) -> String {
+    let mut out = String::from("#");
+    for token in path {
+        out.push('/');
+        out.push_str(&token.replace('~', "~0").replace('/', "~1"));
+    }
+    out
+}
+
+/// The message key a pointer names, when it names a message of the
+/// channel at `channel_path` — that channel's own pointer with
+/// `/messages/<key>` on the end, and nothing else.
+fn message_key_of<'p>(path: &'p [String], channel_path: &[String]) -> Option<&'p String> {
+    let (prefix, tail) = path.split_at(path.len().checked_sub(2)?);
+    match tail {
+        [messages, key] if prefix == channel_path && messages == "messages" => Some(key),
+        _ => None,
+    }
 }
 
 impl Document {
     /// Resolve a `$ref` against `#/<field>/<key>` and
     /// `#/components/<field>/<key>`, following the chain to its end.
     ///
-    /// Returns the key the pointer named alongside the outcome: the
-    /// caller needs it to check that an operation's messages come from
-    /// the channel it names.
+    /// Returns where the chain ended alongside the outcome — the path,
+    /// not the key, because the caller uses it as the target's
+    /// identity. `None` means the chain has no location in this
+    /// document: it left for another one, or was never a pointer.
     fn resolve<'a, T>(
         &'a self,
         reference: &Reference,
         field: &str,
-        inline: &'a BTreeMap<String, RefOr<T>>,
+        inline: Option<&'a BTreeMap<String, RefOr<T>>>,
         components: Option<&'a BTreeMap<String, RefOr<T>>>,
-    ) -> (Option<String>, Resolution<'a, T>)
+    ) -> (Option<Vec<String>>, Resolution<'a, T>)
     where
         T: DeserializeOwned,
     {
@@ -121,18 +162,65 @@ impl Document {
             [c, this, key] if c == "components" && this == field => {
                 components.and_then(|map| map.get(key))
             }
-            [this, key] if this == field => inline.get(key),
+            [this, key] if this == field => inline.and_then(|map| map.get(key)),
             _ => None,
         };
 
-        // The key comes from where the chain *ended*, not where it
-        // started: an alias and its target are the same object, and a
-        // caller comparing keys has to see the target's.
+        // Where the chain *ended*, not where it started: an alias and
+        // its target are the same object, and a caller comparing
+        // identities has to see the target's.
         let (terminal, resolution) = match lookup(&path) {
             Some(entry) => follow_tracked(self, path, entry, field, lookup),
             None => (path, classify_unresolved(self, local, field)),
         };
-        (key_in(&terminal, field), resolution)
+        (Some(terminal), resolution)
+    }
+
+    /// Check a `$ref` the specification pins to a particular place.
+    ///
+    /// From the root that is `#/<field>/<key>` and nothing else — not
+    /// `#/components/<field>/<key>`, and not "anywhere else" either.
+    /// From `components` anything goes, and this says nothing.
+    ///
+    /// An external reference is left alone: where it lands is inside
+    /// another document, which this crate cannot see.
+    fn check_location(reference: &Reference, field: &str, origin: Origin) -> Option<String> {
+        if origin == Origin::Components || reference.is_external() {
+            return None;
+        }
+        // An unusable pointer is not a *location* problem, and the
+        // resolver has a better word for it.
+        let path = reference.local_pointer().and_then(pointer::tokens)?;
+        let rooted = matches!(path.as_slice(), [this, _] if this == field);
+        (!rooted).then(|| format!("must point into the root `{field}` object"))
+    }
+
+    /// Report a declared entry that is a `$ref` leading nowhere.
+    ///
+    /// A dangling alias is a document bug whether or not anything uses
+    /// it, and an unused one is exactly what no other check would
+    /// notice.
+    fn check_declared<T>(
+        &self,
+        ctx: &mut Context,
+        field: &str,
+        map: &BTreeMap<String, RefOr<T>>,
+        inline: Option<&BTreeMap<String, RefOr<T>>>,
+        components: Option<&BTreeMap<String, RefOr<T>>>,
+    ) where
+        T: DeserializeOwned,
+    {
+        for (key, entry) in map {
+            let RefOr::Reference(reference) = entry else {
+                continue;
+            };
+            let (_, resolution) = self.resolve(reference, field, inline, components);
+            if let Some(problem) = resolution.problem() {
+                ctx.in_key(field, key, |ctx| {
+                    ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
+                });
+            }
+        }
     }
 
     fn components_map<'a, T>(
@@ -142,16 +230,20 @@ impl Document {
         self.components.as_ref().map(pick)
     }
 
-    /// Check that every `$ref` in `channel.servers` names a server.
-    fn validate_channel_servers(&self, ctx: &mut Context, channel: &Channel) {
+    /// Check that every `$ref` in `channel.servers` names a server the
+    /// channel is allowed to name.
+    fn validate_channel_servers(&self, ctx: &mut Context, channel: &Channel, origin: Origin) {
         for (i, server) in channel.servers.iter().enumerate() {
-            let (_, resolution) = self.resolve(
-                server,
-                "servers",
-                &self.servers,
-                self.components_map(|c| &c.servers),
-            );
-            if let Some(problem) = resolution.problem() {
+            let problem = Self::check_location(server, "servers", origin).or_else(|| {
+                let (_, resolution) = self.resolve(
+                    server,
+                    "servers",
+                    Some(&self.servers),
+                    self.components_map(|c| &c.servers),
+                );
+                resolution.problem().map(ToOwned::to_owned)
+            });
+            if let Some(problem) = problem {
                 ctx.in_index("servers", i, |ctx| {
                     ctx.error_field("$ref", format!("server `{}` {problem}", server.reference));
                 });
@@ -162,50 +254,76 @@ impl Document {
     /// Check an operation's `channel` and that its `messages` are a
     /// subset of that channel's messages. Returns nothing: every
     /// finding is recorded on `ctx`.
-    fn validate_operation_wiring(&self, ctx: &mut Context, operation: &Operation) {
-        let channel = self.check_channel_ref(ctx, "channel", &operation.channel);
+    fn validate_operation_wiring(&self, ctx: &mut Context, operation: &Operation, origin: Origin) {
+        let channel = self.check_channel_ref(ctx, "channel", &operation.channel, origin);
         self.check_message_refs(ctx, "messages", &operation.messages, channel.as_ref());
 
-        if let Some(reply) = operation.reply.as_ref().and_then(RefOr::item) {
-            ctx.in_field("reply", |ctx| {
-                let reply_channel = reply
-                    .channel
-                    .as_ref()
-                    .and_then(|reference| self.check_channel_ref(ctx, "channel", reference));
-                self.check_message_refs(ctx, "messages", &reply.messages, reply_channel.as_ref());
-            });
-        }
+        let Some(reply) = &operation.reply else {
+            return;
+        };
+        ctx.in_field("reply", |ctx| match reply {
+            // A reusable reply is wired where it is declared, so here
+            // there is only the alias itself to check.
+            RefOr::Reference(reference) => {
+                let (_, resolution) = self.resolve(
+                    reference,
+                    "replies",
+                    None,
+                    self.components_map(|c| &c.replies),
+                );
+                if let Some(problem) = resolution.problem() {
+                    ctx.error_field("$ref", format!("reply `{}` {problem}", reference.reference));
+                }
+            }
+            RefOr::Item(reply) => self.validate_reply_wiring(ctx, reply, origin),
+        });
     }
 
-    /// Resolve a channel `$ref` at `<field>`, reporting when it does not
-    /// land on a declared channel. Returns the channel when it is
-    /// inline and resolvable.
+    /// Check a reply's `channel` and `messages`, which are wired like
+    /// an operation's own.
+    fn validate_reply_wiring(&self, ctx: &mut Context, reply: &OperationReply, origin: Origin) {
+        let channel = reply
+            .channel
+            .as_ref()
+            .and_then(|reference| self.check_channel_ref(ctx, "channel", reference, origin));
+        self.check_message_refs(ctx, "messages", &reply.messages, channel.as_ref());
+    }
+
+    /// Resolve a channel `$ref` at `<field>`, reporting when it may not
+    /// point where it does, or does not land on a declared channel.
     fn check_channel_ref<'a>(
         &'a self,
         ctx: &mut Context,
         field: &str,
         reference: &Reference,
+        origin: Origin,
     ) -> Option<ResolvedChannel<'a>> {
-        let (key, resolution) = self.resolve(
-            reference,
-            "channels",
-            &self.channels,
-            self.components_map(|c| &c.channels),
-        );
-        if let Some(problem) = resolution.problem() {
+        let mut report = |problem: &str| {
             ctx.in_field(field, |ctx| {
                 ctx.error_field(
                     "$ref",
                     format!("channel `{}` {problem}", reference.reference),
                 );
             });
+        };
+        if let Some(problem) = Self::check_location(reference, "channels", origin) {
+            report(&problem);
             return None;
         }
-        // A chain that leaves the document, or lands somewhere this
-        // crate does not model, still names a key — the deeper checks
-        // simply stop there.
-        key.map(|key| ResolvedChannel {
-            key,
+        let (at, resolution) = self.resolve(
+            reference,
+            "channels",
+            Some(&self.channels),
+            self.components_map(|c| &c.channels),
+        );
+        if let Some(problem) = resolution.problem() {
+            report(problem);
+            return None;
+        }
+        // A chain that leaves the document still has an identity here —
+        // the deeper checks simply stop at it.
+        at.map(|at| ResolvedChannel {
+            at,
             channel: resolution.found(),
         })
     }
@@ -241,58 +359,16 @@ impl Document {
         follow(self, entry, "messages", |path| self.message_entry(path)).problem()
     }
 
-    /// Check a message named through the channel it belongs to, i.e.
-    /// `#/channels/<name>/messages/<key>`.
-    fn channel_message_problem(
-        &self,
-        resolved: &ResolvedChannel<'_>,
-        channel_name: &str,
-        key: &str,
-    ) -> Option<String> {
-        if channel_name != resolved.key {
-            return Some(format!(
-                "belongs to channel `{channel_name}`, not `{}`",
-                resolved.key
-            ));
-        }
-        // With the channel itself unresolvable there is nothing left to
-        // compare against; its own `$ref` is reported where it sits.
-        let channel = resolved.channel?;
-        let Some(entry) = channel.messages.get(key) else {
-            return Some("is not one of the channel's `messages`".to_owned());
-        };
-        self.message_problem(entry).map(ToOwned::to_owned)
-    }
-
-    /// Check a message named through `components`, which must also be
-    /// one of the channel's own.
-    fn component_message_problem(
-        &self,
-        resolved: &ResolvedChannel<'_>,
-        key: &str,
-    ) -> Option<String> {
-        let entry = self.components.as_ref().and_then(|c| c.messages.get(key));
-        let Some(entry) = entry else {
-            return Some("is not declared".to_owned());
-        };
-        if let Some(problem) = self.message_problem(entry) {
-            return Some(problem.to_owned());
-        }
-        let channel = resolved.channel?;
-        // Compare decoded keys: `#/components/messages/user%2Dsignup`
-        // and `#/components/messages/user-signup` are the same message.
-        let listed = channel.messages.values().any(|candidate| {
-            candidate
-                .reference()
-                .and_then(|r| r.component_key("messages"))
-                .is_some_and(|candidate| candidate == key)
-        });
-        (!listed).then(|| "is not one of the channel's `messages`".to_owned())
-    }
-
-    /// Check that each `$ref` in `messages` names a message of
-    /// `channel`. Skipped entirely when the channel could not be
-    /// resolved (external, or itself a `$ref`).
+    /// Check that each `$ref` in `messages` names one of the channel's
+    /// own messages.
+    ///
+    /// The specification allows exactly one shape: the channel's own
+    /// pointer with `/messages/<key>` on the end. A message "MUST
+    /// contain a subset of the messages defined in the channel
+    /// referenced in this operation, and MUST NOT point to a subset of
+    /// message definitions located in the Messages Object in the
+    /// Components Object or anywhere else" — so this is as much a check
+    /// on where the pointer points as on what it finds there.
     fn check_message_refs(
         &self,
         ctx: &mut Context,
@@ -316,28 +392,109 @@ impl Document {
                 report(ctx, "is not a usable JSON Pointer".to_owned());
                 continue;
             };
-
-            let problem = match path.as_slice() {
-                [c, ch, name, m, key]
-                    if c == "components" && ch == "channels" && m == "messages" =>
-                {
-                    self.channel_message_problem(resolved, name, key)
-                }
-                [ch, name, m, key] if ch == "channels" && m == "messages" => {
-                    self.channel_message_problem(resolved, name, key)
-                }
-                [c, m, key] if c == "components" && m == "messages" => {
-                    self.component_message_problem(resolved, key)
-                }
-                // Any other document-local pointer cannot be a message.
-                _ => Some(
-                    "must point at a message (`#/channels/…/messages/…` or `#/components/messages/…`)"
-                        .to_owned(),
-                ),
+            let Some(key) = message_key_of(&path, &resolved.at) else {
+                report(
+                    ctx,
+                    format!("must point at a message of `{}`", as_pointer(&resolved.at)),
+                );
+                continue;
             };
-            if let Some(problem) = problem {
-                report(ctx, problem);
+
+            // The channel left the document, so its messages are not
+            // here to be a subset of.
+            let Some(channel) = resolved.channel else {
+                continue;
+            };
+            let Some(entry) = channel.messages.get(key) else {
+                report(ctx, "is not one of the channel's `messages`".to_owned());
+                continue;
+            };
+            if let Some(problem) = self.message_problem(entry) {
+                report(ctx, problem.to_owned());
             }
+        }
+    }
+
+    /// Wire the reusable objects.
+    ///
+    /// Wiring needs the whole document, so it cannot run from
+    /// `Components` itself. A reusable channel, operation, or reply is
+    /// wired exactly like an inline one — except that it may reference
+    /// freely, being outside the root.
+    fn validate_components_wiring(&self, ctx: &mut Context, components: &Components) {
+        for (name, channel) in &components.channels {
+            if let Some(channel) = channel.item() {
+                ctx.in_key("channels", name, |ctx| {
+                    self.validate_channel_servers(ctx, channel, Origin::Components);
+                });
+            }
+        }
+        for (name, operation) in &components.operations {
+            if let Some(operation) = operation.item() {
+                ctx.in_key("operations", name, |ctx| {
+                    self.validate_operation_wiring(ctx, operation, Origin::Components);
+                });
+            }
+        }
+        for (name, reply) in &components.replies {
+            if let Some(reply) = reply.item() {
+                ctx.in_key("replies", name, |ctx| {
+                    self.validate_reply_wiring(ctx, reply, Origin::Components);
+                });
+            }
+        }
+
+        // Every declared alias, whether or not anything uses it.
+        self.check_declared(
+            ctx,
+            "servers",
+            &components.servers,
+            Some(&self.servers),
+            Some(&components.servers),
+        );
+        self.check_declared(
+            ctx,
+            "channels",
+            &components.channels,
+            Some(&self.channels),
+            Some(&components.channels),
+        );
+        self.check_declared(
+            ctx,
+            "operations",
+            &components.operations,
+            Some(&self.operations),
+            Some(&components.operations),
+        );
+        // Messages resolve through channels as well as `components`,
+        // so they get the message lookup rather than the generic one.
+        for (key, entry) in &components.messages {
+            let Some(reference) = entry.reference() else {
+                continue;
+            };
+            if let Some(problem) = self.message_problem(entry) {
+                ctx.in_key("messages", key, |ctx| {
+                    ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
+                });
+            }
+        }
+        declared_components! {
+            self, ctx, components,
+            schemas => "schemas",
+            security_schemes => "securitySchemes",
+            server_variables => "serverVariables",
+            parameters => "parameters",
+            correlation_ids => "correlationIds",
+            replies => "replies",
+            reply_addresses => "replyAddresses",
+            external_docs => "externalDocs",
+            tags => "tags",
+            operation_traits => "operationTraits",
+            message_traits => "messageTraits",
+            server_bindings => "serverBindings",
+            channel_bindings => "channelBindings",
+            operation_bindings => "operationBindings",
+            message_bindings => "messageBindings",
         }
     }
 
@@ -357,47 +514,52 @@ impl Document {
         for (name, server) in &self.servers {
             ctx.in_key("servers", name, |ctx| server.validate_with_context(ctx));
         }
+        self.check_declared(
+            &mut ctx,
+            "servers",
+            &self.servers,
+            Some(&self.servers),
+            self.components_map(|c| &c.servers),
+        );
 
         ctx.validate_map_keys("channels", &self.channels);
         for (name, channel) in &self.channels {
             ctx.in_key("channels", name, |ctx| {
                 channel.validate_with_context(ctx);
                 if let Some(channel) = channel.item() {
-                    self.validate_channel_servers(ctx, channel);
+                    self.validate_channel_servers(ctx, channel, Origin::Root);
                 }
             });
         }
+        self.check_declared(
+            &mut ctx,
+            "channels",
+            &self.channels,
+            Some(&self.channels),
+            self.components_map(|c| &c.channels),
+        );
 
         ctx.validate_map_keys("operations", &self.operations);
         for (name, operation) in &self.operations {
             ctx.in_key("operations", name, |ctx| {
                 operation.validate_with_context(ctx);
                 if let Some(operation) = operation.item() {
-                    self.validate_operation_wiring(ctx, operation);
+                    self.validate_operation_wiring(ctx, operation, Origin::Root);
                 }
             });
         }
+        self.check_declared(
+            &mut ctx,
+            "operations",
+            &self.operations,
+            Some(&self.operations),
+            self.components_map(|c| &c.operations),
+        );
 
         if let Some(components) = &self.components {
             ctx.in_field("components", |ctx| {
                 components.validate_with_context(ctx);
-                // Wiring needs the whole document, so it cannot run from
-                // `Components` itself — and a reusable channel or
-                // operation is wired exactly like an inline one.
-                for (name, channel) in &components.channels {
-                    if let Some(channel) = channel.item() {
-                        ctx.in_key("channels", name, |ctx| {
-                            self.validate_channel_servers(ctx, channel);
-                        });
-                    }
-                }
-                for (name, operation) in &components.operations {
-                    if let Some(operation) = operation.item() {
-                        ctx.in_key("operations", name, |ctx| {
-                            self.validate_operation_wiring(ctx, operation);
-                        });
-                    }
-                }
+                self.validate_components_wiring(ctx, components);
             });
         }
 
@@ -443,6 +605,16 @@ mod tests {
                 }
             }
         })
+    }
+
+    /// The same wiring with the operation under `components`, where a
+    /// reference "MAY point to a Channel Object in any location".
+    fn wired_from_components() -> serde_json::Value {
+        let mut value = wired();
+        let operation = value["operations"]["receiveSignups"].take();
+        value["operations"] = json!({});
+        value["components"] = json!({ "operations": { "receiveSignups": operation } });
+        value
     }
 
     fn errors_for(value: serde_json::Value) -> Vec<String> {
@@ -507,8 +679,23 @@ mod tests {
 
     #[test]
     fn operation_channel_must_point_at_a_channel() {
+        // From the root the location rule answers first: whatever
+        // `#/servers/production` is, it is not in `#/channels`.
         let mut value = wired();
         value["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/servers/production" });
+        let errors = errors_for(value);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("must point into the root `channels` object")),
+            "got: {errors:?}"
+        );
+
+        // From `components`, where any location is allowed, what it
+        // points *at* is what disqualifies it.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
             json!({ "$ref": "#/servers/production" });
         let errors = errors_for(value);
         assert!(
@@ -546,7 +733,7 @@ mod tests {
         let errors = errors_for(value);
         assert!(
             errors.iter().any(|e| e.contains(
-                "message `#/channels/other/messages/ping` belongs to channel `other`, not `userSignedUp`"
+                "message `#/channels/other/messages/ping` must point at a message of `#/channels/userSignedUp`"
             )),
             "got: {errors:?}"
         );
@@ -557,9 +744,10 @@ mod tests {
         // `$ref` may name anything, so a location this crate does not
         // model is legal — but only if what is there could be the kind
         // the position calls for.
-        let mut scalar = wired();
+        let mut scalar = wired_from_components();
         scalar["x-note"] = json!("just a string");
-        scalar["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "#/x-note" });
+        scalar["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/x-note" });
         assert!(
             errors_for(scalar)
                 .iter()
@@ -567,19 +755,35 @@ mod tests {
         );
 
         // A root singleton is that object however its JSON reads.
-        let mut info = wired();
-        info["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "#/info" });
+        let mut info = wired_from_components();
+        info["components"]["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "#/info" });
         assert!(
             errors_for(info)
                 .iter()
                 .any(|e| e.contains("does not point at an object of the expected kind")),
         );
 
-        // A channel-shaped extension stays legal.
-        let mut shaped = wired();
+        // So is a container: a map of channels is not a channel, however
+        // willingly its JSON reads as one whose every field is absent.
+        for container in ["#", "#/channels", "#/components", "#/components/channels"] {
+            let mut value = wired_from_components();
+            value["components"]["operations"]["receiveSignups"]["channel"] =
+                json!({ "$ref": container });
+            let errors = errors_for(value);
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("does not point at an object of the expected kind")),
+                "`{container}` got: {errors:?}"
+            );
+        }
+
+        // A channel-shaped extension stays legal from `components`.
+        let mut shaped = wired_from_components();
         shaped["x-shared-channel"] = json!({ "address": "shared" });
-        shaped["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "#/x-shared-channel" });
-        shaped["operations"]["receiveSignups"]["messages"] = json!([]);
+        shaped["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/x-shared-channel" });
+        shaped["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
         assert!(errors_for(shaped).is_empty());
     }
 
@@ -665,7 +869,7 @@ mod tests {
         assert!(
             errors_for(value)
                 .iter()
-                .any(|e| e.contains("belongs to channel `other`, not `userSignedUp`")),
+                .any(|e| e.contains("must point at a message of `#/channels/userSignedUp`")),
         );
     }
 
@@ -697,16 +901,16 @@ mod tests {
 
     #[test]
     fn messages_are_found_wherever_the_channel_lives() {
-        // A reusable channel, named through `components`, with its
-        // message named the same way.
-        let mut value = wired();
-        value["operations"]["receiveSignups"]["channel"] =
+        // A reusable channel, named through `components` by an
+        // operation that is allowed to, with its message named the
+        // same way.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
             json!({ "$ref": "#/components/channels/reusable" });
-        value["operations"]["receiveSignups"]["messages"] =
+        value["components"]["operations"]["receiveSignups"]["messages"] =
             json!([ { "$ref": "#/components/channels/reusable/messages/m" } ]);
-        value["components"] = json!({
-            "channels": { "reusable": { "messages": { "m": { "name": "M" } } } }
-        });
+        value["components"]["channels"] =
+            json!({ "reusable": { "messages": { "m": { "name": "M" } } } });
         assert!(errors_for(value).is_empty());
 
         // One channel's message entry may point at another channel's,
@@ -762,28 +966,27 @@ mod tests {
     #[test]
     fn message_checks_stop_where_the_channel_does() {
         // The channel is declared here but leads out of the document,
-        // so there is no message list to compare against — the
-        // component message is checked for existence and left at that.
+        // so there is no message list to be a subset of. The pointer
+        // still has to be one of *that* channel's messages.
         let mut value = wired();
         value["channels"]["elsewhere"] = json!({ "$ref": "./other.yaml#/channels/userSignedUp" });
         value["operations"]["receiveSignups"]["channel"] =
             json!({ "$ref": "#/channels/elsewhere" });
         value["operations"]["receiveSignups"]["messages"] =
-            json!([ { "$ref": "#/components/messages/real" } ]);
-        value["components"] = json!({ "messages": { "real": { "name": "M" } } });
+            json!([ { "$ref": "#/channels/elsewhere/messages/m" } ]);
         assert!(errors_for(value).is_empty());
 
-        // A component message that is not declared is still caught.
+        // A pointer at some other channel's message is still wrong.
         let mut value = wired();
         value["channels"]["elsewhere"] = json!({ "$ref": "./other.yaml#/channels/userSignedUp" });
         value["operations"]["receiveSignups"]["channel"] =
             json!({ "$ref": "#/channels/elsewhere" });
         value["operations"]["receiveSignups"]["messages"] =
-            json!([ { "$ref": "#/components/messages/ghost" } ]);
+            json!([ { "$ref": "#/channels/userSignedUp/messages/signup" } ]);
         assert!(
             errors_for(value)
                 .iter()
-                .any(|e| e.contains("is not declared")),
+                .any(|e| e.contains("must point at a message of `#/channels/elsewhere`")),
         );
     }
 
@@ -794,9 +997,13 @@ mod tests {
         let mut value = wired();
         value["components"] = json!({
             "channels": { "alias": { "$ref": "#/channels/userSignedUp" } },
-            "operations": { "alias": { "$ref": "#/operations/receiveSignups" } }
+            "operations": { "alias": { "$ref": "#/operations/receiveSignups" } },
+            "messages": {
+                "real": { "name": "M" },
+                "alias": { "$ref": "#/components/messages/real" }
+            }
         });
-        assert!(errors_for(value).is_empty());
+        assert_eq!(errors_for(value), Vec::<String>::new());
     }
 
     #[test]
@@ -823,9 +1030,10 @@ mod tests {
                 .any(|e| e.contains("is not a usable JSON Pointer"))
         );
 
-        // A component pointer of the right shape, naming nothing.
-        let mut missing_component = wired();
-        missing_component["operations"]["receiveSignups"]["channel"] =
+        // A component pointer of the right shape, naming nothing, from
+        // an operation allowed to use one.
+        let mut missing_component = wired_from_components();
+        missing_component["components"]["operations"]["receiveSignups"]["channel"] =
             json!({ "$ref": "#/components/channels/nope" });
         let errors = errors_for(missing_component);
         assert!(
@@ -834,22 +1042,14 @@ mod tests {
             "got: {errors:?}"
         );
 
-        // A pointer at a *different* declared kind is wrong, and says
-        // so — unlike one at a location this crate does not model,
-        // which is legal.
-        let mut wrong_kind = wired();
-        wrong_kind["operations"]["receiveSignups"]["channel"] =
-            json!({ "$ref": "#/servers/production" });
-        assert!(
-            errors_for(wrong_kind)
-                .iter()
-                .any(|e| e.contains("does not point at an object of the expected kind")),
-        );
-
-        let mut unmodeled = wired();
-        unmodeled["operations"]["receiveSignups"]["channel"] =
+        // A pointer at a location this crate does not model is legal
+        // where the specification allows any location, so long as what
+        // is there could be a channel.
+        let mut unmodeled = wired_from_components();
+        unmodeled["components"]["operations"]["receiveSignups"]["channel"] =
             json!({ "$ref": "#/channels/userSignedUp/messages/signup" });
-        assert!(errors_for(unmodeled).is_empty());
+        unmodeled["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert_eq!(errors_for(unmodeled), Vec::<String>::new());
     }
 
     #[test]
@@ -880,23 +1080,27 @@ mod tests {
     }
 
     #[test]
-    fn component_message_refs_must_be_declared() {
+    fn operation_messages_may_not_name_components_directly() {
+        // "MUST NOT point to a subset of message definitions located in
+        // the Messages Object in the Components Object or anywhere
+        // else" — even when the channel lists exactly that message.
         let mut value = wired();
         value["channels"]["userSignedUp"]["messages"] =
-            json!({ "signup": { "$ref": "#/components/messages/ghost" } });
+            json!({ "signup": { "$ref": "#/components/messages/signup" } });
         value["operations"]["receiveSignups"]["messages"] =
-            json!([ { "$ref": "#/components/messages/ghost" } ]);
+            json!([ { "$ref": "#/components/messages/signup" } ]);
+        value["components"] = json!({ "messages": { "signup": { "name": "Signup" } } });
         let errors = errors_for(value);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("message `#/components/messages/ghost` is not declared")),
+            errors.iter().any(|e| e.contains(
+                "message `#/components/messages/signup` must point at a message of `#/channels/userSignedUp`"
+            )),
             "got: {errors:?}"
         );
     }
 
     #[test]
-    fn component_messages_count_when_the_channel_lists_them() {
+    fn a_reusable_message_is_named_through_the_channel_that_lists_it() {
         let value = json!({
             "asyncapi": "3.1.0",
             "info": { "title": "T", "version": "1" },
@@ -910,14 +1114,15 @@ mod tests {
                 "send": {
                     "action": "send",
                     "channel": { "$ref": "#/channels/user" },
-                    "messages": [ { "$ref": "#/components/messages/signup" } ]
+                    "messages": [ { "$ref": "#/channels/user/messages/signup" } ]
                 }
             },
             "components": { "messages": { "signup": { "name": "Signup" } } }
         });
         assert!(errors_for(value.clone()).is_empty());
 
-        // The same component message, not listed on the channel.
+        // The channel stops listing it, so the operation's pointer no
+        // longer names anything of that channel's.
         let mut detached = value;
         detached["channels"]["user"]["messages"] = json!({});
         let errors = errors_for(detached);
@@ -940,6 +1145,7 @@ mod tests {
             "got: {errors:?}"
         );
 
+        // From a root channel the location rule answers first.
         let mut wrong_kind = wired();
         wrong_kind["channels"]["userSignedUp"]["servers"] =
             json!([ { "$ref": "#/channels/userSignedUp" } ]);
@@ -947,22 +1153,41 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.contains("does not point at an object of the expected kind"))
+                .any(|e| e.contains("must point into the root `servers` object")),
+            "got: {errors:?}"
+        );
+
+        // A reusable channel may point anywhere, so there the target
+        // itself is what disqualifies it.
+        let mut wrong_kind = wired();
+        wrong_kind["components"] = json!({
+            "channels": {
+                "reusable": { "servers": [ { "$ref": "#/channels/userSignedUp" } ] }
+            }
+        });
+        let errors = errors_for(wrong_kind);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+            "got: {errors:?}"
         );
     }
 
     #[test]
     fn components_channels_and_servers_resolve_too() {
+        // Both the operation and the channel are reusable, so both are
+        // free to reference into `components`.
         let value = json!({
             "asyncapi": "3.1.0",
             "info": { "title": "T", "version": "1" },
-            "operations": {
-                "send": {
-                    "action": "send",
-                    "channel": { "$ref": "#/components/channels/user" }
-                }
-            },
             "components": {
+                "operations": {
+                    "send": {
+                        "action": "send",
+                        "channel": { "$ref": "#/components/channels/user" }
+                    }
+                },
                 "servers": { "prod": { "host": "h", "protocol": "kafka" } },
                 "channels": {
                     "user": { "address": "user", "servers": [ { "$ref": "#/components/servers/prod" } ] }
@@ -970,6 +1195,147 @@ mod tests {
             }
         });
         assert!(errors_for(value).is_empty());
+    }
+
+    #[test]
+    fn root_objects_may_only_reference_the_root() {
+        // "MUST NOT point to a subset of server definitions located in
+        // the Components Object or anywhere else."
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["servers"] =
+            json!([ { "$ref": "#/components/servers/s" } ]);
+        value["components"] = json!({ "servers": { "s": { "host": "h", "protocol": "kafka" } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.channels.userSignedUp.servers[0].$ref: server `#/components/servers/s` must point into the root `servers` object"),
+        );
+
+        // "If the operation is located in the root Operations Object,
+        // it MUST point to a channel definition located in the root
+        // Channels Object."
+        let mut value = wired();
+        value["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/components/channels/c" });
+        value["operations"]["receiveSignups"]["messages"] = json!([]);
+        value["components"] = json!({ "channels": { "c": { "address": "c" } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.operations.receiveSignups.channel.$ref: channel `#/components/channels/c` must point into the root `channels` object"),
+        );
+
+        // The same for a reply inside a root operation.
+        let mut value = wired();
+        value["operations"]["receiveSignups"]["reply"] =
+            json!({ "channel": { "$ref": "#/components/channels/c" } });
+        value["components"] = json!({ "channels": { "c": { "address": "c" } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.operations.receiveSignups.reply.channel.$ref: channel `#/components/channels/c` must point into the root `channels` object"),
+        );
+    }
+
+    #[test]
+    fn a_dangling_alias_is_reported_even_if_nothing_uses_it() {
+        for (field, alias) in [
+            ("servers", "#/servers/ghost"),
+            ("channels", "#/channels/ghost"),
+            ("operations", "#/operations/ghost"),
+        ] {
+            let mut value = wired();
+            value[field]["unused"] = json!({ "$ref": alias });
+            let errors = errors_for(value);
+            assert!(
+                errors.iter().any(|e| e
+                    == &format!("#.{field}.unused.$ref: `{alias}` names nothing in this document")),
+                "got: {errors:?}"
+            );
+        }
+
+        // And the same under `components`, messages and replies
+        // included.
+        let mut value = wired();
+        value["components"] = json!({
+            "servers": { "unused": { "$ref": "#/servers/ghost" } },
+            "channels": { "unused": { "$ref": "#/channels/ghost" } },
+            "operations": { "unused": { "$ref": "#/operations/ghost" } },
+            "messages": { "unused": { "$ref": "#/components/messages/ghost" } },
+            "replies": { "unused": { "$ref": "#/components/replies/ghost" } },
+            "securitySchemes": { "unused": { "$ref": "#/components/securitySchemes/ghost" } }
+        });
+        let errors = errors_for(value);
+        for field in [
+            "servers",
+            "channels",
+            "operations",
+            "messages",
+            "replies",
+            "securitySchemes",
+        ] {
+            assert!(
+                errors.iter().any(
+                    |e| e.starts_with(&format!("#.components.{field}.unused.$ref:"))
+                        && e.contains("names nothing in this document")
+                ),
+                "{field} got: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replies_are_wired_wherever_they_are_declared() {
+        // A reusable reply is wired where it is declared, so a bad
+        // channel in it is reported even though the operation that
+        // uses it looks fine.
+        let mut value = wired();
+        value["operations"]["receiveSignups"]["reply"] =
+            json!({ "$ref": "#/components/replies/shared" });
+        value["components"] = json!({
+            "replies": { "shared": { "channel": { "$ref": "#/channels/missing" } } }
+        });
+        let errors = errors_for(value);
+        assert!(
+            errors.iter().any(|e| e
+                == "#.components.replies.shared.channel.$ref: channel `#/channels/missing` names nothing in this document"),
+            "got: {errors:?}"
+        );
+
+        // An alias that leads nowhere is reported at the operation.
+        let mut value = wired();
+        value["operations"]["receiveSignups"]["reply"] =
+            json!({ "$ref": "#/components/replies/ghost" });
+        let errors = errors_for(value);
+        assert!(
+            errors.iter().any(|e| e
+                == "#.operations.receiveSignups.reply.$ref: reply `#/components/replies/ghost` names nothing in this document"),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_channel_is_more_than_its_key() {
+        // Both namespaces declare `events`, and both declare a message
+        // `m`. The operation selects the reusable one, so the root
+        // one's message is not its to name.
+        let mut value = wired();
+        value["operations"] = json!({});
+        value["channels"]["events"] = json!({ "messages": { "m": { "name": "Root" } } });
+        value["components"] = json!({
+            "channels": { "events": { "messages": { "m": { "name": "Reusable" } } } },
+            "operations": {
+                "send": {
+                    "action": "send",
+                    "channel": { "$ref": "#/components/channels/events" },
+                    "messages": [ { "$ref": "#/channels/events/messages/m" } ]
+                }
+            }
+        });
+        let errors = errors_for(value);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("must point at a message of `#/components/channels/events`")),
+            "got: {errors:?}"
+        );
     }
 
     #[test]

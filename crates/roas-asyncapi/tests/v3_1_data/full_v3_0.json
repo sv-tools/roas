@@ -128,7 +128,7 @@
       },
       "messages": [
         {
-          "$ref": "#/components/messages/signup"
+          "$ref": "#/channels/user/messages/signup"
         }
       ],
       "traits": [

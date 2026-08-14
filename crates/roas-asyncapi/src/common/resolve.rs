@@ -102,19 +102,36 @@ const KINDS: &[&str] = &[
 const SINGLETONS: &[&str] = &["info", "asyncapi", "id", "defaultContentType"];
 
 /// Whether a pointer names something the document has already declared
-/// to be a different kind of object.
+/// to be other than the kind expected here.
 ///
-/// Two shapes qualify. An *entry* of another declared map —
-/// `#/servers/prod` where a channel belongs. And a root singleton such
-/// as `#/info`, which is the Info object however plausibly its JSON may
-/// deserialize as something else.
+/// Three shapes qualify, and none of them can be settled by looking at
+/// the JSON: what is wrong with them is *where they are*.
 ///
-/// A longer pointer does not qualify: it is walking deeper into the
-/// document, which is legitimate — `#/channels/user/publish/message`
-/// names a message even though it passes through `channels`.
-fn names_other_kind(path: &[String], expected: &str) -> bool {
+/// A **container** — the document itself, `#/components`, or a whole
+/// map such as `#/channels` — holds objects rather than being one.
+/// These are the cases structural deserialization gets wrong most
+/// readily, since a map of channels is quite happy to read as a channel
+/// whose every field is absent.
+///
+/// A **singleton** such as `#/info` is that object however plausibly
+/// its JSON reads as something else.
+///
+/// An **entry of another map** — `#/servers/prod` where a channel
+/// belongs.
+///
+/// A longer pointer qualifies for none of them: it is walking deeper
+/// into the document, which is legitimate —
+/// `#/channels/user/publish/message` names a message even though it
+/// passes through `channels`.
+fn names_something_else(path: &[String], expected: &str) -> bool {
     let named = match path {
-        [single] => return SINGLETONS.contains(&single.as_str()),
+        // The whole document.
+        [] => return true,
+        [components] if components == "components" => return true,
+        [single] => {
+            return SINGLETONS.contains(&single.as_str()) || KINDS.contains(&single.as_str());
+        }
+        [components, kind] if components == "components" => return KINDS.contains(&kind.as_str()),
         [components, kind, _] if components == "components" => kind,
         [kind, _] => kind,
         _ => return false,
@@ -126,8 +143,8 @@ fn names_other_kind(path: &[String], expected: &str) -> bool {
 /// document as plain JSON.
 ///
 /// Outcomes, in order of how much the document is at fault. A pointer
-/// at something the document declares to be a *different* kind is
-/// [`WrongKind`]. So is one whose target cannot be read as a `T` at
+/// at something the document declares to be a *different* kind — or at
+/// a container of objects rather than an object — is [`WrongKind`]. So is one whose target cannot be read as a `T` at
 /// all — a scalar `x-` extension used as a message, say. One that lands
 /// on JSON that *does* read as a `T` is [`Opaque`]: `$ref` may name
 /// anything, so a message-shaped `x-` extension is a legal target this
@@ -153,7 +170,7 @@ where
     let Some(path) = pointer::tokens(local_pointer) else {
         return Resolution::Unrecognized;
     };
-    if names_other_kind(&path, expected_kind) {
+    if names_something_else(&path, expected_kind) {
         return Resolution::WrongKind;
     }
     // Serializing a document model cannot fail; falling back to `null`
