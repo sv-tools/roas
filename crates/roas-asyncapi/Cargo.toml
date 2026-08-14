@@ -1,13 +1,13 @@
 [package]
 name = "roas-asyncapi"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 keywords = ["asyncapi", "openapi", "kafka", "validation", "parser"]
-description = "Rust implementation of the AsyncAPI Specification v3.0 / v3.1 — parse and validate"
+description = "Rust implementation of the AsyncAPI Specification v2.6 / v3.0 / v3.1 — parse and validate"
 readme = "README.md"
 categories = ["web-programming", "parser-implementations"]
 include = ["src", "Cargo.toml", "README.md"]

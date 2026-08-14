@@ -13,6 +13,7 @@
 use crate::common::pointer;
 use crate::common::reference::RefOr;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 
 /// What following a document-local pointer turned out to be.
@@ -95,15 +96,25 @@ const KINDS: &[&str] = &[
     "messageBindings",
 ];
 
-/// Whether a pointer names an *entry* of a declared map other than the
-/// one expected.
+/// The root fields that hold exactly one object of a fixed kind, none
+/// of which is ever a referenceable component. A pointer at one of
+/// these names that object and nothing else.
+const SINGLETONS: &[&str] = &["info", "asyncapi", "id", "defaultContentType"];
+
+/// Whether a pointer names something the document has already declared
+/// to be a different kind of object.
 ///
-/// Only a direct entry counts — `#/servers/prod` where a channel
-/// belongs. A longer pointer is walking deeper into the document, which
-/// is legitimate: `#/channels/user/publish/message` names a message
-/// even though it passes through `channels`.
+/// Two shapes qualify. An *entry* of another declared map —
+/// `#/servers/prod` where a channel belongs. And a root singleton such
+/// as `#/info`, which is the Info object however plausibly its JSON may
+/// deserialize as something else.
+///
+/// A longer pointer does not qualify: it is walking deeper into the
+/// document, which is legitimate — `#/channels/user/publish/message`
+/// names a message even though it passes through `channels`.
 fn names_other_kind(path: &[String], expected: &str) -> bool {
     let named = match path {
+        [single] => return SINGLETONS.contains(&single.as_str()),
         [components, kind, _] if components == "components" => kind,
         [kind, _] => kind,
         _ => return false,
@@ -114,11 +125,18 @@ fn names_other_kind(path: &[String], expected: &str) -> bool {
 /// Decide what an unresolved local pointer *is*, by walking the
 /// document as plain JSON.
 ///
-/// Three outcomes, in order of how much the document is at fault:
-/// a pointer into a *different* declared kind is [`WrongKind`], since
-/// the document itself says what lives there; one that lands on real
-/// JSON the crate does not model is [`Opaque`], since `$ref` may name
-/// anything; one that lands nowhere is [`Missing`].
+/// Outcomes, in order of how much the document is at fault. A pointer
+/// at something the document declares to be a *different* kind is
+/// [`WrongKind`]. So is one whose target cannot be read as a `T` at
+/// all — a scalar `x-` extension used as a message, say. One that lands
+/// on JSON that *does* read as a `T` is [`Opaque`]: `$ref` may name
+/// anything, so a message-shaped `x-` extension is a legal target this
+/// crate simply does not model as its own object. One that lands
+/// nowhere is [`Missing`].
+///
+/// The `T` check is deliberately a shape check, not an equality one:
+/// these models drop unknown non-`x-` keys and normalize numbers, so
+/// demanding an exact round-trip would reject legitimate targets.
 ///
 /// [`WrongKind`]: Resolution::WrongKind
 /// [`Opaque`]: Resolution::Opaque
@@ -130,6 +148,7 @@ pub(crate) fn classify_unresolved<'a, D, T>(
 ) -> Resolution<'a, T>
 where
     D: Serialize,
+    T: DeserializeOwned,
 {
     let Some(path) = pointer::tokens(local_pointer) else {
         return Resolution::Unrecognized;
@@ -142,7 +161,10 @@ where
     // nothing if it somehow does.
     let snapshot = serde_json::to_value(document).unwrap_or_default();
     match pointer::walk(&snapshot, &path) {
-        Some(_) => Resolution::Opaque,
+        Some(target) => match serde_json::from_value::<T>(target.clone()) {
+            Ok(_) => Resolution::Opaque,
+            Err(_) => Resolution::WrongKind,
+        },
         None => Resolution::Missing,
     }
 }
@@ -163,30 +185,62 @@ pub(crate) fn follow<'a, D, T, F>(
 ) -> Resolution<'a, T>
 where
     D: Serialize,
+    T: DeserializeOwned,
+    F: Fn(&[String]) -> Option<&'a RefOr<T>>,
+{
+    follow_tracked(document, Vec::new(), start, expected_kind, lookup).1
+}
+
+/// [`follow`], reporting *where* the chain ended as well as what it
+/// found.
+///
+/// The terminal path is the pointer that produced the last entry, which
+/// is not the one the caller started from: `#/channels/alias` where
+/// `alias` is a `$ref` to `#/channels/real` ends at `real`. A caller
+/// that keys anything off the target — "is this message one of *that*
+/// channel's?" — has to key it off the terminus, or every alias looks
+/// like a mismatch.
+///
+/// `start_path` is where `start` itself was found, and is the answer
+/// when the chain does not move.
+pub(crate) fn follow_tracked<'a, D, T, F>(
+    document: &D,
+    start_path: Vec<String>,
+    start: &'a RefOr<T>,
+    expected_kind: &str,
+    lookup: F,
+) -> (Vec<String>, Resolution<'a, T>)
+where
+    D: Serialize,
+    T: DeserializeOwned,
     F: Fn(&[String]) -> Option<&'a RefOr<T>>,
 {
     let mut current = start;
+    let mut at = start_path;
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     loop {
         let reference = match current {
-            RefOr::Item(item) => return Resolution::Found(item),
+            RefOr::Item(item) => return (at, Resolution::Found(item)),
             RefOr::Reference(reference) => reference,
         };
         if reference.is_external() {
-            return Resolution::Opaque;
+            return (at, Resolution::Opaque);
         }
         let Some(local) = reference.local_pointer() else {
-            return Resolution::Unrecognized;
+            return (at, Resolution::Unrecognized);
         };
         if !seen.insert(local) {
-            return Resolution::Cycle;
+            return (at, Resolution::Cycle);
         }
         let Some(path) = pointer::tokens(local) else {
-            return Resolution::Unrecognized;
+            return (at, Resolution::Unrecognized);
         };
         match lookup(&path) {
-            Some(next) => current = next,
-            None => return classify_unresolved(document, local, expected_kind),
+            Some(next) => {
+                current = next;
+                at = path;
+            }
+            None => return (path, classify_unresolved(document, local, expected_kind)),
         }
     }
 }
@@ -208,6 +262,8 @@ mod tests {
         entries: BTreeMap<String, RefOr<Demo>>,
         #[serde(rename = "x-extra")]
         extra: serde_json::Value,
+        #[serde(rename = "x-scalar")]
+        scalar: serde_json::Value,
     }
 
     fn reference(target: &str) -> RefOr<Demo> {
@@ -240,6 +296,7 @@ mod tests {
         Doc {
             entries,
             extra: serde_json::json!({ "name": "shared" }),
+            scalar: serde_json::json!("not an object"),
         }
     }
 
@@ -290,6 +347,55 @@ mod tests {
         let resolution = resolve(&doc, &doc.entries["unmodeled"]);
         assert!(matches!(resolution, Resolution::Opaque));
         assert!(resolution.found().is_none());
+    }
+
+    #[test]
+    fn a_target_that_cannot_be_the_expected_kind_is_wrong_not_opaque() {
+        let doc = document();
+        // Shaped like a `Demo`, so naming it is legal even though this
+        // crate does not model the location as one.
+        assert!(matches!(
+            classify_unresolved::<_, Demo>(&doc, "/x-extra", "entries"),
+            Resolution::Opaque
+        ));
+        // Not shaped like one at all.
+        assert!(matches!(
+            classify_unresolved::<_, Demo>(&doc, "/x-scalar", "entries"),
+            Resolution::WrongKind
+        ));
+        // A root singleton is what the document says it is, however
+        // its JSON happens to read.
+        assert!(matches!(
+            classify_unresolved::<_, Demo>(&doc, "/info", "entries"),
+            Resolution::WrongKind
+        ));
+    }
+
+    #[test]
+    fn a_chain_reports_where_it_ended_not_where_it_began() {
+        let doc = document();
+        let start = pointer::tokens("/entries/hop").expect("a pointer");
+        let lookup = |path: &[String]| match path {
+            [entries, key] if entries == "entries" => doc.entries.get(key),
+            _ => None,
+        };
+        let (terminal, resolution) =
+            follow_tracked(&doc, start, &doc.entries["hop"], "entries", lookup);
+        assert_eq!(terminal, vec!["entries", "real"], "hop -> alias -> real");
+        assert!(resolution.found().is_some());
+
+        // A chain that leaves the map ends at the pointer that took it
+        // there, not at the entry that pointed.
+        let start = pointer::tokens("/entries/unmodeled").expect("a pointer");
+        let (terminal, resolution) =
+            follow_tracked(&doc, start, &doc.entries["unmodeled"], "entries", lookup);
+        assert_eq!(terminal, vec!["x-extra"]);
+        assert!(matches!(resolution, Resolution::Opaque));
+
+        // An entry that is already an object ends where it started.
+        let start = pointer::tokens("/entries/real").expect("a pointer");
+        let (terminal, _) = follow_tracked(&doc, start, &doc.entries["real"], "entries", |_| None);
+        assert_eq!(terminal, vec!["entries", "real"]);
     }
 
     #[test]

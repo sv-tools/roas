@@ -404,7 +404,7 @@
       "o": {
         "action": "send",
         "channel": {
-          "$ref": "#/channels/c"
+          "$ref": "#/components/channels/c"
         }
       }
     },
