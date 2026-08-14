@@ -137,9 +137,10 @@ where
     if names_other_kind(&path, expected_kind) {
         return Resolution::WrongKind;
     }
-    let Ok(snapshot) = serde_json::to_value(document) else {
-        return Resolution::Unrecognized;
-    };
+    // Serializing a document model cannot fail; falling back to `null`
+    // keeps that from needing a branch, and leaves every pointer naming
+    // nothing if it somehow does.
+    let snapshot = serde_json::to_value(document).unwrap_or_default();
     match pointer::walk(&snapshot, &path) {
         Some(_) => Resolution::Opaque,
         None => Resolution::Missing,

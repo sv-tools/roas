@@ -493,6 +493,17 @@ mod tests {
                 .any(|e| e.contains("is not a usable JSON Pointer"))
         );
 
+        // A malformed escape is undefined rather than literal, so the
+        // pointer names nothing it could name.
+        let mut malformed = wired();
+        malformed["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/channels/bad~2escape" });
+        assert!(
+            errors_for(malformed)
+                .iter()
+                .any(|e| e.contains("is not a usable JSON Pointer"))
+        );
+
         // A component pointer of the right shape, naming nothing.
         let mut missing_component = wired();
         missing_component["operations"]["receiveSignups"]["channel"] =
