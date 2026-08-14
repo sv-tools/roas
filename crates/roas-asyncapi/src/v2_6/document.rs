@@ -8,7 +8,9 @@
 //! and a security requirement must name a declared scheme — listing
 //! scopes only where the scheme's type allows them.
 
-use crate::common::reference::{RefOr, Reference, array_index, pointer_tokens};
+use crate::common::pointer;
+use crate::common::reference::{RefOr, Reference};
+use crate::common::resolve::{Resolution, classify_unresolved, follow};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
 use crate::v2_6::external_documentation::ExternalDocumentation;
@@ -74,70 +76,6 @@ pub struct Document {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// What following a document-local pointer turned out to be.
-///
-/// The distinctions matter: an external terminus is accepted (this
-/// crate does not fetch other documents), while a local pointer that
-/// names nothing, revisits itself, or has a shape that cannot denote
-/// the kind of object expected is a document bug.
-#[derive(Debug)]
-pub(crate) enum Resolution<'a, T> {
-    /// Resolved to a concrete object in this document.
-    Found(&'a T),
-    /// The chain ends at a reference into another document.
-    External,
-    /// A local pointer that names nothing.
-    Missing,
-    /// The chain revisits a pointer it already followed.
-    Cycle,
-    /// A local pointer whose shape cannot denote this kind of object.
-    Unrecognized,
-}
-
-impl<'a, T> Resolution<'a, T> {
-    /// The object, if the pointer resolved inside this document.
-    ///
-    /// Takes `self` so the borrow is the document's, not this
-    /// `Resolution`'s — callers routinely resolve into a temporary.
-    pub(crate) fn found(self) -> Option<&'a T> {
-        match self {
-            Resolution::Found(item) => Some(item),
-            _ => None,
-        }
-    }
-
-    /// Why this pointer is a document bug, if it is one. `None` means
-    /// it resolved or left the document.
-    fn problem(&self) -> Option<&'static str> {
-        match self {
-            Resolution::Found(_) | Resolution::External => None,
-            Resolution::Missing => Some("names nothing in this document"),
-            Resolution::Cycle => Some("is part of a reference cycle"),
-            Resolution::Unrecognized => Some("does not point at an object of the expected kind"),
-        }
-    }
-}
-
-/// Walk a JSON Pointer over the document as plain JSON.
-///
-/// `$ref` is an unrestricted URI-reference, so a pointer may legally
-/// name something this crate does not model as its own type — a
-/// message-shaped `x-` extension at the root, say. The typed resolvers
-/// answer "which object is this"; this answers the weaker but broader
-/// "is there anything here at all", which is what tells a wrong-kind
-/// pointer from one that simply names nothing.
-fn walk_json<'v>(value: &'v serde_json::Value, tokens: &[String]) -> Option<&'v serde_json::Value> {
-    let mut current = value;
-    for token in tokens {
-        current = match current {
-            serde_json::Value::Object(map) => map.get(token)?,
-            serde_json::Value::Array(items) => items.get(array_index(token)?)?,
-            _ => return None,
-        };
-    }
-    Some(current)
-}
-
 impl Document {
     /// Resolve a channel item, following its `$ref` field through both
     /// `#/channels/…` and `#/components/channels/…` pointers.
@@ -157,7 +95,7 @@ impl Document {
                 reference: reference.to_owned(),
             };
             if reference.is_external() {
-                return Resolution::External;
+                return Resolution::Opaque;
             }
             let Some(pointer) = reference.local_pointer() else {
                 return Resolution::Unrecognized;
@@ -167,34 +105,14 @@ impl Document {
             }
             match self.channel_at(pointer) {
                 Some(next) => current = next,
-                None => return self.classify_unresolved(pointer),
+                None => return classify_unresolved(self, pointer, "channels"),
             }
-        }
-    }
-
-    /// Decide what an unresolved local pointer *is*, for pointers the
-    /// typed resolvers could not follow.
-    ///
-    /// A well-formed pointer that lands on real JSON is accepted: this
-    /// crate simply does not model whatever is there, which is not the
-    /// document's fault. Anything else is malformed or dangling.
-    fn classify_unresolved<T>(&self, pointer: &str) -> Resolution<'_, T> {
-        let Some(tokens) = pointer_tokens(pointer) else {
-            // Malformed escapes — not a usable pointer at all.
-            return Resolution::Unrecognized;
-        };
-        let Ok(snapshot) = serde_json::to_value(self) else {
-            return Resolution::Unrecognized;
-        };
-        match walk_json(&snapshot, &tokens) {
-            Some(_) => Resolution::External,
-            None => Resolution::Missing,
         }
     }
 
     /// The channel a document-local pointer names, in either map.
     fn channel_at<'a>(&'a self, pointer: &str) -> Option<&'a ChannelItem> {
-        let tokens = pointer_tokens(pointer)?;
+        let tokens = pointer::tokens(pointer)?;
         let (map, key) = self.channel_map_for(&tokens)?;
         (key.len() == 1).then(|| map.get(&key[0]))?
     }
@@ -220,70 +138,26 @@ impl Document {
         let Some(components) = self.components.as_ref() else {
             return Resolution::Missing;
         };
-        let Some(mut entry) = components.security_schemes.get(name) else {
+        let Some(entry) = components.security_schemes.get(name) else {
             return Resolution::Missing;
         };
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        loop {
-            match entry {
-                RefOr::Item(scheme) => return Resolution::Found(scheme),
-                RefOr::Reference(reference) => {
-                    if reference.is_external() {
-                        return Resolution::External;
-                    }
-                    let Some(key) = reference.component_key("securitySchemes") else {
-                        return Resolution::Unrecognized;
-                    };
-                    if !seen.insert(key.clone()) {
-                        return Resolution::Cycle;
-                    }
-                    match components.security_schemes.get(&key) {
-                        Some(next) => entry = next,
-                        None => return Resolution::Missing,
-                    }
-                }
+        follow(self, entry, "securitySchemes", |path| match path {
+            [c, kind, key] if c == "components" && kind == "securitySchemes" => {
+                components.security_schemes.get(key)
             }
-        }
+            _ => None,
+        })
     }
 
-    /// Resolve a `RefOr<Server>`, following `#/components/servers/…`.
+    /// Resolve a `RefOr<Server>` through either server map.
     fn resolve_server<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
-        let mut current = entry;
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        loop {
-            match current {
-                RefOr::Item(server) => return Resolution::Found(server),
-                RefOr::Reference(reference) => {
-                    if reference.is_external() {
-                        return Resolution::External;
-                    }
-                    let Some(pointer) = reference.local_pointer() else {
-                        return Resolution::Unrecognized;
-                    };
-                    if !seen.insert(pointer.to_owned()) {
-                        return Resolution::Cycle;
-                    }
-                    // Either map may hold the target: `#/servers/…` as
-                    // well as `#/components/servers/…`.
-                    let Some(tokens) = pointer_tokens(pointer) else {
-                        return Resolution::Unrecognized;
-                    };
-                    let entry = match tokens.as_slice() {
-                        [components, servers, key]
-                            if components == "components" && servers == "servers" =>
-                        {
-                            self.components.as_ref().and_then(|c| c.servers.get(key))
-                        }
-                        [servers, key] if servers == "servers" => self.servers.get(key),
-                        _ => return Resolution::Unrecognized,
-                    };
-                    match entry {
-                        Some(next) => current = next,
-                        None => return Resolution::Missing,
-                    }
-                }
+        follow(self, entry, "servers", |path| match path {
+            [c, servers, key] if c == "components" && servers == "servers" => {
+                self.components.as_ref()?.servers.get(key)
             }
-        }
+            [servers, key] if servers == "servers" => self.servers.get(key),
+            _ => None,
+        })
     }
 
     /// Resolve a message `$ref`, following component aliases and
@@ -293,7 +167,7 @@ impl Document {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         loop {
             if current.is_external() {
-                return Resolution::External;
+                return Resolution::Opaque;
             }
             let Some(pointer) = current.local_pointer() else {
                 return Resolution::Unrecognized;
@@ -304,7 +178,7 @@ impl Document {
             match self.message_at(pointer) {
                 Some(RefOr::Item(message)) => return Resolution::Found(message),
                 Some(RefOr::Reference(next)) => current = next.clone(),
-                None => return self.classify_unresolved(pointer),
+                None => return classify_unresolved(self, pointer, "messages"),
             }
         }
     }
@@ -317,7 +191,7 @@ impl Document {
     /// `$ref` resolves to, so a message declared beside a `$ref` is
     /// reachable and one on the target is not (through this pointer).
     fn message_at<'a>(&'a self, pointer: &str) -> Option<&'a RefOr<Message>> {
-        let tokens = pointer_tokens(pointer)?;
+        let tokens = pointer::tokens(pointer)?;
         if let [components, messages, key] = tokens.as_slice()
             && components == "components"
             && messages == "messages"
@@ -349,7 +223,7 @@ impl Document {
             let OperationMessage::OneOf(one_of) = message else {
                 return None;
             };
-            message = one_of.one_of.get(array_index(index)?)?;
+            message = one_of.one_of.get(pointer::array_index(index)?)?;
         }
         match message {
             OperationMessage::Single(single) => Some(single.as_ref()),
@@ -1250,18 +1124,18 @@ mod tests {
     fn a_pointer_that_names_nothing_is_reported_wherever_it_points() {
         // Outside the locations this crate models *and* absent from the
         // document: dangling either way.
+        // A pointer at an entry of a *different* declared map says so.
         let mut value = minimal();
         value["channels"] = json!({ "user": { "$ref": "#/components/schemas/ghost" } });
         assert!(
             errors_for(value)
                 .iter()
-                .any(|e| e.contains("names nothing in this document")),
+                .any(|e| e.contains("does not point at an object of the expected kind")),
         );
 
+        // One at a location that simply is not there reads differently.
         let mut value = minimal();
-        value["channels"] = json!({
-            "user": { "publish": { "message": { "$ref": "#/components/schemas/ghost" } } }
-        });
+        value["channels"] = json!({ "user": { "$ref": "#/x-nowhere" } });
         assert!(
             errors_for(value)
                 .iter()
@@ -1274,7 +1148,7 @@ mod tests {
         assert!(
             errors_for(value)
                 .iter()
-                .any(|e| e.contains("does not point at an object of the expected kind")),
+                .any(|e| e.contains("is not a usable JSON Pointer")),
         );
     }
 
@@ -1333,14 +1207,21 @@ mod tests {
                 .any(|e| e.contains("names nothing in this document")),
         );
 
-        // Wrong kind of pointer.
+        // A pointer at an entry of some other declared map.
         let mut value = minimal();
-        value["servers"] = json!({ "prod": { "$ref": "#/components/schemas/thing" } });
+        value["servers"] = json!({ "prod": { "$ref": "#/components/schemas/ghost" } });
         assert!(
             errors_for(value)
                 .iter()
                 .any(|e| e.contains("does not point at an object of the expected kind")),
         );
+
+        // …and one at a location this crate does not model, which is
+        // legal.
+        let mut value = minimal();
+        value["x-shared-server"] = json!({ "url": "kafka://e", "protocol": "kafka" });
+        value["servers"] = json!({ "prod": { "$ref": "#/x-shared-server" } });
+        assert!(errors_for(value).is_empty());
 
         // Cycle.
         let mut value = minimal();

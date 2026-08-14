@@ -11,7 +11,9 @@
 //! [`ValidationOptions::ErrorOnExternalReference`] asks for a
 //! self-contained document.
 
+use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference};
+use crate::common::resolve::{Resolution, classify_unresolved, follow};
 use crate::v3_0::channel::Channel;
 use crate::v3_0::components::Components;
 use crate::v3_0::info::Info;
@@ -76,61 +78,46 @@ struct ResolvedChannel<'a> {
     channel: Option<&'a Channel>,
 }
 
-/// What a `$ref` to a document-level object turned out to be.
-enum Target<'a, T> {
-    /// Points outside this document; not resolvable here.
-    External,
-    /// A local pointer that does not name this kind of object.
-    Unrecognized,
-    /// A local pointer of the right shape whose key does not exist.
-    Missing,
-    /// Resolved. The item is `None` when the entry is itself a `$ref`,
-    /// so deeper checks stop there.
-    Found { key: String, item: Option<&'a T> },
-}
-
 impl Document {
     /// Resolve a `$ref` against `#/<field>/<key>` and
-    /// `#/components/<field>/<key>`.
+    /// `#/components/<field>/<key>`, following the chain to its end.
+    ///
+    /// Returns the key the pointer named alongside the outcome: the
+    /// caller needs it to check that an operation's messages come from
+    /// the channel it names.
     fn resolve<'a, T>(
         &'a self,
         reference: &Reference,
         field: &str,
         inline: &'a BTreeMap<String, RefOr<T>>,
         components: Option<&'a BTreeMap<String, RefOr<T>>>,
-    ) -> Target<'a, T> {
+    ) -> (Option<String>, Resolution<'a, T>) {
         if reference.is_external() {
-            return Target::External;
+            return (None, Resolution::Opaque);
         }
-        let Some(pointer) = reference.local_pointer() else {
-            return Target::Unrecognized;
+        let Some(local) = reference.local_pointer() else {
+            return (None, Resolution::Unrecognized);
+        };
+        let Some(path) = pointer::tokens(local) else {
+            return (None, Resolution::Unrecognized);
         };
 
-        if let Some(key) = reference.component_key(field) {
-            return match components.and_then(|map| map.get(&key)) {
-                Some(entry) => Target::Found {
-                    key,
-                    item: entry.item(),
-                },
-                None => Target::Missing,
-            };
-        }
-
-        let Some(rest) = pointer.strip_prefix('/').and_then(|p| {
-            let (head, tail) = p.split_once('/')?;
-            (head == field).then_some(tail)
-        }) else {
-            return Target::Unrecognized;
+        let lookup = |path: &[String]| match path {
+            [c, this, key] if c == "components" && this == field => {
+                components.and_then(|map| map.get(key))
+            }
+            [this, key] if this == field => inline.get(key),
+            _ => None,
         };
-        if rest.is_empty() || rest.contains('/') {
-            return Target::Unrecognized;
-        }
-        match inline.get(rest) {
-            Some(entry) => Target::Found {
-                key: rest.to_owned(),
-                item: entry.item(),
-            },
-            None => Target::Missing,
+        let key = match path.as_slice() {
+            [c, this, key] if c == "components" && this == field => Some(key.clone()),
+            [this, key] if this == field => Some(key.clone()),
+            _ => None,
+        };
+
+        match lookup(&path) {
+            Some(entry) => (key, follow(self, entry, field, lookup)),
+            None => (key, classify_unresolved(self, local, field)),
         }
     }
 
@@ -144,29 +131,16 @@ impl Document {
     /// Check that every `$ref` in `channel.servers` names a server.
     fn validate_channel_servers(&self, ctx: &mut Context, channel: &Channel) {
         for (i, server) in channel.servers.iter().enumerate() {
-            let target = self.resolve(
+            let (_, resolution) = self.resolve(
                 server,
                 "servers",
                 &self.servers,
                 self.components_map(|c| &c.servers),
             );
-            match target {
-                Target::Found { .. } | Target::External => {}
-                Target::Missing => ctx.in_index("servers", i, |ctx| {
-                    ctx.error_field(
-                        "$ref",
-                        format!("server `{}` is not declared", server.reference),
-                    );
-                }),
-                Target::Unrecognized => ctx.in_index("servers", i, |ctx| {
-                    ctx.error_field(
-                        "$ref",
-                        format!(
-                            "`{}` must point at a server (`#/servers/…` or `#/components/servers/…`)",
-                            server.reference
-                        ),
-                    );
-                }),
+            if let Some(problem) = resolution.problem() {
+                ctx.in_index("servers", i, |ctx| {
+                    ctx.error_field("$ref", format!("server `{}` {problem}", server.reference));
+                });
             }
         }
     }
@@ -198,36 +172,28 @@ impl Document {
         field: &str,
         reference: &Reference,
     ) -> Option<ResolvedChannel<'a>> {
-        match self.resolve(
+        let (key, resolution) = self.resolve(
             reference,
             "channels",
             &self.channels,
             self.components_map(|c| &c.channels),
-        ) {
-            Target::Found { key, item } => Some(ResolvedChannel { key, channel: item }),
-            Target::External => None,
-            Target::Missing => {
-                ctx.in_field(field, |ctx| {
-                    ctx.error_field(
-                        "$ref",
-                        format!("channel `{}` is not declared", reference.reference),
-                    );
-                });
-                None
-            }
-            Target::Unrecognized => {
-                ctx.in_field(field, |ctx| {
-                    ctx.error_field(
-                        "$ref",
-                        format!(
-                            "`{}` must point at a channel (`#/channels/…` or `#/components/channels/…`)",
-                            reference.reference
-                        ),
-                    );
-                });
-                None
-            }
+        );
+        if let Some(problem) = resolution.problem() {
+            ctx.in_field(field, |ctx| {
+                ctx.error_field(
+                    "$ref",
+                    format!("channel `{}` {problem}", reference.reference),
+                );
+            });
+            return None;
         }
+        // A chain that leaves the document, or lands somewhere this
+        // crate does not model, still names a key — the deeper checks
+        // simply stop there.
+        key.map(|key| ResolvedChannel {
+            key,
+            channel: resolution.found(),
+        })
     }
 
     /// Check that each `$ref` in `messages` names a message of
@@ -462,7 +428,7 @@ mod tests {
         let errors = errors_for(value);
         assert!(
             errors.iter().any(|e| e
-                == "#.operations.receiveSignups.channel.$ref: channel `#/channels/nope` is not declared"),
+                == "#.operations.receiveSignups.channel.$ref: channel `#/channels/nope` names nothing in this document"),
             "got: {errors:?}"
         );
     }
@@ -474,7 +440,9 @@ mod tests {
             json!({ "$ref": "#/servers/production" });
         let errors = errors_for(value);
         assert!(
-            errors.iter().any(|e| e.contains("must point at a channel")),
+            errors
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
             "got: {errors:?}"
         );
     }
@@ -514,11 +482,16 @@ mod tests {
 
     #[test]
     fn unresolvable_reference_shapes_are_each_reported() {
-        // An empty `$ref` is neither local nor external.
+        // An empty `$ref` is neither local nor external, so it is not
+        // a usable pointer.
         let mut empty = wired();
         empty["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "" });
         let errors = errors_for(empty);
-        assert!(errors.iter().any(|e| e.contains("must point at a channel")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("is not a usable JSON Pointer"))
+        );
 
         // A component pointer of the right shape, naming nothing.
         let mut missing_component = wired();
@@ -526,18 +499,27 @@ mod tests {
             json!({ "$ref": "#/components/channels/nope" });
         let errors = errors_for(missing_component);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("channel `#/components/channels/nope` is not declared")),
+            errors.iter().any(|e| e
+                .contains("channel `#/components/channels/nope` names nothing in this document")),
             "got: {errors:?}"
         );
 
-        // A local pointer that is too deep to name a channel.
-        let mut too_deep = wired();
-        too_deep["operations"]["receiveSignups"]["channel"] =
+        // A pointer at a *different* declared kind is wrong, and says
+        // so — unlike one at a location this crate does not model,
+        // which is legal.
+        let mut wrong_kind = wired();
+        wrong_kind["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/servers/production" });
+        assert!(
+            errors_for(wrong_kind)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+
+        let mut unmodeled = wired();
+        unmodeled["operations"]["receiveSignups"]["channel"] =
             json!({ "$ref": "#/channels/userSignedUp/messages/signup" });
-        let errors = errors_for(too_deep);
-        assert!(errors.iter().any(|e| e.contains("must point at a channel")));
+        assert!(errors_for(unmodeled).is_empty());
     }
 
     #[test]
@@ -624,7 +606,7 @@ mod tests {
         let errors = errors_for(value);
         assert!(
             errors.iter().any(|e| e
-                == "#.channels.userSignedUp.servers[0].$ref: server `#/servers/staging` is not declared"),
+                == "#.channels.userSignedUp.servers[0].$ref: server `#/servers/staging` names nothing in this document"),
             "got: {errors:?}"
         );
 
@@ -632,7 +614,11 @@ mod tests {
         wrong_kind["channels"]["userSignedUp"]["servers"] =
             json!([ { "$ref": "#/channels/userSignedUp" } ]);
         let errors = errors_for(wrong_kind);
-        assert!(errors.iter().any(|e| e.contains("must point at a server")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind"))
+        );
     }
 
     #[test]
@@ -704,7 +690,7 @@ mod tests {
         let errors = errors_for(value);
         assert!(
             errors.iter().any(|e| e
-                == "#.operations.receiveSignups.reply.channel.$ref: channel `#/channels/missing` is not declared"),
+                == "#.operations.receiveSignups.reply.channel.$ref: channel `#/channels/missing` names nothing in this document"),
             "got: {errors:?}"
         );
     }

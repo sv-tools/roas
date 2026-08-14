@@ -184,12 +184,12 @@ impl ValidateWithContext for SchemaOrMultiFormat {
 #[serde(untagged)]
 pub enum SubSchema {
     Bool(bool),
-    Schema(Box<RefOr<Schema>>),
+    Schema(Box<Schema>),
 }
 
 impl Default for SubSchema {
     fn default() -> Self {
-        Self::Schema(Box::new(RefOr::Item(Schema::default())))
+        Self::Schema(Box::default())
     }
 }
 
@@ -277,6 +277,15 @@ pub enum SchemaType {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Schema {
     // ---- identification ----
+    /// The draft-07 `$ref` keyword.
+    ///
+    /// A *keyword*, not a replacement for the schema, so `description`
+    /// and `x-` extensions may sit alongside it. draft-07 says an
+    /// implementation ignores such siblings when applying the schema;
+    /// this crate keeps them so a document round-trips as written.
+    #[serde(rename = "$ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+
     #[serde(rename = "$id", skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
@@ -548,6 +557,10 @@ fn check_unique_strings(ctx: &mut Context, field: &str, values: &[String]) {
 
 impl ValidateWithContext for Schema {
     fn validate_with_context(&self, ctx: &mut Context) {
+        if let Some(reference) = &self.reference {
+            ctx.require_non_empty("$ref", reference);
+            crate::common::reference::check_external(ctx, reference);
+        }
         // ---- keyword constraints from the draft-07 meta-schema ----
         match &self.schema_type {
             Some(SchemaType::Single(name)) if !SIMPLE_TYPES.contains(&name.as_str()) => {
@@ -1377,10 +1390,10 @@ mod tests {
         SubSchema::Bool(true).validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty());
 
-        let nested = SubSchema::Schema(Box::new(RefOr::Item(Schema {
+        let nested = SubSchema::Schema(Box::new(Schema {
             discriminator: Some(String::new()),
             ..Default::default()
-        })));
+        }));
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload.additionalProperties");
         nested.validate_with_context(&mut ctx);
         assert!(

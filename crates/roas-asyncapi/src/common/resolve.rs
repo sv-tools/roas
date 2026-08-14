@@ -1,0 +1,316 @@
+//! Following document-local `$ref`s, and saying what happened.
+//!
+//! Every AsyncAPI version lets a `$ref` stand in for an object, and a
+//! validator has to know more than "did that work": an external
+//! reference is fine and simply unresolvable here, a dangling one is a
+//! document bug, a cycle is a different bug, and a pointer at something
+//! this crate does not model is neither. [`Resolution`] carries that
+//! distinction so each version module reports it the same way.
+//!
+//! Pointer syntax lives in [`pointer`](crate::common::pointer); this
+//! module is about what the pointers *mean*.
+
+use crate::common::pointer;
+use crate::common::reference::RefOr;
+use serde::Serialize;
+use std::collections::BTreeSet;
+
+/// What following a document-local pointer turned out to be.
+#[derive(Debug)]
+pub(crate) enum Resolution<'a, T> {
+    /// Resolved to a concrete object in this document.
+    Found(&'a T),
+    /// The chain ends at a reference into another document, or at a
+    /// location this crate does not model. Either way it is not a
+    /// document bug, and not something this crate can inspect.
+    Opaque,
+    /// A local pointer that names nothing.
+    Missing,
+    /// The chain revisits a pointer it already followed.
+    Cycle,
+    /// Not a usable pointer: malformed escapes, or a shape that is not
+    /// a JSON Pointer at all.
+    Unrecognized,
+    /// A pointer at a location the document itself declares to be some
+    /// *other* kind of object — a server where a channel belongs, say.
+    ///
+    /// Distinct from [`Opaque`](Resolution::Opaque): there the target
+    /// is something this crate does not model and cannot judge; here
+    /// the document has already said what it is.
+    WrongKind,
+}
+
+impl<'a, T> Resolution<'a, T> {
+    /// The object, if the pointer resolved inside this document.
+    ///
+    /// Takes `self` so the borrow is the document's, not this
+    /// `Resolution`'s — callers routinely resolve into a temporary.
+    #[must_use]
+    pub(crate) fn found(self) -> Option<&'a T> {
+        match self {
+            Resolution::Found(item) => Some(item),
+            _ => None,
+        }
+    }
+
+    /// Why this pointer is a document bug, if it is one.
+    ///
+    /// `None` means it resolved, left the document, or landed somewhere
+    /// this crate does not model — none of which the document is at
+    /// fault for.
+    #[must_use]
+    pub(crate) fn problem(&self) -> Option<&'static str> {
+        match self {
+            Resolution::Found(_) | Resolution::Opaque => None,
+            Resolution::Missing => Some("names nothing in this document"),
+            Resolution::Cycle => Some("is part of a reference cycle"),
+            Resolution::Unrecognized => Some("is not a usable JSON Pointer"),
+            Resolution::WrongKind => Some("does not point at an object of the expected kind"),
+        }
+    }
+}
+
+/// The object kinds an AsyncAPI document declares, as they are spelled
+/// in a pointer — the union across versions, since a name that is not a
+/// kind in one of them simply never appears in its pointers.
+const KINDS: &[&str] = &[
+    "servers",
+    "channels",
+    "operations",
+    "messages",
+    "schemas",
+    "securitySchemes",
+    "serverVariables",
+    "parameters",
+    "correlationIds",
+    "replies",
+    "replyAddresses",
+    "externalDocs",
+    "tags",
+    "operationTraits",
+    "messageTraits",
+    "serverBindings",
+    "channelBindings",
+    "operationBindings",
+    "messageBindings",
+];
+
+/// Whether a pointer names an *entry* of a declared map other than the
+/// one expected.
+///
+/// Only a direct entry counts — `#/servers/prod` where a channel
+/// belongs. A longer pointer is walking deeper into the document, which
+/// is legitimate: `#/channels/user/publish/message` names a message
+/// even though it passes through `channels`.
+fn names_other_kind(path: &[String], expected: &str) -> bool {
+    let named = match path {
+        [components, kind, _] if components == "components" => kind,
+        [kind, _] => kind,
+        _ => return false,
+    };
+    named != expected && KINDS.contains(&named.as_str())
+}
+
+/// Decide what an unresolved local pointer *is*, by walking the
+/// document as plain JSON.
+///
+/// Three outcomes, in order of how much the document is at fault:
+/// a pointer into a *different* declared kind is [`WrongKind`], since
+/// the document itself says what lives there; one that lands on real
+/// JSON the crate does not model is [`Opaque`], since `$ref` may name
+/// anything; one that lands nowhere is [`Missing`].
+///
+/// [`WrongKind`]: Resolution::WrongKind
+/// [`Opaque`]: Resolution::Opaque
+/// [`Missing`]: Resolution::Missing
+pub(crate) fn classify_unresolved<'a, D, T>(
+    document: &D,
+    local_pointer: &str,
+    expected_kind: &str,
+) -> Resolution<'a, T>
+where
+    D: Serialize,
+{
+    let Some(path) = pointer::tokens(local_pointer) else {
+        return Resolution::Unrecognized;
+    };
+    if names_other_kind(&path, expected_kind) {
+        return Resolution::WrongKind;
+    }
+    let Ok(snapshot) = serde_json::to_value(document) else {
+        return Resolution::Unrecognized;
+    };
+    match pointer::walk(&snapshot, &path) {
+        Some(_) => Resolution::Opaque,
+        None => Resolution::Missing,
+    }
+}
+
+/// Follow a chain of `RefOr` entries to the object at its end.
+///
+/// `lookup` maps a pointer's decoded tokens to the next entry, which is
+/// what differs between kinds — messages live in one map, servers in
+/// another, and some versions allow both a root and a components map.
+/// Everything else — external termini, cycles, malformed pointers, and
+/// the fallback for unmodeled locations — is the same everywhere and
+/// lives here.
+pub(crate) fn follow<'a, D, T, F>(
+    document: &D,
+    start: &'a RefOr<T>,
+    expected_kind: &str,
+    lookup: F,
+) -> Resolution<'a, T>
+where
+    D: Serialize,
+    F: Fn(&[String]) -> Option<&'a RefOr<T>>,
+{
+    let mut current = start;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let reference = match current {
+            RefOr::Item(item) => return Resolution::Found(item),
+            RefOr::Reference(reference) => reference,
+        };
+        if reference.is_external() {
+            return Resolution::Opaque;
+        }
+        let Some(local) = reference.local_pointer() else {
+            return Resolution::Unrecognized;
+        };
+        if !seen.insert(local) {
+            return Resolution::Cycle;
+        }
+        let Some(path) = pointer::tokens(local) else {
+            return Resolution::Unrecognized;
+        };
+        match lookup(&path) {
+            Some(next) => current = next,
+            None => return classify_unresolved(document, local, expected_kind),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::reference::Reference;
+    use serde::Deserialize;
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct Demo {
+        name: String,
+    }
+
+    #[derive(Serialize)]
+    struct Doc {
+        entries: BTreeMap<String, RefOr<Demo>>,
+        #[serde(rename = "x-extra")]
+        extra: serde_json::Value,
+    }
+
+    fn reference(target: &str) -> RefOr<Demo> {
+        RefOr::Reference(Reference {
+            reference: target.to_owned(),
+        })
+    }
+
+    fn document() -> Doc {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "real".to_owned(),
+            RefOr::Item(Demo {
+                name: "real".to_owned(),
+            }),
+        );
+        entries.insert("alias".to_owned(), reference("#/entries/real"));
+        entries.insert("hop".to_owned(), reference("#/entries/alias"));
+        entries.insert("loop-a".to_owned(), reference("#/entries/loop-b"));
+        entries.insert("loop-b".to_owned(), reference("#/entries/loop-a"));
+        entries.insert(
+            "outside".to_owned(),
+            reference("./other.yaml#/entries/real"),
+        );
+        entries.insert("ghost".to_owned(), reference("#/entries/nope"));
+        entries.insert("unmodeled".to_owned(), reference("#/x-extra"));
+        entries.insert("malformed".to_owned(), reference("#/entries/bad~2escape"));
+        // Empty is neither external nor a pointer.
+        entries.insert("empty".to_owned(), reference(""));
+        Doc {
+            entries,
+            extra: serde_json::json!({ "name": "shared" }),
+        }
+    }
+
+    fn resolve<'a>(doc: &'a Doc, entry: &'a RefOr<Demo>) -> Resolution<'a, Demo> {
+        follow(doc, entry, "entries", |path| match path {
+            [entries, key] if entries == "entries" => doc.entries.get(key),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn follows_a_chain_to_its_object() {
+        let doc = document();
+        let resolved = resolve(&doc, &doc.entries["hop"])
+            .found()
+            .expect("resolves");
+        assert_eq!(resolved.name, "real");
+
+        // An inline entry resolves to itself.
+        assert!(resolve(&doc, &doc.entries["real"]).found().is_some());
+    }
+
+    #[test]
+    fn each_outcome_is_told_apart() {
+        let doc = document();
+        for (key, problem) in [
+            ("ghost", Some("names nothing in this document")),
+            ("loop-a", Some("is part of a reference cycle")),
+            ("malformed", Some("is not a usable JSON Pointer")),
+            ("empty", Some("is not a usable JSON Pointer")),
+            // Neither of these is the document's fault.
+            ("outside", None),
+            ("unmodeled", None),
+        ] {
+            assert_eq!(
+                resolve(&doc, &doc.entries[key]).problem(),
+                problem,
+                "entry `{key}`",
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmodeled_but_real_location_is_opaque_not_found() {
+        let doc = document();
+        // The pointer lands on real JSON, so it is legal — but this
+        // lookup does not model it, so there is nothing to hand back.
+        let resolution = resolve(&doc, &doc.entries["unmodeled"]);
+        assert!(matches!(resolution, Resolution::Opaque));
+        assert!(resolution.found().is_none());
+    }
+
+    #[test]
+    fn classify_separates_dangling_from_unmodeled_and_malformed() {
+        let doc = document();
+        assert!(matches!(
+            classify_unresolved::<_, Demo>(&doc, "/x-extra", "entries"),
+            Resolution::Opaque
+        ));
+        assert!(matches!(
+            classify_unresolved::<_, Demo>(&doc, "/nothing/here", "entries"),
+            Resolution::Missing
+        ));
+        assert!(matches!(
+            classify_unresolved::<_, Demo>(&doc, "/bad~2escape", "entries"),
+            Resolution::Unrecognized
+        ));
+        // A pointer into a different declared kind is the document's
+        // own contradiction.
+        assert!(matches!(
+            classify_unresolved::<_, Demo>(&doc, "/servers/prod", "channels"),
+            Resolution::WrongKind
+        ));
+    }
+}

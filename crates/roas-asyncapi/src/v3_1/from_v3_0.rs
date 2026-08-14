@@ -327,7 +327,7 @@ impl From<v3_0::SubSchema> for v3_1::SubSchema {
     fn from(value: v3_0::SubSchema) -> Self {
         match value {
             v3_0::SubSchema::Bool(b) => Self::Bool(b),
-            v3_0::SubSchema::Schema(s) => Self::Schema(Box::new(map_ref_or(*s))),
+            v3_0::SubSchema::Schema(s) => Self::Schema(map_boxed(*s)),
         }
     }
 }
@@ -371,6 +371,7 @@ impl From<v3_0::Schema> for v3_1::Schema {
         }
 
         Self {
+            reference: value.reference,
             id: value.id,
             dialect: value.dialect,
             comment: value.comment,
