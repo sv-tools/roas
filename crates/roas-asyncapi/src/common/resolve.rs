@@ -231,6 +231,9 @@ enum Role<'a> {
     Object(Option<&'a str>),
     /// A key or index in the collection named just before it.
     Entry(Option<&'a str>),
+    /// One object of this kind, or a list of them: draft-07's `items`
+    /// is either, and which one it is shows in what follows it.
+    Either(&'a str),
     /// Something this crate does not model as holding objects, so
     /// nothing below it can be judged by position.
     Opaque,
@@ -250,7 +253,9 @@ const MEMBERS: &[(&str, Role<'static>)] = &[
     ("allOf", Role::Collection(Some("schemas"))),
     ("anyOf", Role::Collection(Some("schemas"))),
     ("oneOf", Role::Collection(Some("schemas"))),
-    ("items", Role::Collection(Some("schemas"))),
+    ("dependencies", Role::Collection(Some("schemas"))),
+    ("items", Role::Either("schemas")),
+    ("additionalItems", Role::Object(Some("schemas"))),
     ("additionalProperties", Role::Object(Some("schemas"))),
     ("propertyNames", Role::Object(Some("schemas"))),
     ("contains", Role::Object(Some("schemas"))),
@@ -272,33 +277,58 @@ const MEMBERS: &[(&str, Role<'static>)] = &[
     ("externalDocs", Role::Object(Some("externalDocs"))),
     ("reply", Role::Object(Some("replies"))),
     ("address", Role::Object(Some("replyAddresses"))),
-    // A trait is an operation's or a message's depending on where it
-    // hangs, and bindings are declared under four names: both are
-    // modelled, neither is one kind.
-    ("traits", Role::Collection(None)),
-    ("bindings", Role::Object(None)),
 ];
+
+/// The kind of a `traits` entry or of `bindings`, which is whatever the
+/// object holding them is: a message's traits are message traits, and a
+/// channel's bindings are channel bindings.
+fn kind_within(parent: Option<&str>, member: &str) -> Option<&'static str> {
+    match (parent?, member) {
+        ("messages" | "messageTraits", "traits") => Some("messageTraits"),
+        ("operations" | "operationTraits", "traits") => Some("operationTraits"),
+        ("servers", "bindings") => Some("serverBindings"),
+        ("channels", "bindings") => Some("channelBindings"),
+        ("operations" | "operationTraits", "bindings") => Some("operationBindings"),
+        ("messages" | "messageTraits", "bindings") => Some("messageBindings"),
+        _ => None,
+    }
+}
 
 /// The role of a token, given the role of the one before it.
 fn role_after<'a>(previous: Role<'a>, token: &'a str) -> Role<'a> {
-    match previous {
+    let parent = match previous {
         // A key is whatever its collection holds.
-        Role::Collection(kind) => Role::Entry(kind),
-        Role::Opaque | Role::Entry(None) => Role::Opaque,
-        // A member of an object. Under `components` every member is a
-        // map of the kind it is named for; elsewhere the model says.
-        Role::Object(Some("components")) if KINDS.contains(&token) => Role::Collection(Some(token)),
-        Role::Object(_) | Role::Entry(Some(_)) => {
-            // An extension's contents are the extension's business.
-            if token.starts_with("x-") {
-                return Role::Opaque;
-            }
-            MEMBERS
-                .iter()
-                .find(|(name, _)| *name == token)
-                .map_or(Role::Opaque, |(_, role)| *role)
+        Role::Collection(kind) => return Role::Entry(kind),
+        Role::Opaque | Role::Entry(None) => return Role::Opaque,
+        // Either form of `items`: an index makes it the list, anything
+        // else makes it the one schema and this a member of it.
+        Role::Either(kind) if pointer::array_index(token).is_some() => {
+            return Role::Entry(Some(kind));
         }
+        Role::Either(kind) => Some(kind),
+        Role::Object(kind) | Role::Entry(kind) => kind,
+    };
+    // Under `components` every member is a map of the kind it is named
+    // for; elsewhere the model says.
+    if parent == Some("components") && KINDS.contains(&token) {
+        return Role::Collection(Some(token));
     }
+    // An extension's contents are the extension's business.
+    if token.starts_with("x-") {
+        return Role::Opaque;
+    }
+    // `traits` and `bindings` take their kind from whatever holds them.
+    if let Some(kind) = kind_within(parent, token) {
+        return if token == "traits" {
+            Role::Collection(Some(kind))
+        } else {
+            Role::Object(Some(kind))
+        };
+    }
+    MEMBERS
+        .iter()
+        .find(|(name, _)| *name == token)
+        .map_or(Role::Opaque, |(_, role)| *role)
 }
 
 /// Only the document's own structure declares a kind.
@@ -316,6 +346,8 @@ fn names_something_else(path: &[String], expected: &str) -> bool {
         // A map is not one of the objects in it, and the document as a
         // whole is not an object at all.
         Role::Collection(_) => true,
+        // A pointer stopping at `items` names the one-schema form.
+        Role::Either(kind) => kind != expected,
         Role::Entry(Some(kind)) | Role::Object(Some(kind)) => kind != expected,
         Role::Entry(None) | Role::Object(None) | Role::Opaque => false,
     }
@@ -550,6 +582,24 @@ fn normalize_percent_encoding(reference: &str) -> String {
     out
 }
 
+/// Lower-case the parts of a reference that are case-insensitive, per
+/// [RFC 3986 §6.2.2.1](https://www.rfc-editor.org/rfc/rfc3986#section-6.2.2.1):
+/// the scheme and the host, and nothing else.
+///
+/// Userinfo is left alone — a password is not a hostname — as are the
+/// path and query, which are case-sensitive.
+fn normalize_case(prefix: &str) -> String {
+    let Some((scheme, authority)) = prefix.split_once("//") else {
+        // No authority: whatever is here is a scheme, or nothing.
+        return prefix.to_ascii_lowercase();
+    };
+    let host = match authority.split_once('@') {
+        Some((userinfo, host)) => format!("{userinfo}@{}", host.to_ascii_lowercase()),
+        None => authority.to_ascii_lowercase(),
+    };
+    format!("{}//{host}", scheme.to_ascii_lowercase())
+}
+
 /// Remove dot-segments from a URI reference's path, in the spirit of
 /// [RFC 3986 §5.2.4](https://www.rfc-editor.org/rfc/rfc3986#section-5.2.4).
 ///
@@ -581,8 +631,9 @@ fn remove_dot_segments(reference: &str) -> String {
         _ => before_query.find(':').map_or(0, |colon| colon + 1),
     };
     let (prefix, path) = before_query.split_at(path_start);
+    let prefix = normalize_case(prefix);
     if path.is_empty() {
-        return normalized;
+        return format!("{prefix}{query}");
     }
 
     let absolute = path.starts_with('/');
@@ -940,6 +991,16 @@ mod tests {
             ("a//../b.yaml", "a/b.yaml"),
             // A query is not a path, however many slashes it holds.
             ("http://host?x=/a/../b", "http://host?x=/a/../b"),
+            // Scheme and host are case-insensitive; nothing else is.
+            ("HTTP://EXAMPLE.COM/A.yaml", "http://example.com/A.yaml"),
+            (
+                "http://User:Pass@EXAMPLE.com/a",
+                "http://User:Pass@example.com/a",
+            ),
+            // An unreserved octet decodes; a reserved one does not.
+            ("a/%62.yaml", "a/b.yaml"),
+            ("a%2Fb.yaml", "a%2Fb.yaml"),
+            ("a/%2e%2e/b.yaml", "b.yaml"),
             ("http://host/a/../b?q=/x/../y", "http://host/b?q=/x/../y"),
             // The current directory is not the current document.
             ("././", "./"),

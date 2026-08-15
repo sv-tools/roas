@@ -2400,6 +2400,188 @@ mod tests {
     }
 
     #[test]
+    fn a_trait_or_binding_is_whatever_holds_it() {
+        // A message's traits are message traits, so an operation may
+        // not borrow one.
+        let value = json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "T", "version": "1" },
+            "components": {
+                "channels": { "c": { "address": "a" } },
+                "messages": { "m": { "name": "M", "traits": [ { "title": "mt" } ] } },
+                "operations": {
+                    "o": {
+                        "action": "send",
+                        "channel": { "$ref": "#/components/channels/c" },
+                        "traits": [ { "$ref": "#/components/messages/m/traits/0" } ]
+                    }
+                }
+            }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.operations.o.traits[0].$ref: `#/components/messages/m/traits/0` does not point at an object of the expected kind"),
+        );
+
+        // And a message's bindings are message bindings.
+        let value = json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "T", "version": "1" },
+            "components": {
+                "messages": { "m": { "name": "M", "bindings": { "kafka": {} } } },
+                "channels": {
+                    "c": {
+                        "address": "a",
+                        "bindings": { "$ref": "#/components/messages/m/bindings" }
+                    }
+                }
+            }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.channels.c.bindings.$ref: `#/components/messages/m/bindings` does not point at an object of the expected kind"),
+        );
+
+        // The other way round too: an operation's traits are
+        // operation traits.
+        let value = json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "T", "version": "1" },
+            "components": {
+                "channels": { "c": { "address": "a" } },
+                "operations": {
+                    "o": {
+                        "action": "send",
+                        "channel": { "$ref": "#/components/channels/c" },
+                        "traits": [ { "title": "ot" } ]
+                    }
+                },
+                "messages": {
+                    "m": { "name": "M", "traits": [ { "$ref": "#/components/operations/o/traits/0" } ] }
+                }
+            }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.messages.m.traits[0].$ref: `#/components/operations/o/traits/0` does not point at an object of the expected kind"),
+        );
+
+        // Borrowing from the right sort of object is fine.
+        let value = json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "T", "version": "1" },
+            "components": {
+                "messages": {
+                    "m": { "name": "M", "bindings": { "kafka": {} } },
+                    "other": { "name": "O", "bindings": { "$ref": "#/components/messages/m/bindings" } }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn items_is_one_schema_or_a_list_of_them() {
+        // draft-07 allows either, and which one shows in what follows.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["payload"] =
+            json!({ "$ref": "#/components/schemas/list/items" });
+        value["components"] = json!({
+            "schemas": { "list": { "type": "array", "items": { "type": "string" } } }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["payload"] =
+            json!({ "$ref": "#/components/schemas/tuple/items/1" });
+        value["components"] = json!({
+            "schemas": {
+                "tuple": { "items": [ { "type": "string" }, { "type": "number" } ] }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A pointer continuing past the single form walks into that
+        // schema, so what it names is a schema too.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["payload"] =
+            json!({ "$ref": "#/components/schemas/list/items/properties/p" });
+        value["components"] = json!({
+            "schemas": {
+                "list": { "items": { "properties": { "p": { "type": "string" } } } }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // Either way it is a schema, and not a channel.
+        let mut value = wired_from_components();
+        value["components"]["schemas"] = json!({
+            "list": { "type": "array", "items": { "type": "string" } }
+        });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/components/schemas/list/items" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+    }
+
+    #[test]
+    fn every_schema_bearing_keyword_holds_schemas() {
+        for keyword in ["additionalItems", "propertyNames", "contains", "not", "if"] {
+            let mut value = wired_from_components();
+            value["components"]["schemas"] = json!({ "s": { keyword: { "type": "string" } } });
+            value["components"]["operations"]["receiveSignups"]["channel"] =
+                json!({ "$ref": format!("#/components/schemas/s/{keyword}") });
+            value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+            let errors = errors_for(value);
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("does not point at an object of the expected kind")),
+                "{keyword} got: {errors:?}"
+            );
+        }
+
+        // `dependencies` may hold a schema, so it holds schemas.
+        let mut value = wired_from_components();
+        value["components"]["schemas"] =
+            json!({ "s": { "dependencies": { "d": { "type": "object" } } } });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/components/schemas/s/dependencies/d" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+    }
+
+    #[test]
+    fn a_scheme_and_host_are_compared_without_regard_to_case() {
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "HTTP://EXAMPLE.COM/a.yaml#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "http://example.com/a.yaml#/c/messages/m" } ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // The path is not case-insensitive, though.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "http://example.com/A.yaml#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "http://example.com/a.yaml#/c/messages/m" } ]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("must point at a message of `http://example.com/A.yaml#/c`")),
+        );
+    }
+
+    #[test]
     fn external_references_are_skipped_unless_strictness_is_requested() {
         // A root operation must name a channel in the root Channels
         // Object, so in a split document the *entry* is what points
