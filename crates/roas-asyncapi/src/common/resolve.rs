@@ -12,7 +12,6 @@
 
 use crate::common::pointer;
 use crate::common::reference::RefOr;
-use crate::validation::Context;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -120,22 +119,35 @@ const SINGLETONS: &[&str] = &["info", "asyncapi", "id", "defaultContentType"];
 /// An **entry of another map** — `#/servers/prod` where a channel
 /// belongs.
 ///
-/// Depth does not enter into it: what names the kind is the token
-/// *before* the last one, wherever that falls. `#/channels/c/messages/m`
-/// is a message however deep it sits, and using it where a channel
-/// belongs is the same mistake as `#/components/messages/m` there.
-/// A token that is not a kind name at all — `publish` in v2.6's
-/// `#/channels/user/publish/message` — says nothing either way, and the
-/// pointer is judged on what it finds instead.
+/// Only the document's own structure declares a kind.
+///
+/// A pointer that starts anywhere else — `#/x-store/messages/c`, into
+/// an extension that happens to spell a map `messages` — is arbitrary
+/// JSON, and nothing about its shape says what it holds. Within the
+/// document, what names the kind is the token *before* the last one,
+/// at whatever depth: `#/channels/c/messages/m` is a message, and
+/// using it where a channel belongs is the same mistake as
+/// `#/components/messages/m` there. A token that is no kind at all —
+/// `publish` in v2.6's `#/channels/user/publish/message` — says nothing
+/// either way, and the pointer is judged on what it finds instead.
 fn names_something_else(path: &[String], expected: &str) -> bool {
-    match path {
-        // Containers: the whole document, `#/components`, a map.
+    // The whole document is a container.
+    let [first, rest @ ..] = path else {
+        return true;
+    };
+    // Rooted in the document's own structure, or not our business.
+    if first != "components" && !KINDS.contains(&first.as_str()) {
+        return rest.is_empty() && SINGLETONS.contains(&first.as_str());
+    }
+    match rest {
+        // `#/components` itself, or a whole map.
         [] => true,
-        [components] if components == "components" => true,
-        [single] => SINGLETONS.contains(&single.as_str()) || KINDS.contains(&single.as_str()),
-        [components, kind] if components == "components" => KINDS.contains(&kind.as_str()),
-        // The token before the last one names the kind, at any depth.
-        [.., named, _] => named != expected && KINDS.contains(&named.as_str()),
+        // A whole map under `components`.
+        [kind] if first == "components" => KINDS.contains(&kind.as_str()),
+        _ => {
+            let named = &path[path.len() - 2];
+            named != expected && KINDS.contains(&named.as_str())
+        }
     }
 }
 
@@ -208,6 +220,67 @@ where
     follow_tracked(document, Vec::new(), start, expected_kind, lookup).1
 }
 
+/// Where a chain ended, as an identity two references can be compared
+/// by.
+///
+/// A chain that leaves the document still has one: `./channels.yaml#/user`
+/// names a channel as definitely as `#/channels/user` does, and a
+/// message of *that* channel is `./channels.yaml#/user/messages/m`. A
+/// caller comparing a message against its channel needs the resource as
+/// well as the pointer, or every split document looks mismatched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Terminus {
+    /// The document the chain ended in — empty for this one.
+    pub(crate) resource: String,
+    /// The pointer within that document, as decoded tokens.
+    pub(crate) at: Vec<String>,
+}
+
+impl Terminus {
+    /// Split a reference as written into the resource it names and the
+    /// pointer within it.
+    ///
+    /// `None` when the fragment is not a usable JSON Pointer.
+    pub(crate) fn parse(reference: &str) -> Option<Self> {
+        let (resource, fragment) = match reference.split_once('#') {
+            Some((resource, fragment)) => (resource, fragment),
+            None => (reference, ""),
+        };
+        Some(Self {
+            resource: resource.to_owned(),
+            at: pointer::tokens(fragment)?,
+        })
+    }
+
+    /// The key `other` names, when it names an entry of this object's
+    /// `field` map — this terminus with `/<field>/<key>` on the end, in
+    /// the same document, and nothing else.
+    ///
+    /// Only v3 compares references this way; v2.6 keys its channels by
+    /// address and has no equivalent relationship.
+    #[cfg(any(feature = "v3_0", feature = "v3_1", test))]
+    pub(crate) fn child_key<'o>(&self, field: &str, other: &'o Self) -> Option<&'o String> {
+        if self.resource != other.resource {
+            return None;
+        }
+        let (prefix, tail) = other.at.split_at(other.at.len().checked_sub(2)?);
+        match tail {
+            [map, key] if prefix == self.at && map == field => Some(key),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Terminus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#", self.resource)?;
+        for token in &self.at {
+            write!(f, "/{}", token.replace('~', "~0").replace('/', "~1"))?;
+        }
+        Ok(())
+    }
+}
+
 /// [`follow`], reporting *where* the chain ended as well as what it
 /// found.
 ///
@@ -226,14 +299,17 @@ pub(crate) fn follow_tracked<'a, D, T, F>(
     start: &'a RefOr<T>,
     expected_kind: &str,
     lookup: F,
-) -> (Vec<String>, Resolution<'a, T>)
+) -> (Terminus, Resolution<'a, T>)
 where
     D: Serialize,
     T: DeserializeOwned,
     F: Fn(&[String]) -> Option<&'a RefOr<T>>,
 {
     let mut current = start;
-    let mut at = start_path;
+    let mut at = Terminus {
+        resource: String::new(),
+        at: start_path,
+    };
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     loop {
         let reference = match current {
@@ -241,7 +317,13 @@ where
             RefOr::Reference(reference) => reference,
         };
         if reference.is_external() {
-            return (at, Resolution::Opaque);
+            // The chain ends in another document, and *that* is the
+            // identity of what it found.
+            let terminus = Terminus::parse(&reference.reference);
+            return match terminus {
+                Some(terminus) => (terminus, Resolution::Opaque),
+                None => (at, Resolution::Unrecognized),
+            };
         }
         let Some(local) = reference.local_pointer() else {
             return (at, Resolution::Unrecognized);
@@ -255,140 +337,23 @@ where
         match lookup(&path) {
             Some(next) => {
                 current = next;
-                at = path;
+                at = Terminus {
+                    resource: String::new(),
+                    at: path,
+                };
             }
-            None => return (path, classify_unresolved(document, local, expected_kind)),
+            None => {
+                let terminus = Terminus {
+                    resource: String::new(),
+                    at: path,
+                };
+                return (
+                    terminus,
+                    classify_unresolved(document, local, expected_kind),
+                );
+            }
         }
     }
-}
-
-/// Check every document-local `$ref` in the document, wherever it sits.
-///
-/// The typed checks above judge the references a version *wires* —
-/// which channel an operation names, which messages belong to it — and
-/// they are the better error when they apply. But a reference is a
-/// document bug whether or not anything is wired through it, and a
-/// dangling pointer inside a channel's `messages`, a server's
-/// `variables`, or an operation's `traits` would otherwise be found
-/// only if some other check happened to walk that way.
-///
-/// This walks the serialized document instead of the model, so it needs
-/// no per-position code and covers positions the model holds as opaque
-/// JSON. It reports only what it can see structurally — a pointer that
-/// names nothing, or a chain that loops — and stays quiet where a typed
-/// check has already spoken, so the specific error wins.
-///
-/// `x-` extensions are skipped: what a `$ref` means inside one is the
-/// extension's business.
-pub(crate) fn check_every_reference<D>(ctx: &mut Context, document: &D)
-where
-    D: Serialize,
-{
-    let snapshot = serde_json::to_value(document).unwrap_or_default();
-    visit(ctx, &snapshot, &snapshot);
-}
-
-fn visit(ctx: &mut Context, root: &serde_json::Value, node: &serde_json::Value) {
-    match node {
-        serde_json::Value::Object(map) => {
-            if let Some(serde_json::Value::String(reference)) = map.get("$ref") {
-                check_one(ctx, root, reference);
-            }
-            for (key, value) in map {
-                if key.starts_with("x-") || key == "$ref" {
-                    continue;
-                }
-                ctx.in_field(key, |ctx| visit(ctx, root, value));
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for (index, item) in items.iter().enumerate() {
-                ctx.in_element(index, |ctx| visit(ctx, root, item));
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Follow one reference through the document as plain JSON.
-fn check_one(ctx: &mut Context, root: &serde_json::Value, reference: &str) {
-    // External references land in a document this crate cannot see, and
-    // an empty one is reported for being empty.
-    let Some(local) = reference.strip_prefix('#') else {
-        return;
-    };
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut pointer = local.to_owned();
-    let problem = loop {
-        if !seen.insert(pointer.clone()) {
-            break "is part of a reference cycle";
-        }
-        match walk_as_written(root, &pointer) {
-            // Nothing to say: either it resolved, or what would have
-            // resolved it is in another document.
-            Walk::Deferred => return,
-            Walk::Missing => break "names nothing in this document",
-            Walk::Unrecognized => break "is not a usable JSON Pointer",
-            Walk::Landed(target) => {
-                // Keep following while the target is itself a
-                // reference, which is how a cycle shows up.
-                match target.get("$ref").and_then(serde_json::Value::as_str) {
-                    Some(next) => match next.strip_prefix('#') {
-                        Some(next) => pointer = next.to_owned(),
-                        None => return,
-                    },
-                    None => return,
-                }
-            }
-        }
-    };
-    if !ctx.has_error_at_field("$ref") {
-        ctx.error_field("$ref", format!("`{reference}` {problem}"));
-    }
-}
-
-/// Where a structural walk ended.
-enum Walk<'v> {
-    Landed(&'v serde_json::Value),
-    /// The walk failed, but passed a `$ref` on the way — so what it was
-    /// looking for may well exist, just not in this document as
-    /// written. Not something to report.
-    Deferred,
-    Missing,
-    Unrecognized,
-}
-
-/// Walk a pointer over the document exactly as written.
-///
-/// A JSON Pointer does not resolve as it walks: `#/channels/c/publish`
-/// names what is written beside a `$ref` in `c`, not what that `$ref`
-/// points at. But when the walk *fails* after passing one, the missing
-/// step is very likely inside what the reference names — a split-file
-/// document walks `#/channels/user/messages/m` through a `channels.user`
-/// that is only a `$ref` — so a failure downstream of a reference is
-/// left unjudged.
-fn walk_as_written<'v>(root: &'v serde_json::Value, pointer: &str) -> Walk<'v> {
-    let Some(tokens) = pointer::tokens(pointer) else {
-        return Walk::Unrecognized;
-    };
-    let mut current = root;
-    let mut deferred = false;
-    for token in &tokens {
-        deferred |= current.get("$ref").is_some();
-        let next = match current {
-            serde_json::Value::Object(map) => map.get(token),
-            serde_json::Value::Array(items) => {
-                pointer::array_index(token).and_then(|index| items.get(index))
-            }
-            _ => None,
-        };
-        match next {
-            Some(value) => current = value,
-            None if deferred => return Walk::Deferred,
-            None => return Walk::Missing,
-        }
-    }
-    Walk::Landed(current)
 }
 
 #[cfg(test)]
@@ -518,6 +483,33 @@ mod tests {
     }
 
     #[test]
+    fn a_terminus_is_a_resource_and_a_pointer() {
+        let local = Terminus::parse("#/channels/user").expect("a pointer");
+        assert_eq!(local.resource, "");
+        assert_eq!(local.to_string(), "#/channels/user");
+
+        // A whole document, with no fragment at all.
+        let whole = Terminus::parse("./other.yaml").expect("a resource");
+        assert_eq!(whole.resource, "./other.yaml");
+        assert!(whole.at.is_empty());
+        assert_eq!(whole.to_string(), "./other.yaml#");
+
+        // A message of a channel over there is named over there.
+        let channel = Terminus::parse("./channels.yaml#/user").expect("a pointer");
+        let message = Terminus::parse("./channels.yaml#/user/messages/signup").expect("a pointer");
+        assert_eq!(
+            channel.child_key("messages", &message).map(String::as_str),
+            Some("signup"),
+        );
+        // The same pointer in *this* document is a different object.
+        let here = Terminus::parse("#/user/messages/signup").expect("a pointer");
+        assert!(channel.child_key("messages", &here).is_none());
+
+        // A fragment that is not a pointer is not a terminus.
+        assert!(Terminus::parse("./other.yaml#bad").is_none());
+    }
+
+    #[test]
     fn a_chain_reports_where_it_ended_not_where_it_began() {
         let doc = document();
         let start = pointer::tokens("/entries/hop").expect("a pointer");
@@ -527,7 +519,11 @@ mod tests {
         };
         let (terminal, resolution) =
             follow_tracked(&doc, start, &doc.entries["hop"], "entries", lookup);
-        assert_eq!(terminal, vec!["entries", "real"], "hop -> alias -> real");
+        assert_eq!(
+            terminal.to_string(),
+            "#/entries/real",
+            "hop -> alias -> real"
+        );
         assert!(resolution.found().is_some());
 
         // A chain that leaves the map ends at the pointer that took it
@@ -535,13 +531,13 @@ mod tests {
         let start = pointer::tokens("/entries/unmodeled").expect("a pointer");
         let (terminal, resolution) =
             follow_tracked(&doc, start, &doc.entries["unmodeled"], "entries", lookup);
-        assert_eq!(terminal, vec!["x-extra"]);
+        assert_eq!(terminal.to_string(), "#/x-extra");
         assert!(matches!(resolution, Resolution::Opaque));
 
         // An entry that is already an object ends where it started.
         let start = pointer::tokens("/entries/real").expect("a pointer");
         let (terminal, _) = follow_tracked(&doc, start, &doc.entries["real"], "entries", |_| None);
-        assert_eq!(terminal, vec!["entries", "real"]);
+        assert_eq!(terminal.to_string(), "#/entries/real");
     }
 
     #[test]

@@ -33,18 +33,12 @@ where
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Message {
     /// Schema definition of the application headers.
-    ///
-    /// A schema, not a Reference Object: the specification defines this
-    /// position as `anySchema` directly, and a schema carries `$ref` as
-    /// a keyword that keeps its siblings.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<SchemaOrMultiFormat>,
+    pub headers: Option<RefOr<SchemaOrMultiFormat>>,
 
     /// Definition of the message payload.
-    ///
-    /// A schema, not a Reference Object — see [`headers`](Self::headers).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<SchemaOrMultiFormat>,
+    pub payload: Option<RefOr<SchemaOrMultiFormat>>,
 
     /// Definition of the correlation ID used for message tracing.
     #[serde(rename = "correlationId", skip_serializing_if = "Option::is_none")]
@@ -143,7 +137,7 @@ impl ValidateWithContext for Message {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct MessageTrait {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<SchemaOrMultiFormat>,
+    pub headers: Option<RefOr<SchemaOrMultiFormat>>,
 
     #[serde(rename = "correlationId", skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<RefOr<CorrelationId>>,
@@ -310,35 +304,39 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(
-            message.payload.as_ref(),
+            message.payload.as_ref().and_then(|p| p.item()),
             Some(SchemaOrMultiFormat::MultiFormat(_))
         ));
     }
 
     #[test]
-    fn a_payload_ref_keeps_its_siblings() {
-        // The specification defines `payload`, `headers`, and
-        // `components.schemas` as `anySchema` — a schema, never a
-        // Reference Object — so `$ref` here is the draft-07 keyword and
-        // what sits beside it is part of the schema.
-        let source = json!({
-            "headers": { "$ref": "#/components/schemas/headers", "description": "kept" },
-            "payload": { "$ref": "#/components/schemas/base", "description": "must survive", "x-note": true }
-        });
-        let message: Message = serde_json::from_value(source.clone()).unwrap();
-
-        assert!(
-            matches!(&message.payload, Some(SchemaOrMultiFormat::Schema(payload))
-                if payload.reference.as_deref() == Some("#/components/schemas/base")
-                    && payload.description.as_deref() == Some("must survive")),
-            "got {:?}",
-            message.payload,
-        );
+    fn a_payload_ref_is_a_reference_object() {
+        // "Alternatively, any time a Schema Object can be used, a
+        // Reference Object can be used in its place … the `$ref`
+        // keyword MUST follow the behavior described by Reference
+        // Object instead of the one in JSON Schema definition." A
+        // Reference Object is `$ref` and nothing else, so siblings are
+        // ignored — and dropped rather than round-tripped.
+        let message: Message = serde_json::from_value(json!({
+            "headers": { "$ref": "#/components/schemas/headers" },
+            "payload": { "$ref": "#/components/schemas/base", "description": "ignored" }
+        }))
+        .unwrap();
 
         assert_eq!(
+            message
+                .payload
+                .as_ref()
+                .and_then(RefOr::reference)
+                .map(|r| r.reference.as_str()),
+            Some("#/components/schemas/base"),
+        );
+        assert_eq!(
             serde_json::to_value(&message).unwrap(),
-            source,
-            "a payload `$ref` round-trips with everything beside it"
+            json!({
+                "headers": { "$ref": "#/components/schemas/headers" },
+                "payload": { "$ref": "#/components/schemas/base" }
+            })
         );
     }
 

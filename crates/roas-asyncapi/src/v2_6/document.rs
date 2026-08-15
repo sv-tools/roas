@@ -10,7 +10,7 @@
 
 use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference};
-use crate::common::resolve::{Resolution, check_every_reference, classify_unresolved, follow};
+use crate::common::resolve::{Resolution, classify_unresolved, follow};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
 use crate::v2_6::external_documentation::ExternalDocumentation;
@@ -556,10 +556,6 @@ impl Document {
         if let Some(components) = &self.components {
             ctx.in_field("components", |ctx| components.validate_with_context(ctx));
         }
-
-        // Last, so the checks above own the references they know
-        // about and this only speaks where nothing else has.
-        check_every_reference(&mut ctx, self);
 
         ctx.into_result()
     }

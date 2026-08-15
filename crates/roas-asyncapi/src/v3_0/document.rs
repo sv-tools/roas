@@ -11,17 +11,18 @@
 //! [`ValidationOptions::ErrorOnExternalReference`] asks for a
 //! self-contained document.
 
+use crate::common::bindings::Bindings;
 use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference};
-use crate::common::resolve::{
-    Resolution, check_every_reference, classify_unresolved, follow, follow_tracked,
-};
+use crate::common::resolve::{Resolution, Terminus, classify_unresolved, follow, follow_tracked};
 use crate::v3_0::channel::Channel;
 use crate::v3_0::components::Components;
+use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::info::Info;
 use crate::v3_0::message::Message;
 use crate::v3_0::operation::{Operation, OperationReply};
 use crate::v3_0::server::Server;
+use crate::v3_0::tag::Tag;
 use crate::v3_0::version::Version;
 use crate::validation::{Context, Error, Validate, ValidateWithContext, ValidationOptions};
 use enumset::EnumSet;
@@ -99,37 +100,17 @@ enum Origin {
 
 /// A channel `$ref` that landed on a declared channel.
 struct ResolvedChannel<'a> {
-    /// Where the chain ended, as decoded pointer tokens.
+    /// Where the chain ended: the document it ended in as well as the
+    /// pointer within it.
     ///
-    /// The whole path, not just the key: `#/channels/events` and
+    /// The whole identity, not just the key. `#/channels/events` and
     /// `#/components/channels/events` are different channels that may
-    /// both declare a message `m`, and an operation may only name the
-    /// messages of the one it selected.
-    at: Vec<String>,
+    /// both declare a message `m`, and a channel reached through an
+    /// external alias declares its messages over there, not here.
+    at: Terminus,
     /// The channel itself, or `None` when the chain left the document
     /// and deeper checks cannot continue.
     channel: Option<&'a Channel>,
-}
-
-/// Render decoded tokens back into a JSON Pointer, for error messages.
-fn as_pointer(path: &[String]) -> String {
-    let mut out = String::from("#");
-    for token in path {
-        out.push('/');
-        out.push_str(&token.replace('~', "~0").replace('/', "~1"));
-    }
-    out
-}
-
-/// The message key a pointer names, when it names a message of the
-/// channel at `channel_path` — that channel's own pointer with
-/// `/messages/<key>` on the end, and nothing else.
-fn message_key_of<'p>(path: &'p [String], channel_path: &[String]) -> Option<&'p String> {
-    let (prefix, tail) = path.split_at(path.len().checked_sub(2)?);
-    match tail {
-        [messages, key] if prefix == channel_path && messages == "messages" => Some(key),
-        _ => None,
-    }
 }
 
 impl Document {
@@ -146,12 +127,17 @@ impl Document {
         field: &str,
         inline: Option<&'a BTreeMap<String, RefOr<T>>>,
         components: Option<&'a BTreeMap<String, RefOr<T>>>,
-    ) -> (Option<Vec<String>>, Resolution<'a, T>)
+    ) -> (Option<Terminus>, Resolution<'a, T>)
     where
         T: DeserializeOwned,
     {
         if reference.is_external() {
-            return (None, Resolution::Opaque);
+            // Another document, but still an identity: a message of
+            // that channel is named over there too.
+            return match Terminus::parse(&reference.reference) {
+                Some(terminus) => (Some(terminus), Resolution::Opaque),
+                None => (None, Resolution::Unrecognized),
+            };
         }
         let Some(local) = reference.local_pointer() else {
             return (None, Resolution::Unrecognized);
@@ -173,7 +159,13 @@ impl Document {
         // identities has to see the target's.
         let (terminal, resolution) = match lookup(&path) {
             Some(entry) => follow_tracked(self, path, entry, field, lookup),
-            None => (path, classify_unresolved(self, local, field)),
+            None => (
+                Terminus {
+                    resource: String::new(),
+                    at: path,
+                },
+                classify_unresolved(self, local, field),
+            ),
         };
         (Some(terminal), resolution)
     }
@@ -411,40 +403,22 @@ impl Document {
                 });
             };
 
-            // The channel is one this document declares, so a message
-            // of it is too — a reference into another document cannot
-            // be one of this channel's, whatever it finds there.
-            if message.is_external() {
-                report(
-                    ctx,
-                    format!("must point at a message of `{}`", as_pointer(&resolved.at)),
-                );
-                continue;
-            }
-
-            let Some(path) = message.local_pointer().and_then(pointer::tokens) else {
+            let Some(named) = Terminus::parse(&message.reference) else {
                 report(ctx, "is not a usable JSON Pointer".to_owned());
                 continue;
             };
-            let Some(key) = message_key_of(&path, &resolved.at) else {
-                report(
-                    ctx,
-                    format!("must point at a message of `{}`", as_pointer(&resolved.at)),
-                );
+            let Some(key) = resolved.at.child_key("messages", &named) else {
+                report(ctx, format!("must point at a message of `{}`", resolved.at));
                 continue;
             };
 
-            // The channel left the document, so its messages are not
-            // here to be a subset of.
+            // The channel is declared in another document, so its
+            // messages are not here to be a subset of.
             let Some(channel) = resolved.channel else {
                 continue;
             };
-            let Some(entry) = channel.messages.get(key) else {
+            if !channel.messages.contains_key(key) {
                 report(ctx, "is not one of the channel's `messages`".to_owned());
-                continue;
-            };
-            if let Some(problem) = self.message_problem(entry) {
-                report(ctx, problem.to_owned());
             }
         }
     }
@@ -456,10 +430,18 @@ impl Document {
     /// wired exactly like an inline one — except that it may reference
     /// freely, being outside the root.
     fn validate_components_wiring(&self, ctx: &mut Context, components: &Components) {
+        for (name, server) in &components.servers {
+            if let Some(server) = server.item() {
+                ctx.in_key("servers", name, |ctx| {
+                    self.check_server_references(ctx, server)
+                });
+            }
+        }
         for (name, channel) in &components.channels {
             if let Some(channel) = channel.item() {
                 ctx.in_key("channels", name, |ctx| {
                     self.validate_channel_servers(ctx, channel, Origin::Components);
+                    self.check_channel_references(ctx, channel);
                 });
             }
         }
@@ -467,6 +449,14 @@ impl Document {
             if let Some(operation) = operation.item() {
                 ctx.in_key("operations", name, |ctx| {
                     self.validate_operation_wiring(ctx, operation, Origin::Components);
+                    self.check_operation_references(ctx, operation);
+                });
+            }
+        }
+        for (name, message) in &components.messages {
+            if let Some(message) = message.item() {
+                ctx.in_key("messages", name, |ctx| {
+                    self.check_message_references(ctx, message)
                 });
             }
         }
@@ -474,6 +464,7 @@ impl Document {
             if let Some(reply) = reply.item() {
                 ctx.in_key("replies", name, |ctx| {
                     self.validate_reply_wiring(ctx, reply, Origin::Components);
+                    self.check_reply_references(ctx, reply);
                 });
             }
         }
@@ -514,6 +505,7 @@ impl Document {
         }
         declared_components! {
             self, ctx, components,
+            schemas => "schemas",
             security_schemes => "securitySchemes",
             server_variables => "serverVariables",
             parameters => "parameters",
@@ -531,6 +523,232 @@ impl Document {
         }
     }
 
+    /// Report a declared reference that leads nowhere.
+    ///
+    /// Only a reference is checked here: an inline object is validated
+    /// where it sits.
+    fn check_entry<T>(
+        &self,
+        ctx: &mut Context,
+        entry: &RefOr<T>,
+        kind: &str,
+        components: Option<&BTreeMap<String, RefOr<T>>>,
+    ) where
+        T: DeserializeOwned,
+    {
+        let RefOr::Reference(reference) = entry else {
+            return;
+        };
+        let (_, resolution) = self.resolve(reference, kind, None, components);
+        if let Some(problem) = resolution.problem() {
+            ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
+        }
+    }
+
+    fn check_entry_map<T>(
+        &self,
+        ctx: &mut Context,
+        field: &str,
+        map: &BTreeMap<String, RefOr<T>>,
+        kind: &str,
+        components: Option<&BTreeMap<String, RefOr<T>>>,
+    ) where
+        T: DeserializeOwned,
+    {
+        for (key, entry) in map {
+            ctx.in_key(field, key, |ctx| {
+                self.check_entry(ctx, entry, kind, components)
+            });
+        }
+    }
+
+    fn check_entry_list<T>(
+        &self,
+        ctx: &mut Context,
+        field: &str,
+        items: &[RefOr<T>],
+        kind: &str,
+        components: Option<&BTreeMap<String, RefOr<T>>>,
+    ) where
+        T: DeserializeOwned,
+    {
+        for (index, entry) in items.iter().enumerate() {
+            ctx.in_index(field, index, |ctx| {
+                self.check_entry(ctx, entry, kind, components);
+            });
+        }
+    }
+
+    fn check_entry_option<T>(
+        &self,
+        ctx: &mut Context,
+        field: &str,
+        entry: &Option<RefOr<T>>,
+        kind: &str,
+        components: Option<&BTreeMap<String, RefOr<T>>>,
+    ) where
+        T: DeserializeOwned,
+    {
+        if let Some(entry) = entry {
+            ctx.in_field(field, |ctx| self.check_entry(ctx, entry, kind, components));
+        }
+    }
+
+    /// The `tags`, `externalDocs`, and `bindings` every object carries.
+    fn check_shared_references(
+        &self,
+        ctx: &mut Context,
+        tags: &[RefOr<Tag>],
+        external_docs: &Option<RefOr<ExternalDocumentation>>,
+        bindings: &Option<RefOr<Bindings>>,
+        bindings_kind: &str,
+        bindings_map: Option<&BTreeMap<String, RefOr<Bindings>>>,
+    ) {
+        let components = self.components.as_ref();
+        self.check_entry_list(ctx, "tags", tags, "tags", components.map(|c| &c.tags));
+        self.check_entry_option(
+            ctx,
+            "externalDocs",
+            external_docs,
+            "externalDocs",
+            components.map(|c| &c.external_docs),
+        );
+        self.check_entry_option(ctx, "bindings", bindings, bindings_kind, bindings_map);
+    }
+
+    fn check_server_references(&self, ctx: &mut Context, server: &Server) {
+        let components = self.components.as_ref();
+        self.check_entry_map(
+            ctx,
+            "variables",
+            &server.variables,
+            "serverVariables",
+            components.map(|c| &c.server_variables),
+        );
+        self.check_entry_list(
+            ctx,
+            "security",
+            &server.security,
+            "securitySchemes",
+            components.map(|c| &c.security_schemes),
+        );
+        self.check_shared_references(
+            ctx,
+            &server.tags,
+            &server.external_docs,
+            &server.bindings,
+            "serverBindings",
+            components.map(|c| &c.server_bindings),
+        );
+    }
+
+    fn check_channel_references(&self, ctx: &mut Context, channel: &Channel) {
+        let components = self.components.as_ref();
+        for (key, entry) in &channel.messages {
+            ctx.in_key("messages", key, |ctx| {
+                // A message may be declared anywhere a message lives,
+                // so it gets the message lookup rather than one map.
+                if let Some(reference) = entry.reference()
+                    && let Some(problem) = self.message_problem(entry)
+                {
+                    ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
+                }
+                if let Some(message) = entry.item() {
+                    self.check_message_references(ctx, message);
+                }
+            });
+        }
+        self.check_entry_map(
+            ctx,
+            "parameters",
+            &channel.parameters,
+            "parameters",
+            components.map(|c| &c.parameters),
+        );
+        self.check_shared_references(
+            ctx,
+            &channel.tags,
+            &channel.external_docs,
+            &channel.bindings,
+            "channelBindings",
+            components.map(|c| &c.channel_bindings),
+        );
+    }
+
+    fn check_message_references(&self, ctx: &mut Context, message: &Message) {
+        let components = self.components.as_ref();
+        for (field, schema) in [("headers", &message.headers), ("payload", &message.payload)] {
+            self.check_entry_option(
+                ctx,
+                field,
+                schema,
+                "schemas",
+                components.map(|c| &c.schemas),
+            );
+        }
+        self.check_entry_option(
+            ctx,
+            "correlationId",
+            &message.correlation_id,
+            "correlationIds",
+            components.map(|c| &c.correlation_ids),
+        );
+        self.check_entry_list(
+            ctx,
+            "traits",
+            &message.traits,
+            "messageTraits",
+            components.map(|c| &c.message_traits),
+        );
+        self.check_shared_references(
+            ctx,
+            &message.tags,
+            &message.external_docs,
+            &message.bindings,
+            "messageBindings",
+            components.map(|c| &c.message_bindings),
+        );
+    }
+
+    fn check_operation_references(&self, ctx: &mut Context, operation: &Operation) {
+        let components = self.components.as_ref();
+        self.check_entry_list(
+            ctx,
+            "traits",
+            &operation.traits,
+            "operationTraits",
+            components.map(|c| &c.operation_traits),
+        );
+        self.check_entry_list(
+            ctx,
+            "security",
+            &operation.security,
+            "securitySchemes",
+            components.map(|c| &c.security_schemes),
+        );
+        self.check_shared_references(
+            ctx,
+            &operation.tags,
+            &operation.external_docs,
+            &operation.bindings,
+            "operationBindings",
+            components.map(|c| &c.operation_bindings),
+        );
+        if let Some(reply) = operation.reply.as_ref().and_then(RefOr::item) {
+            ctx.in_field("reply", |ctx| self.check_reply_references(ctx, reply));
+        }
+    }
+
+    fn check_reply_references(&self, ctx: &mut Context, reply: &OperationReply) {
+        self.check_entry_option(
+            ctx,
+            "address",
+            &reply.address,
+            "replyAddresses",
+            self.components.as_ref().map(|c| &c.reply_addresses),
+        );
+    }
+
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::new(options);
 
@@ -545,7 +763,12 @@ impl Document {
 
         ctx.validate_map_keys("servers", &self.servers);
         for (name, server) in &self.servers {
-            ctx.in_key("servers", name, |ctx| server.validate_with_context(ctx));
+            ctx.in_key("servers", name, |ctx| {
+                server.validate_with_context(ctx);
+                if let Some(server) = server.item() {
+                    self.check_server_references(ctx, server);
+                }
+            });
         }
         self.check_declared(
             &mut ctx,
@@ -561,6 +784,7 @@ impl Document {
                 channel.validate_with_context(ctx);
                 if let Some(channel) = channel.item() {
                     self.validate_channel_servers(ctx, channel, Origin::Root);
+                    self.check_channel_references(ctx, channel);
                 }
             });
         }
@@ -578,6 +802,7 @@ impl Document {
                 operation.validate_with_context(ctx);
                 if let Some(operation) = operation.item() {
                     self.validate_operation_wiring(ctx, operation, Origin::Root);
+                    self.check_operation_references(ctx, operation);
                 }
             });
         }
@@ -595,10 +820,6 @@ impl Document {
                 self.validate_components_wiring(ctx, components);
             });
         }
-
-        // Last, so the wiring checks above own the references they
-        // know about and this only speaks where nothing else has.
-        check_every_reference(&mut ctx, self);
 
         ctx.into_result()
     }
@@ -1010,8 +1231,8 @@ mod tests {
         value["operations"]["receiveSignups"]["channel"] =
             json!({ "$ref": "#/channels/elsewhere" });
         value["operations"]["receiveSignups"]["messages"] =
-            json!([ { "$ref": "#/channels/elsewhere/messages/m" } ]);
-        assert!(errors_for(value).is_empty());
+            json!([ { "$ref": "./other.yaml#/channels/userSignedUp/messages/m" } ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
 
         // A pointer at some other channel's message is still wrong.
         let mut value = wired();
@@ -1020,11 +1241,9 @@ mod tests {
             json!({ "$ref": "#/channels/elsewhere" });
         value["operations"]["receiveSignups"]["messages"] =
             json!([ { "$ref": "#/channels/userSignedUp/messages/signup" } ]);
-        assert!(
-            errors_for(value)
-                .iter()
-                .any(|e| e.contains("must point at a message of `#/channels/elsewhere`")),
-        );
+        assert!(errors_for(value).iter().any(|e| {
+            e.contains("must point at a message of `./other.yaml#/channels/userSignedUp`")
+        }),);
     }
 
     #[test]
@@ -1052,6 +1271,28 @@ mod tests {
         let errors = errors_for(empty);
         assert!(
             errors
+                .iter()
+                .any(|e| e.contains("is not a usable JSON Pointer"))
+        );
+
+        // The same for a reference into another document whose
+        // fragment is not a pointer either, named directly…
+        let mut outside = wired_from_components();
+        outside["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "./other.yaml#bad" });
+        assert!(
+            errors_for(outside)
+                .iter()
+                .any(|e| e.contains("is not a usable JSON Pointer"))
+        );
+
+        // …or reached through an alias.
+        let mut aliased = wired();
+        aliased["channels"]["alias"] = json!({ "$ref": "./other.yaml#bad" });
+        aliased["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "#/channels/alias" });
+        aliased["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert!(
+            errors_for(aliased)
                 .iter()
                 .any(|e| e.contains("is not a usable JSON Pointer"))
         );
@@ -1529,6 +1770,71 @@ mod tests {
     }
 
     #[test]
+    fn application_data_is_not_searched_for_references() {
+        // An example payload is the application's own data. A `$ref`
+        // in it is whatever that application means by one.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["examples"] = json!([
+            { "name": "one", "payload": { "$ref": "#/business/id" } }
+        ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // So is a schema in a dialect this crate does not speak.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["payload"] = json!({
+            "schemaFormat": "application/vnd.apache.avro;version=1.9.0",
+            "schema": { "type": "record", "fields": { "$ref": "#/dialect/type" } }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // And so are binding values.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["bindings"] =
+            json!({ "kafka": { "topic": { "$ref": "#/broker/topic" } } });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_channel_in_another_document_keeps_its_messages_there() {
+        // The operation names a channel in another file directly, so
+        // its messages are named there too — the subset relationship
+        // still compares, it just compares over there.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "./other.yaml#/channels/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "./other.yaml#/channels/c/messages/m" } ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A message of some channel in *this* document is not one of
+        // that channel's.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "./other.yaml#/channels/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "#/channels/userSignedUp/messages/signup" } ]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("must point at a message of `./other.yaml#/channels/c`")),
+        );
+    }
+
+    #[test]
+    fn an_extension_does_not_declare_kinds() {
+        // `#/x-store/messages/c` is a channel that happens to live in
+        // an extension whose map is spelled `messages`. Extensions are
+        // arbitrary JSON, and a reusable operation may name a Channel
+        // Object in any location.
+        let mut value = wired_from_components();
+        value["x-store"] = json!({ "messages": { "c": { "address": "stored" } } });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/x-store/messages/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
     fn external_references_are_skipped_unless_strictness_is_requested() {
         // A root operation must name a channel in the root Channels
         // Object, so in a split document the *entry* is what points
@@ -1556,6 +1862,26 @@ mod tests {
 
     #[test]
     fn a_channel_that_is_itself_a_ref_stops_deeper_checks() {
+        // The channel is over in `channels.yaml`, and so are its
+        // messages — that is where they are named. A pointer does not
+        // dereference as it walks (RFC 6901 §4), so
+        // `#/channels/user/messages/…` would name nothing at all.
+        let value = json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "user": { "$ref": "./channels.yaml#/user" } },
+            "operations": {
+                "send": {
+                    "action": "send",
+                    "channel": { "$ref": "#/channels/user" },
+                    "messages": [ { "$ref": "./channels.yaml#/user/messages/anything" } ]
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // Walking into the alias as though it were the channel is the
+        // mistake, and it is the one reported.
         let value = json!({
             "asyncapi": "3.0.0",
             "info": { "title": "T", "version": "1" },
@@ -1568,7 +1894,10 @@ mod tests {
                 }
             }
         });
-        assert!(errors_for(value).is_empty());
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.operations.send.messages[0].$ref: message `#/channels/user/messages/anything` must point at a message of `./channels.yaml#/user`"),
+        );
     }
 
     #[test]

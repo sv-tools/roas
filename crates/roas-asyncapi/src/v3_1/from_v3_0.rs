@@ -26,13 +26,6 @@ fn map_map<A, B: From<A>>(map: BTreeMap<String, RefOr<A>>) -> BTreeMap<String, R
         .collect()
 }
 
-/// Convert a map of plain (non-referenceable) values.
-fn map_plain_map<A, B: From<A>>(map: BTreeMap<String, A>) -> BTreeMap<String, B> {
-    map.into_iter()
-        .map(|(key, value)| (key, value.into()))
-        .collect()
-}
-
 fn map_vec<A, B: From<A>>(items: Vec<RefOr<A>>) -> Vec<RefOr<B>> {
     items.into_iter().map(map_ref_or).collect()
 }
@@ -247,8 +240,8 @@ impl From<v3_0::OperationReplyAddress> for v3_1::OperationReplyAddress {
 impl From<v3_0::Message> for v3_1::Message {
     fn from(value: v3_0::Message) -> Self {
         Self {
-            headers: value.headers.map(Into::into),
-            payload: value.payload.map(Into::into),
+            headers: value.headers.map(map_ref_or),
+            payload: value.payload.map(map_ref_or),
             correlation_id: value.correlation_id.map(map_ref_or),
             content_type: value.content_type,
             name: value.name,
@@ -269,7 +262,7 @@ impl From<v3_0::Message> for v3_1::Message {
 impl From<v3_0::MessageTrait> for v3_1::MessageTrait {
     fn from(value: v3_0::MessageTrait) -> Self {
         Self {
-            headers: value.headers.map(Into::into),
+            headers: value.headers.map(map_ref_or),
             correlation_id: value.correlation_id.map(map_ref_or),
             content_type: value.content_type,
             name: value.name,
@@ -334,7 +327,7 @@ impl From<v3_0::SubSchema> for v3_1::SubSchema {
     fn from(value: v3_0::SubSchema) -> Self {
         match value {
             v3_0::SubSchema::Bool(b) => Self::Bool(b),
-            v3_0::SubSchema::Schema(s) => Self::Schema(map_boxed(*s)),
+            v3_0::SubSchema::Schema(s) => Self::Schema(Box::new(map_ref_or(*s))),
         }
     }
 }
@@ -378,7 +371,6 @@ impl From<v3_0::Schema> for v3_1::Schema {
         }
 
         Self {
-            reference: value.reference,
             id: value.id,
             dialect: value.dialect,
             comment: value.comment,
@@ -512,7 +504,7 @@ impl From<v3_0::OAuthFlow> for v3_1::OAuthFlow {
 impl From<v3_0::Components> for v3_1::Components {
     fn from(value: v3_0::Components) -> Self {
         Self {
-            schemas: map_plain_map(value.schemas),
+            schemas: map_map(value.schemas),
             servers: map_map(value.servers),
             channels: map_map(value.channels),
             operations: map_map(value.operations),
@@ -631,7 +623,7 @@ mod tests {
             .item()
             .unwrap();
         assert!(matches!(
-            message.payload.as_ref(),
+            message.payload.as_ref().and_then(|p| p.item()),
             Some(v3_1::SchemaOrMultiFormat::Bool(true))
         ));
     }

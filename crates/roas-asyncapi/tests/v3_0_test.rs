@@ -82,7 +82,7 @@ fn streetlights_yaml_parses_validates_and_round_trips() {
     let message = doc.components.as_ref().unwrap().messages["lightMeasured"]
         .item()
         .expect("inline message");
-    match message.payload.as_ref() {
+    match message.payload.as_ref().and_then(|p| p.item()) {
         Some(SchemaOrMultiFormat::Schema(schema)) => {
             assert_eq!(schema.required, vec!["lumens"]);
             assert!(schema.properties.contains_key("streetlightId"));

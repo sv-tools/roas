@@ -207,29 +207,6 @@ impl Context {
         result
     }
 
-    /// Push `[<index>]` for the duration of `f`, for walking an array
-    /// whose field name is already on the path.
-    pub fn in_element<R>(&mut self, index: usize, f: impl FnOnce(&mut Self) -> R) -> R {
-        let mark = self.path.len();
-        let _ = write!(self.path, "[{index}]");
-        let result = f(self);
-        self.path.truncate(mark);
-        result
-    }
-
-    /// Whether an error was already recorded at `<current>.<field>`.
-    ///
-    /// Lets a broad check stay quiet where a narrower one has already
-    /// spoken, rather than saying the same thing twice about the same
-    /// reference.
-    pub fn has_error_at_field(&mut self, field: &str) -> bool {
-        let mark = self.path.len();
-        self.push_field(field);
-        let found = self.errors.iter().any(|error| error.path == self.path);
-        self.path.truncate(mark);
-        found
-    }
-
     /// Push `.<field>.<key>` for the duration of `f` (for map entries).
     pub fn in_key<R>(&mut self, field: &str, key: &str, f: impl FnOnce(&mut Self) -> R) -> R {
         let mark = self.path.len();
