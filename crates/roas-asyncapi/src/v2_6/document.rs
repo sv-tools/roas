@@ -459,11 +459,9 @@ impl Document {
                 ctx.error_field("channels", "a channel path must not be empty");
             }
             ctx.in_key("channels", path, |ctx| {
-                // The item's own fields are checked either way; a
-                // `$ref` additionally has to land on a channel, and the
-                // *resolved* item's parameters are what this path's
-                // placeholders must match.
-                channel.validate_with_context(ctx);
+                // A `$ref` has to land on a channel, and this check
+                // knows that is what it is looking for — so it goes
+                // first, and the general one defers to its message.
                 let resolution = self.resolve_channel(channel);
                 if let Some(problem) = resolution.problem()
                     && let Some(reference) = channel.reference.as_deref()
@@ -471,6 +469,10 @@ impl Document {
                 {
                     ctx.error_field("$ref", format!("channel `{reference}` {problem}"));
                 }
+                // The item's own fields are checked either way, and the
+                // *resolved* item's parameters are what this path's
+                // placeholders must match.
+                channel.validate_with_context(ctx);
                 // The path's placeholders answer to the parameters
                 // declared anywhere along the chain, since `$ref`
                 // siblings are kept.
@@ -1523,6 +1525,53 @@ mod tests {
             "components": { "messages": { "shared": { "messageId": "once" } } }
         });
         assert!(errors_for(value).is_empty(), "identity, not reachability");
+    }
+
+    #[test]
+    fn a_field_style_reference_is_followed_like_any_other() {
+        // v2.6 carries `$ref` as a field rather than as a Reference
+        // Object, which is no reason for it to go unchecked. Nothing
+        // uses this channel.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": { "channels": { "unused": { "$ref": "#/channels/ghost" } } }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.components.channels.unused.$ref: `#/channels/ghost` names nothing in this document"
+            ]
+        );
+
+        // A schema's `$ref` is a field here too.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": { "schemas": { "s": { "$ref": "#/components/schemas/ghost" } } }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.components.schemas.s.$ref: `#/components/schemas/ghost` names nothing in this document"
+            ]
+        );
+
+        // A channel that *is* used still gets the specific message,
+        // not this one as well.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "user": { "$ref": "#/components/channels/ghost" } }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.channels.user.$ref: channel `#/components/channels/ghost` names nothing in this document"
+            ]
+        );
     }
 
     #[test]

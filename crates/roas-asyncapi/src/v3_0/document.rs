@@ -1953,6 +1953,117 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_reference_is_judged_by_its_kind_too() {
+        // `info.tags` is nowhere a wiring check reaches, but the
+        // position still says a tag belongs there.
+        let mut value = wired();
+        value["info"]["tags"] = json!([ { "$ref": "#/components/schemas/notATag" } ]);
+        value["components"] = json!({ "schemas": { "notATag": { "type": "object" } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.info.tags[0].$ref: `#/components/schemas/notATag` does not point at an object of the expected kind"),
+        );
+
+        // The same inside a schema…
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["payload"] = json!({
+            "properties": { "p": { "$ref": "#/components/messages/notASchema" } }
+        });
+        value["components"] = json!({ "messages": { "notASchema": { "name": "M" } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                .starts_with("#.channels.userSignedUp.messages.signup.payload.properties.p.$ref:")
+                && e.contains("does not point at an object of the expected kind")),
+        );
+
+        // A fragment that is not a pointer is reported as that, not as
+        // the wrong kind.
+        let mut value = wired();
+        value["info"]["tags"] = json!([ { "$ref": "#/bad~2escape" } ]);
+        assert_eq!(
+            errors_for(value),
+            vec!["#.info.tags[0].$ref: `#/bad~2escape` is not a usable JSON Pointer"]
+        );
+
+        // …and a reference of the right kind is left alone.
+        let mut value = wired();
+        value["info"]["tags"] = json!([ { "$ref": "#/components/tags/real" } ]);
+        value["components"] = json!({ "tags": { "real": { "name": "real" } } });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_pointer_below_a_reference_object_names_nothing() {
+        // A pointer does not dereference as it walks (RFC 6901 §4), so
+        // only `#/components/tags/alias` lands on the alias; a step
+        // past it lands nowhere.
+        let mut value = wired();
+        value["info"]["tags"] = json!([ { "$ref": "#/components/tags/alias/name" } ]);
+        value["components"] = json!({ "tags": { "alias": { "$ref": "other.yaml#/tag" } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.info.tags[0].$ref: `#/components/tags/alias/name` names nothing in this document"),
+        );
+    }
+
+    #[test]
+    fn a_component_key_may_look_like_an_extension() {
+        // `x-thing` here is a channel's name, not an extension of the
+        // Components Object, so what is under it is still structure.
+        let value = json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "T", "version": "1" },
+            "components": {
+                "channels": { "x-thing": { "messages": { "m": { "name": "M" } } } },
+                "operations": {
+                    "o": {
+                        "action": "send",
+                        "channel": { "$ref": "#/components/channels/x-thing/messages/m" }
+                    }
+                }
+            }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+
+        // The channel itself is nameable, of course.
+        let value = json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "T", "version": "1" },
+            "components": {
+                "channels": { "x-thing": { "messages": { "m": { "name": "M" } } } },
+                "operations": {
+                    "o": {
+                        "action": "send",
+                        "channel": { "$ref": "#/components/channels/x-thing" },
+                        "messages": [ { "$ref": "#/components/channels/x-thing/messages/m" } ]
+                    }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_empty_path_segment_is_a_segment() {
+        // `a//b.yaml` and `a/b.yaml` are different paths, so a message
+        // in one is not a message of a channel in the other.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "a//b.yaml#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "a/b.yaml#/c/messages/m" } ]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("must point at a message of `a//b.yaml#/c`")),
+        );
+    }
+
+    #[test]
     fn external_references_are_skipped_unless_strictness_is_requested() {
         // A root operation must name a channel in the root Channels
         // Object, so in a split document the *entry* is what points

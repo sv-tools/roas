@@ -408,6 +408,7 @@ impl ValidateWithContext for Schema {
         if let Some(reference) = &self.reference {
             ctx.require_non_empty("$ref", reference);
             crate::common::reference::check_external(ctx, reference);
+            crate::common::resolve::check_names_something(ctx, reference);
         }
         // ---- keyword constraints from the draft-07 meta-schema ----
         match &self.schema_type {

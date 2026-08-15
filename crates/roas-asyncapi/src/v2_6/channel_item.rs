@@ -113,6 +113,7 @@ impl ValidateWithContext for ChannelItem {
         if let Some(reference) = &self.reference {
             ctx.require_non_empty("$ref", reference);
             crate::common::reference::check_external(ctx, reference);
+            crate::common::resolve::check_names_something(ctx, reference);
         }
         ctx.validate_map_keys("parameters", &self.parameters);
 

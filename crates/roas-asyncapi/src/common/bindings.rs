@@ -100,3 +100,9 @@ mod tests {
         assert!(ctx.errors[0] == "#.channels.user.bindings.ws: binding must be an object");
     }
 }
+
+crate::common::resolve::kinds! {
+    // Bindings are declared under four different names depending on
+    // what they bind, so a bindings reference has no single kind.
+    Bindings => None,
+}

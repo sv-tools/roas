@@ -11,6 +11,7 @@
 //! object can appear; [`RefOr`] models that `oneOf`.
 
 use crate::common::pointer;
+use crate::common::resolve::Kind;
 use crate::validation::{Context, ValidateWithContext};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -149,10 +150,20 @@ where
     }
 }
 
-impl<T: ValidateWithContext> ValidateWithContext for RefOr<T> {
+impl<T> ValidateWithContext for RefOr<T>
+where
+    T: ValidateWithContext + Kind + DeserializeOwned,
+{
     fn validate_with_context(&self, ctx: &mut Context) {
         match self {
-            RefOr::Reference(r) => r.validate_with_context(ctx),
+            RefOr::Reference(r) => {
+                r.validate_with_context(ctx);
+                // Unlike a bare `Reference`, this position says what
+                // kind of object belongs in it.
+                if let Some(kind) = T::KIND {
+                    crate::common::resolve::check_names_kind::<T>(ctx, &r.reference, kind);
+                }
+            }
             RefOr::Item(t) => t.validate_with_context(ctx),
         }
     }
@@ -176,6 +187,10 @@ mod tests {
         fn validate_with_context(&self, ctx: &mut Context) {
             ctx.require_non_empty("name", &self.name);
         }
+    }
+
+    impl Kind for Demo {
+        const KIND: Option<&'static str> = Some("entries");
     }
 
     #[test]

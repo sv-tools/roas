@@ -89,6 +89,78 @@ impl<'a, T> Resolution<'a, T> {
     }
 }
 
+/// What kind of object a modelled type is, as its kind is spelled in a
+/// pointer.
+///
+/// Lets a reference be judged wherever the model holds one — a `$ref`
+/// in `info.tags` names a tag, whatever else it may resolve to — rather
+/// than only where some check was written by hand.
+///
+/// `None` where the type is not one kind: bindings are declared under
+/// four different names depending on what they bind.
+pub(crate) trait Kind {
+    const KIND: Option<&'static str>;
+}
+
+/// Implement [`Kind`] for a version's modelled types.
+macro_rules! kinds {
+    ($( $ty:ty => $kind:expr ),+ $(,)?) => {
+        $(
+            impl $crate::common::resolve::Kind for $ty {
+                const KIND: Option<&'static str> = $kind;
+            }
+        )+
+    };
+}
+pub(crate) use kinds;
+
+/// Report a reference that names something other than the kind its
+/// position calls for.
+///
+/// Existence is [`check_names_something`]'s business; this adds only
+/// what knowing the kind reveals, and defers to any check that has
+/// already spoken about the same reference.
+pub(crate) fn check_names_kind<T>(ctx: &mut Context, reference: &str, expected: &str)
+where
+    T: DeserializeOwned,
+{
+    let (Some(local), Some(document)) = (reference.strip_prefix('#'), ctx.document()) else {
+        return;
+    };
+    // A pointer that is not one, or that names nothing, is reported as
+    // such rather than as the wrong kind.
+    let Some(path) = pointer::tokens(local) else {
+        return;
+    };
+    if !wrong_kind::<T>(document, &path, expected) {
+        return;
+    }
+    if !ctx.has_error_at_field("$ref") {
+        ctx.error_field(
+            "$ref",
+            format!("`{reference}` does not point at an object of the expected kind"),
+        );
+    }
+}
+
+/// Whether a pointer, judged by where it lands, names something other
+/// than `expected`.
+fn wrong_kind<T>(root: &serde_json::Value, path: &[String], expected: &str) -> bool
+where
+    T: DeserializeOwned,
+{
+    if names_something_else(path, expected) {
+        return true;
+    }
+    // Nothing there, or nothing this document can say about what is
+    // there: either way, not a question of kind.
+    let Some(target) = pointer::walk(root, path).and_then(|target| follow_json(root, target))
+    else {
+        return false;
+    };
+    serde_json::from_value::<T>(target.clone()).is_err()
+}
+
 /// The object kinds an AsyncAPI document declares, as they are spelled
 /// in a pointer — the union across versions, since a name that is not a
 /// kind in one of them simply never appears in its pointers.
@@ -161,10 +233,14 @@ fn names_something_else(path: &[String], expected: &str) -> bool {
     // member is arbitrary, and a map it spells `messages` declares
     // nothing. A *key* is not a member, though — a channel may
     // legitimately be named `x-thing`, so keys are skipped over.
-    let members = if first == "components" {
-        rest
+    // A *member* may be an extension; a *key* is a name, and a channel
+    // may legitimately be called `x-thing`. Under `components` the
+    // first token is a member and the second is a key; under a root map
+    // the first token is already the key.
+    let members: Vec<&String> = if first == "components" {
+        rest.iter().take(1).chain(rest.iter().skip(2)).collect()
     } else {
-        rest.get(1..).unwrap_or_default()
+        rest.iter().skip(1).collect()
     };
     if members.iter().any(|token| token.starts_with("x-")) {
         return false;
@@ -212,12 +288,16 @@ where
     let Some(path) = pointer::tokens(local_pointer) else {
         return Resolution::Unrecognized;
     };
-    if names_something_else(&path, expected_kind) {
-        return Resolution::WrongKind;
-    }
     // Serializing a document model cannot fail; falling back to `null`
     // keeps that from needing a branch, and leaves every pointer naming
     // nothing if it somehow does.
+    // Position first: the document says what lives under
+    // `#/components/schemas/…`, whether or not that particular key is
+    // there, so naming one where a channel belongs is a kind error
+    // rather than a missing one.
+    if names_something_else(&path, expected_kind) {
+        return Resolution::WrongKind;
+    }
     let snapshot = serde_json::to_value(document).unwrap_or_default();
     let Some(target) = pointer::walk(&snapshot, &path) else {
         return Resolution::Missing;
@@ -345,54 +425,72 @@ impl std::fmt::Display for Terminus {
     }
 }
 
-/// Remove dot-segments from a URI reference's path, per
+/// Remove dot-segments from a URI reference's path, in the spirit of
 /// [RFC 3986 §5.2.4](https://www.rfc-editor.org/rfc/rfc3986#section-5.2.4).
 ///
+/// Only `.` and `..` segments are touched. An empty segment is a
+/// segment: `a//b.yaml` and `a/b.yaml` are different paths. A `..` that
+/// cannot be resolved is kept rather than dropped, so two references
+/// that climb equally far still compare alike — §5.2.4 discards those,
+/// but it is defined for a path already merged onto a base, and these
+/// references have no base to merge onto.
+///
 /// Only the path is touched: a scheme, authority, or query is left as
-/// written, since those are already in their comparable form for the
-/// relative and absolute references a `$ref` carries.
+/// written, being already in comparable form.
 fn remove_dot_segments(reference: &str) -> String {
-    // Everything up to the path — `scheme:`, `//authority` — is passed
-    // through, as is anything after it.
     let path_start = match reference.find("//") {
-        Some(slashes) if reference[..slashes].ends_with(':') || slashes == 0 => reference
+        Some(slashes) if slashes == 0 || reference[..slashes].ends_with(':') => reference
             [slashes + 2..]
             .find('/')
             .map_or(reference.len(), |offset| slashes + 2 + offset),
         _ => reference.find(':').map_or(0, |colon| colon + 1),
     };
     let (prefix, rest) = reference.split_at(path_start);
-    let (path, suffix) = match rest.find(['?']) {
+    let (path, suffix) = match rest.find('?') {
         Some(cut) => rest.split_at(cut),
         None => (rest, ""),
     };
+    if path.is_empty() {
+        return reference.to_owned();
+    }
 
-    let mut out: Vec<&str> = Vec::new();
     let absolute = path.starts_with('/');
-    let trailing = path.ends_with('/') || path.ends_with("/.") || path.ends_with("/..");
-    for segment in path.split('/') {
+    let mut out: Vec<&str> = Vec::new();
+    let mut segments = path.strip_prefix('/').unwrap_or(path).split('/').peekable();
+    while let Some(segment) = segments.next() {
+        let last = segments.peek().is_none();
         match segment {
-            "." | "" => {}
-            ".." => {
-                // A `..` that cannot be resolved is kept, so that two
-                // references which climb equally far still compare
-                // alike.
-                if matches!(out.last(), Some(&last) if last != "..") {
-                    out.pop();
-                } else if !absolute {
-                    out.push("..");
+            "." | ".." => {
+                if segment == ".." {
+                    // Climbing out of a name; anything else is kept,
+                    // there being no base to climb through.
+                    match out.last() {
+                        Some(&last) if last != ".." && !last.is_empty() => {
+                            out.pop();
+                        }
+                        _ if !absolute => out.push(".."),
+                        _ => {}
+                    }
+                }
+                // `a/.` and `a/..` name directories, so they end in a
+                // separator even though the segment itself is gone.
+                if last {
+                    out.push("");
                 }
             }
             segment => out.push(segment),
         }
     }
+
     let mut normalized = String::new();
     if absolute {
         normalized.push('/');
     }
     normalized.push_str(&out.join("/"));
-    if trailing && !normalized.ends_with('/') && !normalized.is_empty() {
-        normalized.push('/');
+    // A relative path that normalizes away is the current *directory*,
+    // which is not the current document.
+    if normalized.is_empty() {
+        normalized.push_str("./");
     }
     format!("{prefix}{normalized}{suffix}")
 }
@@ -496,9 +594,6 @@ pub(crate) fn check_names_something(ctx: &mut Context, reference: &str) {
             break "is part of a reference cycle";
         }
         match walk_as_written(document, &pointer) {
-            // Either it resolved, or what would have resolved it is in
-            // another document.
-            Walk::Deferred => return,
             Walk::Missing => break "names nothing in this document",
             Walk::Unrecognized => break "is not a usable JSON Pointer",
             // Keep following while the target is itself a reference,
@@ -520,31 +615,25 @@ pub(crate) fn check_names_something(ctx: &mut Context, reference: &str) {
 /// Where a structural walk ended.
 enum Walk<'v> {
     Landed(&'v serde_json::Value),
-    /// The walk failed, but passed a `$ref` on the way — so what it was
-    /// looking for may well exist, just not in this document as
-    /// written. Not something to report.
-    Deferred,
     Missing,
     Unrecognized,
 }
 
 /// Walk a pointer over the document exactly as written.
 ///
-/// A JSON Pointer does not resolve as it walks: `#/channels/c/publish`
-/// names what is written beside a `$ref` in `c`, not what that `$ref`
-/// points at. But when the walk *fails* after passing one, the missing
-/// step is very likely inside what that reference names — a split-file
-/// document walks `#/channels/user/messages/m` through a `channels.user`
-/// that is only a `$ref` — so a failure downstream of a reference is
-/// left unjudged.
+/// A JSON Pointer does not dereference as it walks
+/// ([RFC 6901 §4](https://www.rfc-editor.org/rfc/rfc6901#section-4)):
+/// `#/channels/c/publish` names what is written beside a `$ref` in `c`,
+/// not what that `$ref` points at, and `#/components/tags/alias/name`
+/// names nothing at all when `alias` is only a Reference Object. Only a
+/// pointer that lands *on* such an object gets to follow it, which the
+/// caller does.
 fn walk_as_written<'v>(root: &'v serde_json::Value, pointer: &str) -> Walk<'v> {
     let Some(tokens) = pointer::tokens(pointer) else {
         return Walk::Unrecognized;
     };
     let mut current = root;
-    let mut deferred = false;
     for token in &tokens {
-        deferred |= current.get("$ref").is_some();
         let next = match current {
             serde_json::Value::Object(map) => map.get(token),
             serde_json::Value::Array(items) => {
@@ -554,7 +643,6 @@ fn walk_as_written<'v>(root: &'v serde_json::Value, pointer: &str) -> Walk<'v> {
         };
         match next {
             Some(value) => current = value,
-            None if deferred => return Walk::Deferred,
             None => return Walk::Missing,
         }
     }
@@ -713,6 +801,12 @@ mod tests {
             ("/a/b/../c", "/a/c"),
             ("/../a", "/a"),
             ("", ""),
+            // An empty segment is a segment, not a typo.
+            ("a//b.yaml", "a//b.yaml"),
+            // The current directory is not the current document.
+            ("././", "./"),
+            ("./", "./"),
+            (".", "./"),
         ] {
             assert_eq!(
                 Terminus::parse(written).expect("a resource").resource,
@@ -747,7 +841,13 @@ mod tests {
             );
         }
         // …and ones that do not, do not.
-        for spelling in ["../channels.yaml", "/channels.yaml", "other.yaml"] {
+        for spelling in [
+            "../channels.yaml",
+            "/channels.yaml",
+            "other.yaml",
+            "channels.yaml/",
+            "a//channels.yaml",
+        ] {
             assert_ne!(
                 Terminus::parse(spelling).expect("a resource").resource,
                 "channels.yaml",
