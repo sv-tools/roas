@@ -213,7 +213,7 @@ impl Document {
                 continue;
             };
             let (_, resolution) = self.resolve(reference, field, inline, components);
-            if let Some(problem) = resolution.problem() {
+            if let Some(problem) = resolution.kind_problem() {
                 ctx.in_key(field, key, |ctx| {
                     ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
                 });
@@ -368,10 +368,9 @@ impl Document {
         }
     }
 
-    /// Why following a message entry to its end is a document bug, if
-    /// it is one.
-    fn message_problem(&self, entry: &RefOr<Message>) -> Option<&'static str> {
-        follow(self, entry, "messages", |path| self.message_entry(path)).problem()
+    /// Whether a message entry leads somewhere that is not a message.
+    fn message_kind_problem(&self, entry: &RefOr<Message>) -> Option<&'static str> {
+        follow(self, entry, "messages", |path| self.message_entry(path)).kind_problem()
     }
 
     /// Check that each `$ref` in `messages` names one of the channel's
@@ -497,7 +496,7 @@ impl Document {
             let Some(reference) = entry.reference() else {
                 continue;
             };
-            if let Some(problem) = self.message_problem(entry) {
+            if let Some(problem) = self.message_kind_problem(entry) {
                 ctx.in_key("messages", key, |ctx| {
                     ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
                 });
@@ -540,7 +539,7 @@ impl Document {
             return;
         };
         let (_, resolution) = self.resolve(reference, kind, None, components);
-        if let Some(problem) = resolution.problem() {
+        if let Some(problem) = resolution.kind_problem() {
             ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
         }
     }
@@ -649,7 +648,7 @@ impl Document {
                 // A message may be declared anywhere a message lives,
                 // so it gets the message lookup rather than one map.
                 if let Some(reference) = entry.reference()
-                    && let Some(problem) = self.message_problem(entry)
+                    && let Some(problem) = self.message_kind_problem(entry)
                 {
                     ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
                 }
@@ -750,7 +749,7 @@ impl Document {
     }
 
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
-        let mut ctx = Context::new(options);
+        let mut ctx = Context::for_document(options, self);
 
         if let Some(id) = &self.id {
             ctx.require_non_empty("id", id);
@@ -764,10 +763,10 @@ impl Document {
         ctx.validate_map_keys("servers", &self.servers);
         for (name, server) in &self.servers {
             ctx.in_key("servers", name, |ctx| {
-                server.validate_with_context(ctx);
                 if let Some(server) = server.item() {
                     self.check_server_references(ctx, server);
                 }
+                server.validate_with_context(ctx);
             });
         }
         self.check_declared(
@@ -781,11 +780,11 @@ impl Document {
         ctx.validate_map_keys("channels", &self.channels);
         for (name, channel) in &self.channels {
             ctx.in_key("channels", name, |ctx| {
-                channel.validate_with_context(ctx);
                 if let Some(channel) = channel.item() {
                     self.validate_channel_servers(ctx, channel, Origin::Root);
                     self.check_channel_references(ctx, channel);
                 }
+                channel.validate_with_context(ctx);
             });
         }
         self.check_declared(
@@ -799,11 +798,11 @@ impl Document {
         ctx.validate_map_keys("operations", &self.operations);
         for (name, operation) in &self.operations {
             ctx.in_key("operations", name, |ctx| {
-                operation.validate_with_context(ctx);
                 if let Some(operation) = operation.item() {
                     self.validate_operation_wiring(ctx, operation, Origin::Root);
                     self.check_operation_references(ctx, operation);
                 }
+                operation.validate_with_context(ctx);
             });
         }
         self.check_declared(
@@ -816,8 +815,8 @@ impl Document {
 
         if let Some(components) = &self.components {
             ctx.in_field("components", |ctx| {
-                components.validate_with_context(ctx);
                 self.validate_components_wiring(ctx, components);
+                components.validate_with_context(ctx);
             });
         }
 
@@ -1242,7 +1241,7 @@ mod tests {
         value["operations"]["receiveSignups"]["messages"] =
             json!([ { "$ref": "#/channels/userSignedUp/messages/signup" } ]);
         assert!(errors_for(value).iter().any(|e| {
-            e.contains("must point at a message of `./other.yaml#/channels/userSignedUp`")
+            e.contains("must point at a message of `other.yaml#/channels/userSignedUp`")
         }),);
     }
 
@@ -1577,6 +1576,29 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_alias_may_not_name_another_kind() {
+        // The target exists, so nothing is dangling — it is simply not
+        // a channel.
+        let mut value = wired();
+        value["components"] = json!({
+            "channels": { "alias": { "$ref": "#/components/messages/m" } },
+            "messages": { "m": { "name": "M" } }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.channels.alias.$ref: `#/components/messages/m` does not point at an object of the expected kind"),
+        );
+
+        // Reusable messages get the same treatment.
+        let mut value = wired();
+        value["components"] = json!({ "messages": { "alias": { "$ref": "#/info" } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.messages.alias.$ref: `#/info` does not point at an object of the expected kind"),
+        );
+    }
+
+    #[test]
     fn replies_are_wired_wherever_they_are_declared() {
         // A reusable reply is wired where it is declared, so a bad
         // channel in it is reported even though the operation that
@@ -1816,7 +1838,7 @@ mod tests {
         assert!(
             errors_for(value)
                 .iter()
-                .any(|e| e.contains("must point at a message of `./other.yaml#/channels/c`")),
+                .any(|e| e.contains("must point at a message of `other.yaml#/channels/c`")),
         );
     }
 
@@ -1832,6 +1854,102 @@ mod tests {
             json!({ "$ref": "#/x-store/messages/c" });
         value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
         assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn every_reference_the_model_holds_is_followed() {
+        // None of these sit anywhere a wiring check would walk.
+        let mut value = wired();
+        value["info"]["tags"] = json!([ { "$ref": "#/components/tags/ghost" } ]);
+        assert!(errors_for(value).iter().any(|e| e
+            == "#.info.tags[0].$ref: `#/components/tags/ghost` names nothing in this document"),);
+
+        // Deep inside a schema.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["payload"] = json!({
+            "type": "object",
+            "properties": { "p": { "$ref": "#/components/schemas/ghost" } }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.channels.userSignedUp.messages.signup.payload.properties.p.$ref: `#/components/schemas/ghost` names nothing in this document"),
+        );
+
+        // And inside an inline trait.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["traits"] =
+            json!([ { "headers": { "$ref": "#/components/schemas/ghost" } } ]);
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.channels.userSignedUp.messages.signup.traits[0].headers.$ref: `#/components/schemas/ghost` names nothing in this document"),
+        );
+    }
+
+    #[test]
+    fn the_same_resource_spelled_differently_is_the_same_resource() {
+        // `./channels.yaml` and `channels.yaml` resolve against the
+        // same base, so they name the same file (RFC 3986 §5.2).
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "./channels.yaml#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "channels.yaml#/c/messages/m" } ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A different file is still a different file.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "./channels.yaml#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "../channels.yaml#/c/messages/m" } ]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("must point at a message of `channels.yaml#/c`")),
+        );
+    }
+
+    #[test]
+    fn an_extension_inside_the_document_declares_nothing_either() {
+        // `#/components/x-store/messages/c` walks into an extension,
+        // and what an extension spells `messages` is its own business.
+        let mut value = wired_from_components();
+        value["components"]["x-store"] = json!({ "messages": { "c": { "address": "stored" } } });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/components/x-store/messages/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A channel named `x-thing` is a name, not an extension.
+        let mut value = wired();
+        value["channels"]["x-thing"] = json!({ "messages": { "m": { "name": "M" } } });
+        value["operations"]["receiveSignups"]["channel"] = json!({ "$ref": "#/channels/x-thing" });
+        value["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "#/channels/x-thing/messages/m" } ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_alias_is_followed_before_its_kind_is_judged() {
+        // The tag is reached through a location this crate does not
+        // model, which holds a Reference Object rather than a tag.
+        // Judging that object as a tag would call every alias wrong.
+        let mut value = wired();
+        value["x-shared"] = json!({ "tags": [ { "$ref": "#/components/tags/real" } ] });
+        value["servers"]["production"]["tags"] = json!([ { "$ref": "#/x-shared/tags/0" } ]);
+        value["components"] = json!({ "tags": { "real": { "name": "real" } } });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A chain that ends at something else is still reported.
+        let mut value = wired();
+        value["x-shared"] = json!({ "tags": [ { "$ref": "#/components/schemas/notATag" } ] });
+        value["servers"]["production"]["tags"] = json!([ { "$ref": "#/x-shared/tags/0" } ]);
+        value["components"] = json!({ "schemas": { "notATag": { "type": "object" } } });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
     }
 
     #[test]
@@ -1896,7 +2014,7 @@ mod tests {
         });
         assert!(
             errors_for(value).iter().any(|e| e
-                == "#.operations.send.messages[0].$ref: message `#/channels/user/messages/anything` must point at a message of `./channels.yaml#/user`"),
+                == "#.operations.send.messages[0].$ref: message `#/channels/user/messages/anything` must point at a message of `channels.yaml#/user`"),
         );
     }
 

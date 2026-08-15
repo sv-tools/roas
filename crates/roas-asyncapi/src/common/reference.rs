@@ -91,6 +91,7 @@ impl ValidateWithContext for Reference {
     fn validate_with_context(&self, ctx: &mut Context) {
         ctx.require_non_empty("$ref", &self.reference);
         check_external(ctx, &self.reference);
+        crate::common::resolve::check_names_something(ctx, &self.reference);
     }
 }
 

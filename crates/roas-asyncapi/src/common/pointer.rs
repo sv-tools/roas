@@ -1,42 +1,50 @@
 //! JSON Pointer parsing for document-local `$ref`s.
 //!
 //! A `$ref` is a URI reference, so a document-local one carries its
-//! pointer in the URI *fragment*: percent-encoded per
-//! [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html) around the
-//! pointer's own escapes from
-//! [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901.html). Getting the
-//! order right matters — `%2F` is a literal `/` *inside* one reference
-//! token, while a raw `/` separates tokens — so every resolver in this
-//! crate goes through here rather than splitting strings itself.
+//! pointer in the URI *fragment*. Getting that back into a pointer is
+//! the reverse of how it was written: a pointer is percent-encoded to
+//! become a fragment ([RFC 6901 §6](https://www.rfc-editor.org/rfc/rfc6901.html#section-6)),
+//! so a fragment is percent-decoded *whole* to become a pointer again,
+//! and only then split on `/` and unescaped per
+//! [RFC 6901 §3](https://www.rfc-editor.org/rfc/rfc6901.html#section-3).
+//!
+//! Order matters, and this is the order that makes `%2F` a separator
+//! like any other `/`: a slash *inside* a reference token has to be
+//! written `~1`, because once percent-decoding has run there is
+//! nothing left to tell the two apart. Every resolver in this crate
+//! goes through here rather than splitting strings itself.
 
-/// Decode one RFC 6901 reference token.
+/// Percent-decode a URI fragment.
 ///
-/// Percent escapes are applied first, then `~1` becomes `/` and `~0`
-/// becomes `~`.
-///
-/// Returns `None` for a malformed token: a truncated or non-hex `%`
-/// escape, or a `~` not followed by `0` or `1`. RFC 6901 leaves those
-/// undefined rather than literal, so a pointer containing one names
-/// nothing rather than naming a key that happens to look like it.
+/// Returns `None` for a truncated or non-hex escape, or for octets
+/// that are not UTF-8.
 #[must_use]
-pub(crate) fn decode_token(token: &str) -> Option<String> {
-    let bytes = token.as_bytes();
-    let mut percent_decoded = Vec::with_capacity(bytes.len());
+fn percent_decode(fragment: &str) -> Option<String> {
+    let bytes = fragment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = token.get(i + 1..i + 3)?;
-            percent_decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            decoded.push(u8::from_str_radix(fragment.get(i + 1..i + 3)?, 16).ok()?);
             i += 3;
         } else {
-            percent_decoded.push(bytes[i]);
+            decoded.push(bytes[i]);
             i += 1;
         }
     }
-    let decoded = String::from_utf8(percent_decoded).ok()?;
+    String::from_utf8(decoded).ok()
+}
 
-    let mut out = String::with_capacity(decoded.len());
-    let mut chars = decoded.chars();
+/// Unescape one RFC 6901 reference token: `~1` becomes `/`, `~0`
+/// becomes `~`.
+///
+/// Returns `None` for a `~` followed by anything else. RFC 6901 leaves
+/// that undefined rather than literal, so a pointer containing one
+/// names nothing rather than naming a key that happens to look like it.
+#[must_use]
+fn unescape(token: &str) -> Option<String> {
+    let mut out = String::with_capacity(token.len());
+    let mut chars = token.chars();
     while let Some(c) = chars.next() {
         if c != '~' {
             out.push(c);
@@ -54,17 +62,18 @@ pub(crate) fn decode_token(token: &str) -> Option<String> {
 /// Split a document-local fragment into decoded reference tokens.
 ///
 /// The empty fragment is the whole document, i.e. no tokens. A fragment
-/// that does not start with `/`, or that contains a malformed token, is
-/// not a pointer at all.
+/// that does not decode, does not start with `/`, or contains a
+/// malformed escape is not a pointer at all.
 #[must_use]
-pub(crate) fn tokens(pointer: &str) -> Option<Vec<String>> {
+pub(crate) fn tokens(fragment: &str) -> Option<Vec<String>> {
+    let pointer = percent_decode(fragment)?;
     if pointer.is_empty() {
         return Some(Vec::new());
     }
     pointer
         .strip_prefix('/')?
         .split('/')
-        .map(decode_token)
+        .map(unescape)
         .collect()
 }
 
@@ -111,28 +120,43 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tokens_are_percent_decoded_then_unescaped() {
+    fn a_fragment_is_decoded_whole_and_then_split() {
+        // Percent-decoding runs first, so `%2F` is a separator like
+        // any other `/` — the pointer it decodes to is `/x-a/b`.
+        assert_eq!(tokens("/x-a%2Fb").unwrap(), vec!["x-a", "b"]);
         assert_eq!(
             tokens("/channels/source%2Fpath").unwrap(),
-            vec!["channels", "source/path"],
-            "`%2F` is a literal `/` inside one token",
+            vec!["channels", "source", "path"]
         );
+
+        // A slash *inside* a token has to be written `~1`, which
+        // survives decoding because `~` is not what encodes it.
         assert_eq!(
             tokens("/channels/source~1path").unwrap(),
-            vec!["channels", "source/path"],
+            vec!["channels", "source/path"]
         );
+        assert_eq!(
+            tokens("/channels/source%7E1path").unwrap(),
+            vec!["channels", "source/path"]
+        );
+
         assert_eq!(tokens("").unwrap(), Vec::<String>::new());
-        assert_eq!(decode_token("a%20b").unwrap(), "a b");
-        assert_eq!(decode_token("a~0b").unwrap(), "a~b");
+        assert_eq!(tokens("/a%20b").unwrap(), vec!["a b"]);
+        assert_eq!(tokens("/a~0b").unwrap(), vec!["a~b"]);
     }
 
     #[test]
-    fn malformed_tokens_are_not_literal() {
-        for bad in ["a~2b", "a~", "a%2", "a%zz"] {
-            assert!(decode_token(bad).is_none(), "{bad} must not decode");
+    fn malformed_fragments_are_not_pointers() {
+        for bad in [
+            "/a~2b", // `~` followed by neither 0 nor 1
+            "/a~",   // a trailing `~`
+            "/a%2",  // a truncated escape
+            "/a%zz", // a non-hex escape
+            "/a%FF", // octets that are not UTF-8
+            "no-leading-slash",
+        ] {
+            assert!(tokens(bad).is_none(), "{bad} must not be a pointer");
         }
-        assert!(tokens("/channels/bad~2escape").is_none());
-        assert!(tokens("no-leading-slash").is_none());
     }
 
     #[test]

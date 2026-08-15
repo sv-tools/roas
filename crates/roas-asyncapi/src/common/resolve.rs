@@ -12,6 +12,7 @@
 
 use crate::common::pointer;
 use crate::common::reference::RefOr;
+use crate::validation::Context;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -50,6 +51,23 @@ impl<'a, T> Resolution<'a, T> {
     pub(crate) fn found(self) -> Option<&'a T> {
         match self {
             Resolution::Found(item) => Some(item),
+            _ => None,
+        }
+    }
+
+    /// Why this pointer names the wrong sort of thing, if it does.
+    ///
+    /// Existence is [`check_names_something`]'s business — every
+    /// reference gets that — so a check that also knows what kind
+    /// belongs here reports only what that general one cannot see.
+    ///
+    /// (Only v3 layers a kind check over the general one; v2.6 reports
+    /// each of its own resolutions in full.)
+    #[must_use]
+    #[cfg(any(feature = "v3_0", feature = "v3_1"))]
+    pub(crate) fn kind_problem(&self) -> Option<&'static str> {
+        match self {
+            Resolution::WrongKind => self.problem(),
             _ => None,
         }
     }
@@ -139,6 +157,18 @@ fn names_something_else(path: &[String], expected: &str) -> bool {
     if first != "components" && !KINDS.contains(&first.as_str()) {
         return rest.is_empty() && SINGLETONS.contains(&first.as_str());
     }
+    // Structure ends where an extension begins: what is inside an `x-`
+    // member is arbitrary, and a map it spells `messages` declares
+    // nothing. A *key* is not a member, though — a channel may
+    // legitimately be named `x-thing`, so keys are skipped over.
+    let members = if first == "components" {
+        rest
+    } else {
+        rest.get(1..).unwrap_or_default()
+    };
+    if members.iter().any(|token| token.starts_with("x-")) {
+        return false;
+    }
     match rest {
         // `#/components` itself, or a whole map.
         [] => true,
@@ -189,13 +219,41 @@ where
     // keeps that from needing a branch, and leaves every pointer naming
     // nothing if it somehow does.
     let snapshot = serde_json::to_value(document).unwrap_or_default();
-    match pointer::walk(&snapshot, &path) {
-        Some(target) => match serde_json::from_value::<T>(target.clone()) {
-            Ok(_) => Resolution::Opaque,
-            Err(_) => Resolution::WrongKind,
-        },
-        None => Resolution::Missing,
+    let Some(target) = pointer::walk(&snapshot, &path) else {
+        return Resolution::Missing;
+    };
+    // The target may be a Reference Object itself. Judging *that* as a
+    // `T` would call every alias the wrong kind, so follow it first.
+    let Some(target) = follow_json(&snapshot, target) else {
+        return Resolution::Opaque;
+    };
+    match serde_json::from_value::<T>(target.clone()) {
+        Ok(_) => Resolution::Opaque,
+        Err(_) => Resolution::WrongKind,
     }
+}
+
+/// Follow a chain of Reference Objects through plain JSON to the object
+/// at its end.
+///
+/// `None` where there is nothing more this document can say: the chain
+/// leaves for another document, loops, or leads nowhere — each of which
+/// some other check reports, and none of which says anything about the
+/// kind.
+fn follow_json<'v>(
+    root: &'v serde_json::Value,
+    start: &'v serde_json::Value,
+) -> Option<&'v serde_json::Value> {
+    let mut current = start;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    while let Some(reference) = current.get("$ref").and_then(serde_json::Value::as_str) {
+        let local = reference.strip_prefix('#')?;
+        if !seen.insert(local.to_owned()) {
+            return None;
+        }
+        current = pointer::walk(root, &pointer::tokens(local)?)?;
+    }
+    Some(current)
 }
 
 /// Follow a chain of `RefOr` entries to the object at its end.
@@ -240,6 +298,12 @@ impl Terminus {
     /// Split a reference as written into the resource it names and the
     /// pointer within it.
     ///
+    /// The resource is normalized so that spellings which resolve
+    /// alike compare alike: `./channels.yaml` and `channels.yaml` name
+    /// the same file, and every reference in a document resolves
+    /// against the same base, so removing dot-segments is enough to
+    /// tell them apart from genuinely different resources.
+    ///
     /// `None` when the fragment is not a usable JSON Pointer.
     pub(crate) fn parse(reference: &str) -> Option<Self> {
         let (resource, fragment) = match reference.split_once('#') {
@@ -247,7 +311,7 @@ impl Terminus {
             None => (reference, ""),
         };
         Some(Self {
-            resource: resource.to_owned(),
+            resource: remove_dot_segments(resource),
             at: pointer::tokens(fragment)?,
         })
     }
@@ -279,6 +343,58 @@ impl std::fmt::Display for Terminus {
         }
         Ok(())
     }
+}
+
+/// Remove dot-segments from a URI reference's path, per
+/// [RFC 3986 §5.2.4](https://www.rfc-editor.org/rfc/rfc3986#section-5.2.4).
+///
+/// Only the path is touched: a scheme, authority, or query is left as
+/// written, since those are already in their comparable form for the
+/// relative and absolute references a `$ref` carries.
+fn remove_dot_segments(reference: &str) -> String {
+    // Everything up to the path — `scheme:`, `//authority` — is passed
+    // through, as is anything after it.
+    let path_start = match reference.find("//") {
+        Some(slashes) if reference[..slashes].ends_with(':') || slashes == 0 => reference
+            [slashes + 2..]
+            .find('/')
+            .map_or(reference.len(), |offset| slashes + 2 + offset),
+        _ => reference.find(':').map_or(0, |colon| colon + 1),
+    };
+    let (prefix, rest) = reference.split_at(path_start);
+    let (path, suffix) = match rest.find(['?']) {
+        Some(cut) => rest.split_at(cut),
+        None => (rest, ""),
+    };
+
+    let mut out: Vec<&str> = Vec::new();
+    let absolute = path.starts_with('/');
+    let trailing = path.ends_with('/') || path.ends_with("/.") || path.ends_with("/..");
+    for segment in path.split('/') {
+        match segment {
+            "." | "" => {}
+            ".." => {
+                // A `..` that cannot be resolved is kept, so that two
+                // references which climb equally far still compare
+                // alike.
+                if matches!(out.last(), Some(&last) if last != "..") {
+                    out.pop();
+                } else if !absolute {
+                    out.push("..");
+                }
+            }
+            segment => out.push(segment),
+        }
+    }
+    let mut normalized = String::new();
+    if absolute {
+        normalized.push('/');
+    }
+    normalized.push_str(&out.join("/"));
+    if trailing && !normalized.ends_with('/') && !normalized.is_empty() {
+        normalized.push('/');
+    }
+    format!("{prefix}{normalized}{suffix}")
 }
 
 /// [`follow`], reporting *where* the chain ended as well as what it
@@ -356,6 +472,95 @@ where
     }
 }
 
+/// Check that a reference names something, wherever it sits.
+///
+/// This is the one check every reference in the document gets, because
+/// it runs from [`Reference`](crate::common::reference::Reference)'s own
+/// validation — the model already walks each of them, at the right
+/// path, and nothing but a modelled reference is ever looked at. It
+/// answers only what it can see structurally: a pointer that names
+/// nothing, or a chain that loops.
+///
+/// It stays quiet where a check that knows what the reference is *for*
+/// has already spoken, so the specific message survives.
+pub(crate) fn check_names_something(ctx: &mut Context, reference: &str) {
+    // External references land in a document this crate cannot see,
+    // and an empty one is reported for being empty.
+    let (Some(local), Some(document)) = (reference.strip_prefix('#'), ctx.document()) else {
+        return;
+    };
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut pointer = local.to_owned();
+    let problem = loop {
+        if !seen.insert(pointer.clone()) {
+            break "is part of a reference cycle";
+        }
+        match walk_as_written(document, &pointer) {
+            // Either it resolved, or what would have resolved it is in
+            // another document.
+            Walk::Deferred => return,
+            Walk::Missing => break "names nothing in this document",
+            Walk::Unrecognized => break "is not a usable JSON Pointer",
+            // Keep following while the target is itself a reference,
+            // which is how a cycle shows up.
+            Walk::Landed(target) => match target.get("$ref").and_then(serde_json::Value::as_str) {
+                Some(next) => match next.strip_prefix('#') {
+                    Some(next) => pointer = next.to_owned(),
+                    None => return,
+                },
+                None => return,
+            },
+        }
+    };
+    if !ctx.has_error_at_field("$ref") {
+        ctx.error_field("$ref", format!("`{reference}` {problem}"));
+    }
+}
+
+/// Where a structural walk ended.
+enum Walk<'v> {
+    Landed(&'v serde_json::Value),
+    /// The walk failed, but passed a `$ref` on the way — so what it was
+    /// looking for may well exist, just not in this document as
+    /// written. Not something to report.
+    Deferred,
+    Missing,
+    Unrecognized,
+}
+
+/// Walk a pointer over the document exactly as written.
+///
+/// A JSON Pointer does not resolve as it walks: `#/channels/c/publish`
+/// names what is written beside a `$ref` in `c`, not what that `$ref`
+/// points at. But when the walk *fails* after passing one, the missing
+/// step is very likely inside what that reference names — a split-file
+/// document walks `#/channels/user/messages/m` through a `channels.user`
+/// that is only a `$ref` — so a failure downstream of a reference is
+/// left unjudged.
+fn walk_as_written<'v>(root: &'v serde_json::Value, pointer: &str) -> Walk<'v> {
+    let Some(tokens) = pointer::tokens(pointer) else {
+        return Walk::Unrecognized;
+    };
+    let mut current = root;
+    let mut deferred = false;
+    for token in &tokens {
+        deferred |= current.get("$ref").is_some();
+        let next = match current {
+            serde_json::Value::Object(map) => map.get(token),
+            serde_json::Value::Array(items) => {
+                pointer::array_index(token).and_then(|index| items.get(index))
+            }
+            _ => None,
+        };
+        match next {
+            Some(value) => current = value,
+            None if deferred => return Walk::Deferred,
+            None => return Walk::Missing,
+        }
+    }
+    Walk::Landed(current)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +580,10 @@ mod tests {
         extra: serde_json::Value,
         #[serde(rename = "x-scalar")]
         scalar: serde_json::Value,
+        #[serde(rename = "x-outward")]
+        outward: serde_json::Value,
+        #[serde(rename = "x-loop")]
+        looping: serde_json::Value,
     }
 
     fn reference(target: &str) -> RefOr<Demo> {
@@ -408,6 +617,8 @@ mod tests {
             entries,
             extra: serde_json::json!({ "name": "shared" }),
             scalar: serde_json::json!("not an object"),
+            outward: serde_json::json!({ "$ref": "./other.yaml#/entries/real" }),
+            looping: serde_json::json!({ "$ref": "#/x-loop" }),
         }
     }
 
@@ -480,6 +691,35 @@ mod tests {
             classify_unresolved::<_, Demo>(&doc, "/info", "entries"),
             Resolution::WrongKind
         ));
+
+        // A target that is itself a Reference Object is followed, not
+        // judged: what it leads to is what matters, and where that is
+        // another document or a loop there is nothing to judge at all.
+        for pointer in ["/x-outward", "/x-loop"] {
+            assert_eq!(
+                classify_unresolved::<_, Demo>(&doc, pointer, "entries").problem(),
+                None,
+                "{pointer}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_resource_keeps_everything_but_its_dot_segments() {
+        for (written, resource) in [
+            ("dir/./spec.yaml?v=1", "dir/spec.yaml?v=1"),
+            ("./dir/", "dir/"),
+            ("dir/sub/../", "dir/"),
+            ("/a/b/../c", "/a/c"),
+            ("/../a", "/a"),
+            ("", ""),
+        ] {
+            assert_eq!(
+                Terminus::parse(written).expect("a resource").resource,
+                resource,
+                "{written}",
+            );
+        }
     }
 
     #[test]
@@ -490,13 +730,40 @@ mod tests {
 
         // A whole document, with no fragment at all.
         let whole = Terminus::parse("./other.yaml").expect("a resource");
-        assert_eq!(whole.resource, "./other.yaml");
         assert!(whole.at.is_empty());
-        assert_eq!(whole.to_string(), "./other.yaml#");
+        assert_eq!(whole.to_string(), "other.yaml#");
+
+        // Spellings that resolve alike compare alike.
+        for spelling in [
+            "./channels.yaml",
+            "channels.yaml",
+            "a/../channels.yaml",
+            "././channels.yaml",
+        ] {
+            assert_eq!(
+                Terminus::parse(spelling).expect("a resource").resource,
+                "channels.yaml",
+                "{spelling}",
+            );
+        }
+        // …and ones that do not, do not.
+        for spelling in ["../channels.yaml", "/channels.yaml", "other.yaml"] {
+            assert_ne!(
+                Terminus::parse(spelling).expect("a resource").resource,
+                "channels.yaml",
+                "{spelling}",
+            );
+        }
+        assert_eq!(
+            Terminus::parse("https://example.com/a/../b/spec.yaml#/c")
+                .expect("a resource")
+                .resource,
+            "https://example.com/b/spec.yaml",
+        );
 
         // A message of a channel over there is named over there.
         let channel = Terminus::parse("./channels.yaml#/user").expect("a pointer");
-        let message = Terminus::parse("./channels.yaml#/user/messages/signup").expect("a pointer");
+        let message = Terminus::parse("channels.yaml#/user/messages/signup").expect("a pointer");
         assert_eq!(
             channel.child_key("messages", &message).map(String::as_str),
             Some("signup"),

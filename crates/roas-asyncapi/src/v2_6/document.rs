@@ -408,7 +408,7 @@ impl Document {
     }
 
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
-        let mut ctx = Context::new(options);
+        let mut ctx = Context::for_document(options, self);
 
         if let Some(id) = &self.id {
             ctx.require_non_empty("id", id);
@@ -1526,15 +1526,15 @@ mod tests {
     }
 
     #[test]
-    fn percent_encoded_separators_stay_inside_a_key() {
-        // `%2F` decodes to a literal `/` *within* one token, so this
-        // names the single key `source/path`.
+    fn a_slash_inside_a_channel_key_is_escaped_not_encoded() {
+        // v2.6 keys channels by address, so keys containing `/` are
+        // the normal case and `~1` is how a pointer names one.
         let value = json!({
             "asyncapi": "2.6.0",
             "info": { "title": "T", "version": "1" },
             "channels": {
                 "source/path": { "publish": {} },
-                "alias": { "$ref": "#/channels/source%2Fpath" }
+                "alias": { "$ref": "#/channels/source~1path" }
             }
         });
         let doc: Document = serde_json::from_value(value.clone()).unwrap();
@@ -1543,7 +1543,18 @@ mod tests {
                 .found()
                 .is_some()
         );
-        assert!(errors_for(value).is_empty());
+        assert!(errors_for(value.clone()).is_empty());
+
+        // `%2F` is not that: a fragment is percent-decoded before it is
+        // split, so this one names `/channels/source/path` and finds
+        // nothing there.
+        let mut encoded = value;
+        encoded["channels"]["alias"] = json!({ "$ref": "#/channels/source%2Fpath" });
+        assert!(
+            errors_for(encoded)
+                .iter()
+                .any(|e| e.contains("names nothing in this document")),
+        );
     }
 
     #[test]
