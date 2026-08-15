@@ -1528,6 +1528,23 @@ mod tests {
     }
 
     #[test]
+    fn a_boolean_schema_is_a_schema() {
+        // `true` is a schema, and no struct deserializes it.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "schemas": {
+                    "always": true,
+                    "s": { "$ref": "#/components/schemas/always" }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_field_style_reference_names_a_kind_too() {
         // Existing is not enough: a channel item's `$ref` has to name
         // a channel item.

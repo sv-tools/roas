@@ -2283,6 +2283,123 @@ mod tests {
     }
 
     #[test]
+    fn a_boolean_is_a_schema() {
+        // JSON Schema allows `true` and `false` wherever a schema is
+        // expected, so a reference to one is a reference to a schema —
+        // no struct deserializes it, which is not the same as it being
+        // the wrong kind.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["payload"] =
+            json!({ "properties": { "p": { "$ref": "#/components/schemas/always" } } });
+        value["components"] = json!({ "schemas": { "always": true } });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_nested_map_says_what_it_holds() {
+        // `properties` holds schemas wherever it appears, so a schema
+        // is what this names — not a channel.
+        let mut value = wired_from_components();
+        value["components"]["schemas"] =
+            json!({ "s": { "properties": { "p": { "type": "string" } } } });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/components/schemas/s/properties/p" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.operations.receiveSignups.channel.$ref: channel `#/components/schemas/s/properties/p` does not point at an object of the expected kind"),
+        );
+
+        // And a map is never one of the objects in it, however
+        // agreeably an empty one reads as a channel.
+        let mut value = wired_from_components();
+        value["servers"]["production"]["variables"] = json!({ "v": { "default": "d" } });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/servers/production/variables" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+
+        // A schema named where a schema belongs is right, of course.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["payload"] =
+            json!({ "properties": { "p": { "$ref": "#/components/schemas/s/properties/inner" } } });
+        value["components"] = json!({
+            "schemas": { "s": { "properties": { "inner": { "type": "string" } } } }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_chain_is_judged_where_it_ends() {
+        // The alias sits somewhere unmodelled, so the only position
+        // that says anything is the one it leads to.
+        let mut value = wired_from_components();
+        value["x-alias"] = json!({ "$ref": "#/components/messages/m" });
+        value["components"]["messages"] = json!({ "m": { "name": "M" } });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/x-alias" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.operations.receiveSignups.channel.$ref: channel `#/x-alias` does not point at an object of the expected kind"),
+        );
+
+        // Ending somewhere that really is a channel is fine.
+        let mut value = wired_from_components();
+        value["x-alias"] = json!({ "$ref": "#/components/channels/c" });
+        value["components"]["channels"] = json!({ "c": { "address": "a" } });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/x-alias" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_single_object_is_not_a_map() {
+        // `externalDocs` names one object, so `x-store` under it is an
+        // extension rather than a key — and what an extension holds is
+        // its own business.
+        let mut value = wired_from_components();
+        value["info"]["externalDocs"] = json!({
+            "url": "https://example.com",
+            "x-store": { "messages": { "c": { "address": "stored" } } }
+        });
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/info/externalDocs/x-store/messages/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_resource_is_compared_with_its_escapes_decoded() {
+        // `%62` is `b`, an unreserved character, so these name the same
+        // file (RFC 3986 §6.2.2.2).
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "a/%62.yaml#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "a/b.yaml#/c/messages/m" } ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A reserved one stays encoded, since decoding `%2F` would turn
+        // one path segment into two.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "a%2Fb.yaml#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "a/b.yaml#/c/messages/m" } ]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("must point at a message of `a%2Fb.yaml#/c`")),
+        );
+    }
+
+    #[test]
     fn external_references_are_skipped_unless_strictness_is_requested() {
         // A root operation must name a channel in the root Channels
         // Object, so in a split document the *entry* is what points

@@ -154,10 +154,22 @@ where
     }
     // Nothing there, or nothing this document can say about what is
     // there: either way, not a question of kind.
-    let Some(target) = pointer::walk(root, path).and_then(|target| follow_json(root, target))
-    else {
+    let Some(target) = pointer::walk(root, path) else {
         return false;
     };
+    let Some((terminal, target)) = follow_json(root, path, target) else {
+        return false;
+    };
+    // Where a chain ends is as much a position as where it starts: an
+    // alias reached through an unmodelled location has only its far end
+    // to be judged by.
+    if names_something_else(&terminal, expected) {
+        return true;
+    }
+    // A schema may be `true` or `false`, which no struct deserializes.
+    if target.is_boolean() && expected == "schemas" {
+        return false;
+    }
     serde_json::from_value::<T>(target.clone()).is_err()
 }
 
@@ -209,51 +221,126 @@ const SINGLETONS: &[&str] = &["info", "asyncapi", "id", "defaultContentType"];
 /// An **entry of another map** — `#/servers/prod` where a channel
 /// belongs.
 ///
+/// What a token names, given where in the document it sits.
+#[derive(Clone, Copy)]
+enum Role<'a> {
+    /// A map or list whose entries are of this kind — `None` where the
+    /// kind depends on context, as `traits` does.
+    Collection(Option<&'a str>),
+    /// One object of this kind.
+    Object(Option<&'a str>),
+    /// A key or index in the collection named just before it.
+    Entry(Option<&'a str>),
+    /// Something this crate does not model as holding objects, so
+    /// nothing below it can be judged by position.
+    Opaque,
+}
+
+/// The members that hold modelled objects, outside `components` where
+/// every member is a map of its own kind.
+///
+/// Anything absent is [`Role::Opaque`]: v2.6's `publish`, a binding's
+/// contents, a schema's `default`. Inference stops there rather than
+/// guessing, which is the point of listing these at all.
+const MEMBERS: &[(&str, Role<'static>)] = &[
+    // Schemas, wherever a schema hangs off another.
+    ("properties", Role::Collection(Some("schemas"))),
+    ("patternProperties", Role::Collection(Some("schemas"))),
+    ("definitions", Role::Collection(Some("schemas"))),
+    ("allOf", Role::Collection(Some("schemas"))),
+    ("anyOf", Role::Collection(Some("schemas"))),
+    ("oneOf", Role::Collection(Some("schemas"))),
+    ("items", Role::Collection(Some("schemas"))),
+    ("additionalProperties", Role::Object(Some("schemas"))),
+    ("propertyNames", Role::Object(Some("schemas"))),
+    ("contains", Role::Object(Some("schemas"))),
+    ("not", Role::Object(Some("schemas"))),
+    ("if", Role::Object(Some("schemas"))),
+    ("then", Role::Object(Some("schemas"))),
+    ("else", Role::Object(Some("schemas"))),
+    ("payload", Role::Object(Some("schemas"))),
+    ("headers", Role::Object(Some("schemas"))),
+    // The rest of the model.
+    ("variables", Role::Collection(Some("serverVariables"))),
+    ("messages", Role::Collection(Some("messages"))),
+    ("parameters", Role::Collection(Some("parameters"))),
+    ("security", Role::Collection(Some("securitySchemes"))),
+    ("tags", Role::Collection(Some("tags"))),
+    ("servers", Role::Collection(Some("servers"))),
+    ("channel", Role::Object(Some("channels"))),
+    ("correlationId", Role::Object(Some("correlationIds"))),
+    ("externalDocs", Role::Object(Some("externalDocs"))),
+    ("reply", Role::Object(Some("replies"))),
+    ("address", Role::Object(Some("replyAddresses"))),
+    // A trait is an operation's or a message's depending on where it
+    // hangs, and bindings are declared under four names: both are
+    // modelled, neither is one kind.
+    ("traits", Role::Collection(None)),
+    ("bindings", Role::Object(None)),
+];
+
+/// The role of a token, given the role of the one before it.
+fn role_after<'a>(previous: Role<'a>, token: &'a str) -> Role<'a> {
+    match previous {
+        // A key is whatever its collection holds.
+        Role::Collection(kind) => Role::Entry(kind),
+        Role::Opaque | Role::Entry(None) => Role::Opaque,
+        // A member of an object. Under `components` every member is a
+        // map of the kind it is named for; elsewhere the model says.
+        Role::Object(Some("components")) if KINDS.contains(&token) => Role::Collection(Some(token)),
+        Role::Object(_) | Role::Entry(Some(_)) => {
+            // An extension's contents are the extension's business.
+            if token.starts_with("x-") {
+                return Role::Opaque;
+            }
+            MEMBERS
+                .iter()
+                .find(|(name, _)| *name == token)
+                .map_or(Role::Opaque, |(_, role)| *role)
+        }
+    }
+}
+
 /// Only the document's own structure declares a kind.
 ///
-/// A pointer that starts anywhere else — `#/x-store/messages/c`, into
-/// an extension that happens to spell a map `messages` — is arbitrary
-/// JSON, and nothing about its shape says what it holds. Within the
-/// document, what names the kind is the token *before* the last one,
-/// at whatever depth: `#/channels/c/messages/m` and `#/info/tags/0` are
-/// a message and a tag, and using either where a channel belongs is the
-/// same mistake as `#/components/messages/m` there. A token that is no
-/// kind at all — `publish` in v2.6's `#/channels/user/publish/message` —
-/// says nothing either way, and the pointer is judged on what it finds.
+/// Each token gets a role from the one before it — a map, an object, a
+/// key in a map, or something unmodelled — and the last one says what
+/// the pointer names. A pointer that starts outside the structure
+/// (`#/x-store/messages/c`) or passes through an extension has no role
+/// to speak of, and is judged on what it finds instead.
 fn names_something_else(path: &[String], expected: &str) -> bool {
-    // The whole document is a container.
-    let [first, rest @ ..] = path else {
-        return true;
+    let Some(role) = role_of(path) else {
+        return false;
     };
-    // Rooted in the document's own structure, or not our business.
-    if first != "components"
-        && !KINDS.contains(&first.as_str())
-        && !SINGLETONS.contains(&first.as_str())
-    {
-        return false;
+    match role {
+        // A map is not one of the objects in it, and the document as a
+        // whole is not an object at all.
+        Role::Collection(_) => true,
+        Role::Entry(Some(kind)) | Role::Object(Some(kind)) => kind != expected,
+        Role::Entry(None) | Role::Object(None) | Role::Opaque => false,
     }
-    // `#/components`, a whole map, or a singleton named on its own.
-    if rest.is_empty() {
-        return true;
+}
+
+/// The role of a pointer's last token, or `None` where the pointer
+/// starts outside anything this crate models.
+fn role_of(path: &[String]) -> Option<Role<'_>> {
+    let Some(first) = path.first() else {
+        // The document itself: a container of everything.
+        return Some(Role::Collection(None));
+    };
+    let mut role = match first.as_str() {
+        "components" => Role::Object(Some("components")),
+        // The root maps are named for what they hold.
+        kind if KINDS.contains(&kind) => Role::Collection(Some(kind)),
+        // A singleton is its own kind, which no reference names — a
+        // pointer at `#/info` is the Info object and nothing else.
+        single if SINGLETONS.contains(&single) => Role::Object(Some(single)),
+        _ => return None,
+    };
+    for token in &path[1..] {
+        role = role_after(role, token);
     }
-    // Structure ends where an extension begins: what is inside an `x-`
-    // *member* is arbitrary. A *key* is not a member, though — a
-    // channel or a message may legitimately be named `x-thing` — and
-    // what marks a key is that the token before it named a map.
-    let is_key = |index: usize| index > 0 && KINDS.contains(&path[index - 1].as_str());
-    if path
-        .iter()
-        .enumerate()
-        .any(|(index, token)| token.starts_with("x-") && !is_key(index))
-    {
-        return false;
-    }
-    // A whole map under `components`.
-    if first == "components" && rest.len() == 1 {
-        return KINDS.contains(&rest[0].as_str());
-    }
-    let named = &path[path.len() - 2];
-    named != expected && KINDS.contains(&named.as_str())
+    Some(role)
 }
 
 /// Decide what an unresolved local pointer *is*, by walking the
@@ -298,22 +385,20 @@ where
         return Resolution::WrongKind;
     }
     let snapshot = serde_json::to_value(document).unwrap_or_default();
-    let Some(target) = pointer::walk(&snapshot, &path) else {
+    if pointer::walk(&snapshot, &path).is_none() {
         return Resolution::Missing;
-    };
-    // The target may be a Reference Object itself. Judging *that* as a
-    // `T` would call every alias the wrong kind, so follow it first.
-    let Some(target) = follow_json(&snapshot, target) else {
-        return Resolution::Opaque;
-    };
-    match serde_json::from_value::<T>(target.clone()) {
-        Ok(_) => Resolution::Opaque,
-        Err(_) => Resolution::WrongKind,
     }
+    // The same judgement every other reference gets: what is there,
+    // where the pointer says it should be, and where any chain from it
+    // ends up.
+    if wrong_kind::<T>(&snapshot, &path, expected_kind) {
+        return Resolution::WrongKind;
+    }
+    Resolution::Opaque
 }
 
-/// Follow a chain of Reference Objects through plain JSON to the object
-/// at its end.
+/// Follow a chain of Reference Objects through plain JSON, reporting
+/// where the chain ends as well as what is there.
 ///
 /// `None` where there is nothing more this document can say: the chain
 /// leaves for another document, loops, or leads nowhere — each of which
@@ -321,18 +406,22 @@ where
 /// kind.
 fn follow_json<'v>(
     root: &'v serde_json::Value,
+    at: &[String],
     start: &'v serde_json::Value,
-) -> Option<&'v serde_json::Value> {
+) -> Option<(Vec<String>, &'v serde_json::Value)> {
     let mut current = start;
+    let mut terminal = at.to_vec();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     while let Some(reference) = current.get("$ref").and_then(serde_json::Value::as_str) {
         let local = reference.strip_prefix('#')?;
         if !seen.insert(local.to_owned()) {
             return None;
         }
-        current = pointer::walk(root, &pointer::tokens(local)?)?;
+        let path = pointer::tokens(local)?;
+        current = pointer::walk(root, &path)?;
+        terminal = path;
     }
-    Some(current)
+    Some((terminal, current))
 }
 
 /// Follow a chain of `RefOr` entries to the object at its end.
@@ -424,6 +513,43 @@ impl std::fmt::Display for Terminus {
     }
 }
 
+/// Normalize a reference's percent-encoding, per
+/// [RFC 3986 §6.2.2](https://www.rfc-editor.org/rfc/rfc3986#section-6.2.2):
+/// decode octets that stand for unreserved characters, and case-normalize
+/// the escapes that remain.
+///
+/// A reserved character stays encoded, `%2F` above all: decoding it
+/// would turn one segment into two.
+fn normalize_percent_encoding(reference: &str) -> String {
+    let bytes = reference.as_bytes();
+    let mut out = String::with_capacity(reference.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escape = (bytes[i] == b'%')
+            .then(|| reference.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok().map(|byte| (hex, byte)));
+        match escape {
+            Some((_, byte))
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') =>
+            {
+                out.push(char::from(byte));
+                i += 3;
+            }
+            Some((hex, _)) => {
+                out.push('%');
+                out.push_str(&hex.to_ascii_uppercase());
+                i += 3;
+            }
+            None => {
+                out.push(char::from(bytes[i]));
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Remove dot-segments from a URI reference's path, in the spirit of
 /// [RFC 3986 §5.2.4](https://www.rfc-editor.org/rfc/rfc3986#section-5.2.4).
 ///
@@ -438,6 +564,10 @@ impl std::fmt::Display for Terminus {
 /// discards those, but it is defined for a path already merged onto a
 /// base, and these references have none.
 fn remove_dot_segments(reference: &str) -> String {
+    // Unreserved characters are decoded first: `%2E` *is* a `.`, and so
+    // makes a dot-segment.
+    let normalized = normalize_percent_encoding(reference);
+    let reference = normalized.as_str();
     // A query is not a path, however many slashes it contains.
     let (before_query, query) = match reference.find('?') {
         Some(cut) => reference.split_at(cut),
@@ -452,7 +582,7 @@ fn remove_dot_segments(reference: &str) -> String {
     };
     let (prefix, path) = before_query.split_at(path_start);
     if path.is_empty() {
-        return reference.to_owned();
+        return normalized;
     }
 
     let absolute = path.starts_with('/');
