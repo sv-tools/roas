@@ -1528,6 +1528,44 @@ mod tests {
     }
 
     #[test]
+    fn a_field_style_reference_names_a_kind_too() {
+        // Existing is not enough: a channel item's `$ref` has to name
+        // a channel item.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "channels": { "unused": { "$ref": "#/components/messages/m" } },
+                "messages": { "m": { "name": "M" } }
+            }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.components.channels.unused.$ref: `#/components/messages/m` does not point at an object of the expected kind"
+            ]
+        );
+
+        // And a schema's names a schema.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "schemas": { "s": { "$ref": "#/components/messages/m" } },
+                "messages": { "m": { "name": "M" } }
+            }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.components.schemas.s.$ref: `#/components/messages/m` does not point at an object of the expected kind"
+            ]
+        );
+    }
+
+    #[test]
     fn a_field_style_reference_is_followed_like_any_other() {
         // v2.6 carries `$ref` as a field rather than as a Reference
         // Object, which is no reason for it to go unchecked. Nothing

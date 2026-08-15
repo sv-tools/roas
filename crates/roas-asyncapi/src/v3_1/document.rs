@@ -19,8 +19,8 @@ use crate::v3_1::channel::Channel;
 use crate::v3_1::components::Components;
 use crate::v3_1::external_documentation::ExternalDocumentation;
 use crate::v3_1::info::Info;
-use crate::v3_1::message::Message;
-use crate::v3_1::operation::{Operation, OperationReply};
+use crate::v3_1::message::{Message, MessageTrait};
+use crate::v3_1::operation::{Operation, OperationReply, OperationTrait};
 use crate::v3_1::server::Server;
 use crate::v3_1::tag::Tag;
 use crate::v3_1::version::Version;
@@ -459,6 +459,20 @@ impl Document {
                 });
             }
         }
+        for (name, operation_trait) in &components.operation_traits {
+            if let Some(operation_trait) = operation_trait.item() {
+                ctx.in_key("operationTraits", name, |ctx| {
+                    self.check_operation_trait_references(ctx, operation_trait);
+                });
+            }
+        }
+        for (name, message_trait) in &components.message_traits {
+            if let Some(message_trait) = message_trait.item() {
+                ctx.in_key("messageTraits", name, |ctx| {
+                    self.check_message_trait_references(ctx, message_trait);
+                });
+            }
+        }
         for (name, reply) in &components.replies {
             if let Some(reply) = reply.item() {
                 ctx.in_key("replies", name, |ctx| {
@@ -699,11 +713,71 @@ impl Document {
             "messageTraits",
             components.map(|c| &c.message_traits),
         );
+        for (index, message_trait) in message.traits.iter().enumerate() {
+            if let Some(message_trait) = message_trait.item() {
+                ctx.in_index("traits", index, |ctx| {
+                    self.check_message_trait_references(ctx, message_trait);
+                });
+            }
+        }
         self.check_shared_references(
             ctx,
             &message.tags,
             &message.external_docs,
             &message.bindings,
+            "messageBindings",
+            components.map(|c| &c.message_bindings),
+        );
+    }
+
+    /// An operation trait carries the same references an operation
+    /// does, and a `bindings` reference is only judged by the position
+    /// holding it — bindings being declared under four names.
+    fn check_operation_trait_references(
+        &self,
+        ctx: &mut Context,
+        operation_trait: &OperationTrait,
+    ) {
+        let components = self.components.as_ref();
+        self.check_entry_list(
+            ctx,
+            "security",
+            &operation_trait.security,
+            "securitySchemes",
+            components.map(|c| &c.security_schemes),
+        );
+        self.check_shared_references(
+            ctx,
+            &operation_trait.tags,
+            &operation_trait.external_docs,
+            &operation_trait.bindings,
+            "operationBindings",
+            components.map(|c| &c.operation_bindings),
+        );
+    }
+
+    /// The same for a message trait, whose bindings are message ones.
+    fn check_message_trait_references(&self, ctx: &mut Context, message_trait: &MessageTrait) {
+        let components = self.components.as_ref();
+        self.check_entry_option(
+            ctx,
+            "headers",
+            &message_trait.headers,
+            "schemas",
+            components.map(|c| &c.schemas),
+        );
+        self.check_entry_option(
+            ctx,
+            "correlationId",
+            &message_trait.correlation_id,
+            "correlationIds",
+            components.map(|c| &c.correlation_ids),
+        );
+        self.check_shared_references(
+            ctx,
+            &message_trait.tags,
+            &message_trait.external_docs,
+            &message_trait.bindings,
             "messageBindings",
             components.map(|c| &c.message_bindings),
         );
@@ -718,6 +792,13 @@ impl Document {
             "operationTraits",
             components.map(|c| &c.operation_traits),
         );
+        for (index, operation_trait) in operation.traits.iter().enumerate() {
+            if let Some(operation_trait) = operation_trait.item() {
+                ctx.in_index("traits", index, |ctx| {
+                    self.check_operation_trait_references(ctx, operation_trait);
+                });
+            }
+        }
         self.check_entry_list(
             ctx,
             "security",
@@ -1256,6 +1337,14 @@ mod tests {
             "messages": {
                 "real": { "name": "M" },
                 "alias": { "$ref": "#/components/messages/real" }
+            },
+            "operationTraits": {
+                "real": { "title": "T" },
+                "alias": { "$ref": "#/components/operationTraits/real" }
+            },
+            "messageTraits": {
+                "real": { "title": "T" },
+                "alias": { "$ref": "#/components/messageTraits/real" }
             }
         });
         assert_eq!(errors_for(value), Vec::<String>::new());
@@ -2060,6 +2149,136 @@ mod tests {
             errors_for(value)
                 .iter()
                 .any(|e| e.contains("must point at a message of `a//b.yaml#/c`")),
+        );
+    }
+
+    #[test]
+    fn structure_continues_below_a_singleton() {
+        // `#/info/tags/0` is a tag: `info` is the document's own
+        // structure, so what hangs off it is too, and a tag reads as a
+        // channel only because the model is permissive.
+        let mut value = wired_from_components();
+        value["info"]["tags"] = json!([ { "name": "t" } ]);
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "#/info/tags/0" });
+        value["components"]["operations"]["receiveSignups"]["messages"] = json!([]);
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.operations.receiveSignups.channel.$ref: channel `#/info/tags/0` does not point at an object of the expected kind"),
+        );
+
+        // Named where a tag belongs, it is exactly right.
+        let mut value = wired();
+        value["info"]["tags"] = json!([ { "name": "t" }, { "$ref": "#/info/tags/0" } ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_traits_bindings_are_the_traits_kind_of_bindings() {
+        // Bindings are declared under four names, so which one a
+        // reference may use is decided by the position holding it —
+        // including inside a trait, inline or reusable.
+        let mut value = wired();
+        value["components"] = json!({
+            "messageBindings": { "mb": { "kafka": {} } },
+            "operationTraits": { "t": { "bindings": { "$ref": "#/components/messageBindings/mb" } } }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.operationTraits.t.bindings.$ref: `#/components/messageBindings/mb` does not point at an object of the expected kind"),
+        );
+
+        // The same inline, on an operation's trait.
+        let mut value = wired();
+        value["operations"]["receiveSignups"]["traits"] =
+            json!([ { "bindings": { "$ref": "#/components/messageBindings/mb" } } ]);
+        value["components"] = json!({ "messageBindings": { "mb": { "kafka": {} } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.operations.receiveSignups.traits[0].bindings.$ref: `#/components/messageBindings/mb` does not point at an object of the expected kind"),
+        );
+
+        // The same inline, on a message's trait.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["messages"]["signup"]["traits"] =
+            json!([ { "bindings": { "$ref": "#/components/operationBindings/ob" } } ]);
+        value["components"] = json!({ "operationBindings": { "ob": { "kafka": {} } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.channels.userSignedUp.messages.signup.traits[0].bindings.$ref: `#/components/operationBindings/ob` does not point at an object of the expected kind"),
+        );
+
+        // Bindings of the right kind are left alone.
+        let mut value = wired();
+        value["components"] = json!({
+            "messageBindings": { "mb": { "kafka": {} } },
+            "messageTraits": { "t": { "bindings": { "$ref": "#/components/messageBindings/mb" } } }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_key_may_look_like_an_extension_at_any_depth() {
+        // `x-message` is a message's name, not an extension of the
+        // channel, so the structure below it still declares kinds.
+        let value = json!({
+            "asyncapi": "3.1.0",
+            "info": { "title": "T", "version": "1" },
+            "components": {
+                "channels": { "c": { "messages": { "x-message": { "name": "M" } } } },
+                "operations": {
+                    "o": {
+                        "action": "send",
+                        "channel": { "$ref": "#/components/channels/c/messages/x-message" }
+                    }
+                }
+            }
+        });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("does not point at an object of the expected kind")),
+        );
+
+        // Naming that message as a message is fine.
+        let value = json!({
+            "asyncapi": "3.1.0",
+            "info": { "title": "T", "version": "1" },
+            "components": {
+                "channels": { "c": { "messages": { "x-message": { "name": "M" } } } },
+                "operations": {
+                    "o": {
+                        "action": "send",
+                        "channel": { "$ref": "#/components/channels/c" },
+                        "messages": [ { "$ref": "#/components/channels/c/messages/x-message" } ]
+                    }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_resource_is_compared_by_its_path_alone() {
+        // `a//../b.yaml` and `a/b.yaml` are the same file.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "a//../b.yaml#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "a/b.yaml#/c/messages/m" } ]);
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A slash inside a query is not a path separator, so these are
+        // two different resources.
+        let mut value = wired_from_components();
+        value["components"]["operations"]["receiveSignups"]["channel"] =
+            json!({ "$ref": "http://host?x=/a/../b#/c" });
+        value["components"]["operations"]["receiveSignups"]["messages"] =
+            json!([ { "$ref": "http://host?x=/b#/c/messages/m" } ]);
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("must point at a message of `http://host?x=/a/../b#/c`")),
         );
     }
 

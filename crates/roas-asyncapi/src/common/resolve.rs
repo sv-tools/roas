@@ -215,46 +215,45 @@ const SINGLETONS: &[&str] = &["info", "asyncapi", "id", "defaultContentType"];
 /// an extension that happens to spell a map `messages` — is arbitrary
 /// JSON, and nothing about its shape says what it holds. Within the
 /// document, what names the kind is the token *before* the last one,
-/// at whatever depth: `#/channels/c/messages/m` is a message, and
-/// using it where a channel belongs is the same mistake as
-/// `#/components/messages/m` there. A token that is no kind at all —
-/// `publish` in v2.6's `#/channels/user/publish/message` — says nothing
-/// either way, and the pointer is judged on what it finds instead.
+/// at whatever depth: `#/channels/c/messages/m` and `#/info/tags/0` are
+/// a message and a tag, and using either where a channel belongs is the
+/// same mistake as `#/components/messages/m` there. A token that is no
+/// kind at all — `publish` in v2.6's `#/channels/user/publish/message` —
+/// says nothing either way, and the pointer is judged on what it finds.
 fn names_something_else(path: &[String], expected: &str) -> bool {
     // The whole document is a container.
     let [first, rest @ ..] = path else {
         return true;
     };
     // Rooted in the document's own structure, or not our business.
-    if first != "components" && !KINDS.contains(&first.as_str()) {
-        return rest.is_empty() && SINGLETONS.contains(&first.as_str());
-    }
-    // Structure ends where an extension begins: what is inside an `x-`
-    // member is arbitrary, and a map it spells `messages` declares
-    // nothing. A *key* is not a member, though — a channel may
-    // legitimately be named `x-thing`, so keys are skipped over.
-    // A *member* may be an extension; a *key* is a name, and a channel
-    // may legitimately be called `x-thing`. Under `components` the
-    // first token is a member and the second is a key; under a root map
-    // the first token is already the key.
-    let members: Vec<&String> = if first == "components" {
-        rest.iter().take(1).chain(rest.iter().skip(2)).collect()
-    } else {
-        rest.iter().skip(1).collect()
-    };
-    if members.iter().any(|token| token.starts_with("x-")) {
+    if first != "components"
+        && !KINDS.contains(&first.as_str())
+        && !SINGLETONS.contains(&first.as_str())
+    {
         return false;
     }
-    match rest {
-        // `#/components` itself, or a whole map.
-        [] => true,
-        // A whole map under `components`.
-        [kind] if first == "components" => KINDS.contains(&kind.as_str()),
-        _ => {
-            let named = &path[path.len() - 2];
-            named != expected && KINDS.contains(&named.as_str())
-        }
+    // `#/components`, a whole map, or a singleton named on its own.
+    if rest.is_empty() {
+        return true;
     }
+    // Structure ends where an extension begins: what is inside an `x-`
+    // *member* is arbitrary. A *key* is not a member, though — a
+    // channel or a message may legitimately be named `x-thing` — and
+    // what marks a key is that the token before it named a map.
+    let is_key = |index: usize| index > 0 && KINDS.contains(&path[index - 1].as_str());
+    if path
+        .iter()
+        .enumerate()
+        .any(|(index, token)| token.starts_with("x-") && !is_key(index))
+    {
+        return false;
+    }
+    // A whole map under `components`.
+    if first == "components" && rest.len() == 1 {
+        return KINDS.contains(&rest[0].as_str());
+    }
+    let named = &path[path.len() - 2];
+    named != expected && KINDS.contains(&named.as_str())
 }
 
 /// Decide what an unresolved local pointer *is*, by walking the
@@ -428,28 +427,30 @@ impl std::fmt::Display for Terminus {
 /// Remove dot-segments from a URI reference's path, in the spirit of
 /// [RFC 3986 §5.2.4](https://www.rfc-editor.org/rfc/rfc3986#section-5.2.4).
 ///
-/// Only `.` and `..` segments are touched. An empty segment is a
-/// segment: `a//b.yaml` and `a/b.yaml` are different paths. A `..` that
-/// cannot be resolved is kept rather than dropped, so two references
-/// that climb equally far still compare alike — §5.2.4 discards those,
-/// but it is defined for a path already merged onto a base, and these
-/// references have no base to merge onto.
+/// Only `.` and `..` segments are touched, and only in the path: a
+/// scheme, authority, or query is left as written, being already in
+/// comparable form — a slash inside a query is not a path separator.
+/// An empty segment is a segment, so `a//b.yaml` and `a/b.yaml` are
+/// different paths, though `..` removes one like any other.
 ///
-/// Only the path is touched: a scheme, authority, or query is left as
-/// written, being already in comparable form.
+/// A `..` that cannot be resolved is kept rather than dropped, so two
+/// references that climb equally far still compare alike. §5.2.4
+/// discards those, but it is defined for a path already merged onto a
+/// base, and these references have none.
 fn remove_dot_segments(reference: &str) -> String {
-    let path_start = match reference.find("//") {
-        Some(slashes) if slashes == 0 || reference[..slashes].ends_with(':') => reference
+    // A query is not a path, however many slashes it contains.
+    let (before_query, query) = match reference.find('?') {
+        Some(cut) => reference.split_at(cut),
+        None => (reference, ""),
+    };
+    let path_start = match before_query.find("//") {
+        Some(slashes) if slashes == 0 || before_query[..slashes].ends_with(':') => before_query
             [slashes + 2..]
             .find('/')
-            .map_or(reference.len(), |offset| slashes + 2 + offset),
-        _ => reference.find(':').map_or(0, |colon| colon + 1),
+            .map_or(before_query.len(), |offset| slashes + 2 + offset),
+        _ => before_query.find(':').map_or(0, |colon| colon + 1),
     };
-    let (prefix, rest) = reference.split_at(path_start);
-    let (path, suffix) = match rest.find('?') {
-        Some(cut) => rest.split_at(cut),
-        None => (rest, ""),
-    };
+    let (prefix, path) = before_query.split_at(path_start);
     if path.is_empty() {
         return reference.to_owned();
     }
@@ -462,12 +463,14 @@ fn remove_dot_segments(reference: &str) -> String {
         match segment {
             "." | ".." => {
                 if segment == ".." {
-                    // Climbing out of a name; anything else is kept,
-                    // there being no base to climb through.
                     match out.last() {
-                        Some(&last) if last != ".." && !last.is_empty() => {
+                        // An empty segment is a segment, and `..`
+                        // removes it like any other.
+                        Some(&previous) if previous != ".." => {
                             out.pop();
                         }
+                        // Climbing past the start: kept where there is
+                        // no base to climb through.
                         _ if !absolute => out.push(".."),
                         _ => {}
                     }
@@ -492,7 +495,7 @@ fn remove_dot_segments(reference: &str) -> String {
     if normalized.is_empty() {
         normalized.push_str("./");
     }
-    format!("{prefix}{normalized}{suffix}")
+    format!("{prefix}{normalized}{query}")
 }
 
 /// [`follow`], reporting *where* the chain ended as well as what it
@@ -801,8 +804,13 @@ mod tests {
             ("/a/b/../c", "/a/c"),
             ("/../a", "/a"),
             ("", ""),
-            // An empty segment is a segment, not a typo.
+            // An empty segment is a segment, not a typo — though
+            // `..` removes one like any other.
             ("a//b.yaml", "a//b.yaml"),
+            ("a//../b.yaml", "a/b.yaml"),
+            // A query is not a path, however many slashes it holds.
+            ("http://host?x=/a/../b", "http://host?x=/a/../b"),
+            ("http://host/a/../b?q=/x/../y", "http://host/b?q=/x/../y"),
             // The current directory is not the current document.
             ("././", "./"),
             ("./", "./"),

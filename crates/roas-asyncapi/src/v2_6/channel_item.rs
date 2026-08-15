@@ -114,6 +114,9 @@ impl ValidateWithContext for ChannelItem {
             ctx.require_non_empty("$ref", reference);
             crate::common::reference::check_external(ctx, reference);
             crate::common::resolve::check_names_something(ctx, reference);
+            // A field-style `$ref` is still a reference to one kind of
+            // object, and this position says which.
+            crate::common::resolve::check_names_kind::<ChannelItem>(ctx, reference, "channels");
         }
         ctx.validate_map_keys("parameters", &self.parameters);
 
