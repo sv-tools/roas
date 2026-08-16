@@ -18,7 +18,7 @@ use crate::v2_6::external_documentation::ExternalDocumentation;
 use crate::v2_6::schema::{Schema, SchemaType, SubSchema};
 use crate::v2_6::tag::Tag;
 use crate::validation::{Context, ValidateWithContext};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
 /// The `schemaFormat` values that make a payload an AsyncAPI Schema
@@ -70,26 +70,6 @@ pub fn payload_is_asyncapi_schema(schema_format: Option<&str>) -> bool {
 /// schema checks, reporting a parse failure as a diagnostic rather than
 /// letting a malformed schema through.
 fn validate_schema_payload(ctx: &mut Context, payload: &serde_json::Value) {
-    // A payload that names a schema is a Reference Object, and a
-    // Reference Object is `$ref` alone. The typed schema positions drop
-    // what sits beside one on the way in; a payload is raw JSON so that
-    // any dialect round-trips, so here the ignored half is reported
-    // instead of silently kept.
-    if let Some(map) = payload.as_object()
-        && map.contains_key("$ref")
-        && map.len() > 1
-    {
-        let ignored = map
-            .keys()
-            .filter(|key| key.as_str() != "$ref")
-            .map(|key| format!("`{key}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        ctx.error_field(
-            "payload",
-            format!("{ignored} beside `$ref` is ignored: a schema `$ref` is a Reference Object"),
-        );
-    }
     match serde_json::from_value::<SubSchema>(payload.clone()) {
         Ok(schema) => ctx.in_field("payload", |ctx| schema.validate_with_context(ctx)),
         Err(err) => ctx.error_field(
@@ -183,6 +163,7 @@ impl ValidateWithContext for MessageOneOf {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[serde(remote = "Self")]
 pub struct Message {
     /// A machine-friendly identifier, unique across the document.
     #[serde(rename = "messageId", skip_serializing_if = "Option::is_none")]
@@ -252,6 +233,67 @@ pub struct Message {
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+impl Serialize for Message {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // `remote = "Self"` makes the derive an inherent function for
+        // this direction too; nothing else about serializing changes.
+        Message::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // The derive is generated as an inherent function by
+        // `remote = "Self"`, which leaves this impl free to run after
+        // it — the only place a payload can be normalized, since that
+        // needs `schemaFormat`, which the field's own deserializer
+        // cannot see.
+        let mut message = Message::deserialize(deserializer)?;
+        message.normalize_payload_reference();
+        Ok(message)
+    }
+}
+
+impl Message {
+    /// Reduce a payload that is a Reference Object to its `$ref`.
+    ///
+    /// "Any time a Schema Object can be used, a Reference Object can be
+    /// used in its place", and additional properties on one "SHALL be
+    /// ignored" — which the typed schema positions honour by
+    /// deserializing into a [`RefOr`] and dropping the rest. A payload
+    /// is raw JSON so that any dialect round-trips, so it is reduced
+    /// here instead, to the same effect.
+    ///
+    /// Only in this document's own dialect: another dialect decides for
+    /// itself what sits beside a `$ref` — 2020-12 keeps it where
+    /// draft-07 ignores it — and a payload this crate cannot type is
+    /// not one it should be rewriting.
+    fn normalize_payload_reference(&mut self) {
+        if !payload_is_asyncapi_schema(self.schema_format.as_deref()) {
+            return;
+        }
+        let Some(payload) = self.payload.as_mut() else {
+            return;
+        };
+        let Some(map) = payload.as_object() else {
+            return;
+        };
+        if map.len() < 2 {
+            return;
+        }
+        let Some(reference) = map.get("$ref").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        *payload = serde_json::json!({ "$ref": reference.to_owned() });
+    }
 }
 
 impl ValidateWithContext for Message {

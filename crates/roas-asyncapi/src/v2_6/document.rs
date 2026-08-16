@@ -1814,7 +1814,7 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_ref_carries_nothing_beside_it() {
+    fn a_payload_ref_ignores_what_sits_beside_it() {
         let document = |message: serde_json::Value| {
             json!({
                 "asyncapi": "2.6.0",
@@ -1824,39 +1824,48 @@ mod tests {
             })
         };
 
-        // In the default dialect a payload `$ref` is a Reference
-        // Object, so what sits beside it does nothing — and is said so
-        // rather than left to look meaningful.
+        // In the document's own dialect a payload `$ref` is a Reference
+        // Object, and "any additional properties SHALL be ignored" — as
+        // the typed positions ignore them, by dropping them.
+        let value = document(json!({
+            "payload": {
+                "$ref": "#/components/schemas/base",
+                "properties": { "ignored": { "type": "string" } }
+            }
+        }));
+        assert_eq!(errors_for(value.clone()), Vec::<String>::new());
+
+        let parsed: Document = serde_json::from_value(value).unwrap();
         assert_eq!(
-            errors_for(document(json!({
-                "payload": {
-                    "$ref": "#/components/schemas/base",
-                    "properties": { "ignored": { "type": "string" } }
-                }
-            }))),
-            vec![
-                "#.channels.c.publish.message.payload: `properties` beside `$ref` is ignored: a schema `$ref` is a Reference Object"
-            ]
+            serde_json::to_value(&parsed).unwrap(),
+            document(json!({ "payload": { "$ref": "#/components/schemas/base" } }))
         );
 
-        // The reference alone is fine.
-        assert_eq!(
-            errors_for(document(
-                json!({ "payload": { "$ref": "#/components/schemas/base" } })
-            )),
-            Vec::<String>::new()
+        // Being ignored, they are not there to be named either.
+        let mut value = document(json!({
+            "payload": {
+                "$ref": "#/components/schemas/base",
+                "properties": { "ignored": { "type": "string" } }
+            }
+        }));
+        value["components"]["schemas"]["other"] =
+            json!({ "$ref": "#/channels/c/publish/message/payload/properties/ignored" });
+        assert!(
+            errors_for(value)
+                .iter()
+                .any(|e| e.contains("names nothing in this document")),
         );
 
         // Another dialect's payload is that dialect's business: its
-        // `$ref` may mean anything, and its siblings are not ours to
-        // judge.
-        assert_eq!(
-            errors_for(document(json!({
-                "schemaFormat": "application/vnd.apache.avro;version=1.9.0",
-                "payload": { "$ref": "user.avsc", "type": "record" }
-            }))),
-            Vec::<String>::new()
-        );
+        // `$ref` may mean anything, and what sits beside one is not
+        // ours to remove — 2020-12 keeps it where draft-07 ignores it.
+        let value = document(json!({
+            "schemaFormat": "application/vnd.apache.avro;version=1.9.0",
+            "payload": { "$ref": "user.avsc", "type": "record" }
+        }));
+        assert_eq!(errors_for(value.clone()), Vec::<String>::new());
+        let parsed: Document = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), value);
     }
 
     #[test]
