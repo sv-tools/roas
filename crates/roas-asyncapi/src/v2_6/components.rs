@@ -66,12 +66,12 @@ component_maps! {
     security_schemes: RefOr<SecurityScheme> => "securitySchemes",
     parameters: RefOr<Parameter> => "parameters",
     correlation_ids: RefOr<CorrelationId> => "correlationIds",
-    operation_traits: OperationTrait => "operationTraits",
-    message_traits: MessageTrait => "messageTraits",
-    server_bindings: Bindings => "serverBindings",
-    channel_bindings: Bindings => "channelBindings",
-    operation_bindings: Bindings => "operationBindings",
-    message_bindings: Bindings => "messageBindings",
+    operation_traits: RefOr<OperationTrait> => "operationTraits",
+    message_traits: RefOr<MessageTrait> => "messageTraits",
+    server_bindings: RefOr<Bindings> => "serverBindings",
+    channel_bindings: RefOr<Bindings> => "channelBindings",
+    operation_bindings: RefOr<Bindings> => "operationBindings",
+    message_bindings: RefOr<Bindings> => "messageBindings",
 }
 
 #[cfg(test)]

@@ -279,19 +279,28 @@ const MEMBERS: &[(&str, Role<'static>)] = &[
     ("address", Role::Object(Some("replyAddresses"))),
 ];
 
-/// The kind of a `traits` entry or of `bindings`, which is whatever the
-/// object holding them is: a message's traits are message traits, and a
-/// channel's bindings are channel bindings.
-fn kind_within(parent: Option<&str>, member: &str) -> Option<&'static str> {
-    match (parent?, member) {
-        ("messages" | "messageTraits", "traits") => Some("messageTraits"),
-        ("operations" | "operationTraits", "traits") => Some("operationTraits"),
-        ("servers", "bindings") => Some("serverBindings"),
-        ("channels", "bindings") => Some("channelBindings"),
-        ("operations" | "operationTraits", "bindings") => Some("operationBindings"),
-        ("messages" | "messageTraits", "bindings") => Some("messageBindings"),
-        _ => None,
-    }
+/// The members whose meaning depends on what holds them.
+///
+/// A message's traits are message traits and a channel's bindings are
+/// channel bindings; v2.6 names a channel's operations after what they
+/// do; and `oneOf` holds messages under a message but schemas under a
+/// schema. None of that can be read off the member's own name, which is
+/// why these are settled before [`MEMBERS`].
+fn member_within<'a>(parent: Option<&str>, member: &str) -> Option<Role<'a>> {
+    Some(match (parent?, member) {
+        ("messages" | "messageTraits", "traits") => Role::Collection(Some("messageTraits")),
+        ("operations" | "operationTraits", "traits") => Role::Collection(Some("operationTraits")),
+        ("servers", "bindings") => Role::Object(Some("serverBindings")),
+        ("channels", "bindings") => Role::Object(Some("channelBindings")),
+        ("operations" | "operationTraits", "bindings") => Role::Object(Some("operationBindings")),
+        ("messages" | "messageTraits", "bindings") => Role::Object(Some("messageBindings")),
+        // v2.6 keeps a channel's two operations under the names of what
+        // they do, and lets an operation carry several messages.
+        ("channels", "publish" | "subscribe") => Role::Object(Some("operations")),
+        ("operations" | "operationTraits", "message") => Role::Object(Some("messages")),
+        ("messages" | "messageTraits", "oneOf") => Role::Collection(Some("messages")),
+        _ => return None,
+    })
 }
 
 /// The role of a token, given the role of the one before it.
@@ -317,13 +326,9 @@ fn role_after<'a>(previous: Role<'a>, token: &'a str) -> Role<'a> {
     if token.starts_with("x-") {
         return Role::Opaque;
     }
-    // `traits` and `bindings` take their kind from whatever holds them.
-    if let Some(kind) = kind_within(parent, token) {
-        return if token == "traits" {
-            Role::Collection(Some(kind))
-        } else {
-            Role::Object(Some(kind))
-        };
+    // Some members mean different things in different places.
+    if let Some(role) = member_within(parent, token) {
+        return role;
     }
     MEMBERS
         .iter()

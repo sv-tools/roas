@@ -1528,6 +1528,108 @@ mod tests {
     }
 
     #[test]
+    fn structure_continues_below_publish_and_subscribe() {
+        // v2.6 names a channel's operations after what they do, and
+        // the objects under them keep their kinds.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "c": { "publish": { "message": { "name": "M" } } } },
+            "components": { "channels": { "alias": { "$ref": "#/channels/c/publish" } } }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.channels.alias.$ref: `#/channels/c/publish` does not point at an object of the expected kind"),
+        );
+
+        // A message's traits are message traits down here too…
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "c": { "publish": { "message": { "name": "M", "traits": [ { "title": "mt" } ] } } }
+            },
+            "components": {
+                "operationTraits": { "t": { "$ref": "#/channels/c/publish/message/traits/0" } }
+            }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.operationTraits.t.$ref: `#/channels/c/publish/message/traits/0` does not point at an object of the expected kind"),
+        );
+
+        // …and an operation's are operation traits.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "c": {
+                    "publish": { "traits": [ { "operationId": "o" } ], "message": { "name": "M" } }
+                }
+            },
+            "components": {
+                "messageTraits": { "t": { "$ref": "#/channels/c/publish/traits/0" } }
+            }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.messageTraits.t.$ref: `#/channels/c/publish/traits/0` does not point at an object of the expected kind"),
+        );
+    }
+
+    #[test]
+    fn a_message_under_an_operation_is_still_a_message() {
+        // The pointer shape v2.6 documents actually use, in both the
+        // single and the `oneOf` form.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": { "publish": { "message": { "name": "M" } } },
+                "target": {
+                    "subscribe": { "message": { "$ref": "#/channels/source/publish/message" } }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": {
+                    "publish": { "message": { "oneOf": [ { "name": "A" }, { "name": "B" } ] } }
+                },
+                "target": {
+                    "subscribe": {
+                        "message": { "$ref": "#/channels/source/publish/message/oneOf/1" }
+                    }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A reusable trait may be an alias, which the specification
+        // allows for every component map but `channels`.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "messageTraits": {
+                    "real": { "title": "T" },
+                    "alias": { "$ref": "#/components/messageTraits/real" }
+                },
+                "messageBindings": {
+                    "real": { "kafka": {} },
+                    "alias": { "$ref": "#/components/messageBindings/real" }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_boolean_schema_is_a_schema() {
         // `true` is a schema, and no struct deserializes it.
         let value = json!({
