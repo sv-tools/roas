@@ -241,8 +241,19 @@ impl Serialize for Message {
         S: Serializer,
     {
         // `remote = "Self"` makes the derive an inherent function for
-        // this direction too; nothing else about serializing changes.
-        Message::serialize(self, serializer)
+        // this direction too, which leaves room to normalize here as
+        // well as on the way in. `payload` is public, so a message
+        // built or edited in memory has never been through
+        // deserialization — and what a Reference Object ignores should
+        // reach neither the wire nor the document the resolver walks.
+        match self.payload_reference_only() {
+            Some(payload) => {
+                let mut message = self.clone();
+                message.payload = Some(payload);
+                Message::serialize(&message, serializer)
+            }
+            None => Message::serialize(self, serializer),
+        }
     }
 }
 
@@ -277,22 +288,24 @@ impl Message {
     /// draft-07 ignores it — and a payload this crate cannot type is
     /// not one it should be rewriting.
     fn normalize_payload_reference(&mut self) {
+        if let Some(payload) = self.payload_reference_only() {
+            self.payload = Some(payload);
+        }
+    }
+
+    /// This payload reduced to its `$ref`, when it is a Reference
+    /// Object in the document's own dialect and carries anything
+    /// beside it. `None` when there is nothing to reduce.
+    fn payload_reference_only(&self) -> Option<serde_json::Value> {
         if !payload_is_asyncapi_schema(self.schema_format.as_deref()) {
-            return;
+            return None;
         }
-        let Some(payload) = self.payload.as_mut() else {
-            return;
-        };
-        let Some(map) = payload.as_object() else {
-            return;
-        };
+        let map = self.payload.as_ref()?.as_object()?;
         if map.len() < 2 {
-            return;
+            return None;
         }
-        let Some(reference) = map.get("$ref").and_then(serde_json::Value::as_str) else {
-            return;
-        };
-        *payload = serde_json::json!({ "$ref": reference.to_owned() });
+        let reference = map.get("$ref")?.as_str()?;
+        Some(serde_json::json!({ "$ref": reference }))
     }
 }
 

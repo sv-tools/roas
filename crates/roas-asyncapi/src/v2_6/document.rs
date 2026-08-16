@@ -1869,6 +1869,66 @@ mod tests {
     }
 
     #[test]
+    fn a_payload_built_in_memory_is_normalized_too() {
+        // `payload` is public, so a message may carry siblings that
+        // never went through deserialization.
+        let mut document: Document = serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "c": { "publish": { "message": { "name": "M" } } } },
+            "components": {
+                "schemas": {
+                    "base": { "type": "object" },
+                    "other": {
+                        "$ref": "#/channels/c/publish/message/payload/properties/ignored"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let Some(OperationMessage::Single(message)) = document.channels["c"]
+            .publish
+            .as_ref()
+            .and_then(|publish| publish.message.clone())
+        else {
+            panic!("a single inline message");
+        };
+        let mut message = message.item().expect("inline").clone();
+        message.payload = Some(json!({
+            "$ref": "#/components/schemas/base",
+            "properties": { "ignored": { "type": "string" } }
+        }));
+        document
+            .channels
+            .get_mut("c")
+            .and_then(|channel| channel.publish.as_mut())
+            .expect("a publish operation")
+            .message = Some(OperationMessage::Single(Box::new(RefOr::Item(message))));
+
+        // What a Reference Object ignores reaches neither the wire…
+        let serialized = serde_json::to_value(&document).unwrap();
+        assert_eq!(
+            serialized["channels"]["c"]["publish"]["message"]["payload"],
+            json!({ "$ref": "#/components/schemas/base" })
+        );
+
+        // …nor the document the resolver walks.
+        let errors: Vec<String> = document
+            .validate(EnumSet::empty())
+            .unwrap_err()
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            errors.iter().any(|e| e
+                == "#.components.schemas.other.$ref: `#/channels/c/publish/message/payload/properties/ignored` names nothing in this document"),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
     fn a_schema_reference_resolves_like_any_other() {
         let document = |schemas: serde_json::Value| {
             json!({
