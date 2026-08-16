@@ -7,7 +7,7 @@
 //! applying traits to a message is resolution rather than modeling, so
 //! this crate parses and validates them without merging.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::MessageBindings;
 use crate::common::reference::RefOr;
 use crate::v3_1::correlation_id::CorrelationId;
 use crate::v3_1::external_documentation::ExternalDocumentation;
@@ -79,7 +79,7 @@ pub struct Message {
 
     /// Protocol-specific definitions for the message.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<RefOr<MessageBindings>>,
 
     /// Examples of this message, each with headers and / or payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -167,7 +167,7 @@ pub struct MessageTrait {
     pub external_docs: Option<RefOr<ExternalDocumentation>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<RefOr<MessageBindings>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<MessageExample>,

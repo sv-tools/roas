@@ -11,18 +11,14 @@
 //! [`ValidationOptions::ErrorOnExternalReference`] asks for a
 //! self-contained document.
 
-use crate::common::bindings::Bindings;
 use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference};
-use crate::common::resolve::{Resolution, Terminus, classify_unresolved, follow, follow_tracked};
+use crate::common::resolve::{Resolution, Terminus, classify_unresolved, follow_tracked};
 use crate::v3_0::channel::Channel;
 use crate::v3_0::components::Components;
-use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::info::Info;
-use crate::v3_0::message::{Message, MessageTrait};
-use crate::v3_0::operation::{Operation, OperationReply, OperationTrait};
+use crate::v3_0::operation::{Operation, OperationReply};
 use crate::v3_0::server::Server;
-use crate::v3_0::tag::Tag;
 use crate::v3_0::version::Version;
 use crate::validation::{Context, Error, Validate, ValidateWithContext, ValidationOptions};
 use enumset::EnumSet;
@@ -71,17 +67,6 @@ pub struct Document {
     #[serde(with = "crate::common::extensions")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
-}
-
-/// Check the declared aliases of every `components` map that has no
-/// root counterpart, which is all of them but servers, channels, and
-/// operations.
-macro_rules! declared_components {
-    ($self:ident, $ctx:ident, $components:ident, $( $field:ident => $name:literal ),+ $(,)?) => {
-        $(
-            $self.check_declared($ctx, $name, &$components.$field, None, Some(&$components.$field));
-        )+
-    };
 }
 
 /// Where an object sits in the document.
@@ -191,34 +176,6 @@ impl Document {
         let path = reference.local_pointer().and_then(pointer::tokens)?;
         let rooted = matches!(path.as_slice(), [this, _] if this == field);
         (!rooted).then(|| format!("must point into the root `{field}` object"))
-    }
-
-    /// Report a declared entry that is a `$ref` leading nowhere.
-    ///
-    /// A dangling alias is a document bug whether or not anything uses
-    /// it, and an unused one is exactly what no other check would
-    /// notice.
-    fn check_declared<T>(
-        &self,
-        ctx: &mut Context,
-        field: &str,
-        map: &BTreeMap<String, RefOr<T>>,
-        inline: Option<&BTreeMap<String, RefOr<T>>>,
-        components: Option<&BTreeMap<String, RefOr<T>>>,
-    ) where
-        T: DeserializeOwned,
-    {
-        for (key, entry) in map {
-            let RefOr::Reference(reference) = entry else {
-                continue;
-            };
-            let (_, resolution) = self.resolve(reference, field, inline, components);
-            if let Some(problem) = resolution.kind_problem() {
-                ctx.in_key(field, key, |ctx| {
-                    ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
-                });
-            }
-        }
     }
 
     fn components_map<'a, T>(
@@ -343,36 +300,6 @@ impl Document {
         })
     }
 
-    /// The message entry a pointer names, wherever messages may live:
-    /// a channel's own map, inline or under `components`, or the
-    /// reusable `components.messages`.
-    fn message_entry(&self, path: &[String]) -> Option<&RefOr<Message>> {
-        fn channel_message<'a>(
-            channels: &'a BTreeMap<String, RefOr<Channel>>,
-            name: &str,
-            key: &str,
-        ) -> Option<&'a RefOr<Message>> {
-            channels.get(name)?.item()?.messages.get(key)
-        }
-        match path {
-            [c, m, key] if c == "components" && m == "messages" => {
-                self.components.as_ref()?.messages.get(key)
-            }
-            [c, ch, name, m, key] if c == "components" && ch == "channels" && m == "messages" => {
-                channel_message(&self.components.as_ref()?.channels, name, key)
-            }
-            [ch, name, m, key] if ch == "channels" && m == "messages" => {
-                channel_message(&self.channels, name, key)
-            }
-            _ => None,
-        }
-    }
-
-    /// Whether a message entry leads somewhere that is not a message.
-    fn message_kind_problem(&self, entry: &RefOr<Message>) -> Option<&'static str> {
-        follow(self, entry, "messages", |path| self.message_entry(path)).kind_problem()
-    }
-
     /// Check that each `$ref` in `messages` names one of the channel's
     /// own messages.
     ///
@@ -429,18 +356,10 @@ impl Document {
     /// wired exactly like an inline one — except that it may reference
     /// freely, being outside the root.
     fn validate_components_wiring(&self, ctx: &mut Context, components: &Components) {
-        for (name, server) in &components.servers {
-            if let Some(server) = server.item() {
-                ctx.in_key("servers", name, |ctx| {
-                    self.check_server_references(ctx, server)
-                });
-            }
-        }
         for (name, channel) in &components.channels {
             if let Some(channel) = channel.item() {
                 ctx.in_key("channels", name, |ctx| {
                     self.validate_channel_servers(ctx, channel, Origin::Components);
-                    self.check_channel_references(ctx, channel);
                 });
             }
         }
@@ -448,28 +367,6 @@ impl Document {
             if let Some(operation) = operation.item() {
                 ctx.in_key("operations", name, |ctx| {
                     self.validate_operation_wiring(ctx, operation, Origin::Components);
-                    self.check_operation_references(ctx, operation);
-                });
-            }
-        }
-        for (name, message) in &components.messages {
-            if let Some(message) = message.item() {
-                ctx.in_key("messages", name, |ctx| {
-                    self.check_message_references(ctx, message)
-                });
-            }
-        }
-        for (name, operation_trait) in &components.operation_traits {
-            if let Some(operation_trait) = operation_trait.item() {
-                ctx.in_key("operationTraits", name, |ctx| {
-                    self.check_operation_trait_references(ctx, operation_trait);
-                });
-            }
-        }
-        for (name, message_trait) in &components.message_traits {
-            if let Some(message_trait) = message_trait.item() {
-                ctx.in_key("messageTraits", name, |ctx| {
-                    self.check_message_trait_references(ctx, message_trait);
                 });
             }
         }
@@ -477,356 +374,9 @@ impl Document {
             if let Some(reply) = reply.item() {
                 ctx.in_key("replies", name, |ctx| {
                     self.validate_reply_wiring(ctx, reply, Origin::Components);
-                    self.check_reply_references(ctx, reply);
                 });
             }
         }
-
-        // Every declared alias, whether or not anything uses it.
-        self.check_declared(
-            ctx,
-            "servers",
-            &components.servers,
-            Some(&self.servers),
-            Some(&components.servers),
-        );
-        self.check_declared(
-            ctx,
-            "channels",
-            &components.channels,
-            Some(&self.channels),
-            Some(&components.channels),
-        );
-        self.check_declared(
-            ctx,
-            "operations",
-            &components.operations,
-            Some(&self.operations),
-            Some(&components.operations),
-        );
-        // Messages resolve through channels as well as `components`,
-        // so they get the message lookup rather than the generic one.
-        for (key, entry) in &components.messages {
-            let Some(reference) = entry.reference() else {
-                continue;
-            };
-            if let Some(problem) = self.message_kind_problem(entry) {
-                ctx.in_key("messages", key, |ctx| {
-                    ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
-                });
-            }
-        }
-        declared_components! {
-            self, ctx, components,
-            schemas => "schemas",
-            security_schemes => "securitySchemes",
-            server_variables => "serverVariables",
-            parameters => "parameters",
-            correlation_ids => "correlationIds",
-            replies => "replies",
-            reply_addresses => "replyAddresses",
-            external_docs => "externalDocs",
-            tags => "tags",
-            operation_traits => "operationTraits",
-            message_traits => "messageTraits",
-            server_bindings => "serverBindings",
-            channel_bindings => "channelBindings",
-            operation_bindings => "operationBindings",
-            message_bindings => "messageBindings",
-        }
-    }
-
-    /// Report a declared reference that leads nowhere.
-    ///
-    /// Only a reference is checked here: an inline object is validated
-    /// where it sits.
-    fn check_entry<T>(
-        &self,
-        ctx: &mut Context,
-        entry: &RefOr<T>,
-        kind: &str,
-        components: Option<&BTreeMap<String, RefOr<T>>>,
-    ) where
-        T: DeserializeOwned,
-    {
-        let RefOr::Reference(reference) = entry else {
-            return;
-        };
-        let (_, resolution) = self.resolve(reference, kind, None, components);
-        if let Some(problem) = resolution.kind_problem() {
-            ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
-        }
-    }
-
-    fn check_entry_map<T>(
-        &self,
-        ctx: &mut Context,
-        field: &str,
-        map: &BTreeMap<String, RefOr<T>>,
-        kind: &str,
-        components: Option<&BTreeMap<String, RefOr<T>>>,
-    ) where
-        T: DeserializeOwned,
-    {
-        for (key, entry) in map {
-            ctx.in_key(field, key, |ctx| {
-                self.check_entry(ctx, entry, kind, components)
-            });
-        }
-    }
-
-    fn check_entry_list<T>(
-        &self,
-        ctx: &mut Context,
-        field: &str,
-        items: &[RefOr<T>],
-        kind: &str,
-        components: Option<&BTreeMap<String, RefOr<T>>>,
-    ) where
-        T: DeserializeOwned,
-    {
-        for (index, entry) in items.iter().enumerate() {
-            ctx.in_index(field, index, |ctx| {
-                self.check_entry(ctx, entry, kind, components);
-            });
-        }
-    }
-
-    fn check_entry_option<T>(
-        &self,
-        ctx: &mut Context,
-        field: &str,
-        entry: &Option<RefOr<T>>,
-        kind: &str,
-        components: Option<&BTreeMap<String, RefOr<T>>>,
-    ) where
-        T: DeserializeOwned,
-    {
-        if let Some(entry) = entry {
-            ctx.in_field(field, |ctx| self.check_entry(ctx, entry, kind, components));
-        }
-    }
-
-    /// The `tags`, `externalDocs`, and `bindings` every object carries.
-    fn check_shared_references(
-        &self,
-        ctx: &mut Context,
-        tags: &[RefOr<Tag>],
-        external_docs: &Option<RefOr<ExternalDocumentation>>,
-        bindings: &Option<RefOr<Bindings>>,
-        bindings_kind: &str,
-        bindings_map: Option<&BTreeMap<String, RefOr<Bindings>>>,
-    ) {
-        let components = self.components.as_ref();
-        self.check_entry_list(ctx, "tags", tags, "tags", components.map(|c| &c.tags));
-        self.check_entry_option(
-            ctx,
-            "externalDocs",
-            external_docs,
-            "externalDocs",
-            components.map(|c| &c.external_docs),
-        );
-        self.check_entry_option(ctx, "bindings", bindings, bindings_kind, bindings_map);
-    }
-
-    fn check_server_references(&self, ctx: &mut Context, server: &Server) {
-        let components = self.components.as_ref();
-        self.check_entry_map(
-            ctx,
-            "variables",
-            &server.variables,
-            "serverVariables",
-            components.map(|c| &c.server_variables),
-        );
-        self.check_entry_list(
-            ctx,
-            "security",
-            &server.security,
-            "securitySchemes",
-            components.map(|c| &c.security_schemes),
-        );
-        self.check_shared_references(
-            ctx,
-            &server.tags,
-            &server.external_docs,
-            &server.bindings,
-            "serverBindings",
-            components.map(|c| &c.server_bindings),
-        );
-    }
-
-    fn check_channel_references(&self, ctx: &mut Context, channel: &Channel) {
-        let components = self.components.as_ref();
-        for (key, entry) in &channel.messages {
-            ctx.in_key("messages", key, |ctx| {
-                // A message may be declared anywhere a message lives,
-                // so it gets the message lookup rather than one map.
-                if let Some(reference) = entry.reference()
-                    && let Some(problem) = self.message_kind_problem(entry)
-                {
-                    ctx.error_field("$ref", format!("`{}` {problem}", reference.reference));
-                }
-                if let Some(message) = entry.item() {
-                    self.check_message_references(ctx, message);
-                }
-            });
-        }
-        self.check_entry_map(
-            ctx,
-            "parameters",
-            &channel.parameters,
-            "parameters",
-            components.map(|c| &c.parameters),
-        );
-        self.check_shared_references(
-            ctx,
-            &channel.tags,
-            &channel.external_docs,
-            &channel.bindings,
-            "channelBindings",
-            components.map(|c| &c.channel_bindings),
-        );
-    }
-
-    fn check_message_references(&self, ctx: &mut Context, message: &Message) {
-        let components = self.components.as_ref();
-        for (field, schema) in [("headers", &message.headers), ("payload", &message.payload)] {
-            self.check_entry_option(
-                ctx,
-                field,
-                schema,
-                "schemas",
-                components.map(|c| &c.schemas),
-            );
-        }
-        self.check_entry_option(
-            ctx,
-            "correlationId",
-            &message.correlation_id,
-            "correlationIds",
-            components.map(|c| &c.correlation_ids),
-        );
-        self.check_entry_list(
-            ctx,
-            "traits",
-            &message.traits,
-            "messageTraits",
-            components.map(|c| &c.message_traits),
-        );
-        for (index, message_trait) in message.traits.iter().enumerate() {
-            if let Some(message_trait) = message_trait.item() {
-                ctx.in_index("traits", index, |ctx| {
-                    self.check_message_trait_references(ctx, message_trait);
-                });
-            }
-        }
-        self.check_shared_references(
-            ctx,
-            &message.tags,
-            &message.external_docs,
-            &message.bindings,
-            "messageBindings",
-            components.map(|c| &c.message_bindings),
-        );
-    }
-
-    /// An operation trait carries the same references an operation
-    /// does, and a `bindings` reference is only judged by the position
-    /// holding it — bindings being declared under four names.
-    fn check_operation_trait_references(
-        &self,
-        ctx: &mut Context,
-        operation_trait: &OperationTrait,
-    ) {
-        let components = self.components.as_ref();
-        self.check_entry_list(
-            ctx,
-            "security",
-            &operation_trait.security,
-            "securitySchemes",
-            components.map(|c| &c.security_schemes),
-        );
-        self.check_shared_references(
-            ctx,
-            &operation_trait.tags,
-            &operation_trait.external_docs,
-            &operation_trait.bindings,
-            "operationBindings",
-            components.map(|c| &c.operation_bindings),
-        );
-    }
-
-    /// The same for a message trait, whose bindings are message ones.
-    fn check_message_trait_references(&self, ctx: &mut Context, message_trait: &MessageTrait) {
-        let components = self.components.as_ref();
-        self.check_entry_option(
-            ctx,
-            "headers",
-            &message_trait.headers,
-            "schemas",
-            components.map(|c| &c.schemas),
-        );
-        self.check_entry_option(
-            ctx,
-            "correlationId",
-            &message_trait.correlation_id,
-            "correlationIds",
-            components.map(|c| &c.correlation_ids),
-        );
-        self.check_shared_references(
-            ctx,
-            &message_trait.tags,
-            &message_trait.external_docs,
-            &message_trait.bindings,
-            "messageBindings",
-            components.map(|c| &c.message_bindings),
-        );
-    }
-
-    fn check_operation_references(&self, ctx: &mut Context, operation: &Operation) {
-        let components = self.components.as_ref();
-        self.check_entry_list(
-            ctx,
-            "traits",
-            &operation.traits,
-            "operationTraits",
-            components.map(|c| &c.operation_traits),
-        );
-        for (index, operation_trait) in operation.traits.iter().enumerate() {
-            if let Some(operation_trait) = operation_trait.item() {
-                ctx.in_index("traits", index, |ctx| {
-                    self.check_operation_trait_references(ctx, operation_trait);
-                });
-            }
-        }
-        self.check_entry_list(
-            ctx,
-            "security",
-            &operation.security,
-            "securitySchemes",
-            components.map(|c| &c.security_schemes),
-        );
-        self.check_shared_references(
-            ctx,
-            &operation.tags,
-            &operation.external_docs,
-            &operation.bindings,
-            "operationBindings",
-            components.map(|c| &c.operation_bindings),
-        );
-        if let Some(reply) = operation.reply.as_ref().and_then(RefOr::item) {
-            ctx.in_field("reply", |ctx| self.check_reply_references(ctx, reply));
-        }
-    }
-
-    fn check_reply_references(&self, ctx: &mut Context, reply: &OperationReply) {
-        self.check_entry_option(
-            ctx,
-            "address",
-            &reply.address,
-            "replyAddresses",
-            self.components.as_ref().map(|c| &c.reply_addresses),
-        );
     }
 
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
@@ -843,56 +393,28 @@ impl Document {
 
         ctx.validate_map_keys("servers", &self.servers);
         for (name, server) in &self.servers {
-            ctx.in_key("servers", name, |ctx| {
-                if let Some(server) = server.item() {
-                    self.check_server_references(ctx, server);
-                }
-                server.validate_with_context(ctx);
-            });
+            ctx.in_key("servers", name, |ctx| server.validate_with_context(ctx));
         }
-        self.check_declared(
-            &mut ctx,
-            "servers",
-            &self.servers,
-            Some(&self.servers),
-            self.components_map(|c| &c.servers),
-        );
 
         ctx.validate_map_keys("channels", &self.channels);
         for (name, channel) in &self.channels {
             ctx.in_key("channels", name, |ctx| {
                 if let Some(channel) = channel.item() {
                     self.validate_channel_servers(ctx, channel, Origin::Root);
-                    self.check_channel_references(ctx, channel);
                 }
                 channel.validate_with_context(ctx);
             });
         }
-        self.check_declared(
-            &mut ctx,
-            "channels",
-            &self.channels,
-            Some(&self.channels),
-            self.components_map(|c| &c.channels),
-        );
 
         ctx.validate_map_keys("operations", &self.operations);
         for (name, operation) in &self.operations {
             ctx.in_key("operations", name, |ctx| {
                 if let Some(operation) = operation.item() {
                     self.validate_operation_wiring(ctx, operation, Origin::Root);
-                    self.check_operation_references(ctx, operation);
                 }
                 operation.validate_with_context(ctx);
             });
         }
-        self.check_declared(
-            &mut ctx,
-            "operations",
-            &self.operations,
-            Some(&self.operations),
-            self.components_map(|c| &c.operations),
-        );
 
         if let Some(components) = &self.components {
             ctx.in_field("components", |ctx| {
@@ -2579,6 +2101,27 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("must point at a message of `http://example.com/A.yaml#/c`")),
         );
+    }
+
+    #[test]
+    fn bindings_are_judged_by_the_object_that_declares_them() {
+        // Each position takes its own sort of bindings, inline as much
+        // as under `components`.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["bindings"] =
+            json!({ "$ref": "#/components/messageBindings/mb" });
+        value["components"] = json!({ "messageBindings": { "mb": { "kafka": {} } } });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.channels.userSignedUp.bindings.$ref: `#/components/messageBindings/mb` does not point at an object of the expected kind"),
+        );
+
+        // …and the right sort is accepted.
+        let mut value = wired();
+        value["channels"]["userSignedUp"]["bindings"] =
+            json!({ "$ref": "#/components/channelBindings/cb" });
+        value["components"] = json!({ "channelBindings": { "cb": { "kafka": {} } } });
+        assert_eq!(errors_for(value), Vec::<String>::new());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! `address` (where it actually is), and hangs the messages that travel
 //! over it off the channel rather than off an operation.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::ChannelBindings;
 use crate::common::reference::{RefOr, Reference};
 use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::message::Message;
@@ -78,7 +78,7 @@ pub struct Channel {
 
     /// Protocol-specific definitions for the channel.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<RefOr<ChannelBindings>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]

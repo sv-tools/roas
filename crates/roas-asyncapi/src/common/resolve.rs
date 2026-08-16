@@ -55,23 +55,6 @@ impl<'a, T> Resolution<'a, T> {
         }
     }
 
-    /// Why this pointer names the wrong sort of thing, if it does.
-    ///
-    /// Existence is [`check_names_something`]'s business — every
-    /// reference gets that — so a check that also knows what kind
-    /// belongs here reports only what that general one cannot see.
-    ///
-    /// (Only v3 layers a kind check over the general one; v2.6 reports
-    /// each of its own resolutions in full.)
-    #[must_use]
-    #[cfg(any(feature = "v3_0", feature = "v3_1"))]
-    pub(crate) fn kind_problem(&self) -> Option<&'static str> {
-        match self {
-            Resolution::WrongKind => self.problem(),
-            _ => None,
-        }
-    }
-
     /// Why this pointer is a document bug, if it is one.
     ///
     /// `None` means it resolved, left the document, or landed somewhere
@@ -469,6 +452,9 @@ fn follow_json<'v>(
 /// Everything else — external termini, cycles, malformed pointers, and
 /// the fallback for unmodeled locations — is the same everywhere and
 /// lives here.
+/// (v2.6 resolves this way; v3 keys everything off [`follow_tracked`],
+/// which reports where a chain ended as well as what it found.)
+#[cfg(any(feature = "v2_6", test))]
 pub(crate) fn follow<'a, D, T, F>(
     document: &D,
     start: &'a RefOr<T>,

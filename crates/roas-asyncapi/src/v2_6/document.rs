@@ -1630,6 +1630,46 @@ mod tests {
     }
 
     #[test]
+    fn a_binding_alias_names_its_own_sort_of_bindings() {
+        let document = |target: &str| {
+            json!({
+                "asyncapi": "2.6.0",
+                "info": { "title": "T", "version": "1" },
+                "channels": {},
+                "components": {
+                    "serverBindings": {
+                        "real": { "kafka": {} },
+                        "alias": { "$ref": target }
+                    },
+                    "messageBindings": { "mb": { "kafka": {} } },
+                    "operationTraits": { "ot": { "operationId": "o" } }
+                }
+            })
+        };
+
+        // The whole map, another sort of bindings, and something that
+        // is not bindings at all.
+        for target in [
+            "#/components/serverBindings",
+            "#/components/messageBindings/mb",
+            "#/components/operationTraits/ot",
+        ] {
+            let errors = errors_for(document(target));
+            assert!(
+                errors.iter().any(|e| e
+                    == &format!("#.components.serverBindings.alias.$ref: `{target}` does not point at an object of the expected kind")),
+                "{target} got: {errors:?}"
+            );
+        }
+
+        // Server bindings naming server bindings are right.
+        assert_eq!(
+            errors_for(document("#/components/serverBindings/real")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn a_boolean_schema_is_a_schema() {
         // `true` is a schema, and no struct deserializes it.
         let value = json!({

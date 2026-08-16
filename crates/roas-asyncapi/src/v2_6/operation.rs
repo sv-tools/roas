@@ -9,7 +9,7 @@
 //! application described here receives them. v3 inverted this to
 //! `receive` / `send` stated from the application's own point of view.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::OperationBindings;
 use crate::common::reference::RefOr;
 use crate::v2_6::external_documentation::ExternalDocumentation;
 use crate::v2_6::message::OperationMessage;
@@ -72,7 +72,7 @@ pub struct Operation {
 
     /// Protocol-specific definitions for the operation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<Bindings>,
+    pub bindings: Option<OperationBindings>,
 
     /// Traits to apply to the operation. Validated but not merged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,7 +137,7 @@ pub struct OperationTrait {
     pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<Bindings>,
+    pub bindings: Option<OperationBindings>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]

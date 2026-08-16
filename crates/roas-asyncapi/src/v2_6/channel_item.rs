@@ -8,7 +8,7 @@
 //! apart — a channel key, a separate `address`, and operations hoisted
 //! to the document root.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::ChannelBindings;
 use crate::common::reference::RefOr;
 use crate::v2_6::operation::Operation;
 use crate::v2_6::parameter::Parameter;
@@ -57,7 +57,7 @@ pub struct ChannelItem {
 
     /// Protocol-specific definitions for the channel.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<Bindings>,
+    pub bindings: Option<ChannelBindings>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
