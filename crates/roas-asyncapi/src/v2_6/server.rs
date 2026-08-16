@@ -6,7 +6,7 @@
 //! `host` + `pathname`), and its `security` is a list of
 //! [`SecurityRequirement`] maps rather than inline schemes.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::ServerBindings;
 use crate::common::reference::RefOr;
 use crate::v2_6::security_scheme::SecurityRequirement;
 use crate::v2_6::tag::Tag;
@@ -46,7 +46,7 @@ pub struct Server {
 
     /// Protocol-specific definitions for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<Bindings>,
+    pub bindings: Option<RefOr<ServerBindings>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]

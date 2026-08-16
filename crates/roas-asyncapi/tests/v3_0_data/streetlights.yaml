@@ -71,7 +71,9 @@ channels:
               enum: ['on', 'off']
 
   commandReplies:
-    address: smartylighting/streetlights/replies
+    # The reply address comes from each request's header, so this
+    # channel must not fix one of its own.
+    address: null
     messages:
       ack:
         name: Ack

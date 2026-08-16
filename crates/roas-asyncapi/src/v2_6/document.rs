@@ -8,7 +8,9 @@
 //! and a security requirement must name a declared scheme — listing
 //! scopes only where the scheme's type allows them.
 
-use crate::common::reference::{RefOr, Reference, array_index, pointer_tokens};
+use crate::common::pointer;
+use crate::common::reference::{RefOr, Reference};
+use crate::common::resolve::{Resolution, classify_unresolved, follow};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
 use crate::v2_6::external_documentation::ExternalDocumentation;
@@ -74,70 +76,6 @@ pub struct Document {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-/// What following a document-local pointer turned out to be.
-///
-/// The distinctions matter: an external terminus is accepted (this
-/// crate does not fetch other documents), while a local pointer that
-/// names nothing, revisits itself, or has a shape that cannot denote
-/// the kind of object expected is a document bug.
-#[derive(Debug)]
-pub(crate) enum Resolution<'a, T> {
-    /// Resolved to a concrete object in this document.
-    Found(&'a T),
-    /// The chain ends at a reference into another document.
-    External,
-    /// A local pointer that names nothing.
-    Missing,
-    /// The chain revisits a pointer it already followed.
-    Cycle,
-    /// A local pointer whose shape cannot denote this kind of object.
-    Unrecognized,
-}
-
-impl<'a, T> Resolution<'a, T> {
-    /// The object, if the pointer resolved inside this document.
-    ///
-    /// Takes `self` so the borrow is the document's, not this
-    /// `Resolution`'s — callers routinely resolve into a temporary.
-    pub(crate) fn found(self) -> Option<&'a T> {
-        match self {
-            Resolution::Found(item) => Some(item),
-            _ => None,
-        }
-    }
-
-    /// Why this pointer is a document bug, if it is one. `None` means
-    /// it resolved or left the document.
-    fn problem(&self) -> Option<&'static str> {
-        match self {
-            Resolution::Found(_) | Resolution::External => None,
-            Resolution::Missing => Some("names nothing in this document"),
-            Resolution::Cycle => Some("is part of a reference cycle"),
-            Resolution::Unrecognized => Some("does not point at an object of the expected kind"),
-        }
-    }
-}
-
-/// Walk a JSON Pointer over the document as plain JSON.
-///
-/// `$ref` is an unrestricted URI-reference, so a pointer may legally
-/// name something this crate does not model as its own type — a
-/// message-shaped `x-` extension at the root, say. The typed resolvers
-/// answer "which object is this"; this answers the weaker but broader
-/// "is there anything here at all", which is what tells a wrong-kind
-/// pointer from one that simply names nothing.
-fn walk_json<'v>(value: &'v serde_json::Value, tokens: &[String]) -> Option<&'v serde_json::Value> {
-    let mut current = value;
-    for token in tokens {
-        current = match current {
-            serde_json::Value::Object(map) => map.get(token)?,
-            serde_json::Value::Array(items) => items.get(array_index(token)?)?,
-            _ => return None,
-        };
-    }
-    Some(current)
-}
-
 impl Document {
     /// Resolve a channel item, following its `$ref` field through both
     /// `#/channels/…` and `#/components/channels/…` pointers.
@@ -157,7 +95,7 @@ impl Document {
                 reference: reference.to_owned(),
             };
             if reference.is_external() {
-                return Resolution::External;
+                return Resolution::Opaque;
             }
             let Some(pointer) = reference.local_pointer() else {
                 return Resolution::Unrecognized;
@@ -167,34 +105,14 @@ impl Document {
             }
             match self.channel_at(pointer) {
                 Some(next) => current = next,
-                None => return self.classify_unresolved(pointer),
+                None => return classify_unresolved(self, pointer, "channels"),
             }
-        }
-    }
-
-    /// Decide what an unresolved local pointer *is*, for pointers the
-    /// typed resolvers could not follow.
-    ///
-    /// A well-formed pointer that lands on real JSON is accepted: this
-    /// crate simply does not model whatever is there, which is not the
-    /// document's fault. Anything else is malformed or dangling.
-    fn classify_unresolved<T>(&self, pointer: &str) -> Resolution<'_, T> {
-        let Some(tokens) = pointer_tokens(pointer) else {
-            // Malformed escapes — not a usable pointer at all.
-            return Resolution::Unrecognized;
-        };
-        let Ok(snapshot) = serde_json::to_value(self) else {
-            return Resolution::Unrecognized;
-        };
-        match walk_json(&snapshot, &tokens) {
-            Some(_) => Resolution::External,
-            None => Resolution::Missing,
         }
     }
 
     /// The channel a document-local pointer names, in either map.
     fn channel_at<'a>(&'a self, pointer: &str) -> Option<&'a ChannelItem> {
-        let tokens = pointer_tokens(pointer)?;
+        let tokens = pointer::tokens(pointer)?;
         let (map, key) = self.channel_map_for(&tokens)?;
         (key.len() == 1).then(|| map.get(&key[0]))?
     }
@@ -220,70 +138,26 @@ impl Document {
         let Some(components) = self.components.as_ref() else {
             return Resolution::Missing;
         };
-        let Some(mut entry) = components.security_schemes.get(name) else {
+        let Some(entry) = components.security_schemes.get(name) else {
             return Resolution::Missing;
         };
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        loop {
-            match entry {
-                RefOr::Item(scheme) => return Resolution::Found(scheme),
-                RefOr::Reference(reference) => {
-                    if reference.is_external() {
-                        return Resolution::External;
-                    }
-                    let Some(key) = reference.component_key("securitySchemes") else {
-                        return Resolution::Unrecognized;
-                    };
-                    if !seen.insert(key.clone()) {
-                        return Resolution::Cycle;
-                    }
-                    match components.security_schemes.get(&key) {
-                        Some(next) => entry = next,
-                        None => return Resolution::Missing,
-                    }
-                }
+        follow(self, entry, "securitySchemes", |path| match path {
+            [c, kind, key] if c == "components" && kind == "securitySchemes" => {
+                components.security_schemes.get(key)
             }
-        }
+            _ => None,
+        })
     }
 
-    /// Resolve a `RefOr<Server>`, following `#/components/servers/…`.
+    /// Resolve a `RefOr<Server>` through either server map.
     fn resolve_server<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
-        let mut current = entry;
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        loop {
-            match current {
-                RefOr::Item(server) => return Resolution::Found(server),
-                RefOr::Reference(reference) => {
-                    if reference.is_external() {
-                        return Resolution::External;
-                    }
-                    let Some(pointer) = reference.local_pointer() else {
-                        return Resolution::Unrecognized;
-                    };
-                    if !seen.insert(pointer.to_owned()) {
-                        return Resolution::Cycle;
-                    }
-                    // Either map may hold the target: `#/servers/…` as
-                    // well as `#/components/servers/…`.
-                    let Some(tokens) = pointer_tokens(pointer) else {
-                        return Resolution::Unrecognized;
-                    };
-                    let entry = match tokens.as_slice() {
-                        [components, servers, key]
-                            if components == "components" && servers == "servers" =>
-                        {
-                            self.components.as_ref().and_then(|c| c.servers.get(key))
-                        }
-                        [servers, key] if servers == "servers" => self.servers.get(key),
-                        _ => return Resolution::Unrecognized,
-                    };
-                    match entry {
-                        Some(next) => current = next,
-                        None => return Resolution::Missing,
-                    }
-                }
+        follow(self, entry, "servers", |path| match path {
+            [c, servers, key] if c == "components" && servers == "servers" => {
+                self.components.as_ref()?.servers.get(key)
             }
-        }
+            [servers, key] if servers == "servers" => self.servers.get(key),
+            _ => None,
+        })
     }
 
     /// Resolve a message `$ref`, following component aliases and
@@ -293,7 +167,7 @@ impl Document {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         loop {
             if current.is_external() {
-                return Resolution::External;
+                return Resolution::Opaque;
             }
             let Some(pointer) = current.local_pointer() else {
                 return Resolution::Unrecognized;
@@ -304,7 +178,7 @@ impl Document {
             match self.message_at(pointer) {
                 Some(RefOr::Item(message)) => return Resolution::Found(message),
                 Some(RefOr::Reference(next)) => current = next.clone(),
-                None => return self.classify_unresolved(pointer),
+                None => return classify_unresolved(self, pointer, "messages"),
             }
         }
     }
@@ -317,7 +191,7 @@ impl Document {
     /// `$ref` resolves to, so a message declared beside a `$ref` is
     /// reachable and one on the target is not (through this pointer).
     fn message_at<'a>(&'a self, pointer: &str) -> Option<&'a RefOr<Message>> {
-        let tokens = pointer_tokens(pointer)?;
+        let tokens = pointer::tokens(pointer)?;
         if let [components, messages, key] = tokens.as_slice()
             && components == "components"
             && messages == "messages"
@@ -349,7 +223,7 @@ impl Document {
             let OperationMessage::OneOf(one_of) = message else {
                 return None;
             };
-            message = one_of.one_of.get(array_index(index)?)?;
+            message = one_of.one_of.get(pointer::array_index(index)?)?;
         }
         match message {
             OperationMessage::Single(single) => Some(single.as_ref()),
@@ -534,7 +408,7 @@ impl Document {
     }
 
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
-        let mut ctx = Context::new(options);
+        let mut ctx = Context::for_document(options, self);
 
         if let Some(id) = &self.id {
             ctx.require_non_empty("id", id);
@@ -585,11 +459,9 @@ impl Document {
                 ctx.error_field("channels", "a channel path must not be empty");
             }
             ctx.in_key("channels", path, |ctx| {
-                // The item's own fields are checked either way; a
-                // `$ref` additionally has to land on a channel, and the
-                // *resolved* item's parameters are what this path's
-                // placeholders must match.
-                channel.validate_with_context(ctx);
+                // A `$ref` has to land on a channel, and this check
+                // knows that is what it is looking for — so it goes
+                // first, and the general one defers to its message.
                 let resolution = self.resolve_channel(channel);
                 if let Some(problem) = resolution.problem()
                     && let Some(reference) = channel.reference.as_deref()
@@ -597,6 +469,10 @@ impl Document {
                 {
                     ctx.error_field("$ref", format!("channel `{reference}` {problem}"));
                 }
+                // The item's own fields are checked either way, and the
+                // *resolved* item's parameters are what this path's
+                // placeholders must match.
+                channel.validate_with_context(ctx);
                 // The path's placeholders answer to the parameters
                 // declared anywhere along the chain, since `$ref`
                 // siblings are kept.
@@ -1250,18 +1126,18 @@ mod tests {
     fn a_pointer_that_names_nothing_is_reported_wherever_it_points() {
         // Outside the locations this crate models *and* absent from the
         // document: dangling either way.
+        // A pointer at an entry of a *different* declared map says so.
         let mut value = minimal();
         value["channels"] = json!({ "user": { "$ref": "#/components/schemas/ghost" } });
         assert!(
             errors_for(value)
                 .iter()
-                .any(|e| e.contains("names nothing in this document")),
+                .any(|e| e.contains("does not point at an object of the expected kind")),
         );
 
+        // One at a location that simply is not there reads differently.
         let mut value = minimal();
-        value["channels"] = json!({
-            "user": { "publish": { "message": { "$ref": "#/components/schemas/ghost" } } }
-        });
+        value["channels"] = json!({ "user": { "$ref": "#/x-nowhere" } });
         assert!(
             errors_for(value)
                 .iter()
@@ -1274,7 +1150,7 @@ mod tests {
         assert!(
             errors_for(value)
                 .iter()
-                .any(|e| e.contains("does not point at an object of the expected kind")),
+                .any(|e| e.contains("is not a usable JSON Pointer")),
         );
     }
 
@@ -1333,14 +1209,21 @@ mod tests {
                 .any(|e| e.contains("names nothing in this document")),
         );
 
-        // Wrong kind of pointer.
+        // A pointer at an entry of some other declared map.
         let mut value = minimal();
-        value["servers"] = json!({ "prod": { "$ref": "#/components/schemas/thing" } });
+        value["servers"] = json!({ "prod": { "$ref": "#/components/schemas/ghost" } });
         assert!(
             errors_for(value)
                 .iter()
                 .any(|e| e.contains("does not point at an object of the expected kind")),
         );
+
+        // …and one at a location this crate does not model, which is
+        // legal.
+        let mut value = minimal();
+        value["x-shared-server"] = json!({ "url": "kafka://e", "protocol": "kafka" });
+        value["servers"] = json!({ "prod": { "$ref": "#/x-shared-server" } });
+        assert!(errors_for(value).is_empty());
 
         // Cycle.
         let mut value = minimal();
@@ -1645,15 +1528,316 @@ mod tests {
     }
 
     #[test]
-    fn percent_encoded_separators_stay_inside_a_key() {
-        // `%2F` decodes to a literal `/` *within* one token, so this
-        // names the single key `source/path`.
+    fn structure_continues_below_publish_and_subscribe() {
+        // v2.6 names a channel's operations after what they do, and
+        // the objects under them keep their kinds.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "c": { "publish": { "message": { "name": "M" } } } },
+            "components": { "channels": { "alias": { "$ref": "#/channels/c/publish" } } }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.channels.alias.$ref: `#/channels/c/publish` does not point at an object of the expected kind"),
+        );
+
+        // A message's traits are message traits down here too…
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "c": { "publish": { "message": { "name": "M", "traits": [ { "title": "mt" } ] } } }
+            },
+            "components": {
+                "operationTraits": { "t": { "$ref": "#/channels/c/publish/message/traits/0" } }
+            }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.operationTraits.t.$ref: `#/channels/c/publish/message/traits/0` does not point at an object of the expected kind"),
+        );
+
+        // …and an operation's are operation traits.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "c": {
+                    "publish": { "traits": [ { "operationId": "o" } ], "message": { "name": "M" } }
+                }
+            },
+            "components": {
+                "messageTraits": { "t": { "$ref": "#/channels/c/publish/traits/0" } }
+            }
+        });
+        assert!(
+            errors_for(value).iter().any(|e| e
+                == "#.components.messageTraits.t.$ref: `#/channels/c/publish/traits/0` does not point at an object of the expected kind"),
+        );
+    }
+
+    #[test]
+    fn a_message_under_an_operation_is_still_a_message() {
+        // The pointer shape v2.6 documents actually use, in both the
+        // single and the `oneOf` form.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": { "publish": { "message": { "name": "M" } } },
+                "target": {
+                    "subscribe": { "message": { "$ref": "#/channels/source/publish/message" } }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": {
+                    "publish": { "message": { "oneOf": [ { "name": "A" }, { "name": "B" } ] } }
+                },
+                "target": {
+                    "subscribe": {
+                        "message": { "$ref": "#/channels/source/publish/message/oneOf/1" }
+                    }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+
+        // A reusable trait may be an alias, which the specification
+        // allows for every component map but `channels`.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "messageTraits": {
+                    "real": { "title": "T" },
+                    "alias": { "$ref": "#/components/messageTraits/real" }
+                },
+                "messageBindings": {
+                    "real": { "kafka": {} },
+                    "alias": { "$ref": "#/components/messageBindings/real" }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn inline_bindings_may_be_a_reference() {
+        // "Bindings Object | Reference Object" in all six inline
+        // positions, and a `$ref` there is a reference rather than a
+        // protocol named `$ref`.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "s": {
+                    "url": "kafka://b",
+                    "protocol": "kafka",
+                    "bindings": { "$ref": "#/components/serverBindings/shared" }
+                }
+            },
+            "channels": {
+                "c": {
+                    "bindings": { "$ref": "#/components/channelBindings/shared" },
+                    "publish": {
+                        "bindings": { "$ref": "#/components/operationBindings/shared" },
+                        "message": { "bindings": { "$ref": "#/components/messageBindings/shared" } }
+                    }
+                }
+            },
+            "components": {
+                "serverBindings": { "shared": { "kafka": {} } },
+                "channelBindings": { "shared": { "kafka": {} } },
+                "operationBindings": { "shared": { "kafka": {} } },
+                "messageBindings": { "shared": { "kafka": {} } }
+            }
+        });
+        assert_eq!(errors_for(value.clone()), Vec::<String>::new());
+
+        // A reference is what it round-trips as, too.
+        let document: Document = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&document).unwrap(), value);
+
+        // Each position still names its own sort of bindings.
+        let mut wrong = value;
+        wrong["channels"]["c"]["bindings"] =
+            json!({ "$ref": "#/components/serverBindings/shared" });
+        assert!(
+            errors_for(wrong).iter().any(|e| e
+                == "#.channels.c.bindings.$ref: `#/components/serverBindings/shared` does not point at an object of the expected kind"),
+        );
+
+        // And a protocol map is still a protocol map.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "c": { "bindings": { "kafka": { "topic": "t" } } } }
+        });
+        assert_eq!(errors_for(value.clone()), Vec::<String>::new());
+        let document: Document = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&document).unwrap(), value);
+    }
+
+    #[test]
+    fn a_binding_alias_names_its_own_sort_of_bindings() {
+        let document = |target: &str| {
+            json!({
+                "asyncapi": "2.6.0",
+                "info": { "title": "T", "version": "1" },
+                "channels": {},
+                "components": {
+                    "serverBindings": {
+                        "real": { "kafka": {} },
+                        "alias": { "$ref": target }
+                    },
+                    "messageBindings": { "mb": { "kafka": {} } },
+                    "operationTraits": { "ot": { "operationId": "o" } }
+                }
+            })
+        };
+
+        // The whole map, another sort of bindings, and something that
+        // is not bindings at all.
+        for target in [
+            "#/components/serverBindings",
+            "#/components/messageBindings/mb",
+            "#/components/operationTraits/ot",
+        ] {
+            let errors = errors_for(document(target));
+            assert!(
+                errors.iter().any(|e| e
+                    == &format!("#.components.serverBindings.alias.$ref: `{target}` does not point at an object of the expected kind")),
+                "{target} got: {errors:?}"
+            );
+        }
+
+        // Server bindings naming server bindings are right.
+        assert_eq!(
+            errors_for(document("#/components/serverBindings/real")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_boolean_schema_is_a_schema() {
+        // `true` is a schema, and no struct deserializes it.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "schemas": {
+                    "always": true,
+                    "s": { "$ref": "#/components/schemas/always" }
+                }
+            }
+        });
+        assert_eq!(errors_for(value), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_field_style_reference_names_a_kind_too() {
+        // Existing is not enough: a channel item's `$ref` has to name
+        // a channel item.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "channels": { "unused": { "$ref": "#/components/messages/m" } },
+                "messages": { "m": { "name": "M" } }
+            }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.components.channels.unused.$ref: `#/components/messages/m` does not point at an object of the expected kind"
+            ]
+        );
+
+        // And a schema's names a schema.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "schemas": { "s": { "$ref": "#/components/messages/m" } },
+                "messages": { "m": { "name": "M" } }
+            }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.components.schemas.s.$ref: `#/components/messages/m` does not point at an object of the expected kind"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_field_style_reference_is_followed_like_any_other() {
+        // v2.6 carries `$ref` as a field rather than as a Reference
+        // Object, which is no reason for it to go unchecked. Nothing
+        // uses this channel.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": { "channels": { "unused": { "$ref": "#/channels/ghost" } } }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.components.channels.unused.$ref: `#/channels/ghost` names nothing in this document"
+            ]
+        );
+
+        // A schema's `$ref` is a field here too.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": { "schemas": { "s": { "$ref": "#/components/schemas/ghost" } } }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.components.schemas.s.$ref: `#/components/schemas/ghost` names nothing in this document"
+            ]
+        );
+
+        // A channel that *is* used still gets the specific message,
+        // not this one as well.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "user": { "$ref": "#/components/channels/ghost" } }
+        });
+        assert_eq!(
+            errors_for(value),
+            vec![
+                "#.channels.user.$ref: channel `#/components/channels/ghost` names nothing in this document"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_slash_inside_a_channel_key_is_escaped_not_encoded() {
+        // v2.6 keys channels by address, so keys containing `/` are
+        // the normal case and `~1` is how a pointer names one.
         let value = json!({
             "asyncapi": "2.6.0",
             "info": { "title": "T", "version": "1" },
             "channels": {
                 "source/path": { "publish": {} },
-                "alias": { "$ref": "#/channels/source%2Fpath" }
+                "alias": { "$ref": "#/channels/source~1path" }
             }
         });
         let doc: Document = serde_json::from_value(value.clone()).unwrap();
@@ -1662,7 +1846,18 @@ mod tests {
                 .found()
                 .is_some()
         );
-        assert!(errors_for(value).is_empty());
+        assert!(errors_for(value.clone()).is_empty());
+
+        // `%2F` is not that: a fragment is percent-decoded before it is
+        // split, so this one names `/channels/source/path` and finds
+        // nothing there.
+        let mut encoded = value;
+        encoded["channels"]["alias"] = json!({ "$ref": "#/channels/source%2Fpath" });
+        assert!(
+            errors_for(encoded)
+                .iter()
+                .any(|e| e.contains("names nothing in this document")),
+        );
     }
 
     #[test]

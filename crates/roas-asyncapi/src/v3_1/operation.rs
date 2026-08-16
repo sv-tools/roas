@@ -8,7 +8,7 @@
 //! it. (AsyncAPI 2.x said `subscribe` / `publish`, describing the *other*
 //! side — the inversion is the classic migration trap.)
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::OperationBindings;
 use crate::common::reference::{RefOr, Reference};
 use crate::common::runtime_expression;
 use crate::v3_1::external_documentation::ExternalDocumentation;
@@ -77,7 +77,7 @@ pub struct Operation {
 
     /// Protocol-specific definitions for the operation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<RefOr<OperationBindings>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
@@ -141,7 +141,7 @@ pub struct OperationTrait {
     pub external_docs: Option<RefOr<ExternalDocumentation>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<RefOr<OperationBindings>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]

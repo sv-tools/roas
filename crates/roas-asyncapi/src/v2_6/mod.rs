@@ -66,3 +66,16 @@ pub use security_scheme::{
 pub use server::{Server, ServerVariable};
 pub use tag::Tag;
 pub use version::Version;
+
+// Every modelled type says what kind of object it is, so a reference to
+// one can be judged wherever the model holds it.
+crate::common::resolve::kinds! {
+    server::Server => Some("servers"),
+    server::ServerVariable => Some("serverVariables"),
+    message::Message => Some("messages"),
+    message::MessageTrait => Some("messageTraits"),
+    operation::OperationTrait => Some("operationTraits"),
+    security_scheme::SecurityScheme => Some("securitySchemes"),
+    parameter::Parameter => Some("parameters"),
+    correlation_id::CorrelationId => Some("correlationIds"),
+}

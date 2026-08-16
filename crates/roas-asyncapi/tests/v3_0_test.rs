@@ -105,19 +105,21 @@ fn broken_wiring_reports_every_dangling_reference() {
 
     assert!(
         errors.iter().any(|e| e
-            == "#.channels.userSignedUp.servers[0].$ref: server `#/servers/staging` is not declared"),
+            == "#.channels.userSignedUp.servers[0].$ref: server `#/servers/staging` names nothing in this document"),
         "got: {errors:?}",
     );
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("belongs to channel `other`, not `userSignedUp`")),
+            .any(|e| e.contains(
+                "message `#/channels/other/messages/ping` must point at a message of `#/channels/userSignedUp`"
+            )),
         "got: {errors:?}",
     );
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("channel `#/channels/missing` is not declared")),
+            .any(|e| e.contains("channel `#/channels/missing` names nothing in this document")),
         "got: {errors:?}",
     );
 }

@@ -8,7 +8,7 @@
 //! apart — a channel key, a separate `address`, and operations hoisted
 //! to the document root.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::ChannelBindings;
 use crate::common::reference::RefOr;
 use crate::v2_6::operation::Operation;
 use crate::v2_6::parameter::Parameter;
@@ -57,7 +57,7 @@ pub struct ChannelItem {
 
     /// Protocol-specific definitions for the channel.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<Bindings>,
+    pub bindings: Option<RefOr<ChannelBindings>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
@@ -113,6 +113,10 @@ impl ValidateWithContext for ChannelItem {
         if let Some(reference) = &self.reference {
             ctx.require_non_empty("$ref", reference);
             crate::common::reference::check_external(ctx, reference);
+            crate::common::resolve::check_names_something(ctx, reference);
+            // A field-style `$ref` is still a reference to one kind of
+            // object, and this position says which.
+            crate::common::resolve::check_names_kind::<ChannelItem>(ctx, reference, "channels");
         }
         ctx.validate_map_keys("parameters", &self.parameters);
 

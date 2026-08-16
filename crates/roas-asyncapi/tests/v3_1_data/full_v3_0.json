@@ -112,7 +112,7 @@
       "address": null
     },
     "replies": {
-      "address": "replies",
+      "address": null,
       "messages": {
         "ack": {
           "name": "Ack"
@@ -128,7 +128,7 @@
       },
       "messages": [
         {
-          "$ref": "#/components/messages/signup"
+          "$ref": "#/channels/user/messages/signup"
         }
       ],
       "traits": [
@@ -404,7 +404,7 @@
       "o": {
         "action": "send",
         "channel": {
-          "$ref": "#/channels/c"
+          "$ref": "#/components/channels/c"
         }
       }
     },

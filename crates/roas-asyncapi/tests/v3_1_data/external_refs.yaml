@@ -1,5 +1,9 @@
-# Every reference points outside this document, so the cross-reference
-# checks have nothing local to resolve.
+# A document split across files. The root maps stay the index — the
+# specification requires a root operation to name a channel in the root
+# Channels Object — while the entries themselves point out of this file.
+# A message of that channel is named where the channel actually is: a
+# JSON Pointer does not dereference as it walks, so
+# `#/channels/user/messages/signup` would name nothing.
 asyncapi: 3.1.0
 info:
   title: Split across files
@@ -11,6 +15,10 @@ operations:
   sendSignup:
     action: send
     channel:
-      $ref: './channels.yaml#/user'
+      $ref: '#/channels/user'
     messages:
-      - $ref: './messages.yaml#/signup'
+      - $ref: './channels.yaml#/user/messages/signup'
+components:
+  messages:
+    signup:
+      $ref: './messages.yaml#/signup'

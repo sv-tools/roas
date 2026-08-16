@@ -56,8 +56,83 @@ impl ValidateWithContext for Bindings {
     }
 }
 
+/// The four places bindings are declared, each its own type.
+///
+/// A Bindings Object is the same shape wherever it appears, but *which*
+/// bindings a position may name is not: a channel's bindings are
+/// channel bindings, and a reference from one to a message's is a
+/// document bug. Giving each position its own type is what lets a
+/// reference be judged there like any other.
+macro_rules! bindings {
+    ($( $name:ident => $kind:literal, $what:literal );+ $(;)?) => {
+        $(
+            #[doc = concat!("Bindings declared on ", $what, ".")]
+            #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+            #[serde(transparent)]
+            pub struct $name(pub Bindings);
+
+            impl std::ops::Deref for $name {
+                type Target = Bindings;
+
+                fn deref(&self) -> &Bindings {
+                    &self.0
+                }
+            }
+
+            impl From<Bindings> for $name {
+                fn from(bindings: Bindings) -> Self {
+                    Self(bindings)
+                }
+            }
+
+            impl ValidateWithContext for $name {
+                fn validate_with_context(&self, ctx: &mut Context) {
+                    self.0.validate_with_context(ctx);
+                }
+            }
+        )+
+
+        crate::common::resolve::kinds! {
+            $( $name => Some($kind), )+
+        }
+    };
+}
+
+bindings! {
+    ServerBindings => "serverBindings", "a server";
+    ChannelBindings => "channelBindings", "a channel";
+    OperationBindings => "operationBindings", "an operation or an operation trait";
+    MessageBindings => "messageBindings", "a message or a message trait";
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::common::reference::RefOr;
+
+    #[test]
+    fn a_typed_binding_wraps_a_plain_one() {
+        let plain: Bindings = serde_json::from_value(json!({ "kafka": { "topic": "t" } })).unwrap();
+        let channel = ChannelBindings::from(plain.clone());
+        // Transparent both ways: it serializes as the map it holds, and
+        // reads through to it.
+        assert_eq!(
+            serde_json::to_value(&channel).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+        assert_eq!(channel.binding_version("kafka"), None);
+        assert!(channel.get("kafka").is_some());
+
+        // And it validates whatever the plain one would.
+        let mut ctx = Context::with_path(EnumSet::empty(), "#.channels.c.bindings");
+        let bad: RefOr<ChannelBindings> =
+            serde_json::from_value(json!({ "kafka": "not an object" })).unwrap();
+        bad.validate_with_context(&mut ctx);
+        assert_eq!(
+            ctx.errors.first().map(ToString::to_string),
+            Some("#.channels.c.bindings.kafka: binding must be an object".to_owned())
+        );
+    }
+
     use super::*;
     use enumset::EnumSet;
     use serde_json::json;

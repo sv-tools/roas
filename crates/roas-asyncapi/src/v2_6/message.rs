@@ -10,7 +10,7 @@
 //! `{ "oneOf": [...] }` form modeled by [`OperationMessage`] — which v3
 //! replaced with the channel's `messages` map.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::MessageBindings;
 use crate::common::reference::RefOr;
 use crate::v2_6::correlation_id::CorrelationId;
 use crate::v2_6::external_documentation::ExternalDocumentation;
@@ -217,7 +217,7 @@ pub struct Message {
     pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<Bindings>,
+    pub bindings: Option<RefOr<MessageBindings>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<MessageExample>,
@@ -368,7 +368,7 @@ pub struct MessageTrait {
     pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<Bindings>,
+    pub bindings: Option<RefOr<MessageBindings>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<MessageExample>,

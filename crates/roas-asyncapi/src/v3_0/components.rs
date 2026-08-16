@@ -6,7 +6,9 @@
 //! `^[A-Za-z0-9\.\-_]+$`; the values are the same objects that may
 //! appear inline elsewhere in the document.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::{
+    ChannelBindings, MessageBindings, OperationBindings, ServerBindings,
+};
 use crate::common::reference::RefOr;
 use crate::v3_0::channel::Channel;
 use crate::v3_0::correlation_id::CorrelationId;
@@ -67,10 +69,10 @@ component_maps! {
     tags: RefOr<Tag> => "tags",
     operation_traits: RefOr<OperationTrait> => "operationTraits",
     message_traits: RefOr<MessageTrait> => "messageTraits",
-    server_bindings: RefOr<Bindings> => "serverBindings",
-    channel_bindings: RefOr<Bindings> => "channelBindings",
-    operation_bindings: RefOr<Bindings> => "operationBindings",
-    message_bindings: RefOr<Bindings> => "messageBindings",
+    server_bindings: RefOr<ServerBindings> => "serverBindings",
+    channel_bindings: RefOr<ChannelBindings> => "channelBindings",
+    operation_bindings: RefOr<OperationBindings> => "operationBindings",
+    message_bindings: RefOr<MessageBindings> => "messageBindings",
 }
 
 #[cfg(test)]

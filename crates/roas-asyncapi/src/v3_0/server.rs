@@ -5,7 +5,7 @@
 //! v3 splits the 2.x `url` into `host` + `pathname`, so a server is
 //! addressed as `<protocol>://<host><pathname>`.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::ServerBindings;
 use crate::common::reference::RefOr;
 use crate::v3_0::external_documentation::ExternalDocumentation;
 use crate::v3_0::security_scheme::SecurityScheme;
@@ -63,7 +63,7 @@ pub struct Server {
 
     /// Protocol-specific definitions for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<RefOr<ServerBindings>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]

@@ -159,6 +159,12 @@ pub(crate) struct Context {
     /// Mutated in place via `in_*`; only cloned when an error is
     /// recorded.
     path: String,
+    /// The document being validated, as plain JSON.
+    ///
+    /// Every reference in the model is followed against this, at
+    /// whatever depth it sits, so resolution does not depend on some
+    /// other check happening to walk that way.
+    document: Option<serde_json::Value>,
 }
 
 impl Context {
@@ -167,7 +173,38 @@ impl Context {
             options,
             errors: Vec::new(),
             path: "#".to_owned(),
+            document: None,
         }
+    }
+
+    /// A context that can follow the document's own references.
+    pub fn for_document<D>(options: EnumSet<ValidationOptions>, document: &D) -> Self
+    where
+        D: serde::Serialize,
+    {
+        Self {
+            // Serializing a document model cannot fail; `null` simply
+            // leaves every pointer naming nothing.
+            document: Some(serde_json::to_value(document).unwrap_or_default()),
+            ..Self::new(options)
+        }
+    }
+
+    /// The document as plain JSON, when this context has one.
+    pub fn document(&self) -> Option<&serde_json::Value> {
+        self.document.as_ref()
+    }
+
+    /// Whether an error was already recorded at `<current>.<field>`.
+    ///
+    /// Lets the general check stay quiet where a check that knows what
+    /// the reference is *for* has already spoken.
+    pub fn has_error_at_field(&mut self, field: &str) -> bool {
+        let mark = self.path.len();
+        self.push_field(field);
+        let found = self.errors.iter().any(|error| error.path == self.path);
+        self.path.truncate(mark);
+        found
     }
 
     pub fn is_option(&self, option: ValidationOptions) -> bool {
@@ -254,9 +291,8 @@ impl Context {
     #[cfg(test)]
     pub fn with_path(options: EnumSet<ValidationOptions>, path: &str) -> Self {
         Self {
-            options,
-            errors: Vec::new(),
             path: path.to_owned(),
+            ..Self::new(options)
         }
     }
 }

@@ -7,7 +7,7 @@
 //! applying traits to a message is resolution rather than modeling, so
 //! this crate parses and validates them without merging.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::MessageBindings;
 use crate::common::reference::RefOr;
 use crate::v3_1::correlation_id::CorrelationId;
 use crate::v3_1::external_documentation::ExternalDocumentation;
@@ -79,7 +79,7 @@ pub struct Message {
 
     /// Protocol-specific definitions for the message.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<RefOr<MessageBindings>>,
 
     /// Examples of this message, each with headers and / or payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -167,7 +167,7 @@ pub struct MessageTrait {
     pub external_docs: Option<RefOr<ExternalDocumentation>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<RefOr<Bindings>>,
+    pub bindings: Option<RefOr<MessageBindings>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<MessageExample>,
@@ -307,6 +307,37 @@ mod tests {
             message.payload.as_ref().and_then(|p| p.item()),
             Some(SchemaOrMultiFormat::MultiFormat(_))
         ));
+    }
+
+    #[test]
+    fn a_payload_ref_is_a_reference_object() {
+        // "Alternatively, any time a Schema Object can be used, a
+        // Reference Object can be used in its place … the `$ref`
+        // keyword MUST follow the behavior described by Reference
+        // Object instead of the one in JSON Schema definition." A
+        // Reference Object is `$ref` and nothing else, so siblings are
+        // ignored — and dropped rather than round-tripped.
+        let message: Message = serde_json::from_value(json!({
+            "headers": { "$ref": "#/components/schemas/headers" },
+            "payload": { "$ref": "#/components/schemas/base", "description": "ignored" }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            message
+                .payload
+                .as_ref()
+                .and_then(RefOr::reference)
+                .map(|r| r.reference.as_str()),
+            Some("#/components/schemas/base"),
+        );
+        assert_eq!(
+            serde_json::to_value(&message).unwrap(),
+            json!({
+                "headers": { "$ref": "#/components/schemas/headers" },
+                "payload": { "$ref": "#/components/schemas/base" }
+            })
+        );
     }
 
     #[test]

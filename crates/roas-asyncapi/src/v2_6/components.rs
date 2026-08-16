@@ -5,16 +5,25 @@
 //! 2.6 holds fourteen maps; v3 added `operations`, `replies`,
 //! `replyAddresses`, `tags`, and `externalDocs` to that set.
 //!
-//! Which maps accept a `$ref` *in place of* the object is decided per
-//! map by the schema, following its delegation: `messages`,
-//! `parameters`, `servers`, `serverVariables`, `securitySchemes`, and
-//! `correlationIds` do; the trait and binding maps do not.
+//! Every map here takes `Object | Reference Object` except `channels`,
+//! per the specification's own field table. `channels` is the one
+//! exception it makes, a Channel Item carrying `$ref` as a field of its
+//! own — which is why [`ChannelItem`] is not a [`RefOr`].
 //!
-//! `channels` and `schemas` are neither — there `$ref` is a *field* of
-//! the object itself, so it coexists with siblings and is modeled as
-//! one, on [`ChannelItem`] and on the Schema Object.
+//! The bundled `schema.json` disagrees: it gives the trait and binding
+//! maps their objects directly, with no Reference alternative. The
+//! prose is what this crate follows — AsyncAPI says so itself, and its
+//! JSON Schemas do not track the specification one-for-one — so a
+//! `$ref` in those maps is a reference here.
+//!
+//! `schemas` is the one place this crate has *not* caught up: the field
+//! table gives it `Schema Object | Reference Object`, while the Schema
+//! Object here still carries `$ref` as a field. Fixing that means
+//! changing the Schema model itself, which is left for its own change.
 
-use crate::common::bindings::Bindings;
+use crate::common::bindings::{
+    ChannelBindings, MessageBindings, OperationBindings, ServerBindings,
+};
 use crate::common::reference::RefOr;
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::correlation_id::CorrelationId;
@@ -66,12 +75,12 @@ component_maps! {
     security_schemes: RefOr<SecurityScheme> => "securitySchemes",
     parameters: RefOr<Parameter> => "parameters",
     correlation_ids: RefOr<CorrelationId> => "correlationIds",
-    operation_traits: OperationTrait => "operationTraits",
-    message_traits: MessageTrait => "messageTraits",
-    server_bindings: Bindings => "serverBindings",
-    channel_bindings: Bindings => "channelBindings",
-    operation_bindings: Bindings => "operationBindings",
-    message_bindings: Bindings => "messageBindings",
+    operation_traits: RefOr<OperationTrait> => "operationTraits",
+    message_traits: RefOr<MessageTrait> => "messageTraits",
+    server_bindings: RefOr<ServerBindings> => "serverBindings",
+    channel_bindings: RefOr<ChannelBindings> => "channelBindings",
+    operation_bindings: RefOr<OperationBindings> => "operationBindings",
+    message_bindings: RefOr<MessageBindings> => "messageBindings",
 }
 
 #[cfg(test)]
@@ -183,14 +192,16 @@ mod tests {
         let components: Components = serde_json::from_value(delegated.clone()).unwrap();
         assert_eq!(serde_json::to_value(&components).unwrap(), delegated);
 
-        // The trait and binding maps take the object itself, so a
-        // `$ref` there is not a reference — and a trait has no required
-        // field to reject it, which is exactly why the distinction is
-        // worth pinning.
-        let components: Components =
-            serde_json::from_value(json!({ "operationTraits": { "t": { "summary": "s" } } }))
-                .unwrap();
-        assert_eq!(components.operation_traits.len(), 1);
+        // The trait and binding maps take a Reference too, whatever the
+        // bundled schema says — a trait has no required field, so an
+        // unreferenced `$ref` would otherwise be swallowed whole.
+        let traits = json!({
+            "operationTraits": { "t": { "$ref": "#/x" } },
+            "messageBindings": { "b": { "$ref": "#/x" } }
+        });
+        let components: Components = serde_json::from_value(traits.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&components).unwrap(), traits);
+        assert!(components.operation_traits["t"].reference().is_some());
     }
 
     #[test]
