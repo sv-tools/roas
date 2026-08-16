@@ -234,6 +234,10 @@ struct Conversion {
     /// Every operation name spoken for, including those a reusable
     /// channel takes as it is converted.
     taken_operations: BTreeSet<String>,
+    /// The v2.6 pointer at a message → the name v3 files it under. A
+    /// message moved from its operation to its channel, so a pointer at
+    /// one has somewhere to go only if the name is settled first.
+    message_keys: BTreeMap<String, String>,
 }
 
 impl Conversion {
@@ -336,12 +340,55 @@ impl Conversion {
                 operation_keys.insert((source.clone(), action.as_str()), format!("{map}/{key}"));
             }
         }
+
+        // Messages last, and per channel: v3 files them under their
+        // channel, so that is where their names have to be unique — and
+        // a pointer at one has to know the name before anything moves.
+        let mut message_keys = BTreeMap::new();
+        for (source, item) in document
+            .channels
+            .iter()
+            .map(|(address, item)| (format!("#/channels/{address}"), item))
+            .chain(
+                reusable
+                    .iter()
+                    .map(|(name, item)| (format!("#/components/channels/{name}"), item)),
+            )
+        {
+            let mut taken = BTreeSet::new();
+            for (action, operation) in [
+                (v2_6::OperationKind::Publish, &item.publish),
+                (v2_6::OperationKind::Subscribe, &item.subscribe),
+            ] {
+                let Some(operation) = operation else { continue };
+                let at = format!("{source}/{}/message", action.as_str());
+                let messages = flatten(operation.message.clone());
+                let one_of = matches!(operation.message, Some(v2_6::OperationMessage::OneOf(_)));
+                for (index, message) in messages.into_iter().enumerate() {
+                    let key = unique(
+                        message_name(&message)
+                            .as_deref()
+                            .map(sanitize)
+                            .filter(|key| !key.is_empty())
+                            .unwrap_or_else(|| "message".to_owned()),
+                        &mut taken,
+                    );
+                    let at = if one_of {
+                        format!("{at}/oneOf/{index}")
+                    } else {
+                        at.clone()
+                    };
+                    message_keys.insert(at, key);
+                }
+            }
+        }
         Self {
             notes,
             channel_keys,
             reusable,
             operation_keys,
             taken_operations: taken,
+            message_keys,
         }
     }
 
@@ -555,6 +602,89 @@ impl Conversion {
     /// looked at, v3 having moved some of what they name.
     fn bindings<T>(&mut self, at: &str, bindings: Option<RefOr<T>>) -> Option<RefOr<T>> {
         bindings.map(|bindings| self.ref_or(at, bindings, |_, _, item| item))
+    }
+
+    /// An operation trait carries what an operation does, references
+    /// and all — so it is converted the same way, rather than re-read
+    /// as a whole and left holding pointers to where v3 is not.
+    fn operation_trait(
+        &mut self,
+        at: &str,
+        operation_trait: v2_6::OperationTrait,
+    ) -> v3_0::OperationTrait {
+        // v3 keys an operation by where it sits; a trait has no
+        // `operationId` of its own to keep.
+        if operation_trait.operation_id.is_some() {
+            self.note(
+                at,
+                NoteKind::FieldsDropped {
+                    fields: vec!["operationId".to_owned()],
+                },
+            );
+        }
+        v3_0::OperationTrait {
+            title: None,
+            summary: operation_trait.summary,
+            description: operation_trait.description,
+            security: self.security(at, operation_trait.security),
+            tags: operation_trait
+                .tags
+                .into_iter()
+                .map(|tag| RefOr::Item(self.tag(tag)))
+                .collect(),
+            external_docs: operation_trait
+                .external_docs
+                .map(|docs| RefOr::Item(external_documentation(docs))),
+            bindings: self.bindings(at, operation_trait.bindings),
+            extensions: operation_trait.extensions,
+        }
+    }
+
+    /// The same for a message trait, which carries what a message does
+    /// bar its payload.
+    fn message_trait(&mut self, at: &str, message_trait: v2_6::MessageTrait) -> v3_0::MessageTrait {
+        let dropped: Vec<String> = [
+            message_trait.message_id.as_ref().map(|_| "messageId"),
+            message_trait.schema_format.as_ref().map(|_| "schemaFormat"),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::to_owned)
+        .collect();
+        if !dropped.is_empty() {
+            self.note(at, NoteKind::FieldsDropped { fields: dropped });
+        }
+        v3_0::MessageTrait {
+            headers: message_trait
+                .headers
+                .and_then(|headers| self.schema(at, "headers", &headers, None)),
+            correlation_id: message_trait.correlation_id.map(|correlation_id| {
+                self.ref_or(at, correlation_id, |this, at, item| {
+                    this.reinterpret(at, &item).unwrap_or_default()
+                })
+            }),
+            content_type: message_trait.content_type,
+            name: message_trait.name,
+            title: message_trait.title,
+            summary: message_trait.summary,
+            description: message_trait.description,
+            deprecated: message_trait.deprecated,
+            tags: message_trait
+                .tags
+                .into_iter()
+                .map(|tag| RefOr::Item(self.tag(tag)))
+                .collect(),
+            external_docs: message_trait
+                .external_docs
+                .map(|docs| RefOr::Item(external_documentation(docs))),
+            bindings: self.bindings(at, message_trait.bindings),
+            examples: message_trait
+                .examples
+                .into_iter()
+                .filter_map(|example| self.reinterpret(at, &example))
+                .collect(),
+            extensions: message_trait.extensions,
+        }
     }
 
     fn tag(&mut self, tag: v2_6::Tag) -> v3_0::Tag {
@@ -793,11 +923,7 @@ impl Conversion {
             traits: operation
                 .traits
                 .into_iter()
-                .map(|operation_trait| {
-                    self.ref_or(at, operation_trait, |this, at, item| {
-                        this.reinterpret(at, &item).unwrap_or_default()
-                    })
-                })
+                .map(|operation_trait| self.ref_or(at, operation_trait, Self::operation_trait))
                 .collect(),
             title: None,
             summary: operation.summary,
@@ -917,11 +1043,7 @@ impl Conversion {
             traits: message
                 .traits
                 .into_iter()
-                .map(|message_trait| {
-                    self.ref_or(at, message_trait, |this, at, item| {
-                        this.reinterpret(at, &item).unwrap_or_default()
-                    })
-                })
+                .map(|message_trait| self.ref_or(at, message_trait, Self::message_trait))
                 .collect(),
             extensions: message.extensions,
         }
@@ -937,9 +1059,11 @@ impl Conversion {
         schema_format: Option<&str>,
     ) -> Option<RefOr<v3_0::SchemaOrMultiFormat>> {
         let mut value = serde_json::to_value(schema).ok()?;
-        // A schema names things too, and v3 moved some of them.
-        self.rewrite_within(at, &mut value);
         if crate::v2_6::message::payload_is_asyncapi_schema(schema_format) {
+            // A schema in this document's own dialect names things the
+            // way the document does, and v3 moved some of them. Another
+            // dialect's `$ref` means whatever that dialect says.
+            self.rewrite_in_schema(at, &mut value);
             return match serde_json::from_value(value) {
                 Ok(schema) => Some(schema),
                 Err(_) => {
@@ -1060,9 +1184,7 @@ impl Conversion {
                     let at = format!("{at}.operationTraits.{name}");
                     (
                         name,
-                        self.ref_or(&at, operation_trait, |this, at, item| {
-                            this.reinterpret(at, &item).unwrap_or_default()
-                        }),
+                        self.ref_or(&at, operation_trait, Self::operation_trait),
                     )
                 })
                 .collect(),
@@ -1071,12 +1193,7 @@ impl Conversion {
                 .into_iter()
                 .map(|(name, message_trait)| {
                     let at = format!("{at}.messageTraits.{name}");
-                    (
-                        name,
-                        self.ref_or(&at, message_trait, |this, at, item| {
-                            this.reinterpret(at, &item).unwrap_or_default()
-                        }),
-                    )
+                    (name, self.ref_or(&at, message_trait, Self::message_trait))
                 })
                 .collect(),
             server_bindings: components.server_bindings,
@@ -1168,14 +1285,31 @@ impl Conversion {
         } else {
             "subscribe"
         };
-        // A message is the exception; everything else an operation had,
-        // it still has.
-        let followable = !matches!(rest.first(), Some(field) if field == "message");
-        match self
-            .operation_keys
-            .get(&(source, action))
-            .filter(|_| followable)
+        // A message did not follow its operation: it went to the
+        // channel, under a name settled before any of this began.
+        if let [message, tail @ ..] = rest
+            && message == "message"
         {
+            let (named, rest) = match tail {
+                [one_of, index, rest @ ..] if one_of == "oneOf" => {
+                    (format!("{source}/{action}/message/oneOf/{index}"), rest)
+                }
+                rest => (format!("{source}/{action}/message"), rest),
+            };
+            return match self.message_keys.get(&named) {
+                Some(key) => join(&format!("{moved_to}/messages/{key}"), rest.iter()),
+                None => {
+                    self.note(
+                        at,
+                        NoteKind::ReferenceNotRewritten {
+                            reference: reference.to_owned(),
+                        },
+                    );
+                    reference.to_owned()
+                }
+            };
+        }
+        match self.operation_keys.get(&(source, action)) {
             Some(operation) => join(&operation.clone(), rest.iter()),
             None => {
                 self.note(
@@ -1189,27 +1323,59 @@ impl Conversion {
         }
     }
 
-    /// Rewrite every `$ref` inside a value this conversion carries as
-    /// raw JSON — a schema's, which may name anything the document has.
-    fn rewrite_within(&mut self, at: &str, value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(map) => {
-                if let Some(serde_json::Value::String(reference)) = map.get("$ref") {
-                    let rewritten = self.rewrite(at, &reference.clone());
-                    map.insert("$ref".to_owned(), serde_json::Value::String(rewritten));
-                }
-                for (key, value) in map.iter_mut() {
-                    if key != "$ref" {
-                        self.rewrite_within(at, value);
+    /// Rewrite the pointers a schema holds, and only those.
+    ///
+    /// A schema keeps schemas in a known set of places; everything else
+    /// it holds is data — a `default`, an `enum`, an `x-` member — and
+    /// a `$ref`-shaped value there means whatever the application says
+    /// it means. This walks the first and leaves the second alone.
+    fn rewrite_in_schema(&mut self, at: &str, value: &mut serde_json::Value) {
+        let serde_json::Value::Object(map) = value else {
+            return;
+        };
+        if let Some(serde_json::Value::String(reference)) = map.get("$ref") {
+            let rewritten = self.rewrite(at, &reference.clone());
+            map.insert("$ref".to_owned(), serde_json::Value::String(rewritten));
+        }
+        for (key, value) in map.iter_mut() {
+            match key.as_str() {
+                // A map of schemas.
+                "properties" | "patternProperties" | "definitions" | "dependencies" => {
+                    if let serde_json::Value::Object(schemas) = value {
+                        for schema in schemas.values_mut() {
+                            self.rewrite_in_schema(at, schema);
+                        }
                     }
                 }
-            }
-            serde_json::Value::Array(values) => {
-                for value in values {
-                    self.rewrite_within(at, value);
+                // A list of them.
+                "allOf" | "anyOf" | "oneOf" => {
+                    if let serde_json::Value::Array(schemas) = value {
+                        for schema in schemas {
+                            self.rewrite_in_schema(at, schema);
+                        }
+                    }
                 }
+                // Either, `items` being draft-07's both-ways keyword.
+                "items" => match value {
+                    serde_json::Value::Array(schemas) => {
+                        for schema in schemas {
+                            self.rewrite_in_schema(at, schema);
+                        }
+                    }
+                    schema => self.rewrite_in_schema(at, schema),
+                },
+                // One schema.
+                "additionalItems"
+                | "additionalProperties"
+                | "propertyNames"
+                | "contains"
+                | "not"
+                | "if"
+                | "then"
+                | "else" => self.rewrite_in_schema(at, value),
+                // Anything else is the application's own data.
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -1269,6 +1435,14 @@ fn split_url(url: &str) -> (String, Option<String>) {
     match authority.split_once('/') {
         Some((host, path)) => (host.to_owned(), Some(format!("/{path}"))),
         None => (authority.to_owned(), None),
+    }
+}
+
+/// What a message offers to be called.
+fn message_name(message: &RefOr<v2_6::Message>) -> Option<String> {
+    match message {
+        RefOr::Reference(reference) => reference.component_key("messages"),
+        RefOr::Item(message) => message.message_id.clone().or_else(|| message.name.clone()),
     }
 }
 
@@ -1483,17 +1657,17 @@ mod tests {
         ));
         assert!(!notes.iter().any(|note| note.contains("no longer names")));
 
-        // One that points *inside* a channel has nowhere to go: v3 took
-        // the operations out.
-        let (_, notes) = convert_json(minimal(json!({
+        // One that points *inside* a channel is followed too: the
+        // message went to the channel, under a name of its own.
+        let (document, notes) = convert_json(minimal(json!({
             "a/b": { "publish": { "message": { "name": "M" } } },
             "alias": { "$ref": "#/channels/a~1b/publish/message" }
         })));
-        assert!(
-            notes.iter().any(|note| note
-                .contains("`#/channels/a~1b/publish/message` no longer names the same thing")),
-            "got: {notes:?}"
-        );
+        assert!(matches!(
+            &document.channels["alias"],
+            RefOr::Reference(reference) if reference.reference == "#/channels/a_b/messages/M"
+        ));
+        assert!(!notes.iter().any(|note| note.contains("no longer names")));
     }
 
     #[test]
@@ -1933,20 +2107,21 @@ mod tests {
         assert!(!notes.iter().any(|note| note.contains("no longer names")));
         document_is_valid(&document);
 
-        // A pointer at what an operation *carried* is another matter:
-        // its message became the channel's, under a name of its own.
-        let (_, notes) = convert_json(minimal(json!({
+        // A message followed its channel rather than its operation,
+        // and a pointer at one follows it there.
+        let (document, notes) = convert_json(minimal(json!({
             "c": {
                 "publish": { "message": { "name": "M" } },
                 "subscribe": { "bindings": { "$ref": "#/channels/c/publish/message" } }
             }
         })));
-        assert!(
-            notes
-                .iter()
-                .any(|note| note.contains("`#/channels/c/publish/message` no longer names")),
-            "got: {notes:?}"
-        );
+        let send = document.operations["c_subscribe"].item().expect("inline");
+        assert!(matches!(
+            &send.bindings,
+            Some(RefOr::Reference(reference))
+                if reference.reference == "#/channels/c/messages/M"
+        ));
+        assert!(!notes.iter().any(|note| note.contains("no longer names")));
     }
 
     #[test]
@@ -2209,30 +2384,44 @@ mod tests {
             json!("#/channels/bad~2escape"),
         );
 
-        // One that names what an operation *carried* cannot be
-        // followed: v3 gave the message a name of its own, and this
-        // conversion invents it while converting.
-        let (_, notes) = convert_json(json!({
+        // One that names what an operation carried is followed to the
+        // channel the message went to, whichever form it took there.
+        let (document, notes) = convert_json(json!({
             "asyncapi": "2.6.0",
             "info": { "title": "T", "version": "1" },
             "channels": {
-                "c": { "publish": { "message": { "name": "M", "payload": { "type": "object" } } } }
+                "c": { "publish": { "message": { "name": "M", "payload": { "type": "object" } } } },
+                "a/b": {
+                    "publish": {
+                        "message": {
+                            "oneOf": [ { "name": "A" }, { "name": "B", "payload": { "type": "object" } } ]
+                        }
+                    }
+                }
             },
             "components": {
                 "schemas": {
                     "s": {
                         "properties": {
-                            "p": { "$ref": "#/channels/c/publish/message/payload" }
+                            "p": { "$ref": "#/channels/c/publish/message/payload" },
+                            "q": { "$ref": "#/channels/a~1b/publish/message/oneOf/1/payload" }
                         }
                     }
                 }
             }
         }));
-        assert!(
-            notes.iter().any(|note| note
-                .contains("`#/channels/c/publish/message/payload` no longer names the same thing")),
-            "got: {notes:?}"
+        let value = serde_json::to_value(&document).expect("serializable");
+        let properties = &value["components"]["schemas"]["s"]["properties"];
+        assert_eq!(
+            properties["p"]["$ref"],
+            json!("#/channels/c/messages/M/payload"),
         );
+        assert_eq!(
+            properties["q"]["$ref"],
+            json!("#/channels/a_b/messages/B/payload"),
+        );
+        assert!(!notes.iter().any(|note| note.contains("no longer names")));
+        document_is_valid(&document);
     }
 
     #[test]
@@ -2318,6 +2507,207 @@ mod tests {
         assert!(
             !notes.iter().any(|note| note.contains("nowhere to keep")),
             "got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_traits_references_are_followed_like_an_operations() {
+        // A trait carries what an operation does, references and all —
+        // so re-reading it whole would leave it pointing where v3 is
+        // not.
+        let (document, notes) = convert_json(minimal(json!({
+            "c": {
+                "subscribe": { "operationId": "send", "bindings": { "kafka": {} } },
+                "publish": {
+                    "traits": [ { "bindings": { "$ref": "#/channels/c/subscribe/bindings" } } ]
+                }
+            }
+        })));
+        let operation = document.operations["c_publish"].item().expect("inline");
+        let operation_trait = operation.traits[0].item().expect("inline");
+        assert!(matches!(
+            &operation_trait.bindings,
+            Some(RefOr::Reference(reference))
+                if reference.reference == "#/operations/send/bindings"
+        ));
+        assert!(!notes.iter().any(|note| note.contains("no longer names")));
+        document_is_valid(&document);
+
+        // A message trait's headers name things too.
+        let (document, _) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "a/b": { "publish": {} } },
+            "components": {
+                "messageTraits": {
+                    "t": { "headers": { "properties": { "p": { "$ref": "#/channels/a~1b" } } } }
+                }
+            }
+        }));
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["components"]["messageTraits"]["t"]["headers"]["properties"]["p"]["$ref"],
+            json!("#/channels/a_b"),
+        );
+    }
+
+    #[test]
+    fn another_dialect_is_left_exactly_as_it_was() {
+        // A `$ref` in an Avro payload is Avro's business, and so is a
+        // `$ref`-shaped value sitting in a schema's own data.
+        let (document, _) = convert_json(minimal(json!({
+            "a/b": {
+                "publish": {
+                    "message": {
+                        "name": "M",
+                        "schemaFormat": "application/vnd.apache.avro;version=1.9.0",
+                        "payload": { "type": "record", "ref": { "$ref": "#/channels/a~1b" } }
+                    }
+                }
+            }
+        })));
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["channels"]["a_b"]["messages"]["M"]["payload"]["schema"]["ref"]["$ref"],
+            json!("#/channels/a~1b"),
+        );
+
+        // The same for what a schema holds as data rather than as a
+        // schema.
+        let (document, _) = convert_json(minimal(json!({
+            "a/b": {
+                "publish": {
+                    "message": {
+                        "name": "M",
+                        "payload": {
+                            "type": "object",
+                            "default": { "$ref": "#/channels/a~1b" },
+                            "examples": [ { "$ref": "#/channels/a~1b" } ],
+                            "x-sample": { "$ref": "#/channels/a~1b" },
+                            "properties": { "p": { "$ref": "#/channels/a~1b" } }
+                        }
+                    }
+                }
+            }
+        })));
+        let value = serde_json::to_value(&document).expect("serializable");
+        let payload = &value["channels"]["a_b"]["messages"]["M"]["payload"];
+        for data in ["default", "x-sample"] {
+            assert_eq!(payload[data]["$ref"], json!("#/channels/a~1b"), "{data}");
+        }
+        assert_eq!(payload["examples"][0]["$ref"], json!("#/channels/a~1b"));
+        // …but a schema it holds as a schema is a schema.
+        assert_eq!(payload["properties"]["p"]["$ref"], json!("#/channels/a_b"));
+    }
+
+    #[test]
+    fn a_pointer_at_what_is_not_there_is_left_and_reported() {
+        // Nothing to follow: the channel has no such operation, and no
+        // such message.
+        let (_, notes) = convert_json(minimal(json!({
+            "c": {
+                "subscribe": {
+                    "bindings": { "$ref": "#/channels/c/publish/bindings" },
+                    "message": { "$ref": "#/channels/c/publish/message" }
+                }
+            }
+        })));
+        for missing in [
+            "`#/channels/c/publish/bindings` no longer names the same thing",
+            "`#/channels/c/publish/message` no longer names the same thing",
+        ] {
+            assert!(
+                notes.iter().any(|note| note.contains(missing)),
+                "got: {notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_place_a_schema_keeps_schemas_is_walked() {
+        let (document, _) = convert_json(minimal(json!({
+            "a/b": {
+                "publish": {
+                    "message": {
+                        "name": "M",
+                        "payload": {
+                            "allOf": [ { "$ref": "#/channels/a~1b" } ],
+                            "items": [ { "$ref": "#/channels/a~1b" } ],
+                            "additionalProperties": { "$ref": "#/channels/a~1b" },
+                            "definitions": { "d": { "$ref": "#/channels/a~1b" } }
+                        }
+                    }
+                }
+            },
+            "c": {
+                "publish": {
+                    "message": {
+                        "name": "N",
+                        "payload": { "items": { "$ref": "#/channels/a~1b" } }
+                    }
+                }
+            }
+        })));
+        let value = serde_json::to_value(&document).expect("serializable");
+        let payload = &value["channels"]["a_b"]["messages"]["M"]["payload"];
+        assert_eq!(payload["allOf"][0]["$ref"], json!("#/channels/a_b"));
+        assert_eq!(payload["items"][0]["$ref"], json!("#/channels/a_b"));
+        assert_eq!(
+            payload["additionalProperties"]["$ref"],
+            json!("#/channels/a_b")
+        );
+        assert_eq!(payload["definitions"]["d"]["$ref"], json!("#/channels/a_b"));
+        // `items` the other way round is a schema, not a list of them.
+        assert_eq!(
+            value["channels"]["c"]["messages"]["N"]["payload"]["items"]["$ref"],
+            json!("#/channels/a_b"),
+        );
+    }
+
+    #[test]
+    fn a_message_trait_carries_a_correlation_id_across() {
+        let (document, _) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "messageTraits": {
+                    "t": { "correlationId": { "location": "$message.header#/id" } }
+                }
+            }
+        }));
+        let components = document.components.expect("components");
+        let message_trait = components.message_traits["t"].item().expect("inline");
+        let correlation_id = message_trait
+            .correlation_id
+            .as_ref()
+            .and_then(RefOr::item)
+            .expect("carried across");
+        assert_eq!(correlation_id.location, "$message.header#/id");
+    }
+
+    #[test]
+    fn re_reading_a_value_says_what_it_could_not_bring() {
+        // Nothing this conversion re-reads drops a field today — the
+        // types that did are converted field by field — but the net
+        // stays, so that adding one does not lose anything quietly.
+        let source: v2_6::Document =
+            serde_json::from_value(minimal(json!({}))).expect("a document");
+        let mut conversion = Conversion::new(&source);
+        let message = v2_6::Message {
+            message_id: Some("mid".to_owned()),
+            name: Some("M".to_owned()),
+            ..v2_6::Message::default()
+        };
+        let converted: Option<v3_0::Message> = conversion.reinterpret("#.somewhere", &message);
+        assert!(converted.is_some());
+        assert_eq!(
+            conversion
+                .notes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["#.somewhere: v3 has nowhere to keep [\"messageId\"]"],
         );
     }
 
