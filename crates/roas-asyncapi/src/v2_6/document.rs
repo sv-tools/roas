@@ -1727,6 +1727,139 @@ mod tests {
     }
 
     #[test]
+    fn referenced_headers_must_still_describe_an_object() {
+        let document = |headers: serde_json::Value, schemas: serde_json::Value| {
+            json!({
+                "asyncapi": "2.6.0",
+                "info": { "title": "T", "version": "1" },
+                "channels": { "c": { "publish": { "message": { "headers": headers } } } },
+                "components": { "schemas": schemas }
+            })
+        };
+
+        // The constraint is on what the headers are, so naming a schema
+        // that is not an object breaks it just as writing one would.
+        assert_eq!(
+            errors_for(document(
+                json!({ "$ref": "#/components/schemas/s" }),
+                json!({ "s": { "type": "string" } })
+            )),
+            vec![
+                "#.channels.c.publish.message.headers.$ref: `#/components/schemas/s` must be `object`, not `string`"
+            ]
+        );
+        assert_eq!(
+            errors_for(document(
+                json!({ "$ref": "#/components/schemas/s" }),
+                json!({ "s": { "type": ["object"] } })
+            )),
+            vec![
+                "#.channels.c.publish.message.headers.$ref: `#/components/schemas/s` must be the string `object`, not a list"
+            ]
+        );
+
+        // Naming one that is an object is right, and so is saying so
+        // inline.
+        assert_eq!(
+            errors_for(document(
+                json!({ "$ref": "#/components/schemas/s" }),
+                json!({ "s": { "type": "object" } })
+            )),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            errors_for(document(json!({ "type": "object" }), json!({}))),
+            Vec::<String>::new()
+        );
+
+        // A reference this document cannot follow says nothing about
+        // the headers either way…
+        assert_eq!(
+            errors_for(document(json!({ "$ref": "./other.yaml#/s" }), json!({}))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            errors_for(document(
+                json!({ "$ref": "#/components/schemas/ghost" }),
+                json!({})
+            )),
+            vec![
+                "#.channels.c.publish.message.headers.$ref: `#/components/schemas/ghost` names nothing in this document"
+            ]
+        );
+
+        // …nor does one naming a boolean schema, which declares no type
+        // at all.
+        assert_eq!(
+            errors_for(document(
+                json!({ "$ref": "#/components/schemas/s" }),
+                json!({ "s": true })
+            )),
+            Vec::<String>::new()
+        );
+
+        // A chain is followed to its end.
+        assert_eq!(
+            errors_for(document(
+                json!({ "$ref": "#/components/schemas/alias" }),
+                json!({
+                    "alias": { "$ref": "#/components/schemas/s" },
+                    "s": { "type": "string" }
+                })
+            )),
+            vec![
+                "#.channels.c.publish.message.headers.$ref: `#/components/schemas/alias` must be `object`, not `string`"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_payload_ref_carries_nothing_beside_it() {
+        let document = |message: serde_json::Value| {
+            json!({
+                "asyncapi": "2.6.0",
+                "info": { "title": "T", "version": "1" },
+                "channels": { "c": { "publish": { "message": message } } },
+                "components": { "schemas": { "base": { "type": "object" } } }
+            })
+        };
+
+        // In the default dialect a payload `$ref` is a Reference
+        // Object, so what sits beside it does nothing — and is said so
+        // rather than left to look meaningful.
+        assert_eq!(
+            errors_for(document(json!({
+                "payload": {
+                    "$ref": "#/components/schemas/base",
+                    "properties": { "ignored": { "type": "string" } }
+                }
+            }))),
+            vec![
+                "#.channels.c.publish.message.payload: `properties` beside `$ref` is ignored: a schema `$ref` is a Reference Object"
+            ]
+        );
+
+        // The reference alone is fine.
+        assert_eq!(
+            errors_for(document(
+                json!({ "payload": { "$ref": "#/components/schemas/base" } })
+            )),
+            Vec::<String>::new()
+        );
+
+        // Another dialect's payload is that dialect's business: its
+        // `$ref` may mean anything, and its siblings are not ours to
+        // judge.
+        assert_eq!(
+            errors_for(document(json!({
+                "schemaFormat": "application/vnd.apache.avro;version=1.9.0",
+                "payload": { "$ref": "user.avsc", "type": "record" }
+            }))),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn a_schema_reference_resolves_like_any_other() {
         let document = |schemas: serde_json::Value| {
             json!({

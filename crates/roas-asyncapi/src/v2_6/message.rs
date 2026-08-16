@@ -12,9 +12,10 @@
 
 use crate::common::bindings::MessageBindings;
 use crate::common::reference::RefOr;
+use crate::common::resolve;
 use crate::v2_6::correlation_id::CorrelationId;
 use crate::v2_6::external_documentation::ExternalDocumentation;
-use crate::v2_6::schema::{SchemaType, SubSchema};
+use crate::v2_6::schema::{Schema, SchemaType, SubSchema};
 use crate::v2_6::tag::Tag;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -69,6 +70,26 @@ pub fn payload_is_asyncapi_schema(schema_format: Option<&str>) -> bool {
 /// schema checks, reporting a parse failure as a diagnostic rather than
 /// letting a malformed schema through.
 fn validate_schema_payload(ctx: &mut Context, payload: &serde_json::Value) {
+    // A payload that names a schema is a Reference Object, and a
+    // Reference Object is `$ref` alone. The typed schema positions drop
+    // what sits beside one on the way in; a payload is raw JSON so that
+    // any dialect round-trips, so here the ignored half is reported
+    // instead of silently kept.
+    if let Some(map) = payload.as_object()
+        && map.contains_key("$ref")
+        && map.len() > 1
+    {
+        let ignored = map
+            .keys()
+            .filter(|key| key.as_str() != "$ref")
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ctx.error_field(
+            "payload",
+            format!("{ignored} beside `$ref` is ignored: a schema `$ref` is a Reference Object"),
+        );
+    }
     match serde_json::from_value::<SubSchema>(payload.clone()) {
         Ok(schema) => ctx.in_field("payload", |ctx| schema.validate_with_context(ctx)),
         Err(err) => ctx.error_field(
@@ -283,22 +304,36 @@ impl ValidateWithContext for Message {
 fn validate_headers(ctx: &mut Context, headers: &SubSchema) {
     ctx.in_field("headers", |ctx| {
         headers.validate_with_context(ctx);
-        // A reference is followed where it is declared, not here.
-        if let SubSchema::Schema(schema) = headers
-            && let Some(schema) = schema.item()
-        {
-            match &schema.schema_type {
-                Some(SchemaType::Single(name)) if name != "object" => {
-                    ctx.error_field("type", format!("must be `object`, not `{name}`"));
-                }
-                // `const: "object"` constrains the whole `type` value,
-                // so the list form cannot satisfy it — not even
-                // `["object"]`.
-                Some(SchemaType::Multiple(_)) => {
-                    ctx.error_field("type", "must be the string `object`, not a list");
-                }
-                _ => {}
+        let SubSchema::Schema(schema) = headers else {
+            return;
+        };
+        // The constraint is on what the headers *are*, so a reference
+        // is followed to find out — reported on the `$ref` that named
+        // the schema, there being no `type` here to point at.
+        let (schema_type, at) = match schema.as_ref() {
+            RefOr::Item(schema) => (schema.schema_type.clone(), None),
+            RefOr::Reference(reference) => {
+                let Some(target) = resolve::resolved(ctx, &reference.reference) else {
+                    return;
+                };
+                let Ok(schema) = serde_json::from_value::<Schema>(target) else {
+                    return;
+                };
+                (schema.schema_type, Some(reference.reference.clone()))
             }
+        };
+        let problem = match schema_type {
+            Some(SchemaType::Single(name)) if name != "object" => {
+                format!("must be `object`, not `{name}`")
+            }
+            // `const: "object"` constrains the whole `type` value, so
+            // the list form cannot satisfy it — not even `["object"]`.
+            Some(SchemaType::Multiple(_)) => "must be the string `object`, not a list".to_owned(),
+            _ => return,
+        };
+        match at {
+            Some(reference) => ctx.error_field("$ref", format!("`{reference}` {problem}")),
+            None => ctx.error_field("type", problem),
         }
     });
 }
