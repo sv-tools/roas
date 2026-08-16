@@ -90,6 +90,9 @@ pub enum NoteKind {
     /// A 2.6 parameter carries a schema; a 3.0 parameter is a string
     /// with an optional enumeration, so anything else it said is lost.
     ParameterSchemaDropped,
+    /// …unless the document names it, in which case it is kept where
+    /// v3 keeps schemas, and pointers at it follow.
+    ParameterSchemaMoved { to: String },
     /// 3.0 has no `deprecated` on a channel.
     ChannelDeprecationDropped,
     /// 2.6's `$ref` on a channel item may carry siblings, whose
@@ -157,6 +160,12 @@ impl fmt::Display for NoteKind {
             ),
             NoteKind::ParameterSchemaDropped => {
                 f.write_str("a v3 parameter is a string, so `schema` is dropped")
+            }
+            NoteKind::ParameterSchemaMoved { to } => {
+                write!(
+                    f,
+                    "a v3 parameter is a string, so `schema` was kept at `{to}`"
+                )
             }
             NoteKind::ChannelDeprecationDropped => f.write_str("a v3 channel has no `deprecated`"),
             NoteKind::ChannelReferenceSiblingsDropped => {
@@ -231,13 +240,16 @@ struct Conversion {
     /// the v3.0 pointer the operation went to. Keyed up front for the
     /// same reason channels are: a pointer may name one.
     operation_keys: BTreeMap<(String, &'static str), String>,
-    /// Every operation name spoken for, including those a reusable
-    /// channel takes as it is converted.
-    taken_operations: BTreeSet<String>,
     /// The v2.6 pointer at a message → the name v3 files it under. A
     /// message moved from its operation to its channel, so a pointer at
     /// one has somewhere to go only if the name is settled first.
     message_keys: BTreeMap<String, String>,
+    /// The v2.6 pointer at a parameter's schema → the reusable schema
+    /// it is kept as. A v3 parameter is a string and holds no schema,
+    /// so one the document points at is kept where v3 keeps schemas.
+    parameter_schemas: BTreeMap<String, String>,
+    /// Those schemas, gathered as the channels are converted.
+    kept_schemas: BTreeMap<String, RefOr<v3_0::SchemaOrMultiFormat>>,
 }
 
 impl Conversion {
@@ -309,11 +321,21 @@ impl Conversion {
                 )
             }));
         for (at, source, channel_key, map, item, is_reusable) in places {
-            // What a channel that names another says itself is
-            // discarded, so none of it is a destination.
-            if item.reference.is_some() {
-                continue;
-            }
+            // A channel that names another is converted as the two of
+            // them together, so what it says itself is a destination
+            // like anything else — unless the naming cannot be
+            // followed, in which case nothing of it survives.
+            let merged_item;
+            let item = match &item.reference {
+                None => item,
+                Some(_) => match merged(item, &reusable) {
+                    Some(item) => {
+                        merged_item = item;
+                        &merged_item
+                    }
+                    None => continue,
+                },
+            };
             for (action, operation) in [
                 (v2_6::OperationKind::Publish, &item.publish),
                 (v2_6::OperationKind::Subscribe, &item.subscribe),
@@ -360,12 +382,17 @@ impl Conversion {
                     .map(|(name, item)| (format!("#/components/channels/{name}"), item)),
             )
         {
-            // A channel that names another is *given* what it names,
-            // and what it says itself is discarded — so nothing here is
-            // a destination anything should be pointed at.
-            if item.reference.is_some() {
-                continue;
-            }
+            let merged_item;
+            let item = match &item.reference {
+                None => item,
+                Some(_) => match merged(item, &reusable) {
+                    Some(item) => {
+                        merged_item = item;
+                        &merged_item
+                    }
+                    None => continue,
+                },
+            };
             let mut taken = BTreeSet::new();
             for (action, operation) in [
                 (v2_6::OperationKind::Publish, &item.publish),
@@ -386,13 +413,56 @@ impl Conversion {
                 }
             }
         }
+        // A v3 parameter keeps no schema, so one the document points at
+        // has to be kept somewhere v3 does. Only those: generating a
+        // reusable schema for every parameter would bulk out documents
+        // that never name one.
+        let named = named_pointers(&document);
+        let mut taken: BTreeSet<String> = document
+            .components
+            .as_ref()
+            .map(|components| components.schemas.keys().cloned().collect())
+            .unwrap_or_default();
+        let mut parameter_schemas = BTreeMap::new();
+        for (source, channel_key, parameters) in document
+            .channels
+            .iter()
+            .map(|(address, item)| {
+                (
+                    format!("#/channels/{address}"),
+                    channel_keys[address].clone(),
+                    &item.parameters,
+                )
+            })
+            .chain(reusable.iter().map(|(name, item)| {
+                (
+                    format!("#/components/channels/{name}"),
+                    name.clone(),
+                    &item.parameters,
+                )
+            }))
+        {
+            for name in parameters.keys() {
+                let at = format!("{source}/parameters/{name}/schema");
+                if !named
+                    .iter()
+                    .any(|pointer| pointer == &at || pointer.starts_with(&format!("{at}/")))
+                {
+                    continue;
+                }
+                let key = unique(sanitize(&format!("{channel_key}_{name}")), &mut taken);
+                parameter_schemas.insert(at, key);
+            }
+        }
+
         Self {
             notes,
             channel_keys,
             reusable,
             operation_keys,
-            taken_operations: taken,
             message_keys,
+            parameter_schemas,
+            kept_schemas: BTreeMap::new(),
         }
     }
 
@@ -437,9 +507,15 @@ impl Conversion {
             default_content_type: document.default_content_type,
             channels,
             operations,
-            components: document
-                .components
-                .map(|components| self.components(components)),
+            // A document with nothing reusable may still have had a
+            // parameter schema kept for it.
+            components: match document.components {
+                Some(components) => Some(self.components(components)),
+                None => (!self.kept_schemas.is_empty()).then(|| v3_0::Components {
+                    schemas: std::mem::take(&mut self.kept_schemas),
+                    ..v3_0::Components::default()
+                }),
+            },
             extensions: document.extensions,
         }
     }
@@ -711,8 +787,21 @@ impl Conversion {
         item: v2_6::ChannelItem,
     ) -> (RefOr<v3_0::Channel>, Vec<(String, RefOr<v3_0::Operation>)>) {
         if let Some(reference) = &item.reference {
-            // 2.6 leaves the meaning of a `$ref` sibling undefined and
-            // deprecates the field; 3.0 has no room for one at all.
+            // A v3 channel keeps its address, and a Reference Object
+            // cannot carry one — so what the reference names is copied
+            // in, where this conversion can reach it, together with
+            // whatever the naming channel said itself.
+            if let Some(named) = merged(&item, &self.reusable) {
+                self.note(
+                    at,
+                    NoteKind::ChannelReferenceInlined {
+                        reference: reference.clone(),
+                    },
+                );
+                return self.channel(at, place, named);
+            }
+            // Out of reach, so a Reference Object it stays — and a
+            // Reference Object is `$ref` alone.
             if item.publish.is_some()
                 || item.subscribe.is_some()
                 || item.description.is_some()
@@ -723,18 +812,6 @@ impl Conversion {
                 || !item.servers.is_empty()
             {
                 self.note(at, NoteKind::ChannelReferenceSiblingsDropped);
-            }
-            // A v3 channel keeps its address, and a Reference Object
-            // cannot carry one — so what the reference names is copied
-            // in, where this conversion can reach it.
-            if let Some(named) = self.named_channel(reference) {
-                self.note(
-                    at,
-                    NoteKind::ChannelReferenceInlined {
-                        reference: reference.clone(),
-                    },
-                );
-                return self.channel(at, place, named);
             }
             let reference = self.rewrite(at, reference);
             if let Some(address) = place.address {
@@ -772,7 +849,13 @@ impl Conversion {
                 .into_iter()
                 .map(|(name, parameter)| {
                     let at = format!("{at}.parameters.{name}");
-                    (name, self.ref_or(&at, parameter, Self::parameter))
+                    let source = format!("{}/parameters/{name}/schema", place.source);
+                    (
+                        name,
+                        self.ref_or(&at, parameter, |this, at, item| {
+                            this.parameter(at, &source, item)
+                        }),
+                    )
                 })
                 .collect(),
             title: None,
@@ -793,30 +876,9 @@ impl Conversion {
         (RefOr::Item(channel), operations)
     }
 
-    /// The reusable channel a pointer names, following one that names
-    /// another. `None` for a pointer this conversion cannot follow.
-    fn named_channel(&self, reference: &str) -> Option<v2_6::ChannelItem> {
-        let mut seen = BTreeSet::new();
-        let mut reference = reference.to_owned();
-        loop {
-            let tokens = pointer::tokens(reference.strip_prefix('#')?)?;
-            let [components, channels, name] = tokens.as_slice() else {
-                return None;
-            };
-            if components != "components" || channels != "channels" || !seen.insert(name.clone()) {
-                return None;
-            }
-            let named = self.reusable.get(name)?;
-            match &named.reference {
-                Some(next) => reference = next.clone(),
-                None => return Some(named.clone()),
-            }
-        }
-    }
-
     /// A 2.6 parameter describes its value with a schema; a 3.0 one is
     /// a string, with an enumeration and a default at most.
-    fn parameter(&mut self, at: &str, parameter: v2_6::Parameter) -> v3_0::Parameter {
+    fn parameter(&mut self, at: &str, source: &str, parameter: v2_6::Parameter) -> v3_0::Parameter {
         let mut converted = v3_0::Parameter {
             description: parameter.description,
             location: parameter.location,
@@ -826,6 +888,19 @@ impl Conversion {
         let Some(schema) = parameter.schema else {
             return converted;
         };
+        // Kept where v3 keeps schemas, when the document names it.
+        if let Some(key) = self.parameter_schemas.get(source).cloned() {
+            if let Some(kept) = self.schema(at, "schema", &schema, None) {
+                self.kept_schemas.insert(key.clone(), kept);
+            }
+            self.note(
+                at,
+                NoteKind::ParameterSchemaMoved {
+                    to: format!("#/components/schemas/{key}"),
+                },
+            );
+            return converted;
+        }
         // Only what a v3 parameter can still say survives, and only
         // where the value itself survives with it: v3 enumerates
         // strings, so a number in an `enum` is as lost as a `pattern`.
@@ -884,37 +959,15 @@ impl Conversion {
             },
         );
 
-        // A root operation was named before anything was converted, so
-        // that a pointer at it could be rewritten; anything else — a
-        // reusable channel's, or one copied in from it — is named here.
-        let key = match self
+        // Everything was named before anything was converted, so that
+        // a pointer at it could be rewritten. Deriving the name again
+        // is the same answer, and a gentler one than a panic if that
+        // ever stops being true.
+        let key = self
             .operation_keys
             .get(&(place.source.clone(), action.as_str()))
             .and_then(|pointer| pointer.rsplit('/').next().map(str::to_owned))
-        {
-            Some(key) => key,
-            None => {
-                let offered = operation
-                    .operation_id
-                    .as_deref()
-                    .map(sanitize)
-                    .filter(|id| !id.is_empty());
-                let key = unique(
-                    offered.unwrap_or_else(|| format!("{}_{}", place.key, action.as_str())),
-                    &mut self.taken_operations,
-                );
-                if operation.operation_id.as_deref() != Some(key.as_str()) {
-                    self.note(
-                        at,
-                        NoteKind::OperationKeyDerived {
-                            from: operation.operation_id.clone(),
-                            key: key.clone(),
-                        },
-                    );
-                }
-                key
-            }
-        };
+            .unwrap_or_else(|| format!("{}_{}", place.key, action.as_str()));
 
         let references = self.messages(
             at,
@@ -983,20 +1036,17 @@ impl Conversion {
             // The name was settled before anything moved, so that a
             // pointer at this message lands where it went; one copied
             // in from a channel that named another is named here.
-            let key = match self.message_keys.get(&format!("{source}{within}")) {
-                Some(key) => key.clone(),
-                None => {
-                    let mut taken: BTreeSet<String> = channel_messages.keys().cloned().collect();
-                    unique(
-                        named
-                            .as_deref()
-                            .map(sanitize)
-                            .filter(|key| !key.is_empty())
-                            .unwrap_or_else(|| "message".to_owned()),
-                        &mut taken,
-                    )
-                }
-            };
+            let key = self
+                .message_keys
+                .get(&format!("{source}{within}"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    named
+                        .as_deref()
+                        .map(sanitize)
+                        .filter(|key| !key.is_empty())
+                        .unwrap_or_else(|| "message".to_owned())
+                });
             if named.as_deref() != Some(key.as_str()) {
                 self.note(
                     &at,
@@ -1117,6 +1167,18 @@ impl Conversion {
 
     fn components(&mut self, components: v2_6::Components) -> v3_0::Components {
         let at = "#.components";
+        // The reusable schemas, and the parameter schemas kept on the
+        // way through the channels.
+        let mut schemas: BTreeMap<String, RefOr<v3_0::SchemaOrMultiFormat>> = components
+            .schemas
+            .into_iter()
+            .filter_map(|(name, schema)| {
+                let at = format!("{at}.schemas.{name}");
+                Some((name, self.schema(&at, "schema", &schema, None)?))
+            })
+            .collect();
+        schemas.extend(std::mem::take(&mut self.kept_schemas));
+
         // A reusable channel has no address — in 2.6 the address is the
         // key of whatever names it — and its operations still have to
         // go somewhere, which in v3 is a map of their own.
@@ -1136,14 +1198,7 @@ impl Conversion {
         }
 
         v3_0::Components {
-            schemas: components
-                .schemas
-                .into_iter()
-                .filter_map(|(name, schema)| {
-                    let at = format!("{at}.schemas.{name}");
-                    Some((name, self.schema(&at, "schema", &schema, None)?))
-                })
-                .collect(),
+            schemas,
             servers: components
                 .servers
                 .into_iter()
@@ -1189,7 +1244,14 @@ impl Conversion {
                 .into_iter()
                 .map(|(name, parameter)| {
                     let at = format!("{at}.parameters.{name}");
-                    (name, self.ref_or(&at, parameter, Self::parameter))
+                    // A reusable parameter is not a channel's, so
+                    // nothing points at a schema inside one.
+                    (
+                        name,
+                        self.ref_or(&at, parameter, |this, at, item| {
+                            this.parameter(at, "", item)
+                        }),
+                    )
                 })
                 .collect(),
             correlation_ids: components
@@ -1307,6 +1369,17 @@ impl Conversion {
         let [step, rest @ ..] = rest else {
             return moved_to;
         };
+        // A parameter's schema was kept elsewhere, v3 parameters having
+        // nowhere to hold one.
+        if step == "parameters"
+            && let [name, schema, rest @ ..] = rest
+            && schema == "schema"
+            && let Some(key) = self
+                .parameter_schemas
+                .get(&format!("{source}/parameters/{name}/schema"))
+        {
+            return join(&format!("#/components/schemas/{key}"), rest.iter());
+        }
         if !matches!(step.as_str(), "publish" | "subscribe") {
             // Parameters, bindings, a description: all still the
             // channel's, wherever the channel went.
@@ -1476,6 +1549,102 @@ fn split_url(url: &str) -> (String, Option<String>) {
 }
 
 /// What a message offers to be called.
+/// Every `$ref` the document spells, at any depth.
+fn named_pointers<D: Serialize>(document: &D) -> BTreeSet<String> {
+    fn walk(value: &serde_json::Value, found: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(reference)) = map.get("$ref") {
+                    found.insert(reference.clone());
+                }
+                for value in map.values() {
+                    walk(value, found);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    walk(value, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = BTreeSet::new();
+    if let Ok(value) = serde_json::to_value(document) {
+        walk(&value, &mut found);
+    }
+    found
+}
+
+/// A channel that names another, as the two of them together.
+///
+/// 2.6 leaves it undefined which wins where both say something, and
+/// deprecates the whole arrangement — so this takes the naming channel
+/// as the more particular of the two and lets it stand where it speaks.
+/// Nothing is thrown away, which is what matters: a pointer at either
+/// half still has somewhere to land.
+fn merged(
+    item: &v2_6::ChannelItem,
+    reusable: &BTreeMap<String, v2_6::ChannelItem>,
+) -> Option<v2_6::ChannelItem> {
+    let mut named = named_channel(item.reference.as_deref()?, reusable)?;
+    if item.description.is_some() {
+        named.description = item.description.clone();
+    }
+    if !item.servers.is_empty() {
+        named.servers = item.servers.clone();
+    }
+    if item.publish.is_some() {
+        named.publish = item.publish.clone();
+    }
+    if item.subscribe.is_some() {
+        named.subscribe = item.subscribe.clone();
+    }
+    if item.deprecated.is_some() {
+        named.deprecated = item.deprecated;
+    }
+    if item.bindings.is_some() {
+        named.bindings = item.bindings.clone();
+    }
+    named.parameters.extend(
+        item.parameters
+            .iter()
+            .map(|(name, parameter)| (name.clone(), parameter.clone())),
+    );
+    if let Some(extensions) = &item.extensions {
+        named
+            .extensions
+            .get_or_insert_with(BTreeMap::new)
+            .extend(extensions.clone());
+    }
+    named.reference = None;
+    Some(named)
+}
+
+/// The reusable channel a pointer names, following one that names
+/// another. `None` for a pointer this conversion cannot follow.
+fn named_channel(
+    reference: &str,
+    reusable: &BTreeMap<String, v2_6::ChannelItem>,
+) -> Option<v2_6::ChannelItem> {
+    let mut seen = BTreeSet::new();
+    let mut reference = reference.to_owned();
+    loop {
+        let tokens = pointer::tokens(reference.strip_prefix('#')?)?;
+        let [components, channels, name] = tokens.as_slice() else {
+            return None;
+        };
+        if components != "components" || channels != "channels" || !seen.insert(name.clone()) {
+            return None;
+        }
+        let named = reusable.get(name)?;
+        match &named.reference {
+            Some(next) => reference = next.clone(),
+            None => return Some(named.clone()),
+        }
+    }
+}
+
 fn message_name(message: &RefOr<v2_6::Message>) -> Option<String> {
     match message {
         RefOr::Reference(reference) => reference.component_key("messages"),
@@ -2844,10 +3013,10 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_pointed_at_what_a_channel_reference_discards() {
-        // The channel is given what it names, so what it said itself is
-        // gone — and a pointer at that is left alone rather than sent
-        // somewhere that was never built.
+    fn a_channel_that_names_another_keeps_what_it_says_itself() {
+        // 2.6 leaves it undefined which of the two wins, and v3 has no
+        // Reference Object that can carry an address — so the two are
+        // converted together, and a pointer at either half lands.
         let (document, notes) = convert_json(json!({
             "asyncapi": "2.6.0",
             "info": { "title": "T", "version": "1" },
@@ -2858,23 +3027,113 @@ mod tests {
                 }
             },
             "components": {
-                "channels": { "shared": { "description": "the real one" } },
+                "channels": {
+                    "shared": { "description": "the real one", "deprecated": false }
+                },
                 "schemas": { "s": { "$ref": "#/channels/alias/publish/message/payload" } }
             }
         }));
+
         let channel = document.channels["alias"].item().expect("copied in");
         assert_eq!(channel.description.as_deref(), Some("the real one"));
-        assert!(channel.messages.is_empty());
+        assert!(channel.messages.contains_key("Own"), "the sibling is kept");
+        assert!(document.operations.contains_key("alias_publish"));
 
         let value = serde_json::to_value(&document).expect("serializable");
         assert_eq!(
             value["components"]["schemas"]["s"]["$ref"],
-            json!("#/channels/alias/publish/message/payload"),
-            "left as written rather than sent to a message that was discarded",
+            json!("#/channels/alias/messages/Own/payload"),
         );
+        assert!(!notes.iter().any(|note| note.contains("no longer names")));
+        assert!(!notes.iter().any(|note| note.contains("what sat beside it")));
+        document_is_valid(&document);
+    }
+
+    #[test]
+    fn the_channel_doing_the_naming_stands_where_it_speaks() {
+        // Both halves say something in every field. The naming channel
+        // is the more particular of the two, so it wins where it
+        // speaks; where it is silent the named one is heard. The naming
+        // goes through a channel that names a third, which is as far as
+        // 2.6 lets one chain go before it stops being followable.
+        let (document, _) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "mine": { "url": "amqp://mine", "protocol": "amqp" },
+                "theirs": { "url": "amqp://theirs", "protocol": "amqp" }
+            },
+            "channels": {
+                "things/{p}/{q}": {
+                    "$ref": "#/components/channels/middle",
+                    "description": "mine",
+                    "servers": ["mine"],
+                    "deprecated": true,
+                    "bindings": { "amqp": { "is": "queue" } },
+                    "parameters": { "p": { "description": "mine" } },
+                    "publish": { "message": { "name": "Up" } },
+                    "subscribe": { "message": { "name": "Down" } },
+                    "x-mine": true
+                }
+            },
+            "components": {
+                "channels": {
+                    "middle": { "$ref": "#/components/channels/shared" },
+                    "shared": {
+                        "description": "theirs",
+                        "servers": ["theirs"],
+                        "deprecated": false,
+                        "bindings": { "amqp": { "is": "routingKey" } },
+                        "parameters": { "q": { "description": "theirs" } },
+                        "publish": { "message": { "name": "Other" } },
+                        "x-theirs": true
+                    }
+                }
+            }
+        }));
+
+        let key = "things__p___q_";
+        let channel = document.channels[key].item().expect("copied in");
+        assert_eq!(channel.description.as_deref(), Some("mine"));
+        assert_eq!(channel.servers.len(), 1, "the naming channel's server");
+        let value = serde_json::to_value(channel).expect("serializable");
+        assert_eq!(value["bindings"]["amqp"]["is"], json!("queue"));
+        assert!(
+            channel.parameters.contains_key("p") && channel.parameters.contains_key("q"),
+            "both halves' parameters: {:?}",
+            channel.parameters.keys().collect::<Vec<_>>(),
+        );
+        let extensions = channel.extensions.as_ref().expect("extensions");
+        assert!(extensions.contains_key("x-mine") && extensions.contains_key("x-theirs"));
+        // The named channel's own `publish` gives way, so `Other` is not
+        // carried twice — but `Down` has nothing to give way to.
+        assert!(channel.messages.contains_key("Up") && channel.messages.contains_key("Down"));
+        assert!(!channel.messages.contains_key("Other"));
+        document_is_valid(&document);
+    }
+
+    #[test]
+    fn a_naming_that_cannot_be_followed_costs_what_it_costs() {
+        // Nothing to copy in, so a Reference Object it stays — and a
+        // Reference Object is `$ref` alone.
+        let (document, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "alias": {
+                    "$ref": "./other.yaml#/channels/shared",
+                    "publish": { "message": { "name": "Own" } }
+                }
+            },
+            "components": {
+                "schemas": { "s": { "$ref": "#/channels/alias/publish/message" } }
+            }
+        }));
+        assert!(matches!(&document.channels["alias"], RefOr::Reference(_)));
         for expected in [
             "what sat beside it is dropped",
-            "`#/channels/alias/publish/message/payload` no longer names the same thing",
+            "address `alias` is lost",
+            "`#/channels/alias/publish/message` no longer names the same thing",
         ] {
             assert!(
                 notes.iter().any(|note| note.contains(expected)),
@@ -2920,6 +3179,83 @@ mod tests {
         assert!(
             notes.iter().any(|note| note
                 == "#.channels.c.publish.message/oneOf/1: v3 has nowhere to keep [\"x-inner\"]"),
+            "got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_parameter_schema_the_document_names_is_kept() {
+        // A v3 parameter is a string and holds no schema, so one that
+        // is pointed at is kept where v3 keeps schemas, and the pointer
+        // follows it there.
+        let (document, notes) = convert_json(minimal(json!({
+            "{p}": {
+                "parameters": { "p": { "schema": { "type": "string", "pattern": "^x" } } },
+                "publish": {
+                    "message": {
+                        "name": "M",
+                        "payload": {
+                            "properties": {
+                                "id": { "$ref": "#/channels/{p}/parameters/p/schema" }
+                            }
+                        }
+                    }
+                }
+            }
+        })));
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["channels"]["_p_"]["messages"]["M"]["payload"]["properties"]["id"]["$ref"],
+            json!("#/components/schemas/_p__p"),
+        );
+        assert_eq!(
+            value["components"]["schemas"]["_p__p"],
+            json!({ "type": "string", "pattern": "^x" }),
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("`schema` was kept at `#/components/schemas/_p__p`")),
+            "got: {notes:?}"
+        );
+        document_is_valid(&document);
+
+        // A pointer *into* one follows it too.
+        let (document, _) = convert_json(minimal(json!({
+            "{p}": {
+                "parameters": {
+                    "p": { "schema": { "properties": { "inner": { "type": "string" } } } }
+                },
+                "publish": {
+                    "message": {
+                        "name": "M",
+                        "payload": {
+                            "$ref": "#/channels/{p}/parameters/p/schema/properties/inner"
+                        }
+                    }
+                }
+            }
+        })));
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["channels"]["_p_"]["messages"]["M"]["payload"]["$ref"],
+            json!("#/components/schemas/_p__p/properties/inner"),
+        );
+        document_is_valid(&document);
+    }
+
+    #[test]
+    fn a_parameter_schema_nothing_names_is_not_kept() {
+        // Keeping every one of them would bulk out documents that never
+        // name a single one.
+        let (document, notes) = convert_json(minimal(json!({
+            "{p}": { "parameters": { "p": { "schema": { "type": "string" } } } }
+        })));
+        assert!(document.components.is_none());
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("so `schema` is dropped")),
             "got: {notes:?}"
         );
     }
