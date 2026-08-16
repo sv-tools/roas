@@ -28,6 +28,9 @@ pub mod server;
 pub mod tag;
 pub mod version;
 
+#[cfg(feature = "v2_6")]
+pub mod from_v2_6;
+
 pub use crate::common::bindings::Bindings;
 pub use crate::common::reference::{RefOr, Reference};
 pub use channel::Channel;

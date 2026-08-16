@@ -17,7 +17,7 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 | 3.1              | `v3_1` (default) | ✅ implemented  | Adds its own `schemaFormat` values and the `ros2` bindings |
 | 2.6              | `v2_6`           | ✅ implemented  | The pre-v3 model: channels keyed by path, `publish` / `subscribe` |
 
-`v2_6`, `v3_0`, and `v3_1` are independent — enable whichever you need. With `v3_0` and `v3_1` both enabled, an `impl From<v3_0::Document> for v3_1::Document` upconverts a 3.0 document; since 3.1 left the object model untouched, nothing is dropped or approximated and only the `asyncapi` version string changes. A 2.6 → 3.0 conversion, which has genuinely lossy cases, follows separately.
+`v2_6`, `v3_0`, and `v3_1` are independent — enable whichever you need. With `v3_0` and `v3_1` both enabled, an `impl From<v3_0::Document> for v3_1::Document` upconverts a 3.0 document; since 3.1 left the object model untouched, nothing is dropped or approximated and only the `asyncapi` version string changes. With `v2_6` and `v3_0` both enabled, `v3_0::from_v2_6::convert` converts a 2.6 document — v3 reorganized the document rather than extending it, so that conversion is genuinely lossy and returns a `ConversionReport` saying where a name had to be invented and what had nowhere to go.
 
 ## Quick start
 

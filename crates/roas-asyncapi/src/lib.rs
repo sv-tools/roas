@@ -89,8 +89,13 @@
 //! by one module or rejected. With both features enabled, an
 //! `impl From<v3_0::Document> for v3_1::Document` is available for
 //! upconverting a 3.0 document — v3.1 left the object model untouched,
-//! so nothing is dropped or approximated. A 2.6 → 3.0 conversion, which
-//! has genuinely lossy cases, follows.
+//! so nothing is dropped or approximated.
+//!
+//! With `v2_6` and `v3_0` both enabled,
+//! [`v3_0::from_v2_6::convert`] converts a 2.6 document. v3
+//! reorganized the document rather than extending it, so that one is
+//! genuinely lossy: it returns a report saying where a name had to be
+//! invented and what had nowhere to go.
 
 pub mod common;
 pub mod validation;
