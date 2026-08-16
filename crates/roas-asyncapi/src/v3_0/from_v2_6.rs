@@ -59,12 +59,13 @@ pub enum NoteKind {
     /// and this address is not a usable name. The address itself is
     /// kept, in the channel's `address`.
     ChannelKeyDerived { address: String, key: String },
-    /// An operation is keyed by name in 3.0, and this one had no
-    /// `operationId` to use.
-    OperationKeyDerived { key: String },
-    /// A message needs a name inside its channel, and this one had
-    /// neither `messageId` nor `name`.
-    MessageKeyDerived { key: String },
+    /// An operation is keyed by name in 3.0. `from` is the
+    /// `operationId` it offered, where that was not a usable key or was
+    /// already taken; `None` where it offered nothing at all.
+    OperationKeyDerived { from: Option<String>, key: String },
+    /// A message needs a name inside its channel, `from` being the
+    /// `messageId` or `name` it offered, if any.
+    MessageKeyDerived { from: Option<String>, key: String },
     /// 2.6's `publish` is what the application receives, and
     /// `subscribe` what it sends — the point of view flipped in v3.
     ActionFlipped {
@@ -90,6 +91,13 @@ pub enum NoteKind {
     /// behaviour that specification leaves undefined. 3.0's Reference
     /// Object may not, so they are dropped.
     ChannelReferenceSiblingsDropped,
+    /// A channel named another with `$ref`, and only the naming channel
+    /// knows the address — so the named one was copied in rather than
+    /// referenced.
+    ChannelReferenceInlined { reference: String },
+    /// A channel named another with `$ref` that could not be copied in,
+    /// so the address the naming channel carried is gone.
+    ChannelAddressDropped { address: String },
     /// A pointer into the source document that no longer names the same
     /// thing, and that this conversion could not rewrite.
     ReferenceNotRewritten { reference: String },
@@ -106,12 +114,14 @@ impl fmt::Display for NoteKind {
                     "address `{address}` is not a usable key; keyed as `{key}`"
                 )
             }
-            NoteKind::OperationKeyDerived { key } => {
-                write!(f, "no `operationId`; keyed as `{key}`")
-            }
-            NoteKind::MessageKeyDerived { key } => {
-                write!(f, "no `messageId` or `name`; keyed as `{key}`")
-            }
+            NoteKind::OperationKeyDerived { from, key } => match from {
+                Some(from) => write!(f, "`{from}` is not a usable key; keyed as `{key}`"),
+                None => write!(f, "no `operationId`; keyed as `{key}`"),
+            },
+            NoteKind::MessageKeyDerived { from, key } => match from {
+                Some(from) => write!(f, "`{from}` is not a usable key; keyed as `{key}`"),
+                None => write!(f, "no `messageId` or `name`; keyed as `{key}`"),
+            },
             NoteKind::ActionFlipped { from, to } => {
                 write!(f, "`{from}` is what the application does not do; `{to}` is")
             }
@@ -139,6 +149,18 @@ impl fmt::Display for NoteKind {
             NoteKind::ChannelReferenceSiblingsDropped => {
                 f.write_str("a Reference Object is `$ref` alone, so what sat beside it is dropped")
             }
+            NoteKind::ChannelReferenceInlined { reference } => {
+                write!(
+                    f,
+                    "`{reference}` was copied in, this channel's address being its own"
+                )
+            }
+            NoteKind::ChannelAddressDropped { address } => {
+                write!(
+                    f,
+                    "address `{address}` is lost: a Reference Object cannot carry one"
+                )
+            }
             NoteKind::ReferenceNotRewritten { reference } => {
                 write!(f, "`{reference}` no longer names the same thing in v3")
             }
@@ -165,12 +187,33 @@ pub fn convert(document: v2_6::Document) -> (v3_0::Document, ConversionReport) {
     )
 }
 
+/// Where a channel is going, which is what everything inside it will
+/// name.
+struct Place<'a> {
+    /// The address it carries, which a reusable channel has none of:
+    /// in 2.6 the address is the key of the channel that names it.
+    address: Option<&'a str>,
+    /// The pointer its operations and messages are reached by.
+    reference: String,
+    /// What to build an operation's name from, where it offers none.
+    key: &'a str,
+}
+
 /// The conversion in progress: what it has decided, and what it has to
 /// say about it.
 struct Conversion {
     notes: Vec<Note>,
     /// v2.6 channel address → the v3.0 key it was given.
     channel_keys: BTreeMap<String, String>,
+    /// The reusable channels, kept to copy in what a `$ref` names: only
+    /// the channel doing the naming knows the address.
+    reusable: BTreeMap<String, v2_6::ChannelItem>,
+    /// (v2.6 channel address, `publish` or `subscribe`) → the v3.0 key
+    /// the operation was given. Keyed up front for the same reason
+    /// channels are: a pointer may name one.
+    operation_keys: BTreeMap<(String, &'static str), String>,
+    /// Every operation name spoken for, including those a reusable
+    /// channel takes as it is converted.
     taken_operations: BTreeSet<String>,
 }
 
@@ -206,10 +249,49 @@ impl Conversion {
             }
             channel_keys.insert(address.clone(), key);
         }
+
+        // Operations are named next, for the same reason: v3 moved them
+        // out of their channel, and a pointer may name one.
+        let mut taken = BTreeSet::new();
+        let mut operation_keys = BTreeMap::new();
+        for (address, item) in &document.channels {
+            let channel_key = &channel_keys[address];
+            for (action, operation) in [
+                (v2_6::OperationKind::Publish, &item.publish),
+                (v2_6::OperationKind::Subscribe, &item.subscribe),
+            ] {
+                let Some(operation) = operation else { continue };
+                let offered = operation
+                    .operation_id
+                    .as_deref()
+                    .map(sanitize)
+                    .filter(|id| !id.is_empty());
+                let key = unique(
+                    offered.unwrap_or_else(|| format!("{channel_key}_{}", action.as_str())),
+                    &mut taken,
+                );
+                if operation.operation_id.as_deref() != Some(key.as_str()) {
+                    notes.push(Note {
+                        at: format!("#.channels.{address}.{}", action.as_str()),
+                        kind: NoteKind::OperationKeyDerived {
+                            from: operation.operation_id.clone(),
+                            key: key.clone(),
+                        },
+                    });
+                }
+                operation_keys.insert((address.clone(), action.as_str()), key);
+            }
+        }
         Self {
             notes,
             channel_keys,
-            taken_operations: BTreeSet::new(),
+            reusable: document
+                .components
+                .as_ref()
+                .map(|components| components.channels.clone())
+                .unwrap_or_default(),
+            operation_keys,
+            taken_operations: taken,
         }
     }
 
@@ -226,8 +308,13 @@ impl Conversion {
         for (address, item) in document.channels {
             let key = self.channel_keys[&address].clone();
             let at = format!("#.channels.{address}");
-            let (channel, channel_operations) = self.channel(&at, &address, &key, item);
-            channels.insert(key, channel);
+            let place = Place {
+                address: Some(&address),
+                reference: format!("#/channels/{key}"),
+                key: &key,
+            };
+            let (channel, channel_operations) = self.channel(&at, &place, item);
+            channels.insert(key.clone(), channel);
             operations.extend(channel_operations);
         }
 
@@ -316,7 +403,7 @@ impl Conversion {
                 .map(|tag| RefOr::Item(self.tag(tag)))
                 .collect(),
             external_docs: None,
-            bindings: server.bindings,
+            bindings: self.bindings(at, server.bindings),
             extensions: server.extensions,
         }
     }
@@ -356,6 +443,52 @@ impl Conversion {
         schemes
     }
 
+    /// v3 renamed an OAuth flow's `scopes` to `availableScopes`, and
+    /// made it required — a scheme that crossed over as-is would leave
+    /// an invalid document behind.
+    fn security_scheme(&mut self, at: &str, scheme: v2_6::SecurityScheme) -> v3_0::SecurityScheme {
+        let Ok(mut value) = serde_json::to_value(&scheme) else {
+            self.note(
+                at,
+                NoteKind::NotConverted {
+                    what: "securityScheme",
+                },
+            );
+            return v3_0::SecurityScheme::default();
+        };
+        if let Some(flows) = value
+            .get_mut("flows")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for flow in flows.values_mut() {
+                if let Some(flow) = flow.as_object_mut()
+                    && let Some(scopes) = flow.remove("scopes")
+                {
+                    flow.insert("availableScopes".to_owned(), scopes);
+                }
+            }
+        }
+        match serde_json::from_value(value) {
+            Ok(scheme) => scheme,
+            Err(_) => {
+                self.note(
+                    at,
+                    NoteKind::NotConverted {
+                        what: "securityScheme",
+                    },
+                );
+                v3_0::SecurityScheme::default()
+            }
+        }
+    }
+
+    /// Bindings need no conversion — both versions hold them as the
+    /// protocol's own JSON — but a reference to one still has to be
+    /// looked at, v3 having moved some of what they name.
+    fn bindings<T>(&mut self, at: &str, bindings: Option<RefOr<T>>) -> Option<RefOr<T>> {
+        bindings.map(|bindings| self.ref_or(at, bindings, |_, _, item| item))
+    }
+
     fn tag(&mut self, tag: v2_6::Tag) -> v3_0::Tag {
         v3_0::Tag {
             name: tag.name,
@@ -372,8 +505,7 @@ impl Conversion {
     fn channel(
         &mut self,
         at: &str,
-        address: &str,
-        key: &str,
+        place: &Place<'_>,
         item: v2_6::ChannelItem,
     ) -> (RefOr<v3_0::Channel>, Vec<(String, RefOr<v3_0::Operation>)>) {
         if let Some(reference) = &item.reference {
@@ -382,11 +514,35 @@ impl Conversion {
             if item.publish.is_some()
                 || item.subscribe.is_some()
                 || item.description.is_some()
+                || item.deprecated.is_some()
+                || item.bindings.is_some()
+                || item.extensions.is_some()
                 || !item.parameters.is_empty()
+                || !item.servers.is_empty()
             {
                 self.note(at, NoteKind::ChannelReferenceSiblingsDropped);
             }
+            // A v3 channel keeps its address, and a Reference Object
+            // cannot carry one — so what the reference names is copied
+            // in, where this conversion can reach it.
+            if let Some(named) = self.named_channel(reference) {
+                self.note(
+                    at,
+                    NoteKind::ChannelReferenceInlined {
+                        reference: reference.clone(),
+                    },
+                );
+                return self.channel(at, place, named);
+            }
             let reference = self.rewrite(at, reference);
+            if let Some(address) = place.address {
+                self.note(
+                    at,
+                    NoteKind::ChannelAddressDropped {
+                        address: address.to_owned(),
+                    },
+                );
+            }
             return (RefOr::Reference(Reference { reference }), Vec::new());
         }
 
@@ -402,12 +558,12 @@ impl Conversion {
         ] {
             let Some(operation) = operation else { continue };
             let at = format!("{at}.{}", action.as_str());
-            let (name, converted) = self.operation(&at, key, action, operation, &mut messages);
+            let (name, converted) = self.operation(&at, place, action, operation, &mut messages);
             operations.push((name, RefOr::Item(converted)));
         }
 
         let channel = v3_0::Channel {
-            address: Some(Some(address.to_owned())),
+            address: place.address.map(|address| Some(address.to_owned())),
             messages,
             parameters: item
                 .parameters
@@ -429,10 +585,28 @@ impl Conversion {
                 .collect(),
             tags: Vec::new(),
             external_docs: None,
-            bindings: item.bindings,
+            bindings: self.bindings(at, item.bindings),
             extensions: item.extensions,
         };
         (RefOr::Item(channel), operations)
+    }
+
+    /// The reusable channel a pointer names, following one that names
+    /// another. `None` for a pointer this conversion cannot follow.
+    fn named_channel(&self, reference: &str) -> Option<v2_6::ChannelItem> {
+        let mut seen = BTreeSet::new();
+        let mut reference = reference.to_owned();
+        loop {
+            let name = reference.strip_prefix("#/components/channels/")?;
+            if name.contains('/') || !seen.insert(name.to_owned()) {
+                return None;
+            }
+            let named = self.reusable.get(&unescape(name))?;
+            match &named.reference {
+                Some(next) => reference = next.clone(),
+                None => return Some(named.clone()),
+            }
+        }
     }
 
     /// A 2.6 parameter describes its value with a schema; a 3.0 one is
@@ -441,24 +615,34 @@ impl Conversion {
         let mut converted = v3_0::Parameter {
             description: parameter.description,
             location: parameter.location,
+            extensions: parameter.extensions,
             ..v3_0::Parameter::default()
         };
         let Some(schema) = parameter.schema else {
             return converted;
         };
-        // Only what a v3 parameter can still say survives.
+        // Only what a v3 parameter can still say survives, and only
+        // where the value itself survives with it: v3 enumerates
+        // strings, so a number in an `enum` is as lost as a `pattern`.
         let carried = match serde_json::to_value(&schema) {
             Ok(serde_json::Value::Object(map)) => {
                 converted.enum_values = strings(map.get("enum"));
                 converted.examples = strings(map.get("examples"));
                 converted.default = map
                     .get("default")
-                    .and_then(|d| d.as_str())
+                    .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
+                let whole = |key: &str, kept: usize| match map.get(key) {
+                    None => true,
+                    Some(value) => value.as_array().is_some_and(|values| values.len() == kept),
+                };
                 map.len()
                     == usize::from(map.contains_key("enum"))
                         + usize::from(map.contains_key("examples"))
                         + usize::from(map.contains_key("default"))
+                    && whole("enum", converted.enum_values.len())
+                    && whole("examples", converted.examples.len())
+                    && map.contains_key("default") == converted.default.is_some()
             }
             _ => false,
         };
@@ -473,7 +657,7 @@ impl Conversion {
     fn operation(
         &mut self,
         at: &str,
-        channel_key: &str,
+        place: &Place<'_>,
         action: v2_6::OperationKind,
         operation: v2_6::Operation,
         messages: &mut BTreeMap<String, RefOr<v3_0::Message>>,
@@ -495,23 +679,42 @@ impl Conversion {
             },
         );
 
-        let key = match operation.operation_id.as_deref().map(sanitize) {
-            Some(id) if !id.is_empty() => unique(id, &mut self.taken_operations),
-            _ => {
+        // A root operation was named before anything was converted, so
+        // that a pointer at it could be rewritten; anything else — a
+        // reusable channel's, or one copied in from it — is named here.
+        let key = match place.address.and_then(|address| {
+            self.operation_keys
+                .get(&(address.to_owned(), action.as_str()))
+        }) {
+            Some(key) => key.clone(),
+            None => {
+                let offered = operation
+                    .operation_id
+                    .as_deref()
+                    .map(sanitize)
+                    .filter(|id| !id.is_empty());
                 let key = unique(
-                    format!("{channel_key}_{}", action.as_str()),
+                    offered.unwrap_or_else(|| format!("{}_{}", place.key, action.as_str())),
                     &mut self.taken_operations,
                 );
-                self.note(at, NoteKind::OperationKeyDerived { key: key.clone() });
+                if operation.operation_id.as_deref() != Some(key.as_str()) {
+                    self.note(
+                        at,
+                        NoteKind::OperationKeyDerived {
+                            from: operation.operation_id.clone(),
+                            key: key.clone(),
+                        },
+                    );
+                }
                 key
             }
         };
 
-        let references = self.messages(at, channel_key, operation.message, messages);
+        let references = self.messages(at, place, operation.message, messages);
         let converted = v3_0::Operation {
             action: converted_action,
             channel: Reference {
-                reference: format!("#/channels/{channel_key}"),
+                reference: place.reference.clone(),
             },
             messages: references,
             reply: None,
@@ -536,7 +739,7 @@ impl Conversion {
             external_docs: operation
                 .external_docs
                 .map(|docs| RefOr::Item(external_documentation(docs))),
-            bindings: operation.bindings,
+            bindings: self.bindings(at, operation.bindings),
             extensions: operation.extensions,
         };
         (key, converted)
@@ -547,43 +750,42 @@ impl Conversion {
     fn messages(
         &mut self,
         at: &str,
-        channel_key: &str,
+        place: &Place<'_>,
         message: Option<v2_6::OperationMessage>,
         channel_messages: &mut BTreeMap<String, RefOr<v3_0::Message>>,
     ) -> Vec<Reference> {
         let mut references = Vec::new();
         for message in flatten(message) {
             let at = format!("{at}.message");
-            let (key, converted) = match message {
+            // What the message offers to be called, and what it is.
+            let (named, converted) = match message {
                 RefOr::Reference(reference) => {
-                    let key = reference
-                        .component_key("messages")
-                        .map(|key| sanitize(&key))
-                        .filter(|key| !key.is_empty());
+                    let named = reference.component_key("messages");
                     let reference = self.rewrite(&at, &reference.reference);
-                    (key, RefOr::Reference(Reference { reference }))
+                    (named, RefOr::Reference(Reference { reference }))
                 }
                 RefOr::Item(message) => {
-                    let key = message
-                        .message_id
-                        .as_deref()
-                        .or(message.name.as_deref())
-                        .map(sanitize)
-                        .filter(|key| !key.is_empty());
-                    (key, RefOr::Item(self.message(&at, message)))
+                    let named = message.message_id.clone().or_else(|| message.name.clone());
+                    (named, RefOr::Item(self.message(&at, message)))
                 }
             };
+            let offered = named.as_deref().map(sanitize).filter(|key| !key.is_empty());
             let mut taken: BTreeSet<String> = channel_messages.keys().cloned().collect();
-            let key = match key {
-                Some(key) => unique(key, &mut taken),
-                None => {
-                    let key = unique("message".to_owned(), &mut taken);
-                    self.note(&at, NoteKind::MessageKeyDerived { key: key.clone() });
-                    key
-                }
-            };
+            let key = unique(
+                offered.clone().unwrap_or_else(|| "message".to_owned()),
+                &mut taken,
+            );
+            if named.as_deref() != Some(key.as_str()) {
+                self.note(
+                    &at,
+                    NoteKind::MessageKeyDerived {
+                        from: named,
+                        key: key.clone(),
+                    },
+                );
+            }
             references.push(Reference {
-                reference: format!("#/channels/{channel_key}/messages/{key}"),
+                reference: format!("{}/messages/{key}", place.reference),
             });
             channel_messages.insert(key, converted);
         }
@@ -617,7 +819,7 @@ impl Conversion {
             external_docs: message
                 .external_docs
                 .map(|docs| RefOr::Item(external_documentation(docs))),
-            bindings: message.bindings,
+            bindings: self.bindings(at, message.bindings),
             examples: message
                 .examples
                 .into_iter()
@@ -668,6 +870,23 @@ impl Conversion {
 
     fn components(&mut self, components: v2_6::Components) -> v3_0::Components {
         let at = "#.components";
+        // A reusable channel has no address — in 2.6 the address is the
+        // key of whatever names it — and its operations still have to
+        // go somewhere, which in v3 is a map of their own.
+        let mut reusable_channels = BTreeMap::new();
+        let mut reusable_operations = BTreeMap::new();
+        for (name, item) in components.channels {
+            let at = format!("{at}.channels.{name}");
+            let place = Place {
+                address: None,
+                reference: format!("#/components/channels/{name}"),
+                key: &name,
+            };
+            let (channel, operations) = self.channel(&at, &place, item);
+            reusable_channels.insert(name.clone(), channel);
+            reusable_operations.extend(operations);
+        }
+
         v3_0::Components {
             schemas: components
                 .schemas
@@ -685,18 +904,8 @@ impl Conversion {
                     (name, self.ref_or(&at, server, Self::server))
                 })
                 .collect(),
-            channels: components
-                .channels
-                .into_iter()
-                .map(|(name, item)| {
-                    let at = format!("{at}.channels.{name}");
-                    // A reusable channel has no address of its own and
-                    // no operations to give up: `name` is both.
-                    let (channel, _) = self.channel(&at, &name, &name, item);
-                    (name, channel)
-                })
-                .collect(),
-            operations: BTreeMap::new(),
+            channels: reusable_channels,
+            operations: reusable_operations,
             messages: components
                 .messages
                 .into_iter()
@@ -710,12 +919,7 @@ impl Conversion {
                 .into_iter()
                 .map(|(name, scheme)| {
                     let at = format!("{at}.securitySchemes.{name}");
-                    (
-                        name,
-                        self.ref_or(&at, scheme, |this, at, item| {
-                            this.reinterpret(at, &item).unwrap_or_default()
-                        }),
-                    )
+                    (name, self.ref_or(&at, scheme, Self::security_scheme))
                 })
                 .collect(),
             server_variables: components
@@ -826,19 +1030,44 @@ impl Conversion {
             );
             return reference.to_owned();
         };
-        match tail {
-            // Operations left the channel, so nothing below it survives.
-            Some(_) => {
-                self.note(
-                    at,
-                    NoteKind::ReferenceNotRewritten {
-                        reference: reference.to_owned(),
-                    },
-                );
-                reference.to_owned()
-            }
-            None => format!("#/channels/{key}"),
+        let key = key.clone();
+        let Some(tail) = tail else {
+            return format!("#/channels/{key}");
+        };
+        // An operation left its channel but is still in the document,
+        // so a pointer at one of its fields can follow it there. Its
+        // `message` is the exception: that became the channel's, under
+        // a name of its own.
+        let (action, field) = match tail.split_once('/') {
+            Some((action, field)) => (action, Some(field)),
+            None => (tail, None),
+        };
+        let moved = matches!(action, "publish" | "subscribe")
+            && !matches!(field, Some(field) if field.starts_with("message"));
+        if let Some(operation) = self
+            .operation_keys
+            .get(&(
+                address.clone(),
+                if action == "publish" {
+                    "publish"
+                } else {
+                    "subscribe"
+                },
+            ))
+            .filter(|_| moved)
+        {
+            return match field {
+                Some(field) => format!("#/operations/{operation}/{field}"),
+                None => format!("#/operations/{operation}"),
+            };
         }
+        self.note(
+            at,
+            NoteKind::ReferenceNotRewritten {
+                reference: reference.to_owned(),
+            },
+        );
+        reference.to_owned()
     }
 
     /// Re-read a value as its v3.0 counterpart, the two versions
@@ -1266,10 +1495,26 @@ mod tests {
                 key: "a_b".to_owned(),
             },
             NoteKind::OperationKeyDerived {
+                from: None,
                 key: "k".to_owned(),
             },
+            NoteKind::OperationKeyDerived {
+                from: Some("read/orders".to_owned()),
+                key: "read_orders".to_owned(),
+            },
             NoteKind::MessageKeyDerived {
+                from: None,
                 key: "m".to_owned(),
+            },
+            NoteKind::MessageKeyDerived {
+                from: Some("M/x".to_owned()),
+                key: "M_x".to_owned(),
+            },
+            NoteKind::ChannelReferenceInlined {
+                reference: "#/components/channels/shared".to_owned(),
+            },
+            NoteKind::ChannelAddressDropped {
+                address: "orders".to_owned(),
             },
             NoteKind::ActionFlipped {
                 from: "publish",
@@ -1395,6 +1640,269 @@ mod tests {
         let mut keys: Vec<&String> = document.channels.keys().collect();
         keys.sort();
         assert_eq!(keys, vec!["a_b", "a_b_2", "a_b_3"]);
+    }
+
+    #[test]
+    fn a_channel_that_names_another_is_given_what_it_names() {
+        // Only the naming channel knows the address, so what it names
+        // is copied in rather than referenced — operations and all.
+        let (document, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "orders": { "$ref": "#/components/channels/shared" } },
+            "components": {
+                "channels": { "shared": { "publish": { "message": { "name": "M" } } } }
+            }
+        }));
+
+        let channel = document.channels["orders"].item().expect("copied in");
+        assert_eq!(
+            channel.address.as_ref().and_then(Option::as_deref),
+            Some("orders"),
+        );
+        let operation = document.operations["orders_publish"]
+            .item()
+            .expect("lifted");
+        assert_eq!(operation.action, v3_0::OperationAction::Receive);
+        assert_eq!(operation.channel.reference, "#/channels/orders");
+        assert!(notes.iter().any(|note| note.contains("was copied in")));
+
+        // The reusable channel has no address of its own, and its
+        // operations went where v3 keeps reusable ones.
+        let components = document.components.as_ref().expect("components");
+        let shared = components.channels["shared"].item().expect("inline");
+        assert_eq!(shared.address, None);
+        let reusable = components.operations["shared_publish"]
+            .item()
+            .expect("lifted");
+        assert_eq!(reusable.channel.reference, "#/components/channels/shared");
+        document_is_valid(&document);
+    }
+
+    #[test]
+    fn a_channel_reference_that_cannot_be_followed_says_what_it_costs() {
+        let (document, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": { "s": { "url": "b", "protocol": "kafka" } },
+            "channels": {
+                "c": {
+                    "$ref": "./other.yaml#/c",
+                    "servers": ["s"],
+                    "deprecated": true,
+                    "bindings": { "kafka": {} },
+                    "x-note": 1
+                }
+            }
+        }));
+        assert!(matches!(&document.channels["c"], RefOr::Reference(_)));
+        // Every sort of sibling counts, not only the obvious ones.
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("what sat beside it is dropped")),
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("address `c` is lost")),
+            "got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn an_oauth_flow_keeps_its_scopes_under_the_name_v3_gave_them() {
+        let (document, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "securitySchemes": {
+                    "oauth": {
+                        "type": "oauth2",
+                        "flows": {
+                            "implicit": {
+                                "authorizationUrl": "https://example.com/authorize",
+                                "scopes": { "read": "read things" }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        // v3 requires `availableScopes`, so a scheme that crossed over
+        // as-is would leave an invalid document behind.
+        assert!(notes.is_empty(), "got: {notes:?}");
+        document_is_valid(&document);
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["components"]["securitySchemes"]["oauth"]["flows"]["implicit"]["availableScopes"]
+                ["read"],
+            json!("read things"),
+        );
+    }
+
+    #[test]
+    fn a_pointer_follows_an_operation_to_where_v3_put_it() {
+        let (document, notes) = convert_json(minimal(json!({
+            "c": {
+                "subscribe": { "bindings": { "kafka": {} } },
+                "publish": { "bindings": { "$ref": "#/channels/c/subscribe/bindings" } }
+            }
+        })));
+        let operation = document.operations["c_publish"].item().expect("inline");
+        assert!(matches!(
+            &operation.bindings,
+            Some(RefOr::Reference(reference))
+                if reference.reference == "#/operations/c_subscribe/bindings"
+        ));
+        assert!(!notes.iter().any(|note| note.contains("no longer names")));
+        document_is_valid(&document);
+
+        // A pointer at what an operation *carried* is another matter:
+        // its message became the channel's, under a name of its own.
+        let (_, notes) = convert_json(minimal(json!({
+            "c": {
+                "publish": { "message": { "name": "M" } },
+                "subscribe": { "bindings": { "$ref": "#/channels/c/publish/message" } }
+            }
+        })));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("`#/channels/c/publish/message` no longer names")),
+            "got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_parameter_keeps_its_extensions_and_says_what_it_could_not_keep() {
+        let (document, notes) = convert_json(minimal(json!({
+            "c": {
+                "parameters": {
+                    "p": {
+                        "x-owner": "me",
+                        "schema": { "enum": ["a", 1], "examples": ["b", 2], "default": 3 }
+                    }
+                }
+            }
+        })));
+        let channel = document.channels["c"].item().expect("inline");
+        let parameter = channel.parameters["p"].item().expect("inline");
+        // v3 parameters carry extensions, so these need not be lost.
+        assert_eq!(
+            parameter
+                .extensions
+                .as_ref()
+                .and_then(|ext| ext.get("x-owner")),
+            Some(&json!("me")),
+        );
+        // A v3 enumeration is of strings, so the number in each list —
+        // and the numeric default — did not survive, and that is said.
+        assert_eq!(parameter.enum_values, vec!["a"]);
+        assert_eq!(parameter.examples, vec!["b"]);
+        assert_eq!(parameter.default, None);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("a v3 parameter is a string")),
+            "got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_name_that_had_to_change_is_named_in_the_report() {
+        let (document, notes) = convert_json(minimal(json!({
+            "c": {
+                "publish": {
+                    "operationId": "read/orders",
+                    "message": { "name": "M/x" }
+                }
+            }
+        })));
+        assert!(document.operations.contains_key("read_orders"));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note
+                    .contains("`read/orders` is not a usable key; keyed as `read_orders`")),
+            "got: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("`M/x` is not a usable key; keyed as `M_x`")),
+            "got: {notes:?}"
+        );
+
+        // A name taken twice is changed too, and said so.
+        let (_, notes) = convert_json(minimal(json!({
+            "a": { "publish": { "operationId": "shared" } },
+            "b": { "publish": { "operationId": "shared" } }
+        })));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("`shared` is not a usable key; keyed as `shared_2`")),
+            "got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_channel_that_names_a_channel_that_names_another_is_followed() {
+        let (document, _) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "orders": { "$ref": "#/components/channels/alias" } },
+            "components": {
+                "channels": {
+                    "alias": { "$ref": "#/components/channels/shared" },
+                    "shared": { "description": "the real one" }
+                }
+            }
+        }));
+        let channel = document.channels["orders"].item().expect("copied in");
+        assert_eq!(channel.description.as_deref(), Some("the real one"));
+        assert_eq!(
+            channel.address.as_ref().and_then(Option::as_deref),
+            Some("orders"),
+        );
+
+        // A chain that goes round in a circle is not followed at all.
+        let (document, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "orders": { "$ref": "#/components/channels/a" } },
+            "components": {
+                "channels": {
+                    "a": { "$ref": "#/components/channels/b" },
+                    "b": { "$ref": "#/components/channels/a" }
+                }
+            }
+        }));
+        assert!(matches!(&document.channels["orders"], RefOr::Reference(_)));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("address `orders` is lost"))
+        );
+    }
+
+    #[test]
+    fn a_pointer_at_a_whole_operation_follows_it_too() {
+        let (document, notes) = convert_json(minimal(json!({
+            "c": {
+                "subscribe": { "operationId": "sendThings" },
+                "publish": { "bindings": { "$ref": "#/channels/c/subscribe" } }
+            }
+        })));
+        let operation = document.operations["c_publish"].item().expect("inline");
+        assert!(matches!(
+            &operation.bindings,
+            Some(RefOr::Reference(reference))
+                if reference.reference == "#/operations/sendThings"
+        ));
+        assert!(!notes.iter().any(|note| note.contains("no longer names")));
     }
 
     #[test]
