@@ -12,12 +12,13 @@
 
 use crate::common::bindings::MessageBindings;
 use crate::common::reference::RefOr;
+use crate::common::resolve;
 use crate::v2_6::correlation_id::CorrelationId;
 use crate::v2_6::external_documentation::ExternalDocumentation;
-use crate::v2_6::schema::{SchemaType, SubSchema};
+use crate::v2_6::schema::{Schema, SchemaType, SubSchema};
 use crate::v2_6::tag::Tag;
 use crate::validation::{Context, ValidateWithContext};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
 /// The `schemaFormat` values that make a payload an AsyncAPI Schema
@@ -162,6 +163,7 @@ impl ValidateWithContext for MessageOneOf {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[serde(remote = "Self")]
 pub struct Message {
     /// A machine-friendly identifier, unique across the document.
     #[serde(rename = "messageId", skip_serializing_if = "Option::is_none")]
@@ -233,6 +235,80 @@ pub struct Message {
     pub extensions: Option<BTreeMap<String, serde_json::Value>>,
 }
 
+impl Serialize for Message {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // `remote = "Self"` makes the derive an inherent function for
+        // this direction too, which leaves room to normalize here as
+        // well as on the way in. `payload` is public, so a message
+        // built or edited in memory has never been through
+        // deserialization — and what a Reference Object ignores should
+        // reach neither the wire nor the document the resolver walks.
+        match self.payload_reference_only() {
+            Some(payload) => {
+                let mut message = self.clone();
+                message.payload = Some(payload);
+                Message::serialize(&message, serializer)
+            }
+            None => Message::serialize(self, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // The derive is generated as an inherent function by
+        // `remote = "Self"`, which leaves this impl free to run after
+        // it — the only place a payload can be normalized, since that
+        // needs `schemaFormat`, which the field's own deserializer
+        // cannot see.
+        let mut message = Message::deserialize(deserializer)?;
+        message.normalize_payload_reference();
+        Ok(message)
+    }
+}
+
+impl Message {
+    /// Reduce a payload that is a Reference Object to its `$ref`.
+    ///
+    /// "Any time a Schema Object can be used, a Reference Object can be
+    /// used in its place", and additional properties on one "SHALL be
+    /// ignored" — which the typed schema positions honour by
+    /// deserializing into a [`RefOr`] and dropping the rest. A payload
+    /// is raw JSON so that any dialect round-trips, so it is reduced
+    /// here instead, to the same effect.
+    ///
+    /// Only in this document's own dialect: another dialect decides for
+    /// itself what sits beside a `$ref` — 2020-12 keeps it where
+    /// draft-07 ignores it — and a payload this crate cannot type is
+    /// not one it should be rewriting.
+    fn normalize_payload_reference(&mut self) {
+        if let Some(payload) = self.payload_reference_only() {
+            self.payload = Some(payload);
+        }
+    }
+
+    /// This payload reduced to its `$ref`, when it is a Reference
+    /// Object in the document's own dialect and carries anything
+    /// beside it. `None` when there is nothing to reduce.
+    fn payload_reference_only(&self) -> Option<serde_json::Value> {
+        if !payload_is_asyncapi_schema(self.schema_format.as_deref()) {
+            return None;
+        }
+        let map = self.payload.as_ref()?.as_object()?;
+        if map.len() < 2 {
+            return None;
+        }
+        let reference = map.get("$ref")?.as_str()?;
+        Some(serde_json::json!({ "$ref": reference }))
+    }
+}
+
 impl ValidateWithContext for Message {
     fn validate_with_context(&self, ctx: &mut Context) {
         if let Some(format) = &self.schema_format {
@@ -283,19 +359,36 @@ impl ValidateWithContext for Message {
 fn validate_headers(ctx: &mut Context, headers: &SubSchema) {
     ctx.in_field("headers", |ctx| {
         headers.validate_with_context(ctx);
-        if let SubSchema::Schema(schema) = headers {
-            match &schema.schema_type {
-                Some(SchemaType::Single(name)) if name != "object" => {
-                    ctx.error_field("type", format!("must be `object`, not `{name}`"));
-                }
-                // `const: "object"` constrains the whole `type` value,
-                // so the list form cannot satisfy it — not even
-                // `["object"]`.
-                Some(SchemaType::Multiple(_)) => {
-                    ctx.error_field("type", "must be the string `object`, not a list");
-                }
-                _ => {}
+        let SubSchema::Schema(schema) = headers else {
+            return;
+        };
+        // The constraint is on what the headers *are*, so a reference
+        // is followed to find out — reported on the `$ref` that named
+        // the schema, there being no `type` here to point at.
+        let (schema_type, at) = match schema.as_ref() {
+            RefOr::Item(schema) => (schema.schema_type.clone(), None),
+            RefOr::Reference(reference) => {
+                let Some(target) = resolve::resolved(ctx, &reference.reference) else {
+                    return;
+                };
+                let Ok(schema) = serde_json::from_value::<Schema>(target) else {
+                    return;
+                };
+                (schema.schema_type, Some(reference.reference.clone()))
             }
+        };
+        let problem = match schema_type {
+            Some(SchemaType::Single(name)) if name != "object" => {
+                format!("must be `object`, not `{name}`")
+            }
+            // `const: "object"` constrains the whole `type` value, so
+            // the list form cannot satisfy it — not even `["object"]`.
+            Some(SchemaType::Multiple(_)) => "must be the string `object`, not a list".to_owned(),
+            _ => return,
+        };
+        match at {
+            Some(reference) => ctx.error_field("$ref", format!("`{reference}` {problem}")),
+            None => ctx.error_field("type", problem),
         }
     });
 }

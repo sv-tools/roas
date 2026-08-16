@@ -417,6 +417,20 @@ where
     Resolution::Opaque
 }
 
+/// What a reference resolves to, as plain JSON.
+///
+/// For the few checks that constrain the *target* rather than the
+/// reference — v2.6's headers must describe an object, whether they say
+/// so inline or name a schema that does. `None` where the answer is not
+/// in this document.
+#[cfg(feature = "v2_6")]
+pub(crate) fn resolved(ctx: &Context, reference: &str) -> Option<serde_json::Value> {
+    let local = reference.strip_prefix('#')?;
+    let document = ctx.document()?;
+    let target = pointer::walk(document, &pointer::tokens(local)?)?;
+    follow_json(document, &[], target).map(|(_, value)| value.clone())
+}
+
 /// Follow a chain of Reference Objects through plain JSON, reporting
 /// where the chain ends as well as what is there.
 ///
