@@ -309,6 +309,11 @@ impl Conversion {
                 )
             }));
         for (at, source, channel_key, map, item, is_reusable) in places {
+            // What a channel that names another says itself is
+            // discarded, so none of it is a destination.
+            if item.reference.is_some() {
+                continue;
+            }
             for (action, operation) in [
                 (v2_6::OperationKind::Publish, &item.publish),
                 (v2_6::OperationKind::Subscribe, &item.subscribe),
@@ -355,6 +360,12 @@ impl Conversion {
                     .map(|(name, item)| (format!("#/components/channels/{name}"), item)),
             )
         {
+            // A channel that names another is *given* what it names,
+            // and what it says itself is discarded — so nothing here is
+            // a destination anything should be pointed at.
+            if item.reference.is_some() {
+                continue;
+            }
             let mut taken = BTreeSet::new();
             for (action, operation) in [
                 (v2_6::OperationKind::Publish, &item.publish),
@@ -362,9 +373,7 @@ impl Conversion {
             ] {
                 let Some(operation) = operation else { continue };
                 let at = format!("{source}/{}/message", action.as_str());
-                let messages = flatten(operation.message.clone());
-                let one_of = matches!(operation.message, Some(v2_6::OperationMessage::OneOf(_)));
-                for (index, message) in messages.into_iter().enumerate() {
+                for (within, message) in flatten(operation.message.clone()).entries {
                     let key = unique(
                         message_name(&message)
                             .as_deref()
@@ -373,12 +382,7 @@ impl Conversion {
                             .unwrap_or_else(|| "message".to_owned()),
                         &mut taken,
                     );
-                    let at = if one_of {
-                        format!("{at}/oneOf/{index}")
-                    } else {
-                        at.clone()
-                    };
-                    message_keys.insert(at, key);
+                    message_keys.insert(format!("{at}{within}"), key);
                 }
             }
         }
@@ -912,7 +916,13 @@ impl Conversion {
             }
         };
 
-        let references = self.messages(at, place, operation.message, messages);
+        let references = self.messages(
+            at,
+            &format!("{}/{}/message", place.source, action.as_str()),
+            place,
+            operation.message,
+            messages,
+        );
         let converted = v3_0::Operation {
             action: converted_action,
             channel: Reference {
@@ -948,23 +958,45 @@ impl Conversion {
     fn messages(
         &mut self,
         at: &str,
+        source: &str,
         place: &Place<'_>,
         message: Option<v2_6::OperationMessage>,
         channel_messages: &mut BTreeMap<String, RefOr<v3_0::Message>>,
     ) -> Vec<Reference> {
+        let found = flatten(message);
+        // v3 has no `oneOf` object to hang anything off: the
+        // alternatives become the channel's messages, and what the
+        // container carried has nowhere to go.
+        for (within, extensions) in found.containers {
+            let fields: Vec<String> = extensions.into_keys().collect();
+            if !fields.is_empty() {
+                self.note(
+                    &format!("{at}.message{within}"),
+                    NoteKind::FieldsDropped { fields },
+                );
+            }
+        }
         let mut references = Vec::new();
-        for message in flatten(message) {
-            let at = format!("{at}.message");
-            // What the message offers to be called, which is settled
-            // before it is converted: v3 keeps a message's identity in
-            // the name it is filed under.
-            let named = match &message {
-                RefOr::Reference(reference) => reference.component_key("messages"),
-                RefOr::Item(message) => message.message_id.clone().or_else(|| message.name.clone()),
+        for (within, message) in found.entries {
+            let at = format!("{at}.message{within}");
+            let named = message_name(&message);
+            // The name was settled before anything moved, so that a
+            // pointer at this message lands where it went; one copied
+            // in from a channel that named another is named here.
+            let key = match self.message_keys.get(&format!("{source}{within}")) {
+                Some(key) => key.clone(),
+                None => {
+                    let mut taken: BTreeSet<String> = channel_messages.keys().cloned().collect();
+                    unique(
+                        named
+                            .as_deref()
+                            .map(sanitize)
+                            .filter(|key| !key.is_empty())
+                            .unwrap_or_else(|| "message".to_owned()),
+                        &mut taken,
+                    )
+                }
             };
-            let offered = named.as_deref().map(sanitize).filter(|key| !key.is_empty());
-            let mut taken: BTreeSet<String> = channel_messages.keys().cloned().collect();
-            let key = unique(offered.unwrap_or_else(|| "message".to_owned()), &mut taken);
             if named.as_deref() != Some(key.as_str()) {
                 self.note(
                     &at,
@@ -1290,12 +1322,17 @@ impl Conversion {
         if let [message, tail @ ..] = rest
             && message == "message"
         {
-            let (named, rest) = match tail {
-                [one_of, index, rest @ ..] if one_of == "oneOf" => {
-                    (format!("{source}/{action}/message/oneOf/{index}"), rest)
+            // A `oneOf` may hold another, and the pointer says so.
+            let mut within = String::new();
+            let mut rest = tail;
+            while let [one_of, index, more @ ..] = rest {
+                if one_of != "oneOf" || pointer::array_index(index).is_none() {
+                    break;
                 }
-                rest => (format!("{source}/{action}/message"), rest),
-            };
+                within.push_str(&format!("/oneOf/{index}"));
+                rest = more;
+            }
+            let named = format!("{source}/{action}/message{within}");
             return match self.message_keys.get(&named) {
                 Some(key) => join(&format!("{moved_to}/messages/{key}"), rest.iter()),
                 None => {
@@ -1446,17 +1483,41 @@ fn message_name(message: &RefOr<v2_6::Message>) -> Option<String> {
     }
 }
 
-/// Every message an operation carries, however 2.6 spelled them.
-fn flatten(message: Option<v2_6::OperationMessage>) -> Vec<RefOr<v2_6::Message>> {
-    match message {
-        None => Vec::new(),
-        Some(v2_6::OperationMessage::Single(message)) => vec![*message],
-        Some(v2_6::OperationMessage::OneOf(one_of)) => one_of
-            .one_of
-            .into_iter()
-            .flat_map(|message| flatten(Some(message)))
-            .collect(),
+/// Every message an operation carries, however 2.6 spelled them, each
+/// with what the pointer that names it says after `message`.
+///
+/// A `oneOf` may hold another, so the pointer is built as the walk goes
+/// rather than counted off a flattened list: the second alternative of
+/// the second is `/oneOf/1/oneOf/1`, and nothing else.
+#[derive(Default)]
+struct Messages {
+    entries: Vec<(String, RefOr<v2_6::Message>)>,
+    /// The `oneOf` objects walked through, and what each carried that
+    /// v3 has no container to keep.
+    containers: Vec<(String, BTreeMap<String, serde_json::Value>)>,
+}
+
+fn flatten(message: Option<v2_6::OperationMessage>) -> Messages {
+    fn walk(within: &str, message: v2_6::OperationMessage, found: &mut Messages) {
+        match message {
+            v2_6::OperationMessage::Single(message) => {
+                found.entries.push((within.to_owned(), *message));
+            }
+            v2_6::OperationMessage::OneOf(one_of) => {
+                if let Some(extensions) = one_of.extensions {
+                    found.containers.push((within.to_owned(), extensions));
+                }
+                for (index, message) in one_of.one_of.into_iter().enumerate() {
+                    walk(&format!("{within}/oneOf/{index}"), message, found);
+                }
+            }
+        }
     }
+    let mut found = Messages::default();
+    if let Some(message) = message {
+        walk("", message, &mut found);
+    }
+    found
 }
 
 /// A v3 key is `^[A-Za-z0-9\.\-_]+$`, which a v2.6 channel address —
@@ -2708,6 +2769,158 @@ mod tests {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
             vec!["#.somewhere: v3 has nowhere to keep [\"messageId\"]"],
+        );
+    }
+
+    #[test]
+    fn a_oneof_inside_a_oneof_keeps_its_own_pointer() {
+        // The alternatives all become the channel's messages, but the
+        // pointer that names one says how it was nested to get there.
+        let (document, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "source": {
+                    "publish": {
+                        "message": {
+                            "oneOf": [
+                                { "name": "A" },
+                                {
+                                    "oneOf": [
+                                        { "name": "C" },
+                                        { "name": "D", "payload": { "type": "object" } }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "s": { "$ref": "#/channels/source/publish/message/oneOf/1/oneOf/1/payload" }
+                }
+            }
+        }));
+        let channel = document.channels["source"].item().expect("inline");
+        let mut keys: Vec<&String> = channel.messages.keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["A", "C", "D"]);
+
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["components"]["schemas"]["s"]["$ref"],
+            json!("#/channels/source/messages/D/payload"),
+        );
+        assert!(!notes.iter().any(|note| note.contains("no longer names")));
+        document_is_valid(&document);
+
+        // A pointer that goes deeper into a message rather than into
+        // another alternative stops counting alternatives.
+        let (document, _) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "c": {
+                    "publish": {
+                        "message": {
+                            "name": "M",
+                            "payload": { "properties": { "p": { "type": "string" } } }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "s": { "$ref": "#/channels/c/publish/message/payload/properties" }
+                }
+            }
+        }));
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["components"]["schemas"]["s"]["$ref"],
+            json!("#/channels/c/messages/M/payload/properties"),
+        );
+    }
+
+    #[test]
+    fn nothing_is_pointed_at_what_a_channel_reference_discards() {
+        // The channel is given what it names, so what it said itself is
+        // gone — and a pointer at that is left alone rather than sent
+        // somewhere that was never built.
+        let (document, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "alias": {
+                    "$ref": "#/components/channels/shared",
+                    "publish": { "message": { "name": "Own", "payload": { "type": "object" } } }
+                }
+            },
+            "components": {
+                "channels": { "shared": { "description": "the real one" } },
+                "schemas": { "s": { "$ref": "#/channels/alias/publish/message/payload" } }
+            }
+        }));
+        let channel = document.channels["alias"].item().expect("copied in");
+        assert_eq!(channel.description.as_deref(), Some("the real one"));
+        assert!(channel.messages.is_empty());
+
+        let value = serde_json::to_value(&document).expect("serializable");
+        assert_eq!(
+            value["components"]["schemas"]["s"]["$ref"],
+            json!("#/channels/alias/publish/message/payload"),
+            "left as written rather than sent to a message that was discarded",
+        );
+        for expected in [
+            "what sat beside it is dropped",
+            "`#/channels/alias/publish/message/payload` no longer names the same thing",
+        ] {
+            assert!(
+                notes.iter().any(|note| note.contains(expected)),
+                "got: {notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_oneof_carried_itself_is_accounted_for() {
+        // v3 has no `oneOf` object, so anything on one has nowhere to
+        // go — which the report says rather than the conversion
+        // swallowing it.
+        let (_, notes) = convert_json(minimal(json!({
+            "c": {
+                "publish": {
+                    "message": {
+                        "x-selection-policy": "first",
+                        "oneOf": [ { "name": "A" } ]
+                    }
+                }
+            }
+        })));
+        assert!(
+            notes.iter().any(|note| note
+                == "#.channels.c.publish.message: v3 has nowhere to keep [\"x-selection-policy\"]"),
+            "got: {notes:?}"
+        );
+
+        // A nested one is named where it sits.
+        let (_, notes) = convert_json(minimal(json!({
+            "c": {
+                "publish": {
+                    "message": {
+                        "oneOf": [
+                            { "name": "A" },
+                            { "x-inner": true, "oneOf": [ { "name": "B" } ] }
+                        ]
+                    }
+                }
+            }
+        })));
+        assert!(
+            notes.iter().any(|note| note
+                == "#.channels.c.publish.message/oneOf/1: v3 has nowhere to keep [\"x-inner\"]"),
+            "got: {notes:?}"
         );
     }
 
