@@ -46,7 +46,7 @@ pub struct Server {
 
     /// Protocol-specific definitions for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<ServerBindings>,
+    pub bindings: Option<RefOr<ServerBindings>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]

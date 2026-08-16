@@ -217,7 +217,7 @@ pub struct Message {
     pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<MessageBindings>,
+    pub bindings: Option<RefOr<MessageBindings>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<MessageExample>,
@@ -368,7 +368,7 @@ pub struct MessageTrait {
     pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<MessageBindings>,
+    pub bindings: Option<RefOr<MessageBindings>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<MessageExample>,

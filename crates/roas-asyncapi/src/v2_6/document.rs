@@ -1630,6 +1630,63 @@ mod tests {
     }
 
     #[test]
+    fn inline_bindings_may_be_a_reference() {
+        // "Bindings Object | Reference Object" in all six inline
+        // positions, and a `$ref` there is a reference rather than a
+        // protocol named `$ref`.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "s": {
+                    "url": "kafka://b",
+                    "protocol": "kafka",
+                    "bindings": { "$ref": "#/components/serverBindings/shared" }
+                }
+            },
+            "channels": {
+                "c": {
+                    "bindings": { "$ref": "#/components/channelBindings/shared" },
+                    "publish": {
+                        "bindings": { "$ref": "#/components/operationBindings/shared" },
+                        "message": { "bindings": { "$ref": "#/components/messageBindings/shared" } }
+                    }
+                }
+            },
+            "components": {
+                "serverBindings": { "shared": { "kafka": {} } },
+                "channelBindings": { "shared": { "kafka": {} } },
+                "operationBindings": { "shared": { "kafka": {} } },
+                "messageBindings": { "shared": { "kafka": {} } }
+            }
+        });
+        assert_eq!(errors_for(value.clone()), Vec::<String>::new());
+
+        // A reference is what it round-trips as, too.
+        let document: Document = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&document).unwrap(), value);
+
+        // Each position still names its own sort of bindings.
+        let mut wrong = value;
+        wrong["channels"]["c"]["bindings"] =
+            json!({ "$ref": "#/components/serverBindings/shared" });
+        assert!(
+            errors_for(wrong).iter().any(|e| e
+                == "#.channels.c.bindings.$ref: `#/components/serverBindings/shared` does not point at an object of the expected kind"),
+        );
+
+        // And a protocol map is still a protocol map.
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": { "c": { "bindings": { "kafka": { "topic": "t" } } } }
+        });
+        assert_eq!(errors_for(value.clone()), Vec::<String>::new());
+        let document: Document = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&document).unwrap(), value);
+    }
+
+    #[test]
     fn a_binding_alias_names_its_own_sort_of_bindings() {
         let document = |target: &str| {
             json!({

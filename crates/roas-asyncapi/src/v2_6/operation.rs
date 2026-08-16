@@ -72,7 +72,7 @@ pub struct Operation {
 
     /// Protocol-specific definitions for the operation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<OperationBindings>,
+    pub bindings: Option<RefOr<OperationBindings>>,
 
     /// Traits to apply to the operation. Validated but not merged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,7 +137,7 @@ pub struct OperationTrait {
     pub external_docs: Option<ExternalDocumentation>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings: Option<OperationBindings>,
+    pub bindings: Option<RefOr<OperationBindings>>,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
