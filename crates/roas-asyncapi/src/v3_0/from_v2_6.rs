@@ -25,7 +25,12 @@ use std::fmt;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ConversionReport {
-    /// One entry per decision, in document order.
+    /// One entry per decision, in the order the conversion made it:
+    /// the names it had to settle before converting anything come
+    /// first, and the rest follow the document. A decision that could
+    /// only be settled once the whole document was converted — what
+    /// became of a parameter's schema — is put back where it was made
+    /// rather than left at the end.
     pub notes: Vec<Note>,
 }
 
@@ -267,6 +272,11 @@ struct Conversion {
 struct KeptSchema {
     /// Where the parameter is, for the note about what became of it.
     at: String,
+    /// How far the report had got when the parameter was converted, so
+    /// that the note this ends up making can be put back where it
+    /// would have been said — and which parameter it was, because two
+    /// of them may have had nothing to say between them.
+    said_after: (usize, usize),
     schema: v2_6::SubSchema,
     /// Whether a v3 parameter could say everything the schema said, so
     /// that dropping it costs nothing.
@@ -512,6 +522,9 @@ impl Conversion {
     fn keep_schemas(&mut self, document: &mut v3_0::Document) {
         let mut kept = BTreeMap::new();
         let mut settled = BTreeSet::new();
+        // Said late, but about a parameter the report has already
+        // passed, so each is held with the place it belongs.
+        let mut deferred: Vec<((usize, usize), Vec<Note>)> = Vec::new();
         while let Some(key) = self
             .used_schemas
             .iter()
@@ -519,27 +532,54 @@ impl Conversion {
             .cloned()
         {
             settled.insert(key.clone());
-            let Some(KeptSchema { at, schema, .. }) = self.kept_schemas.remove(&key) else {
+            let Some(KeptSchema {
+                at,
+                said_after,
+                schema,
+                ..
+            }) = self.kept_schemas.remove(&key)
+            else {
                 continue;
             };
-            let Some(converted) = self.schema(&at, "schema", &schema, None) else {
-                continue;
-            };
-            self.note(
-                &at,
-                NoteKind::ParameterSchemaMoved {
-                    to: format!("#/components/schemas/{key}"),
-                },
-            );
-            kept.insert(key, converted);
+            // Converting it may have something to say of its own, and
+            // that belongs beside the parameter too.
+            let mark = self.notes.len();
+            let converted = self.schema(&at, "schema", &schema, None);
+            let mut said = self.notes.split_off(mark);
+            if let Some(converted) = converted {
+                said.push(Note {
+                    at,
+                    kind: NoteKind::ParameterSchemaMoved {
+                        to: format!("#/components/schemas/{key}"),
+                    },
+                });
+                kept.insert(key, converted);
+            }
+            deferred.push((said_after, said));
         }
         // Nothing names the rest, so they go the way they went before a
         // pointer gave one a reason to stay.
-        for (_, KeptSchema { at, carried, .. }) in std::mem::take(&mut self.kept_schemas) {
+        for (
+            _,
+            KeptSchema {
+                at,
+                said_after,
+                carried,
+                ..
+            },
+        ) in std::mem::take(&mut self.kept_schemas)
+        {
             if !carried {
-                self.note(&at, NoteKind::ParameterSchemaDropped);
+                deferred.push((
+                    said_after,
+                    vec![Note {
+                        at,
+                        kind: NoteKind::ParameterSchemaDropped,
+                    }],
+                ));
             }
         }
+        self.say_in_order(deferred);
         if !kept.is_empty() {
             document
                 .components
@@ -547,6 +587,34 @@ impl Conversion {
                 .schemas
                 .extend(kept);
         }
+    }
+
+    /// Put notes held back for later where they would have been said.
+    ///
+    /// A parameter's schema is only settled once the whole document
+    /// has been converted, so these notes are made last — and they read
+    /// where the parameter is, not where they were made.
+    fn say_in_order(&mut self, mut deferred: Vec<((usize, usize), Vec<Note>)>) {
+        if deferred.is_empty() {
+            return;
+        }
+        // Stable, so two notes held at the same point keep the order
+        // the document put them in.
+        deferred.sort_by_key(|(said_after, _)| *said_after);
+        let said = std::mem::take(&mut self.notes);
+        let mut deferred = deferred.into_iter().peekable();
+        let mut notes = Vec::with_capacity(said.len());
+        for (index, note) in said.into_iter().enumerate() {
+            while deferred
+                .peek()
+                .is_some_and(|((said_after, _), _)| *said_after <= index)
+            {
+                notes.extend(deferred.next().expect("peeked").1);
+            }
+            notes.push(note);
+        }
+        notes.extend(deferred.flat_map(|(_, notes)| notes));
+        self.notes = notes;
     }
 
     fn note(&mut self, at: &str, kind: NoteKind) {
@@ -976,6 +1044,18 @@ impl Conversion {
                     .get("default")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
+                // v3 substitutes a parameter's default into the
+                // address, so one the enumeration does not offer could
+                // never be substituted — 2.6 allowed the pair, v3 does
+                // not, and it counts as lost like anything else here.
+                if !converted.enum_values.is_empty()
+                    && converted
+                        .default
+                        .as_ref()
+                        .is_some_and(|default| !converted.enum_values.contains(default))
+                {
+                    converted.default = None;
+                }
                 let whole = |key: &str, kept: usize| match map.get(key) {
                     None => true,
                     Some(value) => value.as_array().is_some_and(|values| values.len() == kept),
@@ -998,6 +1078,7 @@ impl Conversion {
                 key,
                 KeptSchema {
                     at: at.to_owned(),
+                    said_after: (self.notes.len(), self.kept_schemas.len()),
                     schema,
                     carried,
                 },
@@ -3263,6 +3344,76 @@ mod tests {
             notes.iter().any(|note| note
                 == "#.channels.c.publish.message/oneOf/1: v3 has nowhere to keep [\"x-inner\"]"),
             "got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_default_the_enumeration_does_not_offer_is_not_carried() {
+        // 2.6 allowed the pair; v3 substitutes the default into the
+        // address, so one the enumeration does not offer could never be
+        // substituted — this crate's own validator says so.
+        let (document, notes) = convert_json(minimal(json!({
+            "{p}": { "parameters": { "p": { "schema": { "enum": ["a"], "default": "b" } } } }
+        })));
+        let parameter = document.channels["_p_"].item().expect("inline").parameters["p"]
+            .item()
+            .expect("inline");
+        assert_eq!(parameter.enum_values, ["a"]);
+        assert_eq!(parameter.default, None);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("`schema` is dropped")),
+            "the default is reported as lost: {notes:?}"
+        );
+        document_is_valid(&document);
+
+        // One it does offer is a default a v3 parameter can hold, and
+        // then nothing was lost at all.
+        let (document, notes) = convert_json(minimal(json!({
+            "{p}": { "parameters": { "p": { "schema": { "enum": ["a", "b"], "default": "b" } } } }
+        })));
+        let parameter = document.channels["_p_"].item().expect("inline").parameters["p"]
+            .item()
+            .expect("inline");
+        assert_eq!(parameter.default.as_deref(), Some("b"));
+        assert!(
+            !notes.iter().any(|note| note.contains("`schema`")),
+            "nothing about the schema was lost: {notes:?}"
+        );
+        document_is_valid(&document);
+    }
+
+    #[test]
+    fn a_note_held_back_still_reads_where_it_belongs() {
+        // What became of a parameter's schema is settled only once the
+        // whole document is converted, but the report reads in the
+        // order the conversion decided things — not in the order of the
+        // names it happened to generate.
+        let (_, notes) = convert_json(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "z/{z}": {
+                    "parameters": { "z": { "schema": { "type": "string", "pattern": "^z" } } }
+                }
+            },
+            "components": {
+                "parameters": { "a": { "schema": { "type": "string", "pattern": "^a" } } }
+            }
+        }));
+        let said: Vec<&str> = notes
+            .iter()
+            .filter(|note| note.contains("`schema` is dropped"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "#.channels.z/{z}.parameters.z: a v3 parameter is a string, so `schema` is dropped",
+                "#.components.parameters.a: a v3 parameter is a string, so `schema` is dropped",
+            ],
+            "the channel comes first, though `parameter_a` sorts before `z__z__z`",
         );
     }
 
