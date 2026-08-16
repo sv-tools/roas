@@ -128,9 +128,43 @@ jobs:
           report_type: test_results
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  CrossFeatureTestJob:
+    name: Test cross-feature code
+    # The matrix above is one row per feature, so code that compiles
+    # only when two features are on together is never built there —
+    # `roas-asyncapi`'s `v3_0::from_v2_6` needs `v2_6` *and* `v3_0`.
+    # Run the crates that have such code with every feature on, so the
+    # coverage report knows those lines exist.
+    strategy:
+      matrix:
+        package: [roas-asyncapi]
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - run: cargo install-tools
+      - name: Run tests
+        run: cargo llvm-cov nextest --package ${{ matrix.package }} --all-features --all-targets --no-fail-fast --no-tests=pass --verbose
+      - name: Run doctests
+        run: cargo test --doc --package ${{ matrix.package }} --all-features --no-fail-fast --verbose
+      - name: Prepare coverage report
+        if: ${{ !cancelled() }}
+        run: cargo llvm-cov report --lcov --output-path coverage.lcov
+      - name: Upload coverage reports to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          report_type: test_results
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
   Tests:
     name: Wait for testing jobs to finish
-    needs: TestJob
+    needs: [TestJob, CrossFeatureTestJob]
     runs-on: ubuntu-latest
     steps:
       - run: echo "Testing jobs succeeded"
