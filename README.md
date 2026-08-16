@@ -51,7 +51,7 @@ subcommand reference, piping examples, and the live-reload preview server.
   [AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.1.0)
   documents (v2.6 / v3.0 / v3.1) via [`roas-asyncapi`](crates/roas-asyncapi), the
   event-driven counterpart to an OpenAPI description, including
-  v3.0 → v3.1 upconversion.
+  v3.0 → v3.1 upconversion and a reported v2.6 → v3.0 conversion.
 - **Pluggable loader** — `ResourceFetcher` / `AsyncResourceFetcher` traits
   for resolving external `$ref`s, with first-party fetcher crates for
   [filesystem](crates/roas-file-fetcher) and [HTTP](crates/roas-http-fetcher)

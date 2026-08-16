@@ -1,6 +1,6 @@
 [package]
 name = "roas-asyncapi"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -21,7 +21,8 @@ all-features = true
 [features]
 default = ["v3_1"]
 # Support for AsyncAPI v2.6.0 — the pre-v3 model, pinned to that exact
-# version by the schema's single-value enum.
+# version by the schema's single-value enum. Enable it with `v3_0` to
+# get the (lossy, reported) `v3_0::from_v2_6::convert`.
 v2_6 = []
 # Support for AsyncAPI v3.0.0 — the schema pins `asyncapi` to that
 # exact string, so there is no patch range.
