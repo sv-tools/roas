@@ -2,7 +2,8 @@
 //!
 //! The root `validate` and `convert` commands operate on OpenAPI specs;
 //! the `overlay` subcommand group operates on OpenAPI Overlay documents,
-//! and the `arazzo` group on OpenAPI Arazzo workflow descriptions.
+//! the `arazzo` group on OpenAPI Arazzo workflow descriptions, and the
+//! `asyncapi` group on AsyncAPI documents.
 //!
 //! - `roas validate [FILE]` — parse and validate an OpenAPI spec. Version is
 //!   auto-detected from the document; pass `--from` to force. External
@@ -43,6 +44,14 @@
 //!   v1.1). Arazzo describes workflows rather than transforming a spec,
 //!   so there is no `apply`.
 //!
+//! - `roas asyncapi <validate|convert>` — work with AsyncAPI
+//!   documents. `asyncapi validate` parses + validates one (2.6, 3.0 or
+//!   3.1, detected from the `asyncapi` field); `asyncapi convert --to
+//!   <v3_0|v3_1>` upconverts one. 2.6 → 3.x is lossy — v3 reshaped the
+//!   document — so the conversion reports what it invented or left
+//!   behind on stderr, keeping stdout the document; `--strict` turns
+//!   that report into a failure and `--quiet` silences it.
+//!
 //! - `roas preview [FILE]` — start a local HTTP server on
 //!   `127.0.0.1:<random>` that serves the spec rendered with
 //!   [Redoc](https://redocly.com/redoc) (default) or
@@ -73,11 +82,13 @@ use std::path::{Path, PathBuf};
 // `Options::IgnoreMissingTags` ↔ `--ignore missing-tags`.
 
 mod arazzo;
+mod asyncapi;
 mod overlay;
 mod preview;
 mod versioned;
 
 use arazzo::ArazzoCommand;
+use asyncapi::AsyncApiCommand;
 use overlay::OverlayCommand;
 use preview::PreviewArgs;
 use versioned::{SpecVersion, parse_value, path_looks_like_yaml};
@@ -101,6 +112,9 @@ enum Command {
     /// Work with OpenAPI Arazzo descriptions: validate or convert.
     #[command(subcommand)]
     Arazzo(ArazzoCommand),
+    /// Work with AsyncAPI documents: validate or convert.
+    #[command(subcommand)]
+    Asyncapi(AsyncApiCommand),
     /// Preview the spec in a browser, rendered with Redoc or Swagger UI.
     Preview(PreviewArgs),
     /// Print a shell completion script to stdout.
@@ -288,6 +302,7 @@ fn main() -> Result<()> {
         Command::Convert(args) => run_convert(args),
         Command::Overlay(cmd) => overlay::run_overlay(cmd),
         Command::Arazzo(cmd) => arazzo::run_arazzo(cmd),
+        Command::Asyncapi(cmd) => asyncapi::run_asyncapi(cmd),
         Command::Preview(args) => preview::run_preview(args),
         Command::Completions { shell } => run_completions(shell),
         Command::Manpages { out } => run_manpages(&out),

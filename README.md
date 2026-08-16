@@ -2,14 +2,14 @@
 
 `roas` is a Rust **SDK and command-line tool** for the OpenAPI ecosystem:
 parse, validate, convert, and round-trip OpenAPI / Swagger documents — plus
-the OpenAPI **Overlay** and **Arazzo** specifications — from Rust code *or*
-from the shell. Every released OpenAPI version is supported: v2.0 (Swagger),
+the OpenAPI **Overlay** and **Arazzo** specifications and **AsyncAPI** — from
+Rust code *or* from the shell. Every released OpenAPI version is supported: v2.0 (Swagger),
 v3.0.x, v3.1.x, and v3.2.x.
 
 ## Use it as a CLI
 
 [`roas-cli`](crates/roas-cli) ships a `roas` binary with `validate`,
-`convert`, `preview`, `overlay`, and `arazzo` subcommands. Install via Cargo,
+`convert`, `preview`, `overlay`, `arazzo`, and `asyncapi` subcommands. Install via Cargo,
 Homebrew, or Docker — pick whichever fits the host:
 
 ```shell

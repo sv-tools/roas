@@ -1,6 +1,6 @@
 # roas-cli
 
-Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and convert OpenAPI specs across versions 2.0 / 3.0.x / 3.1.x / 3.2.x, validate / convert / apply [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 / v1.1) via [`roas-overlay`](https://crates.io/crates/roas-overlay), and validate / convert [OpenAPI Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) workflow descriptions (v1.0 / v1.1) via [`roas-arazzo`](https://crates.io/crates/roas-arazzo).
+Command-line front-end for [`roas`](https://crates.io/crates/roas): validate and convert OpenAPI specs across versions 2.0 / 3.0.x / 3.1.x / 3.2.x, validate / convert / apply [OpenAPI Overlay](https://spec.openapis.org/overlay/v1.0.0.html) documents (v1.0 / v1.1) via [`roas-overlay`](https://crates.io/crates/roas-overlay), validate / convert [OpenAPI Arazzo](https://spec.openapis.org/arazzo/v1.0.1.html) workflow descriptions (v1.0 / v1.1) via [`roas-arazzo`](https://crates.io/crates/roas-arazzo), and validate / convert [AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.1.0) documents (2.6 / 3.0 / 3.1) via [`roas-asyncapi`](https://crates.io/crates/roas-asyncapi).
 
 [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)
 
@@ -42,10 +42,12 @@ roas overlay convert --to v1_1 [FILE]      # upconvert an overlay
 roas overlay apply --overlay O.yaml [SPEC] # apply overlay(s) to a spec
 roas arazzo validate [FILE]                # validate an OpenAPI Arazzo description
 roas arazzo convert --to v1_1 [FILE]       # upconvert an Arazzo description
+roas asyncapi validate [FILE]              # validate an AsyncAPI document
+roas asyncapi convert --to v3_1 [FILE]     # upconvert an AsyncAPI document
 roas preview [FILE]                        # open the spec in a browser via Redoc
 ```
 
-The root `validate` and `convert` commands operate on OpenAPI specs; the `overlay` subcommand group operates on OpenAPI Overlay documents, and the `arazzo` group on OpenAPI Arazzo workflow descriptions.
+The root `validate` and `convert` commands operate on OpenAPI specs; the `overlay` subcommand group operates on OpenAPI Overlay documents, the `arazzo` group on OpenAPI Arazzo workflow descriptions, and the `asyncapi` group on AsyncAPI documents.
 
 Input can be JSON or YAML. With a file path, the parser is selected by extension (`.yaml` / `.yml` → YAML, everything else → JSON). Pass `-` as the file path, or omit it entirely and pipe the spec, to read from stdin; stdin defaults to JSON. `--format json|yaml` overrides everything.
 
@@ -149,6 +151,20 @@ cat workflow.json | roas arazzo validate       # description on stdin
 
 - **`arazzo validate`** — checks structure: required / non-empty fields, source-name and component/output-key patterns, uniqueness of source names / workflow ids / step ids, the step shape rules (OpenAPI / AsyncAPI / Workflow), criterion type / context / version constraints, and `goto` action targets. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed description.
 - **`arazzo convert --to <v1_0|v1_1>`** — upconverts a description. Only upconversion is supported (v1.0 → v1.1 adds `$self`, AsyncAPI steps, selectors, expression types, and action `parameters`); downconversion errors.
+
+### `asyncapi`
+
+Work with [AsyncAPI](https://www.asyncapi.com/docs/reference/specification/v3.1.0) documents (2.6, 3.0 and 3.1). The version is auto-detected from the `asyncapi` field. AsyncAPI describes an event-driven API rather than transforming a spec, so there is no `apply`.
+
+```shell
+roas asyncapi validate events.yaml               # parse + validate
+roas asyncapi convert --to v3_0 events26.yaml    # upconvert 2.6 → 3.0
+roas asyncapi convert --to v3_1 --strict e.json  # fail if anything is lost
+cat events.json | roas asyncapi validate         # document on stdin
+```
+
+- **`asyncapi validate`** — checks structure and cross-references: required / non-empty fields, server and channel wiring, operation and reply targets, message and schema references (every `$ref` is followed to what it names, and judged against the kind of object that position holds), and channel parameters against the address. `--check <CHECK>` adjusts one check — `empty-info-title`, `empty-info-version` and `unused-channel-parameter` relax one, `external-reference` adds one, requiring the document to be self-contained. `--print` echoes the parsed document.
+- **`asyncapi convert --to <v2_6|v3_0|v3_1>`** — upconverts a document; downconversion errors. 3.0 → 3.1 is the object model unchanged. **2.6 → 3.x is lossy**: v3 keys a channel by name and carries the address inside it, moves operations to a map of their own and states them from the application's point of view (`publish` → `receive`, `subscribe` → `send`), and gives a parameter no schema. The conversion invents the names v3 needs and reports every one of them, along with everything it could not carry, to stderr — stdout is the document alone, so a pipeline is unaffected. `--strict` turns any such note into a failure (nothing is written to stdout), and `--quiet` silences the report.
 
 ### `preview`
 
