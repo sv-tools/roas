@@ -283,7 +283,10 @@ impl ValidateWithContext for Message {
 fn validate_headers(ctx: &mut Context, headers: &SubSchema) {
     ctx.in_field("headers", |ctx| {
         headers.validate_with_context(ctx);
-        if let SubSchema::Schema(schema) = headers {
+        // A reference is followed where it is declared, not here.
+        if let SubSchema::Schema(schema) = headers
+            && let Some(schema) = schema.item()
+        {
             match &schema.schema_type {
                 Some(SchemaType::Single(name)) if name != "object" => {
                     ctx.error_field("type", format!("must be `object`, not `{name}`"));

@@ -1727,6 +1727,69 @@ mod tests {
     }
 
     #[test]
+    fn a_schema_reference_resolves_like_any_other() {
+        let document = |schemas: serde_json::Value| {
+            json!({
+                "asyncapi": "2.6.0",
+                "info": { "title": "T", "version": "1" },
+                "channels": {},
+                "components": { "schemas": schemas }
+            })
+        };
+
+        // A reference to a schema, at the top of a component and nested
+        // inside one.
+        assert_eq!(
+            errors_for(document(json!({
+                "base": { "type": "object" },
+                "user": { "$ref": "#/components/schemas/base" },
+                "wrapper": { "properties": { "p": { "$ref": "#/components/schemas/base" } } }
+            }))),
+            Vec::<String>::new()
+        );
+
+        // Boolean schemas are still schemas.
+        assert_eq!(
+            errors_for(document(json!({ "any": true, "never": false }))),
+            Vec::<String>::new()
+        );
+
+        // One that names nothing, one that names the wrong kind, and a
+        // pair that name each other.
+        assert_eq!(
+            errors_for(document(
+                json!({ "user": { "$ref": "#/components/schemas/ghost" } })
+            )),
+            vec![
+                "#.components.schemas.user.$ref: `#/components/schemas/ghost` names nothing in this document"
+            ]
+        );
+        let wrong = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {},
+            "components": {
+                "schemas": { "user": { "$ref": "#/components/messages/m" } },
+                "messages": { "m": { "name": "M" } }
+            }
+        });
+        assert_eq!(
+            errors_for(wrong),
+            vec![
+                "#.components.schemas.user.$ref: `#/components/messages/m` does not point at an object of the expected kind"
+            ]
+        );
+        assert!(
+            errors_for(document(json!({
+                "a": { "$ref": "#/components/schemas/b" },
+                "b": { "$ref": "#/components/schemas/a" }
+            })))
+            .iter()
+            .any(|e| e.contains("is part of a reference cycle")),
+        );
+    }
+
+    #[test]
     fn a_boolean_schema_is_a_schema() {
         // `true` is a schema, and no struct deserializes it.
         let value = json!({

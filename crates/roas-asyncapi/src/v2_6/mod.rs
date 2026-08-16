@@ -73,6 +73,7 @@ crate::common::resolve::kinds! {
     server::Server => Some("servers"),
     server::ServerVariable => Some("serverVariables"),
     message::Message => Some("messages"),
+    schema::Schema => Some("schemas"),
     message::MessageTrait => Some("messageTraits"),
     operation::OperationTrait => Some("operationTraits"),
     security_scheme::SecurityScheme => Some("securitySchemes"),

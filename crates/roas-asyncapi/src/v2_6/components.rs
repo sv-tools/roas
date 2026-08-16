@@ -15,11 +15,6 @@
 //! prose is what this crate follows — AsyncAPI says so itself, and its
 //! JSON Schemas do not track the specification one-for-one — so a
 //! `$ref` in those maps is a reference here.
-//!
-//! `schemas` is the one place this crate has *not* caught up: the field
-//! table gives it `Schema Object | Reference Object`, while the Schema
-//! Object here still carries `$ref` as a field. Fixing that means
-//! changing the Schema model itself, which is left for its own change.
 
 use crate::common::bindings::{
     ChannelBindings, MessageBindings, OperationBindings, ServerBindings,
@@ -149,10 +144,30 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_keeps_its_ref_siblings() {
+    fn a_schema_ref_is_a_reference_object() {
+        // "Any time a Schema Object can be used, a Reference Object can
+        // be used in its place … the `$ref` keyword MUST follow the
+        // behavior described by Reference Object instead of the one in
+        // JSON Schema definition." A Reference Object is `$ref` alone,
+        // so its siblings are ignored — and dropped.
+        let components: Components = serde_json::from_value(json!({
+            "schemas": {
+                "user": { "$ref": "#/components/schemas/base", "description": "ignored" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&components).unwrap(),
+            json!({ "schemas": { "user": { "$ref": "#/components/schemas/base" } } })
+        );
+
+        // Nested schema positions take one too.
         let value = json!({
             "schemas": {
-                "user": { "$ref": "#/components/schemas/base", "description": "d", "x-note": 1 }
+                "user": {
+                    "type": "object",
+                    "properties": { "p": { "$ref": "#/components/schemas/base" } }
+                }
             }
         });
         let components: Components = serde_json::from_value(value.clone()).unwrap();

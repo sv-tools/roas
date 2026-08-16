@@ -4,11 +4,19 @@
 //! JSON Schema draft-07 plus AsyncAPI's `discriminator` /
 //! `externalDocs` / `deprecated` additions.
 //!
+//! `$ref` here is a Reference Object, not the draft-07 keyword: "any
+//! time a Schema Object can be used, a Reference Object can be used in
+//! its place … the `$ref` keyword MUST follow the behavior described by
+//! Reference Object instead of the one in JSON Schema definition." So a
+//! schema position is a [`RefOr`], and what sits beside a `$ref` is
+//! ignored rather than kept.
+//!
 //! Unlike v3, 2.6 has no Multi Format Schema Object — a message names
 //! its dialect with its own `schemaFormat` field and carries the
 //! payload directly, so [`Message`](crate::v2_6::Message) holds an
 //! untyped payload and this type covers the default dialect only.
 
+use crate::common::reference::RefOr;
 use crate::v2_6::external_documentation::ExternalDocumentation;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -25,17 +33,18 @@ where
 }
 
 /// A subschema: JSON Schema allows `true` / `false` wherever a schema
-/// is expected, so every child position accepts either.
+/// is expected, so every child position accepts either — and so does a
+/// Reference Object, "any time a Schema Object can be used".
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SubSchema {
     Bool(bool),
-    Schema(Box<Schema>),
+    Schema(Box<RefOr<Schema>>),
 }
 
 impl Default for SubSchema {
     fn default() -> Self {
-        Self::Schema(Box::default())
+        Self::Schema(Box::new(RefOr::Item(Schema::default())))
     }
 }
 
@@ -124,16 +133,6 @@ pub enum SchemaType {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct Schema {
     // ---- identification ----
-    /// The draft-07 `$ref` keyword.
-    ///
-    /// It is a *keyword*, not a replacement for the schema, so
-    /// `description` and `x-` extensions may sit alongside it and are
-    /// preserved. draft-07 says an implementation ignores such siblings
-    /// when applying the schema; this crate keeps them so a document
-    /// round-trips as written.
-    #[serde(rename = "$ref", skip_serializing_if = "Option::is_none")]
-    pub reference: Option<String>,
-
     #[serde(rename = "$id", skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
@@ -405,14 +404,6 @@ fn check_unique_strings(ctx: &mut Context, field: &str, values: &[String]) {
 
 impl ValidateWithContext for Schema {
     fn validate_with_context(&self, ctx: &mut Context) {
-        if let Some(reference) = &self.reference {
-            ctx.require_non_empty("$ref", reference);
-            crate::common::reference::check_external(ctx, reference);
-            crate::common::resolve::check_names_something(ctx, reference);
-            // A field-style `$ref` is still a reference to one kind of
-            // object, and this position says which.
-            crate::common::resolve::check_names_kind::<Schema>(ctx, reference, "schemas");
-        }
         // ---- keyword constraints from the draft-07 meta-schema ----
         match &self.schema_type {
             Some(SchemaType::Single(name)) if !SIMPLE_TYPES.contains(&name.as_str()) => {
@@ -1139,10 +1130,10 @@ mod tests {
         SubSchema::Bool(true).validate_with_context(&mut ctx);
         assert!(ctx.errors.is_empty());
 
-        let nested = SubSchema::Schema(Box::new(Schema {
+        let nested = SubSchema::Schema(Box::new(RefOr::Item(Schema {
             discriminator: Some(String::new()),
             ..Default::default()
-        }));
+        })));
         let mut ctx = Context::with_path(EnumSet::empty(), "#.payload.additionalProperties");
         nested.validate_with_context(&mut ctx);
         assert!(
