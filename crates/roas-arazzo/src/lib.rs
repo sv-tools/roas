@@ -65,6 +65,13 @@
 //! an `impl From<v1_0::Description> for v1_1::Description` is available
 //! for upconverting an existing v1.0 description.
 
+// Everything internal here is reached through a versioned
+// document: the validation impls, the walkers, the shared
+// helpers. Build with no version feature at all and none of it
+// is called — which is that configuration saying so, not code
+// nobody uses. Every real configuration keeps the lint.
+#![cfg_attr(not(any(feature = "v1_0", feature = "v1_1")), allow(dead_code))]
+
 pub mod common;
 pub mod validation;
 

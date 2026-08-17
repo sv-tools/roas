@@ -44,6 +44,7 @@ pub fn validate_optional_url<T>(url: &Option<String>, ctx: &mut Context<T>, path
 /// (`#/foo`) and rootless paths. Used for fields like `jsonSchemaDialect`
 /// where JSON Schema dialect URIs may be opaque (e.g.
 /// `urn:example:dialect`) and not necessarily HTTP(S).
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
 pub fn validate_optional_uri<T>(uri: &Option<String>, ctx: &mut Context<T>, path: String) {
     let Some(uri) = uri else { return };
     if ctx.is_option(Options::IgnoreInvalidUrls) {
@@ -66,6 +67,7 @@ pub fn validate_optional_uri<T>(uri: &Option<String>, ctx: &mut Context<T>, path
 /// `validate_required_uri` and by callers (e.g. XML namespace
 /// validators) that want to skip a follow-up scheme check when the URI
 /// validator has already flagged the value.
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
 pub fn has_uri_unsafe_bytes(s: &str) -> bool {
     s.bytes()
         .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
@@ -79,6 +81,7 @@ pub fn has_uri_unsafe_bytes(s: &str) -> bool {
 /// specific field should gate the call on the relevant `Options::*`
 /// toggle themselves — this helper does not bake in any field-specific
 /// option.
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
 pub fn validate_required_uri<T>(uri: &String, ctx: &mut Context<T>, path: String) {
     validate_required_string(uri, ctx, path.clone());
     if uri.is_empty() || ctx.is_option(Options::IgnoreInvalidUrls) {
@@ -188,7 +191,12 @@ pub fn validate_not_visited<T, D>(
     }
 }
 
-#[cfg(test)]
+// Every helper here is gated on the versions that use it, so with no
+// version feature there is nothing left to test.
+#[cfg(all(
+    test,
+    any(feature = "v2", feature = "v3_0", feature = "v3_1", feature = "v3_2")
+))]
 mod tests {
     use super::*;
     use crate::validation::ValidationErrorsExt;
@@ -268,6 +276,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "v3_1", feature = "v3_2"))]
     fn validate_optional_uri_ignore_invalid_urls_suppresses_errors() {
         // Exercises the early-return path when IgnoreInvalidUrls is set.
         let mut ctx = Context::new(&(), Options::IgnoreInvalidUrls.only());
@@ -284,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "v3_1", feature = "v3_2"))]
     fn validate_optional_uri_rejects_control_chars_and_whitespace() {
         // Tab, newline, DEL, and other C0 / DEL controls each fail.
         for s in ["bad\turi", "with\nnewline", "with\x01ctl", "with\x7fdel"] {

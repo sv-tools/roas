@@ -97,6 +97,17 @@
 //! genuinely lossy: it returns a report saying where a name had to be
 //! invented and what had nowhere to go.
 
+// Everything inside `common` is there to serve a version module:
+// the reference resolver answers questions about a document, and the
+// validation impls are reached through a `Document`. Build the crate
+// with no version feature at all and none of that is called — which is
+// the configuration saying so, not code nobody uses. Every real
+// configuration keeps the lint.
+#![cfg_attr(
+    not(any(feature = "v2_6", feature = "v3_0", feature = "v3_1")),
+    allow(dead_code)
+)]
+
 pub mod common;
 pub mod validation;
 
