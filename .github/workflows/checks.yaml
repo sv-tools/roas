@@ -35,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.rustmeta.outputs.matrix }}
+      packages: ${{ steps.rustmeta.outputs.packages }}
       publish: ${{ steps.rustmeta.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,9 +54,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       - run: cargo build ${{ matrix.args }} --all-targets --verbose
+  IsolatedBuildJob:
+    name: Build per Package with each Feature alone
+    needs: RustMeta
+    # The matrix above keeps default features on and does not deny
+    # warnings, so a crate built with only an older version feature —
+    # or with none at all — is never seen. That is where code left
+    # behind a `cfg` shows up: unused, but only in a configuration
+    # nothing builds. This builds each feature on its own, and no
+    # features at all, with warnings denied.
+    strategy:
+      matrix:
+        package: ${{ fromJSON(needs.RustMeta.outputs.packages) }}
+    runs-on: "ubuntu-latest"
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - name: Build with no features, then with each one alone
+        shell: bash
+        run: |
+          set -euo pipefail
+          package='${{ matrix.package }}'
+          echo "::group::${package} (no features)"
+          cargo build --package "$package" --no-default-features --all-targets --verbose
+          echo "::endgroup::"
+          # `default` is what the matrix above already builds.
+          features=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r --arg p "$package" '.packages[]
+                | select(.name == $p)
+                | .features
+                | keys[]
+                | select(. != "default")')
+          for feature in $features; do
+            echo "::group::${package} --features=${feature}"
+            cargo build --package "$package" --no-default-features --features "$feature" --all-targets --verbose
+            echo "::endgroup::"
+          done
   Build:
     name: Wait for build jobs to finish
-    needs: BuildJob
+    needs: [BuildJob, IsolatedBuildJob]
     runs-on: ubuntu-latest
     steps:
       - run: echo "Build jobs succeeded"
