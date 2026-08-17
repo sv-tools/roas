@@ -45,8 +45,14 @@ pub struct PayloadReplacement {
     /// the request body.
     pub target: String,
 
-    /// **Required** The value set within the target location.
-    pub value: String,
+    /// **Required** The value set within the target location — any
+    /// JSON value, typically a runtime expression.
+    ///
+    /// The prose specification says `Any | {expression}`, the same as
+    /// [`Parameter::value`](crate::v1_0::Parameter::value); the
+    /// published JSON Schema narrows it to a string. The prose is what
+    /// this crate follows, and it is what v1.1 does with the same field.
+    pub value: serde_json::Value,
 
     /// `x-`-prefixed Specification Extensions.
     #[serde(flatten)]
@@ -80,6 +86,41 @@ mod tests {
 
         let v = serde_json::to_value(&rb).unwrap();
         assert_eq!(v["contentType"], json!("application/json"));
+    }
+
+    #[test]
+    fn a_replacement_value_may_be_any_json_the_prose_allows() {
+        // The published JSON Schema says `string`; the prose says
+        // `Any | {expression}`, as it does for `Parameter.value`, and a
+        // replacement that sets a number or an object is what a real
+        // description writes.
+        let body: RequestBody = serde_json::from_value(json!({
+            "replacements": [
+                { "target": "/quantity", "value": 2 },
+                { "target": "/tags", "value": ["cat", "small"] },
+                { "target": "/pet", "value": { "id": "$steps.find.outputs.id" } },
+                { "target": "/gift", "value": true },
+                { "target": "/note", "value": "for {$inputs.who}" }
+            ]
+        }))
+        .unwrap();
+        let values: Vec<&serde_json::Value> = body.replacements.iter().map(|r| &r.value).collect();
+        assert_eq!(
+            values,
+            [
+                &json!(2),
+                &json!(["cat", "small"]),
+                &json!({ "id": "$steps.find.outputs.id" }),
+                &json!(true),
+                &json!("for {$inputs.who}"),
+            ]
+        );
+
+        // And each keeps its type on the way out again.
+        assert_eq!(
+            serde_json::to_value(&body).unwrap()["replacements"][0]["value"],
+            json!(2)
+        );
     }
 
     #[test]
