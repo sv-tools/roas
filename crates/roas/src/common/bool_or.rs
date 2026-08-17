@@ -1,6 +1,3 @@
-use crate::common::reference::{RefOr, ResolveReference};
-use crate::validation::{Context, ValidateWithContext};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -10,11 +7,19 @@ pub enum BoolOr<T> {
     Item(T),
 }
 
-impl<D> BoolOr<RefOr<D>> {
-    pub(crate) fn validate_with_context<T>(&self, ctx: &mut Context<T>, path: String)
-    where
-        T: ResolveReference<D>,
-        D: ValidateWithContext<T> + 'static + Clone + DeserializeOwned,
+// v2 and v3.0 hold a `BoolOr` but never validate through one.
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
+impl<D> BoolOr<crate::common::reference::RefOr<D>> {
+    pub(crate) fn validate_with_context<T>(
+        &self,
+        ctx: &mut crate::validation::Context<T>,
+        path: String,
+    ) where
+        T: crate::common::reference::ResolveReference<D>,
+        D: crate::validation::ValidateWithContext<T>
+            + 'static
+            + Clone
+            + serde::de::DeserializeOwned,
     {
         match self {
             BoolOr::Bool(_) => {}
