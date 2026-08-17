@@ -18,7 +18,7 @@ This crate is a sibling of [`roas`](https://crates.io/crates/roas) (the typed pa
 
 `v1_0` and `v1_1` are independent — enable whichever you need. With both enabled, an `impl From<v1_0::Description> for v1_1::Description` upconverts an existing v1.0 description.
 
-Authoritative JSON Schemas: [v1.0](https://spec.openapis.org/arazzo/1.0/schema/2025-10-15) · [v1.1](https://spec.openapis.org/arazzo/1.1/schema/2026-04-15).
+JSON Schemas: [v1.0](https://spec.openapis.org/arazzo/1.0/schema/2025-10-15) · [v1.1](https://spec.openapis.org/arazzo/1.1/schema/2026-04-15). Where a schema and the prose specification disagree, this crate follows the prose — the schemas do not track the specification one for one. `PayloadReplacement.value` is such a case: both versions' prose say `Any`, the v1.0 schema says `string`, and this crate takes any JSON value.
 
 ## Quick start
 

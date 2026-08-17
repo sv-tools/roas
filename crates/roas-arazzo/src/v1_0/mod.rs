@@ -1,8 +1,13 @@
 //! Arazzo v1.0 — see
 //! <https://spec.openapis.org/arazzo/v1.0.1.html>.
 //!
-//! Authoritative JSON Schema:
+//! JSON Schema:
 //! <https://spec.openapis.org/arazzo/1.0/schema/2025-10-15>.
+//!
+//! Where the schema and the prose disagree, the prose wins:
+//! [`PayloadReplacement::value`](request_body::PayloadReplacement::value)
+//! is `Any` in the specification and `string` in the schema, and this
+//! module takes any JSON value — as v1.1 does with the same field.
 
 pub mod components;
 pub mod criterion;

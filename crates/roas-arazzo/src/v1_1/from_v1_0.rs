@@ -283,6 +283,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_replacement_value_keeps_its_type_across_the_upconversion() {
+        let replacement = v1_0::PayloadReplacement {
+            target: "/quantity".to_owned(),
+            value: json!(2),
+            extensions: None,
+        };
+        assert_eq!(
+            v1_1::PayloadReplacement::from(replacement).value,
+            v1_1::ValueOrSelector::Literal(json!(2)),
+            "a number stays a number, rather than becoming `\"2\"`"
+        );
+    }
+
+    #[test]
     fn upconverts_and_validates() {
         let v0: v1_0::Description = serde_json::from_value(json!({
             "arazzo": "1.0.1",
