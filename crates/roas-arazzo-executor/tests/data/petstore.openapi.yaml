@@ -1,0 +1,25 @@
+openapi: 3.0.3
+info:
+  title: Pet store
+  version: "1.0.0"
+servers:
+  - url: https://{host}/v1
+    variables:
+      host:
+        default: api.example.com
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPetById
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+  /pets/{petId}/order:
+    post:
+      operationId: placeOrder
+  /pets:
+    get:
+      operationId: listPets

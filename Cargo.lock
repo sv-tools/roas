@@ -1286,6 +1286,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "roas-arazzo-executor"
+version = "0.1.0"
+dependencies = [
+ "enumset",
+ "regex",
+ "reqwest",
+ "roas-arazzo",
+ "serde_json",
+ "serde_json_path",
+ "serde_yaml_ng",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "roas-asyncapi"
 version = "0.4.0"
 dependencies = [

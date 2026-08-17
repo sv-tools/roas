@@ -1,0 +1,74 @@
+arazzo: 1.0.1
+info:
+  title: Buy a pet
+  version: "1.0.0"
+sourceDescriptions:
+  - name: petStore
+    url: https://api.example.com/openapi.yaml
+    type: openapi
+workflows:
+  - workflowId: buyPet
+    summary: Find a pet, then order it
+    inputs:
+      type: object
+      properties:
+        petId:
+          type: string
+        token:
+          type: string
+    parameters:
+      - name: Authorization
+        in: header
+        value: Bearer {$inputs.token}
+    steps:
+      - stepId: findPet
+        description: Look the pet up, retrying while the store is busy
+        operationId: getPetById
+        parameters:
+          - name: petId
+            in: path
+            value: $inputs.petId
+        successCriteria:
+          - condition: $statusCode == 200
+          - context: $response.body
+            condition: $.tags[*]
+            type: jsonpath
+        onFailure:
+          - name: waitForTheStore
+            type: retry
+            retryAfter: 0.5
+            retryLimit: 2
+            criteria:
+              - condition: $statusCode == 503
+        outputs:
+          pet: $response.body
+          name: $response.body#/name
+
+      - stepId: orderPet
+        operationId: placeOrder
+        parameters:
+          - name: petId
+            in: path
+            value: $steps.findPet.outputs.pet#/id
+        requestBody:
+          contentType: application/json
+          payload:
+            petId: $steps.findPet.outputs.pet#/id
+            quantity: 1
+          replacements:
+            - target: /note
+              value: a gift for {$inputs.petId}
+        successCriteria:
+          - condition: $statusCode == 201 && $response.body#/status == 'placed'
+        onSuccess:
+          - name: done
+            type: end
+        outputs:
+          orderId: $response.body#/orderId
+
+      - stepId: neverReached
+        operationId: listPets
+
+    outputs:
+      petName: $steps.findPet.outputs.name
+      orderId: $steps.orderPet.outputs.orderId
