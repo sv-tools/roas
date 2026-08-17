@@ -29,6 +29,13 @@ pub(crate) struct Exchange {
     pub response_body: Option<Value>,
 }
 
+/// What a workflow that has finished was given and produced.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorkflowState {
+    pub inputs: Value,
+    pub outputs: BTreeMap<String, Value>,
+}
+
 /// What a step has produced so far.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StepState {
@@ -44,8 +51,10 @@ pub(crate) struct Scope<'a> {
     pub outputs: &'a BTreeMap<String, Value>,
     /// Every step of this workflow that has run.
     pub steps: &'a BTreeMap<String, StepState>,
-    /// The outputs of workflows that have finished.
-    pub workflows: &'a BTreeMap<String, BTreeMap<String, Value>>,
+    /// The workflows that have finished, by id.
+    pub workflows: &'a BTreeMap<String, WorkflowState>,
+    /// The description's `$self`, when it declares one.
+    pub self_: Option<&'a str>,
     /// The step being evaluated, when there is one.
     pub here: Option<&'a Exchange>,
     /// `sourceDescriptions`, by name.
@@ -104,15 +113,28 @@ pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, Exp
         "$outputs" => from_map(scope.outputs, &rest, expression, "an output")?,
         "$components" => walk(scope.components, &rest, expression, "a component")?,
         "$sourceDescriptions" => walk(scope.sources, &rest, expression, "a source description")?,
+        "$self" => Value::String(
+            scope
+                .self_
+                .ok_or_else(|| missing(expression, "`$self`, which the description does not set"))?
+                .to_owned(),
+        ),
         "$workflows" => {
             let (id, rest) = split_first(&rest, expression, "a workflow id")?;
-            let outputs = scope.workflows.get(id).ok_or_else(|| {
+            let workflow = scope.workflows.get(id).ok_or_else(|| {
                 missing(expression, format!("workflow `{id}`, which has not run"))
             })?;
-            // `$workflows.<id>.outputs.<name>`, and the spec's shorthand
-            // of naming the output directly.
-            let rest = rest.strip_prefix(&["outputs"][..]).unwrap_or(rest);
-            from_map(outputs, rest, expression, "an output")?
+            // `inputs` and `outputs` are both fields of a workflow; the
+            // bare shorthand names an output.
+            match rest.split_first() {
+                Some((field, rest)) if *field == "inputs" => {
+                    walk(&workflow.inputs, rest, expression, "an input")?
+                }
+                Some((field, rest)) if *field == "outputs" => {
+                    from_map(&workflow.outputs, rest, expression, "an output")?
+                }
+                _ => from_map(&workflow.outputs, rest, expression, "an output")?,
+            }
         }
         "$steps" => {
             let (id, rest) = split_first(&rest, expression, "a step id")?;
@@ -295,7 +317,8 @@ pub(crate) mod tests {
         pub inputs: Value,
         pub outputs: BTreeMap<String, Value>,
         pub steps: BTreeMap<String, StepState>,
-        pub workflows: BTreeMap<String, BTreeMap<String, Value>>,
+        pub workflows: BTreeMap<String, WorkflowState>,
+        pub self_: Option<String>,
         pub here: Option<Exchange>,
         pub sources: Value,
         pub components: Value,
@@ -308,6 +331,7 @@ pub(crate) mod tests {
                 outputs: BTreeMap::new(),
                 steps: BTreeMap::new(),
                 workflows: BTreeMap::new(),
+                self_: None,
                 here: None,
                 sources: json!({ "petStore": { "url": "https://api.example.com/openapi.json" } }),
                 components: json!({ "parameters": { "locale": { "name": "locale" } } }),
@@ -322,6 +346,7 @@ pub(crate) mod tests {
                 outputs: &self.outputs,
                 steps: &self.steps,
                 workflows: &self.workflows,
+                self_: self.self_.as_deref(),
                 here: self.here.as_ref(),
                 sources: &self.sources,
                 components: &self.components,
@@ -450,10 +475,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_finished_workflows_outputs_are_readable_either_spelling() {
+    fn a_finished_workflow_is_readable_by_field_and_by_shorthand() {
         let workflows = BTreeMap::from([(
             "authenticate".to_owned(),
-            BTreeMap::from([("token".to_owned(), json!("abc"))]),
+            WorkflowState {
+                inputs: json!({ "user": "ada" }),
+                outputs: BTreeMap::from([("token".to_owned(), json!("abc"))]),
+            },
         )]);
         let fixture = Fixture {
             workflows,
@@ -463,10 +491,39 @@ pub(crate) mod tests {
             eval("$workflows.authenticate.outputs.token", &fixture),
             Ok(json!("abc"))
         );
+        // What it was called with is readable too, which is a field of
+        // its own rather than another way of naming an output.
+        assert_eq!(
+            eval("$workflows.authenticate.inputs.user", &fixture),
+            Ok(json!("ada"))
+        );
         assert_eq!(
             eval("$workflows.authenticate.token", &fixture),
-            Ok(json!("abc"))
+            Ok(json!("abc")),
+            "the shorthand names an output"
         );
+        assert!(matches!(
+            eval("$workflows.authenticate.inputs.nope", &fixture),
+            Err(ExpressionError::Missing { .. })
+        ));
+    }
+
+    #[test]
+    fn the_description_can_name_itself() {
+        let fixture = Fixture {
+            self_: Some("https://example.com/workflows.arazzo.yaml".to_owned()),
+            ..Fixture::default()
+        };
+        assert_eq!(
+            eval("$self", &fixture),
+            Ok(json!("https://example.com/workflows.arazzo.yaml"))
+        );
+        // A description that sets no `$self` says so rather than
+        // producing an empty string.
+        assert!(matches!(
+            eval("$self", &Fixture::default()),
+            Err(ExpressionError::Missing { .. })
+        ));
     }
 
     #[test]

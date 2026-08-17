@@ -62,28 +62,30 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
         Ok(expression::evaluate(context, scope)?)
     };
 
+    // A pattern or a path may be written with expressions inside it —
+    // `{$inputs.pattern}` — and must be filled in before the engine
+    // that reads it ever sees it. A `simple` condition is different:
+    // its own parser evaluates the expressions it finds.
+    let written = || -> Result<String, CriterionError> {
+        Ok(expression::interpolate(&criterion.condition, scope)?)
+    };
+
     match criterion.type_.as_ref() {
         None | Some(CriterionType::Simple(CriterionKind::Simple)) => {
             simple(&criterion.condition, scope)
         }
-        Some(CriterionType::Simple(CriterionKind::Regex)) => {
-            regex(&criterion.condition, &context("regex")?)
-        }
+        Some(CriterionType::Simple(CriterionKind::Regex)) => regex(&written()?, &context("regex")?),
         Some(CriterionType::Simple(CriterionKind::Jsonpath)) => {
-            selects(Language::Path, &criterion.condition, &context("jsonpath")?)
+            selects(Language::Path, &written()?, &context("jsonpath")?)
         }
         Some(CriterionType::Simple(CriterionKind::Xpath)) => {
             Err(CriterionError::Unsupported("XPath"))
         }
         Some(CriterionType::Expression(expression)) => match expression.type_ {
-            ExpressionKind::Jsonpath => {
-                selects(Language::Path, &criterion.condition, &context("jsonpath")?)
+            ExpressionKind::Jsonpath => selects(Language::Path, &written()?, &context("jsonpath")?),
+            ExpressionKind::Jsonpointer => {
+                selects(Language::Pointer, &written()?, &context("jsonpointer")?)
             }
-            ExpressionKind::Jsonpointer => selects(
-                Language::Pointer,
-                &criterion.condition,
-                &context("jsonpointer")?,
-            ),
             ExpressionKind::Xpath => Err(CriterionError::Unsupported("XPath")),
         },
     }
@@ -91,16 +93,12 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
 
 /// Whether the expression picks anything out of the context.
 ///
-/// A criterion asks a question, and a selection language answers it by
-/// finding something: an empty result is a no. The one exception is a
-/// single boolean, which is the expression having answered the question
-/// itself rather than pointed at something.
+/// The specification is explicit: a condition passes when the
+/// expression returns a non-empty nodelist and fails when it returns an
+/// empty one. What was found does not matter — a node holding `false`
+/// is still a node, and a filter is how a criterion asks about a value.
 fn selects(language: Language, condition: &str, context: &Value) -> Result<bool, CriterionError> {
-    Ok(match select::apply(language, condition, context)? {
-        None => false,
-        Some(Value::Bool(answer)) => answer,
-        Some(_) => true,
-    })
+    Ok(select::apply(language, condition, context)?.is_some())
 }
 
 fn regex(condition: &str, context: &Value) -> Result<bool, CriterionError> {
@@ -356,9 +354,10 @@ impl Parser<'_> {
 
 fn holds(comparison: Comparison, left: &Value, right: &Value) -> bool {
     let ordering = compare(left, right);
+    let equal = ordering == Some(Ordering::Equal) || left == right;
     match comparison {
-        Comparison::Equal => ordering == Some(Ordering::Equal) || left == right,
-        Comparison::NotEqual => !(ordering == Some(Ordering::Equal) || left == right),
+        Comparison::Equal => equal,
+        Comparison::NotEqual => !equal,
         Comparison::Less => ordering == Some(Ordering::Less),
         Comparison::LessOrEqual => matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
         Comparison::Greater => ordering == Some(Ordering::Greater),
@@ -373,7 +372,11 @@ fn holds(comparison: Comparison, left: &Value, right: &Value) -> bool {
 fn compare(left: &Value, right: &Value) -> Option<Ordering> {
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => left.as_f64()?.partial_cmp(&right.as_f64()?),
-        (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
+        // "String comparisons MUST be case insensitive" — so `PLACED`
+        // and `placed` are the same word to a condition.
+        (Value::String(left), Value::String(right)) => {
+            Some(left.to_lowercase().cmp(&right.to_lowercase()))
+        }
         (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
         (Value::Number(number), Value::String(text))
         | (Value::String(text), Value::Number(number)) => {

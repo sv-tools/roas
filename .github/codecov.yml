@@ -55,6 +55,10 @@ component_management:
       name: roas-arazzo
       paths:
         - crates/roas-arazzo/**
+    - component_id: roas-arazzo-executor
+      name: roas-arazzo-executor
+      paths:
+        - crates/roas-arazzo-executor/**
 
     # ---- per OpenAPI spec version (within the `roas` crate) ----
     - component_id: common

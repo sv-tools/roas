@@ -54,7 +54,9 @@ pub use expression::ExpressionError;
 pub use http::{
     AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, SendFuture, SleepFuture,
 };
-pub use report::{CriterionOutcome, ExecutionError, ExecutionReport, Outcome, StepRecord};
+pub use report::{
+    CriterionOutcome, ExecutionError, ExecutionReport, Outcome, Performed, StepRecord,
+};
 pub use run::{Options, Progress, Run};
 pub use select::SelectError;
 
