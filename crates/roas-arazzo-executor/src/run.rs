@@ -201,7 +201,13 @@ struct Frame<'d> {
     at: usize,
     steps: BTreeMap<String, StepState>,
     outputs: BTreeMap<String, Value>,
+    /// How many times each step has been attempted, for the report and
+    /// for the caller's safety limit.
     attempts: BTreeMap<String, u32>,
+    /// How many retries each *failure action* has spent on a step.
+    /// `retryLimit` belongs to the action that states it, so a step
+    /// that fails two different ways gets both actions' budgets.
+    retries: BTreeMap<(String, usize), u32>,
     /// The step of the calling frame that is waiting for this one, and
     /// what it does when this one is done.
     caller: Option<(String, Then)>,
@@ -449,6 +455,7 @@ impl<'d> Run<'d> {
         let mut state = StepState {
             exchange: done.exchange.clone(),
             outputs: done.given.clone(),
+            passed: true,
         };
         let (passed, criteria, outputs) = {
             let mut ahead = frame.steps.clone();
@@ -485,17 +492,26 @@ impl<'d> Run<'d> {
                 outputs.extend(evaluate_outputs(&step.outputs, &scope)?);
                 outputs
             } else {
-                done.given.clone()
+                // What it was handed only seeded the scope above: a
+                // step that failed names nothing, a workflow step
+                // included, so no recovery step reads a token from a
+                // call that went wrong.
+                BTreeMap::new()
             };
             (passed, criteria, outputs)
         };
         state.outputs = outputs.clone();
+        state.passed = passed;
+
+        // The step is in scope before its actions are chosen: an
+        // `onSuccess` criterion reading `$steps.<this step>.outputs` is
+        // asking about the step that just finished.
+        let frame = self.frames.last_mut().expect("the frame is still there");
+        frame.steps.insert(step_id.clone(), state);
 
         let action = self.decide(index, passed, done.exchange.as_ref())?;
         let described = describe(&action);
 
-        let frame = self.frames.last_mut().expect("the frame is still there");
-        frame.steps.insert(step_id.clone(), state);
         self.records.push(StepRecord {
             workflow_id,
             step_id,
@@ -531,6 +547,7 @@ impl<'d> Run<'d> {
             steps: BTreeMap::new(),
             outputs: BTreeMap::new(),
             attempts: BTreeMap::new(),
+            retries: BTreeMap::new(),
             caller,
             started: Instant::now(),
             detour: None,
@@ -596,6 +613,7 @@ impl<'d> Run<'d> {
                     StepState {
                         exchange: None,
                         outputs,
+                        passed: frame.outcome != Outcome::Failed,
                     },
                 );
                 parent.at = parent.order.len();
@@ -667,7 +685,11 @@ impl<'d> Run<'d> {
     fn arguments(&self, arguments: &[ReusableOr<Parameter>]) -> Result<Value, ExecutionError> {
         let frame = self.frames.last().expect("a frame to pass arguments from");
         let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
-        let mut inputs = self.options.inputs.clone();
+        // A called workflow starts with what it was passed and nothing
+        // else: only the parameters are forwarded, not the caller's
+        // whole input context, so a child reading `$inputs.x` is asking
+        // for something the calling step gave it.
+        let mut inputs = Map::new();
         for parameter in parameters(arguments, self.description, &scope)? {
             inputs.insert(parameter.name, parameter.value);
         }
@@ -811,7 +833,7 @@ impl<'d> Run<'d> {
             .on_failure
             .iter()
             .chain(frame.workflow.failure_actions.iter());
-        for action in actions {
+        for (at, action) in actions.enumerate() {
             let action = failure_action(action, self.description)?;
             if !holds(&action.criteria, &scope)? {
                 continue;
@@ -833,13 +855,22 @@ impl<'d> Run<'d> {
                     // description says next rather than ending here.
                     let allowed = action
                         .retry_limit
-                        .map_or(1, |limit| u32::try_from(limit).unwrap_or(u32::MAX))
-                        .min(self.options.limits.retries);
+                        .map_or(1, |limit| u32::try_from(limit).unwrap_or(u32::MAX));
+                    let spent = frame
+                        .retries
+                        .get(&(step.step_id.clone(), at))
+                        .copied()
+                        .unwrap_or(0);
+                    // The caller's cap is a rail against a description
+                    // that would retry forever, counted over the step;
+                    // the action's own limit is what the description
+                    // asked for.
                     let taken = frame.attempts.get(&step.step_id).copied().unwrap_or(0);
-                    if taken >= allowed {
+                    if spent >= allowed || taken >= self.options.limits.retries {
                         continue;
                     }
                     Action::Retry {
+                        at,
                         after: action.retry_after,
                         step: action.step_id.clone(),
                         workflow: action.workflow_id.clone(),
@@ -876,6 +907,7 @@ impl<'d> Run<'d> {
                 Ok(())
             }
             Action::Retry {
+                at,
                 after,
                 step: target,
                 workflow,
@@ -887,6 +919,7 @@ impl<'d> Run<'d> {
                 let index = frame.order[frame.at];
                 let step_id = frame.workflow.steps[index].step_id.clone();
                 *frame.attempts.entry(step_id.clone()).or_insert(0) += 1;
+                *frame.retries.entry((step_id.clone(), at)).or_insert(0) += 1;
                 if let Some(after) = after.filter(|after| *after > 0.0) {
                     self.wait = Some(Duration::from_secs_f64(after));
                 }
@@ -987,6 +1020,9 @@ enum Action {
     Advance,
     End(Outcome),
     Retry {
+        /// Which failure action asked, so its own budget is the one
+        /// that is spent.
+        at: usize,
         after: Option<f64>,
         /// A step to run before trying again, if the action names one.
         step: Option<String>,
@@ -1145,11 +1181,12 @@ fn holds(criteria: &[Criterion], scope: &Scope<'_>) -> Result<bool, ExecutionErr
 /// The values a set of `outputs` names, for a workflow that stopped
 /// early.
 ///
-/// An output naming a step that never ran is expected and skipped —
-/// that is what stopping early means. Anything else wrong with an
-/// output is not: a malformed selector or an unsupported expression is
-/// a fault in the description, and a failed workflow is no reason to
-/// keep quiet about it.
+/// An output naming a step or a workflow that never ran is expected and
+/// skipped — that is what stopping early means. Nothing else is: an
+/// input that was never given, a pointer into a body that has not got
+/// it, a malformed selector, an unsupported expression — each is a
+/// fault in the description, and a failed workflow is no reason to keep
+/// quiet about it.
 fn evaluate_what_ran(
     outputs: &BTreeMap<String, ValueOrSelector>,
     scope: &Scope<'_>,
@@ -1160,7 +1197,7 @@ fn evaluate_what_ran(
             Ok(value) => {
                 named.insert(name.clone(), value);
             }
-            Err(SelectError::Expression(ExpressionError::Missing { .. })) => {}
+            Err(SelectError::Expression(ExpressionError::NotRun { .. })) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -1330,40 +1367,102 @@ fn visit<'d>(
     Ok(())
 }
 
-/// Every step id a step's expressions read, which is a dependency
+/// Every step id a step's *expressions* read, which is a dependency
 /// whether or not `dependsOn` says so.
 ///
-/// A sequential executor has to run `findPet` before the step that
-/// reads `$steps.findPet.outputs.id`, and descriptions rely on that
-/// rather than spelling it out.
+/// "Tools MUST also treat runtime expression output references (e.g.,
+/// `$steps.stepId.outputs.field`) as implicit dependencies" — so this
+/// reads the fields that hold expressions and no others. A description
+/// that mentions `$steps.a.outputs.x` in its prose is documenting, not
+/// depending, and treating the two alike turns a comment into a cycle.
 fn steps_named_by(step: &Step) -> BTreeSet<String> {
-    fn walk(value: &Value, found: &mut BTreeSet<String>) {
+    let mut found = BTreeSet::new();
+    let mut note = |text: &str| {
+        let mut rest = text;
+        while let Some(at) = rest.find("$steps.") {
+            rest = &rest[at + "$steps.".len()..];
+            let named: String = rest
+                .chars()
+                .take_while(|char| char.is_alphanumeric() || matches!(char, '_' | '-' | '.'))
+                .collect();
+            // The id runs up to the field that follows it.
+            if let Some((id, _)) = named.split_once('.') {
+                found.insert(id.to_owned());
+            }
+        }
+    };
+
+    // A value may be a literal holding expressions, or a selector whose
+    // context is one.
+    fn value(value: &ValueOrSelector, note: &mut impl FnMut(&str)) {
         match value {
-            Value::String(text) => {
-                let mut rest = text.as_str();
-                while let Some(at) = rest.find("$steps.") {
-                    rest = &rest[at + "$steps.".len()..];
-                    let id: String = rest
-                        .chars()
-                        .take_while(|char| {
-                            char.is_alphanumeric() || matches!(char, '_' | '-' | '.')
-                        })
-                        .collect();
-                    // The id runs up to the field that follows it.
-                    if let Some((id, _)) = id.split_once('.') {
-                        found.insert(id.to_owned());
+            ValueOrSelector::Literal(literal) => {
+                fn walk(value: &Value, note: &mut impl FnMut(&str)) {
+                    match value {
+                        Value::String(text) => note(text),
+                        Value::Array(items) => items.iter().for_each(|item| walk(item, note)),
+                        Value::Object(members) => {
+                            members.values().for_each(|member| walk(member, note));
+                        }
+                        _ => {}
+                    }
+                }
+                walk(literal, note);
+            }
+            ValueOrSelector::Selector(selector) => {
+                note(&selector.context);
+                note(&selector.selector);
+            }
+        }
+    }
+    fn parameters(list: &[ReusableOr<Parameter>], note: &mut impl FnMut(&str)) {
+        for entry in list {
+            match entry {
+                ReusableOr::Item(parameter) => value(&parameter.value, note),
+                ReusableOr::Reusable(reusable) => {
+                    note(&reusable.reference);
+                    if let Some(overridden) = &reusable.value {
+                        value(&ValueOrSelector::Literal(overridden.clone()), note);
                     }
                 }
             }
-            Value::Array(items) => items.iter().for_each(|item| walk(item, found)),
-            Value::Object(members) => members.values().for_each(|value| walk(value, found)),
-            _ => {}
         }
     }
-    let mut found = BTreeSet::new();
-    if let Ok(value) = serde_json::to_value(step) {
-        walk(&value, &mut found);
+    fn criteria(list: &[Criterion], note: &mut impl FnMut(&str)) {
+        for criterion in list {
+            if let Some(context) = &criterion.context {
+                note(context);
+            }
+            note(&criterion.condition);
+        }
     }
+
+    parameters(&step.parameters, &mut note);
+    criteria(&step.success_criteria, &mut note);
+    for output in step.outputs.values() {
+        value(output, &mut note);
+    }
+    if let Some(body) = &step.request_body {
+        if let Some(payload) = &body.payload {
+            value(&ValueOrSelector::Literal(payload.clone()), &mut note);
+        }
+        for replacement in &body.replacements {
+            value(&replacement.value, &mut note);
+        }
+    }
+    for action in &step.on_success {
+        if let ReusableOr::Item(action) = action {
+            criteria(&action.criteria, &mut note);
+            parameters(&action.parameters, &mut note);
+        }
+    }
+    for action in &step.on_failure {
+        if let ReusableOr::Item(action) = action {
+            criteria(&action.criteria, &mut note);
+            parameters(&action.parameters, &mut note);
+        }
+    }
+
     found.remove(&step.step_id);
     found
 }

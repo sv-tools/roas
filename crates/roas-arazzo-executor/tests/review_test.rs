@@ -573,3 +573,205 @@ fn steps_that_read_each_other_are_refused() {
     let error = execute(&description, &options(), &mut Fake::new()).unwrap_err();
     assert!(matches!(error, ExecutionError::Circular(_)), "got: {error}");
 }
+
+// ---- a second review: budgets, scope, and what leaks ----------------
+
+#[test]
+fn each_failure_action_has_its_own_retry_budget() {
+    // Two ways of failing, each with one retry of its own. A 503 spends
+    // the first action's budget; a 401 afterwards must still get the
+    // second action's.
+    let description = one(json!([{
+        "stepId": "listPets",
+        "operationId": "listPets",
+        "successCriteria": [{ "condition": "$statusCode == 200" }],
+        "onFailure": [
+            {
+                "name": "busy",
+                "type": "retry",
+                "retryLimit": 1,
+                "criteria": [{ "condition": "$statusCode == 503" }]
+            },
+            {
+                "name": "expired",
+                "type": "retry",
+                "retryLimit": 1,
+                "criteria": [{ "condition": "$statusCode == 401" }]
+            }
+        ]
+    }]));
+    let mut client = Fake::new()
+        .reply(503, &json!({}))
+        .reply(401, &json!({}))
+        .reply(200, &json!([]));
+
+    let report = execute(&description, &options(), &mut client).expect("the run is fine");
+
+    assert_eq!(
+        client.sent().len(),
+        3,
+        "one try, a retry for the 503, and a retry for the 401"
+    );
+    assert_eq!(report.outcome, Outcome::Succeeded);
+}
+
+#[test]
+fn an_action_can_read_the_step_that_just_finished() {
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "steps": [
+                {
+                    "stepId": "call",
+                    "workflowId": "login",
+                    "onSuccess": [{
+                        "name": "shortcut",
+                        "type": "end",
+                        "criteria": [{ "condition": "$steps.call.outputs.token == 't-1'" }]
+                    }]
+                },
+                { "stepId": "after", "operationId": "placeOrder" }
+            ]
+        },
+        {
+            "workflowId": "login",
+            "steps": [{
+                "stepId": "post",
+                "operationId": "login",
+                "outputs": { "token": "$response.body#/token" }
+            }],
+            "outputs": { "token": "$steps.post.outputs.token" }
+        }
+    ]));
+    let mut client = Fake::new().reply(200, &json!({ "token": "t-1" }));
+
+    let report = execute(&description, &options(), &mut client).expect("the workflow runs");
+
+    assert_eq!(
+        report.outcome,
+        Outcome::Ended,
+        "the criterion could read it"
+    );
+    assert_eq!(client.sent().len(), 1, "so the step after it never ran");
+}
+
+#[test]
+fn a_step_that_fails_leaves_nothing_behind_for_a_recovery_step_to_read() {
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "steps": [
+                {
+                    "stepId": "call",
+                    "workflowId": "login",
+                    "successCriteria": [{ "condition": "$steps.call.outputs.token == 'other'" }],
+                    "onFailure": [{ "name": "carryOn", "type": "goto", "stepId": "after" }]
+                },
+                {
+                    "stepId": "after",
+                    "operationId": "placeOrder",
+                    "requestBody": {
+                        "payload": { "token": "$steps.call.outputs.token" }
+                    }
+                }
+            ]
+        },
+        {
+            "workflowId": "login",
+            "steps": [{
+                "stepId": "post",
+                "operationId": "login",
+                "outputs": { "token": "$response.body#/token" }
+            }],
+            "outputs": { "token": "$steps.post.outputs.token" }
+        }
+    ]));
+    let mut client = Fake::new().reply(200, &json!({ "token": "t-1" }));
+
+    // The call succeeded, but the step that made it did not — so the
+    // token it produced is not there to be read.
+    let error = execute(&description, &options(), &mut client).unwrap_err();
+    assert!(
+        error.to_string().contains("did not succeed"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn a_stopped_workflow_still_reports_an_input_that_was_never_given() {
+    let description = one(json!([{
+        "stepId": "listPets",
+        "operationId": "listPets",
+        "successCriteria": [{ "condition": "$statusCode == 200" }]
+    }]));
+    let mut description = description;
+    description.workflows[0].outputs = serde_json::from_value(json!({
+        "missing": "$inputs.notProvided"
+    }))
+    .expect("outputs");
+    let mut client = Fake::new().reply(500, &json!({}));
+
+    let error = execute(&description, &options(), &mut client).unwrap_err();
+    assert!(
+        error.to_string().contains("$inputs.notProvided"),
+        "only what never ran is skipped, not every absence: {error}"
+    );
+}
+
+#[test]
+fn a_called_workflow_gets_what_it_was_passed_and_nothing_else() {
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "steps": [{
+                "stepId": "call",
+                "workflowId": "login",
+                "parameters": [{ "name": "who", "value": "ada" }]
+            }]
+        },
+        {
+            "workflowId": "login",
+            "steps": [{
+                "stepId": "post",
+                "operationId": "login",
+                "requestBody": { "payload": { "who": "$inputs.who", "root": "$inputs.secret" } }
+            }]
+        }
+    ]));
+    // `secret` is the run's input; the calling step did not pass it.
+    let options = options().input("secret", "s-1").input("who", "root");
+    let error = execute(&description, &options, &mut Fake::new()).unwrap_err();
+    assert!(
+        error.to_string().contains("$inputs.secret"),
+        "a child reads only what it was given: {error}"
+    );
+}
+
+#[test]
+fn prose_mentioning_a_step_is_documentation_not_a_dependency() {
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "description": "Runs before b, which reads $steps.b.outputs.x elsewhere",
+            "operationId": "listPets"
+        },
+        {
+            "stepId": "b",
+            "description": "Documented as reading $steps.a.outputs.x",
+            "operationId": "placeOrder"
+        }
+    ]));
+    let mut client = Fake::new().reply(200, &json!([])).reply(201, &json!({}));
+
+    let report = execute(&description, &options(), &mut client).expect("no cycle here");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"],
+        "the document's own order stands"
+    );
+}

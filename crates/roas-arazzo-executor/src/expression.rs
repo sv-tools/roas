@@ -41,6 +41,10 @@ pub(crate) struct WorkflowState {
 pub(crate) struct StepState {
     pub exchange: Option<Exchange>,
     pub outputs: BTreeMap<String, Value>,
+    /// Whether it did what it said it would. A step that did not names
+    /// no outputs, which is a different thing from a description asking
+    /// for an output that does not exist.
+    pub passed: bool,
 }
 
 /// Everything a runtime expression can name at one point in a run.
@@ -77,10 +81,29 @@ pub enum ExpressionError {
         /// What it wanted that was not there.
         what: String,
     },
+    /// The expression names a step or a workflow that has not run.
+    ///
+    /// Told apart from anything else missing because a workflow that
+    /// stopped early is *expected* to have steps that never ran, while
+    /// every other absence is a fault worth reporting.
+    #[error("`{expression}` names {what}, which has not run")]
+    NotRun {
+        /// The expression as written.
+        expression: String,
+        /// The step or workflow it named.
+        what: String,
+    },
     /// The expression belongs to a part of Arazzo this crate does not
     /// execute.
     #[error("`{0}` belongs to an AsyncAPI step, which this crate does not execute")]
     Unsupported(String),
+}
+
+fn not_run(expression: &str, what: impl Into<String>) -> ExpressionError {
+    ExpressionError::NotRun {
+        expression: expression.to_owned(),
+        what: what.into(),
+    }
 }
 
 fn missing(expression: &str, what: impl Into<String>) -> ExpressionError {
@@ -121,9 +144,10 @@ pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, Exp
         ),
         "$workflows" => {
             let (id, rest) = split_first(&rest, expression, "a workflow id")?;
-            let workflow = scope.workflows.get(id).ok_or_else(|| {
-                missing(expression, format!("workflow `{id}`, which has not run"))
-            })?;
+            let workflow = scope
+                .workflows
+                .get(id)
+                .ok_or_else(|| not_run(expression, format!("workflow `{id}`")))?;
             // `inputs` and `outputs` are both fields of a workflow; the
             // bare shorthand names an output.
             match rest.split_first() {
@@ -141,9 +165,20 @@ pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, Exp
             let step = scope
                 .steps
                 .get(id)
-                .ok_or_else(|| missing(expression, format!("step `{id}`, which has not run")))?;
+                .ok_or_else(|| not_run(expression, format!("step `{id}`")))?;
             if let Some(rest) = rest.strip_prefix(&["outputs"][..]) {
-                from_map(&step.outputs, rest, expression, "an output")?
+                match from_map(&step.outputs, rest, expression, "an output") {
+                    // A step that failed named nothing, and saying it
+                    // has not produced this is the same kind of answer
+                    // as a step that never ran at all.
+                    Err(ExpressionError::Missing { .. }) if !step.passed => {
+                        return Err(not_run(
+                            expression,
+                            format!("an output of step `{id}`, which did not succeed"),
+                        ));
+                    }
+                    other => other?,
+                }
             } else {
                 let exchange = step.exchange.as_ref().ok_or_else(|| {
                     missing(
@@ -449,6 +484,7 @@ pub(crate) mod tests {
             StepState {
                 exchange: Some(exchange()),
                 outputs: BTreeMap::from([("pet".to_owned(), json!({ "id": 7 }))]),
+                passed: true,
             },
         );
         let fixture = Fixture {
@@ -470,6 +506,30 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             eval("$steps.nope.outputs.pet", &fixture),
+            Err(ExpressionError::NotRun { .. })
+        ));
+        // A step that ran but did not succeed named nothing, which is
+        // the same kind of answer — and a different one from asking a
+        // step that succeeded for an output it does not have.
+        let mut steps = fixture.steps.clone();
+        steps.insert(
+            "failed".to_owned(),
+            StepState {
+                exchange: Some(exchange()),
+                outputs: BTreeMap::new(),
+                passed: false,
+            },
+        );
+        let after = Fixture {
+            steps,
+            ..Fixture::default()
+        };
+        assert!(matches!(
+            eval("$steps.failed.outputs.pet", &after),
+            Err(ExpressionError::NotRun { .. })
+        ));
+        assert!(matches!(
+            eval("$steps.findPet.outputs.nope", &after),
             Err(ExpressionError::Missing { .. })
         ));
     }
@@ -581,6 +641,7 @@ pub(crate) mod tests {
             StepState {
                 exchange: None,
                 outputs: BTreeMap::from([("token".to_owned(), json!("abc"))]),
+                passed: true,
             },
         );
         let fixture = Fixture {
