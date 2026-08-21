@@ -48,6 +48,29 @@ pub struct CriterionOutcome {
     pub passed: bool,
 }
 
+/// What a step did — Arazzo has two kinds, and they leave different
+/// traces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Performed {
+    /// The step called an API operation.
+    Request {
+        /// The method sent.
+        method: String,
+        /// The URL sent to.
+        url: String,
+        /// The status received.
+        status: u16,
+    },
+    /// The step called another workflow.
+    Workflow {
+        /// The workflow it called.
+        workflow_id: String,
+        /// How that workflow finished.
+        outcome: Outcome,
+    },
+}
+
 /// One attempt at one step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -58,12 +81,8 @@ pub struct StepRecord {
     pub step_id: String,
     /// 1 for the first try, 2 for the first retry, and so on.
     pub attempt: u32,
-    /// The method sent.
-    pub method: String,
-    /// The URL sent to.
-    pub url: String,
-    /// The status received, absent only if nothing came back.
-    pub status: Option<u16>,
+    /// What the step did.
+    pub performed: Performed,
     /// Each success criterion, in the order the step lists them.
     pub criteria: Vec<CriterionOutcome>,
     /// Whether the step, as a whole, succeeded.
@@ -72,8 +91,38 @@ pub struct StepRecord {
     pub outputs: BTreeMap<String, Value>,
     /// The action the step's outcome triggered, if any.
     pub action: Option<String>,
-    /// How long the exchange took.
+    /// How long it took.
     pub elapsed: Duration,
+}
+
+impl StepRecord {
+    /// The status the step's request came back with, for a step that
+    /// sent one.
+    #[must_use]
+    pub fn status(&self) -> Option<u16> {
+        match &self.performed {
+            Performed::Request { status, .. } => Some(*status),
+            Performed::Workflow { .. } => None,
+        }
+    }
+
+    /// The method the step sent, for a step that sent a request.
+    #[must_use]
+    pub fn method(&self) -> Option<&str> {
+        match &self.performed {
+            Performed::Request { method, .. } => Some(method),
+            Performed::Workflow { .. } => None,
+        }
+    }
+
+    /// The URL the step sent to, for a step that sent a request.
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        match &self.performed {
+            Performed::Request { url, .. } => Some(url),
+            Performed::Workflow { .. } => None,
+        }
+    }
 }
 
 /// What a run did.
@@ -103,9 +152,16 @@ impl fmt::Display for ExecutionReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "workflow `{}` {}", self.workflow_id, self.outcome)?;
         for step in &self.steps {
-            write!(f, "- {} {} {}", step.step_id, step.method, step.url)?;
-            if let Some(status) = step.status {
-                write!(f, " → {status}")?;
+            match &step.performed {
+                Performed::Request {
+                    method,
+                    url,
+                    status,
+                } => write!(f, "- {} {method} {url} → {status}", step.step_id)?,
+                Performed::Workflow {
+                    workflow_id,
+                    outcome,
+                } => write!(f, "- {} → workflow `{workflow_id}` {outcome}", step.step_id)?,
             }
             if step.attempt > 1 {
                 write!(f, " (attempt {})", step.attempt)?;
@@ -180,6 +236,15 @@ pub enum ExecutionError {
     /// `supply` was called when no request was outstanding.
     #[error("a response arrived when no request was outstanding")]
     NotWaiting,
+    /// `advance` was called again before the outstanding request was
+    /// answered.
+    #[error("the run is waiting for a response to `{method} {url}` — supply it before advancing")]
+    Awaiting {
+        /// The method of the request still outstanding.
+        method: String,
+        /// Its URL.
+        url: String,
+    },
 }
 
 #[cfg(test)]
@@ -192,9 +257,11 @@ mod tests {
             workflow_id: "buyPet".to_owned(),
             step_id: step_id.to_owned(),
             attempt: 1,
-            method: "GET".to_owned(),
-            url: format!("https://api.example.com/{step_id}"),
-            status: Some(status),
+            performed: Performed::Request {
+                method: "GET".to_owned(),
+                url: format!("https://api.example.com/{step_id}"),
+                status,
+            },
             criteria: vec![CriterionOutcome {
                 condition: "$statusCode == 200".to_owned(),
                 passed,
@@ -240,6 +307,61 @@ mod tests {
         assert!(text.contains("— failed"), "{text}");
         assert!(text.contains("— retry"), "{text}");
         assert!(!report.is_success());
+    }
+
+    #[test]
+    fn a_step_that_called_a_workflow_reads_as_what_it_called() {
+        let record = StepRecord {
+            workflow_id: "buyPet".to_owned(),
+            step_id: "authenticate".to_owned(),
+            attempt: 1,
+            performed: Performed::Workflow {
+                workflow_id: "login".to_owned(),
+                outcome: Outcome::Succeeded,
+            },
+            criteria: Vec::new(),
+            passed: true,
+            outputs: BTreeMap::from([("token".to_owned(), json!("t-1"))]),
+            action: None,
+            elapsed: Duration::from_millis(30),
+        };
+        // It sent no request, so it has no method, URL or status to
+        // report — and says so rather than inventing them.
+        assert_eq!(record.status(), None);
+        assert_eq!(record.method(), None);
+        assert_eq!(record.url(), None);
+
+        let report = ExecutionReport {
+            workflow_id: "buyPet".to_owned(),
+            outcome: Outcome::Succeeded,
+            outputs: BTreeMap::new(),
+            steps: vec![record],
+        };
+        assert_eq!(
+            report.to_string(),
+            "workflow `buyPet` succeeded\n\
+             - authenticate → workflow `login` succeeded\n"
+        );
+    }
+
+    #[test]
+    fn a_step_that_sent_a_request_says_what_it_sent() {
+        let record = record("findPet", 200, true);
+        assert_eq!(record.status(), Some(200));
+        assert_eq!(record.method(), Some("GET"));
+        assert_eq!(record.url(), Some("https://api.example.com/findPet"));
+    }
+
+    #[test]
+    fn a_run_waiting_for_a_response_says_which_one() {
+        assert_eq!(
+            ExecutionError::Awaiting {
+                method: "GET".to_owned(),
+                url: "https://api.example.com/pets".to_owned(),
+            }
+            .to_string(),
+            "the run is waiting for a response to `GET https://api.example.com/pets` — supply it before advancing"
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
 use crate::http::{HttpRequest, HttpResponse};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A step's exchange: what was sent, and what came back.
 ///
@@ -29,11 +29,22 @@ pub(crate) struct Exchange {
     pub response_body: Option<Value>,
 }
 
+/// What a workflow that has finished was given and produced.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorkflowState {
+    pub inputs: Value,
+    pub outputs: BTreeMap<String, Value>,
+}
+
 /// What a step has produced so far.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StepState {
     pub exchange: Option<Exchange>,
     pub outputs: BTreeMap<String, Value>,
+    /// Whether it did what it said it would. A step that did not names
+    /// no outputs, which is a different thing from a description asking
+    /// for an output that does not exist.
+    pub passed: bool,
 }
 
 /// Everything a runtime expression can name at one point in a run.
@@ -44,8 +55,17 @@ pub(crate) struct Scope<'a> {
     pub outputs: &'a BTreeMap<String, Value>,
     /// Every step of this workflow that has run.
     pub steps: &'a BTreeMap<String, StepState>,
-    /// The outputs of workflows that have finished.
-    pub workflows: &'a BTreeMap<String, BTreeMap<String, Value>>,
+    /// The workflows that have finished, by id.
+    pub workflows: &'a BTreeMap<String, WorkflowState>,
+    /// The description's `$self`, when it declares one.
+    pub self_: Option<&'a str>,
+    /// Every step id this workflow declares. A step that is named but
+    /// has not run is a different thing from a name that is no step of
+    /// this workflow at all — one is how a workflow that stopped early
+    /// looks, the other is a typo.
+    pub declared_steps: &'a BTreeSet<String>,
+    /// Every workflow id the description declares, for the same reason.
+    pub declared_workflows: &'a BTreeSet<String>,
     /// The step being evaluated, when there is one.
     pub here: Option<&'a Exchange>,
     /// `sourceDescriptions`, by name.
@@ -68,10 +88,29 @@ pub enum ExpressionError {
         /// What it wanted that was not there.
         what: String,
     },
+    /// The expression names a step or a workflow that has not run.
+    ///
+    /// Told apart from anything else missing because a workflow that
+    /// stopped early is *expected* to have steps that never ran, while
+    /// every other absence is a fault worth reporting.
+    #[error("`{expression}` names {what}, which has not run")]
+    NotRun {
+        /// The expression as written.
+        expression: String,
+        /// The step or workflow it named.
+        what: String,
+    },
     /// The expression belongs to a part of Arazzo this crate does not
     /// execute.
     #[error("`{0}` belongs to an AsyncAPI step, which this crate does not execute")]
     Unsupported(String),
+}
+
+fn not_run(expression: &str, what: impl Into<String>) -> ExpressionError {
+    ExpressionError::NotRun {
+        expression: expression.to_owned(),
+        what: what.into(),
+    }
 }
 
 fn missing(expression: &str, what: impl Into<String>) -> ExpressionError {
@@ -104,24 +143,61 @@ pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, Exp
         "$outputs" => from_map(scope.outputs, &rest, expression, "an output")?,
         "$components" => walk(scope.components, &rest, expression, "a component")?,
         "$sourceDescriptions" => walk(scope.sources, &rest, expression, "a source description")?,
+        "$self" => Value::String(
+            scope
+                .self_
+                .ok_or_else(|| missing(expression, "`$self`, which the description does not set"))?
+                .to_owned(),
+        ),
         "$workflows" => {
             let (id, rest) = split_first(&rest, expression, "a workflow id")?;
-            let outputs = scope.workflows.get(id).ok_or_else(|| {
-                missing(expression, format!("workflow `{id}`, which has not run"))
-            })?;
-            // `$workflows.<id>.outputs.<name>`, and the spec's shorthand
-            // of naming the output directly.
-            let rest = rest.strip_prefix(&["outputs"][..]).unwrap_or(rest);
-            from_map(outputs, rest, expression, "an output")?
+            let Some(workflow) = scope.workflows.get(id) else {
+                return Err(if scope.declared_workflows.contains(id) {
+                    not_run(expression, format!("workflow `{id}`"))
+                } else {
+                    missing(
+                        expression,
+                        format!("workflow `{id}`, which this description has not got"),
+                    )
+                });
+            };
+            // `inputs` and `outputs` are both fields of a workflow; the
+            // bare shorthand names an output.
+            match rest.split_first() {
+                Some((field, rest)) if *field == "inputs" => {
+                    walk(&workflow.inputs, rest, expression, "an input")?
+                }
+                Some((field, rest)) if *field == "outputs" => {
+                    from_map(&workflow.outputs, rest, expression, "an output")?
+                }
+                _ => from_map(&workflow.outputs, rest, expression, "an output")?,
+            }
         }
         "$steps" => {
             let (id, rest) = split_first(&rest, expression, "a step id")?;
-            let step = scope
-                .steps
-                .get(id)
-                .ok_or_else(|| missing(expression, format!("step `{id}`, which has not run")))?;
+            let Some(step) = scope.steps.get(id) else {
+                return Err(if scope.declared_steps.contains(id) {
+                    not_run(expression, format!("step `{id}`"))
+                } else {
+                    missing(
+                        expression,
+                        format!("step `{id}`, which this workflow has not got"),
+                    )
+                });
+            };
             if let Some(rest) = rest.strip_prefix(&["outputs"][..]) {
-                from_map(&step.outputs, rest, expression, "an output")?
+                match from_map(&step.outputs, rest, expression, "an output") {
+                    // A step that failed named nothing, and saying it
+                    // has not produced this is the same kind of answer
+                    // as a step that never ran at all.
+                    Err(ExpressionError::Missing { .. }) if !step.passed => {
+                        return Err(not_run(
+                            expression,
+                            format!("an output of step `{id}`, which did not succeed"),
+                        ));
+                    }
+                    other => other?,
+                }
             } else {
                 let exchange = step.exchange.as_ref().ok_or_else(|| {
                     missing(
@@ -261,6 +337,39 @@ fn from_map(
     walk(value, rest, expression, what)
 }
 
+/// Every `{$…}` a string fills in.
+///
+/// This is all that happens to a string a caller only ever
+/// interpolates — a `regex` or `jsonpath` condition, say. An unbraced
+/// `$steps.b.outputs.x` in a pattern is pattern text, and matched as
+/// such.
+pub(crate) fn interpolations(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(start) = text[at..].find("{$").map(|start| at + start) {
+        let Some(end) = text[start..].find('}').map(|end| start + end) else {
+            break;
+        };
+        found.push(&text[start + 1..end]);
+        at = end + 1;
+    }
+    found
+}
+
+/// Every runtime expression a *value* really evaluates: the whole
+/// string where the whole of it is one, and every `{$…}` inside it.
+///
+/// This is what tells a reference from a mention. `"see
+/// $steps.a.outputs.x"` is a sentence, and goes on the wire as one.
+pub(crate) fn references(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    if is_expression(text) {
+        found.push(text);
+    }
+    found.extend(interpolations(text));
+    found
+}
+
 /// Replace every `{$…}` in `text` with what it evaluates to.
 ///
 /// A string is what the caller asked for, so a string value is put in as
@@ -295,10 +404,13 @@ pub(crate) mod tests {
         pub inputs: Value,
         pub outputs: BTreeMap<String, Value>,
         pub steps: BTreeMap<String, StepState>,
-        pub workflows: BTreeMap<String, BTreeMap<String, Value>>,
+        pub workflows: BTreeMap<String, WorkflowState>,
+        pub self_: Option<String>,
         pub here: Option<Exchange>,
         pub sources: Value,
         pub components: Value,
+        pub declared_steps: BTreeSet<String>,
+        pub declared_workflows: BTreeSet<String>,
     }
 
     impl Default for Fixture {
@@ -308,9 +420,20 @@ pub(crate) mod tests {
                 outputs: BTreeMap::new(),
                 steps: BTreeMap::new(),
                 workflows: BTreeMap::new(),
+                self_: None,
                 here: None,
                 sources: json!({ "petStore": { "url": "https://api.example.com/openapi.json" } }),
                 components: json!({ "parameters": { "locale": { "name": "locale" } } }),
+                // Every id the tests name, so a name that is absent is
+                // a step that has not run rather than a typo.
+                declared_steps: ["findPet", "call", "failed", "nope"]
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                declared_workflows: ["authenticate", "nope"]
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect(),
             }
         }
     }
@@ -322,9 +445,12 @@ pub(crate) mod tests {
                 outputs: &self.outputs,
                 steps: &self.steps,
                 workflows: &self.workflows,
+                self_: self.self_.as_deref(),
                 here: self.here.as_ref(),
                 sources: &self.sources,
                 components: &self.components,
+                declared_steps: &self.declared_steps,
+                declared_workflows: &self.declared_workflows,
             }
         }
     }
@@ -424,6 +550,7 @@ pub(crate) mod tests {
             StepState {
                 exchange: Some(exchange()),
                 outputs: BTreeMap::from([("pet".to_owned(), json!({ "id": 7 }))]),
+                passed: true,
             },
         );
         let fixture = Fixture {
@@ -445,15 +572,42 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             eval("$steps.nope.outputs.pet", &fixture),
+            Err(ExpressionError::NotRun { .. })
+        ));
+        // A step that ran but did not succeed named nothing, which is
+        // the same kind of answer — and a different one from asking a
+        // step that succeeded for an output it does not have.
+        let mut steps = fixture.steps.clone();
+        steps.insert(
+            "failed".to_owned(),
+            StepState {
+                exchange: Some(exchange()),
+                outputs: BTreeMap::new(),
+                passed: false,
+            },
+        );
+        let after = Fixture {
+            steps,
+            ..Fixture::default()
+        };
+        assert!(matches!(
+            eval("$steps.failed.outputs.pet", &after),
+            Err(ExpressionError::NotRun { .. })
+        ));
+        assert!(matches!(
+            eval("$steps.findPet.outputs.nope", &after),
             Err(ExpressionError::Missing { .. })
         ));
     }
 
     #[test]
-    fn a_finished_workflows_outputs_are_readable_either_spelling() {
+    fn a_finished_workflow_is_readable_by_field_and_by_shorthand() {
         let workflows = BTreeMap::from([(
             "authenticate".to_owned(),
-            BTreeMap::from([("token".to_owned(), json!("abc"))]),
+            WorkflowState {
+                inputs: json!({ "user": "ada" }),
+                outputs: BTreeMap::from([("token".to_owned(), json!("abc"))]),
+            },
         )]);
         let fixture = Fixture {
             workflows,
@@ -463,10 +617,39 @@ pub(crate) mod tests {
             eval("$workflows.authenticate.outputs.token", &fixture),
             Ok(json!("abc"))
         );
+        // What it was called with is readable too, which is a field of
+        // its own rather than another way of naming an output.
+        assert_eq!(
+            eval("$workflows.authenticate.inputs.user", &fixture),
+            Ok(json!("ada"))
+        );
         assert_eq!(
             eval("$workflows.authenticate.token", &fixture),
-            Ok(json!("abc"))
+            Ok(json!("abc")),
+            "the shorthand names an output"
         );
+        assert!(matches!(
+            eval("$workflows.authenticate.inputs.nope", &fixture),
+            Err(ExpressionError::Missing { .. })
+        ));
+    }
+
+    #[test]
+    fn the_description_can_name_itself() {
+        let fixture = Fixture {
+            self_: Some("https://example.com/workflows.arazzo.yaml".to_owned()),
+            ..Fixture::default()
+        };
+        assert_eq!(
+            eval("$self", &fixture),
+            Ok(json!("https://example.com/workflows.arazzo.yaml"))
+        );
+        // A description that sets no `$self` says so rather than
+        // producing an empty string.
+        assert!(matches!(
+            eval("$self", &Fixture::default()),
+            Err(ExpressionError::Missing { .. })
+        ));
     }
 
     #[test]
@@ -524,6 +707,7 @@ pub(crate) mod tests {
             StepState {
                 exchange: None,
                 outputs: BTreeMap::from([("token".to_owned(), json!("abc"))]),
+                passed: true,
             },
         );
         let fixture = Fixture {

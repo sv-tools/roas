@@ -71,17 +71,20 @@ assert!(report.is_success());
 # Ok(()) }
 ```
 
-Driving `Run` directly goes one step further: `Progress::Wait` hands back the delay a `retry` asked for instead of spending it, so retry behaviour can be asserted in microseconds.
+Driving `Run` directly goes one step further: `Progress::Wait` hands back the delay a `retry` asked for instead of spending it, so retry behaviour can be asserted in microseconds. One request is outstanding at a time — `advance` refuses to hand out another until `supply` has answered the first, so a driving loop cannot send the same request twice.
 
 ## What it runs
 
 - **Steps** that name an operation by `operationId` (bare, or `$sourceDescriptions.<name>.<id>`) or by `operationPath`, and steps that call another `workflowId`.
 - **Parameters** in `path`, `query`, `querystring`, `header` and `cookie`, from the workflow and the step, with `$components.parameters` references and their `value` overrides.
 - **Request bodies**, with runtime expressions anywhere inside the payload and `replacements` by JSON Pointer or JSONPath.
-- **Criteria** — `simple` conditions (comparisons, `&&`, `||`, parentheses), `regex`, and `jsonpath`.
-- **Actions** — `end`, `goto` a step or a workflow, and `retry` with `retryAfter` / `retryLimit`.
+- **Criteria** — `simple` conditions (comparisons, `&&`, `||`, parentheses; string comparisons are case-insensitive and numeric strings coerce, as the specification requires), `regex`, and `jsonpath`, each with `{$expressions}` filled in before the engine that reads them sees them. A `jsonpath` condition passes on a non-empty nodelist, whatever the node holds.
+- **Actions** — `end`, `goto` a step or a workflow, and `retry`, which honours `retryAfter`, defaults to a single attempt when `retryLimit` is absent, may send the run through another step or workflow before trying again, and gives way to the next failure action once its limit is spent.
 - **Outputs** at step and workflow level, including [`Selector`](https://spec.openapis.org/arazzo/v1.1.0.html#selector-object)s, readable by later steps as `$steps.<id>.outputs.<name>`.
-- **`dependsOn`** between steps and between workflows, which orders them and rejects circles.
+- **Runtime expressions** — `$url`, `$method`, `$statusCode`, `$request.*`, `$response.*`, `$inputs`, `$outputs`, `$steps`, `$workflows.<id>.inputs` / `.outputs`, `$sourceDescriptions`, `$components`, and `$self`.
+- **`dependsOn`** between steps and between workflows, which orders them and rejects circles — as does reading another step's outputs, which orders the two without anyone having to say so.
+
+A step that calls a workflow is a step like any other: what it called becomes its outputs, its own `outputs` are named on top, its `successCriteria` are judged, its `timeout` covers the whole call, and its `onSuccess` / `onFailure` decide where the workflow goes next. It gets a record of its own in the report — `Performed::Workflow` rather than `Performed::Request`.
 
 Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0` feature), which upconverts first so there is one interpreter.
 

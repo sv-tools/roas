@@ -6,14 +6,17 @@
 //! network at all.
 
 use crate::criterion;
-use crate::expression::{Exchange, Scope, StepState};
+use crate::expression::{self, Exchange, ExpressionError, Scope, StepState, WorkflowState};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::operation::{self, Source};
-use crate::report::{CriterionOutcome, ExecutionError, ExecutionReport, Outcome, StepRecord};
+use crate::report::{
+    CriterionOutcome, ExecutionError, ExecutionReport, Outcome, Performed, StepRecord,
+};
 use crate::select;
+use crate::select::SelectError;
 use roas_arazzo::v1_1::{
-    Criterion, Description, FailureActionType, Parameter, ParameterLocation, ReusableOr, Step,
-    SuccessActionType, ValueOrSelector, Workflow,
+    Criterion, CriterionKind, CriterionType, Description, FailureActionType, Parameter,
+    ParameterLocation, ReusableOr, Step, SuccessActionType, ValueOrSelector, Workflow,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -158,6 +161,39 @@ pub enum Progress {
     Done(Box<ExecutionReport>),
 }
 
+/// Everything a runtime expression can name at this point in the run.
+fn scope<'s>(
+    frame: &'s Frame<'_>,
+    steps: &'s BTreeMap<String, StepState>,
+    here: Option<&'s Exchange>,
+    finished: &'s BTreeMap<String, WorkflowState>,
+    ambient: &'s Ambient,
+) -> Scope<'s> {
+    Scope {
+        inputs: &frame.inputs,
+        outputs: &frame.outputs,
+        steps,
+        workflows: finished,
+        here,
+        sources: &ambient.sources,
+        components: &ambient.components,
+        self_: ambient.self_.as_deref(),
+        declared_steps: &frame.declared,
+        declared_workflows: &ambient.workflows,
+    }
+}
+
+/// What the calling step does when the workflow it started finishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Then {
+    /// Finish the calling step, as any other step finishes.
+    Advance,
+    /// Try the calling step again — a `retry` that named a workflow.
+    Retry,
+    /// End the workflow that left: a `goto` does not come back.
+    EndCaller,
+}
+
 /// One workflow in progress.
 struct Frame<'d> {
     workflow: &'d Workflow,
@@ -167,12 +203,38 @@ struct Frame<'d> {
     at: usize,
     steps: BTreeMap<String, StepState>,
     outputs: BTreeMap<String, Value>,
+    /// How many times each step has been attempted, for the report and
+    /// for the caller's safety limit.
     attempts: BTreeMap<String, u32>,
-    /// The step of the calling frame that is waiting for this one.
-    caller: Option<String>,
-    /// A `goto` to a workflow finishes the workflow it left.
-    ends_caller: bool,
+    /// Every step id this workflow declares.
+    declared: BTreeSet<String>,
+    /// How many retries each *failure action* has spent on a step.
+    /// `retryLimit` belongs to the action that states it, so a step
+    /// that fails two different ways gets both actions' budgets.
+    retries: BTreeMap<(String, usize), u32>,
+    /// The step of the calling frame that is waiting for this one, and
+    /// what it does when this one is done.
+    caller: Option<(String, Then)>,
+    /// When this frame started, for a calling step's `timeout`.
+    started: Instant,
+    /// Where to come back to when a retry sent the run to another step
+    /// first: "context transfers back upon completion".
+    detour: Option<usize>,
     outcome: Outcome,
+}
+
+/// What a step's completion needs beyond what the step itself says.
+struct Completion {
+    /// The exchange, for a step that sent a request.
+    exchange: Option<Exchange>,
+    /// Outputs the step already has — a called workflow's, which its
+    /// own `outputs` may then add to or override.
+    given: BTreeMap<String, Value>,
+    /// Whether it counts as passed when the step states no criteria.
+    default_pass: bool,
+    attempt: u32,
+    performed: Performed,
+    elapsed: Duration,
 }
 
 /// The step waiting for a response.
@@ -183,19 +245,29 @@ struct Pending {
     started: Instant,
 }
 
-/// A workflow run, one request at a time.
-pub struct Run<'d> {
-    description: &'d Description,
-    options: &'d Options,
+/// The parts of the description every expression can see, whichever
+/// workflow is running.
+struct Ambient {
     /// `sourceDescriptions` as JSON, for `$sourceDescriptions.…`.
     sources: Value,
     /// `components` as JSON, for `$components.…`.
     components: Value,
+    /// The description's `$self`, for `$self`.
+    self_: Option<String>,
+    /// Every workflow id the description declares.
+    workflows: BTreeSet<String>,
+}
+
+/// A workflow run, one request at a time.
+pub struct Run<'d> {
+    description: &'d Description,
+    options: &'d Options,
+    ambient: Ambient,
     frames: Vec<Frame<'d>>,
     /// Workflows still to run — dependencies first, then the one asked
     /// for.
     queue: Vec<&'d Workflow>,
-    finished: BTreeMap<String, BTreeMap<String, Value>>,
+    finished: BTreeMap<String, WorkflowState>,
     pending: Option<Pending>,
     wait: Option<Duration>,
     records: Vec<StepRecord>,
@@ -247,8 +319,16 @@ impl<'d> Run<'d> {
         let mut run = Self {
             description,
             options,
-            sources,
-            components,
+            ambient: Ambient {
+                sources,
+                components,
+                self_: description.self_.clone(),
+                workflows: description
+                    .workflows
+                    .iter()
+                    .map(|workflow| workflow.workflow_id.clone())
+                    .collect(),
+            },
             frames: Vec::new(),
             queue,
             finished: BTreeMap::new(),
@@ -258,7 +338,7 @@ impl<'d> Run<'d> {
             taken: 0,
             report: None,
         };
-        run.enter(first, Value::Object(options.inputs.clone()), None, false)?;
+        run.enter(first, Value::Object(options.inputs.clone()), None)?;
         Ok(run)
     }
 
@@ -274,6 +354,15 @@ impl<'d> Run<'d> {
     pub fn advance(&mut self) -> Result<Progress, ExecutionError> {
         if let Some(wait) = self.wait.take() {
             return Ok(Progress::Wait(wait));
+        }
+        // One request is outstanding at a time. Handing out another
+        // would send it twice and lose the exchange the first one is
+        // waiting to be judged by.
+        if let Some(pending) = &self.pending {
+            return Err(ExecutionError::Awaiting {
+                method: pending.exchange.request.method.clone(),
+                url: pending.exchange.request.url.clone(),
+            });
         }
         loop {
             if let Some(report) = self.report.take() {
@@ -320,7 +409,7 @@ impl<'d> Run<'d> {
         }
     }
 
-    /// Hand back the response to the request [`Run::next`] asked for.
+    /// Hand back the response to the request [`Run::advance`] asked for.
     ///
     /// # Errors
     ///
@@ -336,85 +425,124 @@ impl<'d> Run<'d> {
         pending.exchange.response_body = response.body_as_json();
         pending.exchange.response = Some(response);
 
-        let Some(frame) = self.frames.last_mut() else {
+        if self.frames.last().is_none() {
             return Err(ExecutionError::NotWaiting);
+        }
+        let performed = Performed::Request {
+            method: pending.exchange.request.method.clone(),
+            url: pending.exchange.request.url.clone(),
+            status,
         };
-        let step = &frame.workflow.steps[pending.step];
+        // No criteria means the status is the whole judgement.
+        self.complete(
+            pending.step,
+            Completion {
+                exchange: Some(pending.exchange),
+                given: BTreeMap::new(),
+                default_pass: (200..400).contains(&status),
+                attempt: pending.attempt,
+                performed,
+                elapsed,
+            },
+        )
+    }
+
+    // ---- the steps of a run -----------------------------------------
+
+    /// Everything a step's completion needs that the step itself does
+    /// not say.
+    ///
+    /// A step ends the same way whether it sent a request or called a
+    /// workflow: its criteria are judged, its outputs are named, and
+    /// its actions decide where the workflow goes next.
+    fn complete(&mut self, index: usize, done: Completion) -> Result<(), ExecutionError> {
+        let frame = self.frames.last().expect("a frame to complete in");
+        let step = &frame.workflow.steps[index];
         let step_id = step.step_id.clone();
         let workflow_id = frame.workflow.workflow_id.clone();
 
-        let scope = Scope {
-            inputs: &frame.inputs,
-            outputs: &frame.outputs,
-            steps: &frame.steps,
-            workflows: &self.finished,
-            here: Some(&pending.exchange),
-            sources: &self.sources,
-            components: &self.components,
+        // What the step produced is in scope while its own outputs are
+        // named — that is how a workflow step reads what it called.
+        let mut state = StepState {
+            exchange: done.exchange.clone(),
+            outputs: done.given.clone(),
+            passed: true,
         };
+        let (passed, criteria, outputs) = {
+            let mut ahead = frame.steps.clone();
+            ahead.insert(step_id.clone(), state.clone());
+            let scope = scope(
+                frame,
+                &ahead,
+                done.exchange.as_ref(),
+                &self.finished,
+                &self.ambient,
+            );
 
-        // Did the step do what it said it would?
-        let mut criteria = Vec::with_capacity(step.success_criteria.len());
-        let mut passed = true;
-        if step.success_criteria.is_empty() {
-            passed = (200..400).contains(&status);
-        }
-        for criterion in &step.success_criteria {
-            let holds = criterion::passes(criterion, &scope)?;
-            criteria.push(CriterionOutcome {
-                condition: criterion.condition.clone(),
-                passed: holds,
-            });
-            passed = passed && holds;
-        }
-
-        // Only a step that did what it said can name what it produced:
-        // a failed one is about to be retried or given up on, and its
-        // outputs would name parts of a response that is not there.
-        let outputs = if passed {
-            evaluate_outputs(&step.outputs, &scope)?
-        } else {
-            BTreeMap::new()
+            let mut criteria = Vec::with_capacity(step.success_criteria.len());
+            // Criteria, where a step states them, are the whole
+            // judgement: a step that says `$statusCode == 404` means it.
+            let mut passed = if step.success_criteria.is_empty() {
+                done.default_pass
+            } else {
+                true
+            };
+            for criterion in &step.success_criteria {
+                let holds = criterion::passes(criterion, &scope)?;
+                criteria.push(CriterionOutcome {
+                    condition: criterion.condition.clone(),
+                    passed: holds,
+                });
+                passed = passed && holds;
+            }
+            // Only a step that did what it said can name what it
+            // produced: a failed one is about to be retried or given up
+            // on, and its outputs would name what is not there.
+            let outputs = if passed {
+                let mut outputs = done.given.clone();
+                outputs.extend(evaluate_outputs(&step.outputs, &scope)?);
+                outputs
+            } else {
+                // What it was handed only seeded the scope above: a
+                // step that failed names nothing, a workflow step
+                // included, so no recovery step reads a token from a
+                // call that went wrong.
+                BTreeMap::new()
+            };
+            (passed, criteria, outputs)
         };
+        state.outputs = outputs.clone();
+        state.passed = passed;
 
-        // What the step's outcome says to do next.
-        let action = self.decide(pending.step, passed, &pending.exchange)?;
+        // The step is in scope before its actions are chosen: an
+        // `onSuccess` criterion reading `$steps.<this step>.outputs` is
+        // asking about the step that just finished.
+        let frame = self.frames.last_mut().expect("the frame is still there");
+        frame.steps.insert(step_id.clone(), state);
+
+        let action = self.decide(index, passed, done.exchange.as_ref())?;
         let described = describe(&action);
 
-        let frame = self.frames.last_mut().expect("the frame is still there");
-        frame.steps.insert(
-            step_id.clone(),
-            StepState {
-                exchange: Some(pending.exchange.clone()),
-                outputs: outputs.clone(),
-            },
-        );
         self.records.push(StepRecord {
             workflow_id,
             step_id,
-            attempt: pending.attempt,
-            method: pending.exchange.request.method.clone(),
-            url: pending.exchange.request.url.clone(),
-            status: Some(status),
+            attempt: done.attempt,
+            performed: done.performed,
             criteria,
             passed,
             outputs,
             action: described,
-            elapsed,
+            elapsed: done.elapsed,
         });
-
         self.apply(action)
     }
-
-    // ---- the steps of a run -----------------------------------------
 
     /// Push a frame for `workflow`.
     fn enter(
         &mut self,
         workflow: &'d Workflow,
         inputs: Value,
-        caller: Option<String>,
-        ends_caller: bool,
+        caller: Option<(String, Then)>,
     ) -> Result<(), ExecutionError> {
         if self.frames.len() >= self.options.limits.depth {
             return Err(ExecutionError::Limit {
@@ -425,13 +553,20 @@ impl<'d> Run<'d> {
         self.frames.push(Frame {
             workflow,
             inputs,
-            order: ordered_steps(workflow)?,
+            order: ordered_steps(workflow, self.description)?,
             at: 0,
             steps: BTreeMap::new(),
             outputs: BTreeMap::new(),
+            declared: workflow
+                .steps
+                .iter()
+                .map(|step| step.step_id.clone())
+                .collect(),
             attempts: BTreeMap::new(),
+            retries: BTreeMap::new(),
             caller,
-            ends_caller,
+            started: Instant::now(),
+            detour: None,
             outcome: Outcome::Succeeded,
         });
         Ok(())
@@ -442,63 +577,98 @@ impl<'d> Run<'d> {
     fn leave(&mut self) -> Result<(), ExecutionError> {
         let frame = self.frames.pop().expect("a frame to leave");
         let outputs = {
-            let scope = Scope {
-                inputs: &frame.inputs,
-                outputs: &frame.outputs,
-                steps: &frame.steps,
-                workflows: &self.finished,
-                here: None,
-                sources: &self.sources,
-                components: &self.components,
-            };
+            let scope = scope(&frame, &frame.steps, None, &self.finished, &self.ambient);
             if frame.outcome == Outcome::Succeeded {
                 evaluate_outputs(&frame.workflow.outputs, &scope)?
             } else {
                 // A workflow that stopped early names outputs from steps
-                // that never ran. What can be named is worth reporting;
-                // the rest went with the steps.
-                evaluate_what_it_can(&frame.workflow.outputs, &scope)
+                // that never ran. Those go with the steps; anything else
+                // wrong with an output is still worth saying.
+                evaluate_what_ran(&frame.workflow.outputs, &scope)?
             }
         };
-        self.finished
-            .insert(frame.workflow.workflow_id.clone(), outputs.clone());
+        self.finished.insert(
+            frame.workflow.workflow_id.clone(),
+            WorkflowState {
+                inputs: frame.inputs.clone(),
+                outputs: outputs.clone(),
+            },
+        );
 
-        match (frame.caller, self.frames.last_mut()) {
-            // A called workflow hands its outputs to the step that
-            // called it.
-            (Some(step_id), Some(parent)) => {
+        let Some((step_id, then)) = frame.caller else {
+            // A root workflow: its outputs are the run's, unless it was
+            // only a dependency of the one that was asked for.
+            if self.queue.is_empty() {
+                self.report = Some(Box::new(ExecutionReport {
+                    workflow_id: frame.workflow.workflow_id.clone(),
+                    outcome: frame.outcome,
+                    outputs,
+                    steps: std::mem::take(&mut self.records),
+                }));
+            } else {
+                let next = self.queue.remove(0);
+                let inputs = Value::Object(self.options.inputs.clone());
+                self.enter(next, inputs, None)?;
+            }
+            return Ok(());
+        };
+        let Some(parent) = self.frames.last() else {
+            return Ok(());
+        };
+        let index = parent.order[parent.at];
+        debug_assert_eq!(parent.workflow.steps[index].step_id, step_id);
+
+        match then {
+            // A `goto` handed the workflow over: what it did is what the
+            // workflow that left it did, and there is nothing to come
+            // back to.
+            Then::EndCaller => {
+                let parent = self.frames.last_mut().expect("the parent is still there");
                 parent.steps.insert(
                     step_id,
                     StepState {
                         exchange: None,
-                        outputs: outputs.clone(),
+                        outputs,
+                        passed: frame.outcome != Outcome::Failed,
                     },
                 );
-                if frame.ends_caller {
-                    parent.at = parent.order.len();
-                    parent.outcome = frame.outcome;
-                } else {
-                    parent.at += 1;
-                }
+                parent.at = parent.order.len();
+                parent.outcome = frame.outcome;
+                Ok(())
             }
-            // A root workflow: its outputs are the run's, unless it was
-            // only a dependency of the one that was asked for.
-            _ => {
-                if self.queue.is_empty() {
-                    self.report = Some(Box::new(ExecutionReport {
-                        workflow_id: frame.workflow.workflow_id.clone(),
-                        outcome: frame.outcome,
-                        outputs,
-                        steps: std::mem::take(&mut self.records),
-                    }));
-                } else {
-                    let next = self.queue.remove(0);
-                    let inputs = Value::Object(self.options.inputs.clone());
-                    self.enter(next, inputs, None, false)?;
-                }
+            // A `retry` sent the run through another workflow first;
+            // now the step that failed is tried again.
+            Then::Retry => Ok(()),
+            // An ordinary workflow step: it ends like any other step,
+            // with its own criteria, outputs and actions.
+            Then::Advance => {
+                let elapsed = frame.started.elapsed();
+                let timed_out = parent.workflow.steps[index]
+                    .timeout
+                    .and_then(|timeout| u64::try_from(timeout).ok())
+                    .is_some_and(|timeout| elapsed > Duration::from_millis(timeout));
+                let attempt = self
+                    .frames
+                    .last()
+                    .and_then(|parent| parent.attempts.get(&step_id).copied())
+                    .unwrap_or(0)
+                    + 1;
+                self.complete(
+                    index,
+                    Completion {
+                        exchange: None,
+                        given: outputs,
+                        default_pass: frame.outcome != Outcome::Failed && !timed_out,
+                        attempt,
+                        performed: Performed::Workflow {
+                            workflow_id: frame.workflow.workflow_id.clone(),
+                            outcome: frame.outcome,
+                        },
+                        elapsed,
+                    },
+                )
             }
         }
-        Ok(())
     }
 
     /// A step that calls a workflow.
@@ -520,23 +690,31 @@ impl<'d> Run<'d> {
             .ok_or_else(|| ExecutionError::UnknownWorkflow(wanted.clone()))?;
 
         // A workflow step's parameters are the workflow's inputs.
-        let inputs = {
-            let scope = Scope {
-                inputs: &frame.inputs,
-                outputs: &frame.outputs,
-                steps: &frame.steps,
-                workflows: &self.finished,
-                here: None,
-                sources: &self.sources,
-                components: &self.components,
-            };
-            let mut inputs = Map::new();
-            for parameter in parameters(&step.parameters, self.description, &scope)? {
-                inputs.insert(parameter.name, parameter.value);
-            }
-            Value::Object(inputs)
-        };
-        self.enter(workflow, inputs, Some(step_id), false)
+        // "When the step... specifies a `workflowId`, then all
+        // parameters map to workflow inputs", and a workflow's own
+        // parameters are "applicable for all steps described under this
+        // workflow... can be overridden at the step level but cannot be
+        // removed there" — so both lists go, the step's last.
+        let mut arguments = frame.workflow.parameters.clone();
+        arguments.extend(step.parameters.iter().cloned());
+        let inputs = self.arguments(&arguments)?;
+        self.enter(workflow, inputs, Some((step_id, Then::Advance)))
+    }
+
+    /// The inputs a called workflow starts with: the caller's own,
+    /// with whatever parameters were passed to it written over them.
+    fn arguments(&self, arguments: &[ReusableOr<Parameter>]) -> Result<Value, ExecutionError> {
+        let frame = self.frames.last().expect("a frame to pass arguments from");
+        let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
+        // A called workflow starts with what it was passed and nothing
+        // else: only the parameters are forwarded, not the caller's
+        // whole input context, so a child reading `$inputs.x` is asking
+        // for something the calling step gave it.
+        let mut inputs = Map::new();
+        for parameter in parameters(arguments, self.description, &scope)? {
+            inputs.insert(parameter.name, parameter.value);
+        }
+        Ok(Value::Object(inputs))
     }
 
     /// Assemble the request a step wants sent.
@@ -544,15 +722,7 @@ impl<'d> Run<'d> {
         let frame = self.frames.last().expect("a frame to build in");
         let step = &frame.workflow.steps[index];
         let endpoint = operation::resolve(step, &self.options.sources, &self.options.base_urls)?;
-        let scope = Scope {
-            inputs: &frame.inputs,
-            outputs: &frame.outputs,
-            steps: &frame.steps,
-            workflows: &self.finished,
-            here: None,
-            sources: &self.sources,
-            components: &self.components,
-        };
+        let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
 
         // The workflow's parameters first, so a step's own override them.
         let mut resolved = parameters(&frame.workflow.parameters, self.description, &scope)?;
@@ -651,19 +821,11 @@ impl<'d> Run<'d> {
         &mut self,
         index: usize,
         passed: bool,
-        exchange: &Exchange,
+        exchange: Option<&Exchange>,
     ) -> Result<Action, ExecutionError> {
         let frame = self.frames.last().expect("a frame to decide in");
         let step = &frame.workflow.steps[index];
-        let scope = Scope {
-            inputs: &frame.inputs,
-            outputs: &frame.outputs,
-            steps: &frame.steps,
-            workflows: &self.finished,
-            here: Some(exchange),
-            sources: &self.sources,
-            components: &self.components,
-        };
+        let scope = scope(frame, &frame.steps, exchange, &self.finished, &self.ambient);
 
         if passed {
             // A step's own actions first, then the workflow's.
@@ -692,7 +854,7 @@ impl<'d> Run<'d> {
             .on_failure
             .iter()
             .chain(frame.workflow.failure_actions.iter());
-        for action in actions {
+        for (at, action) in actions.enumerate() {
             let action = failure_action(action, self.description)?;
             if !holds(&action.criteria, &scope)? {
                 continue;
@@ -704,10 +866,38 @@ impl<'d> Run<'d> {
                     workflow: action.workflow_id.clone(),
                     parameters: action.parameters.clone(),
                 },
-                FailureActionType::Retry => Action::Retry {
-                    after: action.retry_after,
-                    limit: action.retry_limit,
-                },
+                FailureActionType::Retry => {
+                    // "A non-negative integer indicating how many
+                    // attempts to retry the step MAY be attempted... If
+                    // not specified then a single retry SHALL be
+                    // attempted", and "The retryLimit MUST be exhausted
+                    // prior to executing subsequent failure actions" —
+                    // so an exhausted retry gives way to whatever the
+                    // description says next rather than ending here.
+                    let allowed = action
+                        .retry_limit
+                        .map_or(1, |limit| u32::try_from(limit).unwrap_or(u32::MAX));
+                    let spent = frame
+                        .retries
+                        .get(&(step.step_id.clone(), at))
+                        .copied()
+                        .unwrap_or(0);
+                    // The caller's cap is a rail against a description
+                    // that would retry forever, counted over the step;
+                    // the action's own limit is what the description
+                    // asked for.
+                    let taken = frame.attempts.get(&step.step_id).copied().unwrap_or(0);
+                    if spent >= allowed || taken >= self.options.limits.retries {
+                        continue;
+                    }
+                    Action::Retry {
+                        at,
+                        after: action.retry_after,
+                        step: action.step_id.clone(),
+                        workflow: action.workflow_id.clone(),
+                        parameters: action.parameters.clone(),
+                    }
+                }
             });
         }
         // Nothing said what to do about a failure, so the workflow stops
@@ -717,61 +907,73 @@ impl<'d> Run<'d> {
 
     /// Carry an action out.
     fn apply(&mut self, action: Action) -> Result<(), ExecutionError> {
-        let limit = self.options.limits.retries;
         let frame = self.frames.last_mut().expect("a frame to act in");
         match action {
             Action::Advance => {
-                frame.at += 1;
+                // A step run as a retry's detour hands control back to
+                // the step that asked for it, which is tried again.
+                match frame.detour.take() {
+                    Some(back) => frame.at = back,
+                    None => frame.at += 1,
+                }
                 Ok(())
             }
             Action::End(outcome) => {
                 frame.outcome = outcome;
                 frame.at = frame.order.len();
-                // An ended workflow ends what called it, too: its caller
-                // was waiting on this answer.
-                if outcome == Outcome::Failed {
-                    for frame in &mut self.frames {
-                        frame.outcome = Outcome::Failed;
-                    }
-                }
+                // Nothing is forced on the caller here: a workflow that
+                // ends failed comes back through the step that called
+                // it, whose own `onFailure` may yet have something to
+                // say about it.
                 Ok(())
             }
-            Action::Retry { after, limit: cap } => {
+            Action::Retry {
+                at,
+                after,
+                step: target,
+                workflow,
+                parameters: arguments,
+            } => {
+                // `decide` has already refused a retry whose limit is
+                // used up, so reaching here means another attempt is
+                // owed. Count it before anything else.
                 let index = frame.order[frame.at];
                 let step_id = frame.workflow.steps[index].step_id.clone();
-                let attempts = frame.attempts.entry(step_id).or_insert(0);
-                *attempts += 1;
-                let cap = cap.map_or(limit, |cap| {
-                    u32::try_from(cap).unwrap_or(u32::MAX).min(limit)
-                });
-                if *attempts > cap {
-                    frame.outcome = Outcome::Failed;
-                    frame.at = frame.order.len();
-                    return Ok(());
-                }
+                *frame.attempts.entry(step_id.clone()).or_insert(0) += 1;
+                *frame.retries.entry((step_id.clone(), at)).or_insert(0) += 1;
                 if let Some(after) = after.filter(|after| *after > 0.0) {
                     self.wait = Some(Duration::from_secs_f64(after));
                 }
-                Ok(())
+                match (target, workflow) {
+                    // "When used with `retry`, context transfers back
+                    // upon completion of the specified step" — so the
+                    // named step runs, then this one is tried again.
+                    (Some(target), _) => {
+                        let at = position_of(frame, &target)?;
+                        frame.detour = Some(frame.at);
+                        frame.at = at;
+                        Ok(())
+                    }
+                    // The same, for a workflow.
+                    (None, Some(workflow_id)) => {
+                        let workflow = self
+                            .description
+                            .workflows
+                            .iter()
+                            .find(|workflow| workflow.workflow_id == workflow_id)
+                            .ok_or_else(|| ExecutionError::UnknownWorkflow(workflow_id.clone()))?;
+                        let inputs = self.arguments(&arguments)?;
+                        self.enter(workflow, inputs, Some((step_id, Then::Retry)))
+                    }
+                    // Nothing named: this step, again.
+                    (None, None) => Ok(()),
+                }
             }
             Action::Goto {
                 step: Some(step_id),
                 ..
             } => {
-                let index = frame
-                    .workflow
-                    .steps
-                    .iter()
-                    .position(|step| step.step_id == step_id)
-                    .ok_or_else(|| ExecutionError::UnknownStep {
-                        workflow: frame.workflow.workflow_id.clone(),
-                        step: step_id.clone(),
-                    })?;
-                frame.at = frame
-                    .order
-                    .iter()
-                    .position(|&candidate| candidate == index)
-                    .unwrap_or(frame.order.len());
+                frame.at = position_of(frame, &step_id)?;
                 Ok(())
             }
             Action::Goto {
@@ -787,24 +989,8 @@ impl<'d> Run<'d> {
                     .iter()
                     .find(|workflow| workflow.workflow_id == workflow_id)
                     .ok_or_else(|| ExecutionError::UnknownWorkflow(workflow_id.clone()))?;
-                let inputs = {
-                    let frame = self.frames.last().expect("a frame to leave");
-                    let scope = Scope {
-                        inputs: &frame.inputs,
-                        outputs: &frame.outputs,
-                        steps: &frame.steps,
-                        workflows: &self.finished,
-                        here: None,
-                        sources: &self.sources,
-                        components: &self.components,
-                    };
-                    let mut inputs = self.options.inputs.clone();
-                    for parameter in parameters(&arguments, self.description, &scope)? {
-                        inputs.insert(parameter.name, parameter.value);
-                    }
-                    Value::Object(inputs)
-                };
-                self.enter(workflow, inputs, Some(step_id), true)
+                let inputs = self.arguments(&arguments)?;
+                self.enter(workflow, inputs, Some((step_id, Then::EndCaller)))
             }
             Action::Goto { .. } => Ok(()),
         }
@@ -831,14 +1017,39 @@ impl<'d> Run<'d> {
     }
 }
 
+/// Where a step sits in the order its workflow runs.
+fn position_of(frame: &Frame<'_>, step_id: &str) -> Result<usize, ExecutionError> {
+    let index = frame
+        .workflow
+        .steps
+        .iter()
+        .position(|step| step.step_id == step_id)
+        .ok_or_else(|| ExecutionError::UnknownStep {
+            workflow: frame.workflow.workflow_id.clone(),
+            step: step_id.to_owned(),
+        })?;
+    Ok(frame
+        .order
+        .iter()
+        .position(|&candidate| candidate == index)
+        .unwrap_or(frame.order.len()))
+}
+
 /// What a step's outcome asks the run to do.
 #[derive(Clone, Debug)]
 enum Action {
     Advance,
     End(Outcome),
     Retry {
+        /// Which failure action asked, so its own budget is the one
+        /// that is spent.
+        at: usize,
         after: Option<f64>,
-        limit: Option<u64>,
+        /// A step to run before trying again, if the action names one.
+        step: Option<String>,
+        /// A workflow to run before trying again, if it names one.
+        workflow: Option<String>,
+        parameters: Vec<ReusableOr<Parameter>>,
     },
     Goto {
         step: Option<String>,
@@ -852,6 +1063,13 @@ fn describe(action: &Action) -> Option<String> {
         Action::Advance => None,
         Action::End(Outcome::Failed) => Some("ended, failed".to_owned()),
         Action::End(_) => Some("ended".to_owned()),
+        Action::Retry {
+            step: Some(step), ..
+        } => Some(format!("retry via step `{step}`")),
+        Action::Retry {
+            workflow: Some(workflow),
+            ..
+        } => Some(format!("retry via workflow `{workflow}`")),
         Action::Retry { .. } => Some("retry".to_owned()),
         Action::Goto {
             step: Some(step), ..
@@ -981,20 +1199,30 @@ fn holds(criteria: &[Criterion], scope: &Scope<'_>) -> Result<bool, ExecutionErr
     Ok(true)
 }
 
-/// The values a set of `outputs` names, skipping the ones that name
-/// nothing — for a workflow that did not get far enough to have them.
-fn evaluate_what_it_can(
+/// The values a set of `outputs` names, for a workflow that stopped
+/// early.
+///
+/// An output naming a step or a workflow that never ran is expected and
+/// skipped — that is what stopping early means. Nothing else is: an
+/// input that was never given, a pointer into a body that has not got
+/// it, a malformed selector, an unsupported expression — each is a
+/// fault in the description, and a failed workflow is no reason to keep
+/// quiet about it.
+fn evaluate_what_ran(
     outputs: &BTreeMap<String, ValueOrSelector>,
     scope: &Scope<'_>,
-) -> BTreeMap<String, Value> {
-    outputs
-        .iter()
-        .filter_map(|(name, value)| {
-            select::value_of(value, scope)
-                .ok()
-                .map(|value| (name.clone(), value))
-        })
-        .collect()
+) -> Result<BTreeMap<String, Value>, ExecutionError> {
+    let mut named = BTreeMap::new();
+    for (name, value) in outputs {
+        match select::value_of(value, scope) {
+            Ok(value) => {
+                named.insert(name.clone(), value);
+            }
+            Err(SelectError::Expression(ExpressionError::NotRun { .. })) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(named)
 }
 
 /// The values a set of `outputs` names.
@@ -1160,9 +1388,155 @@ fn visit<'d>(
     Ok(())
 }
 
-/// Step indices in an order that respects `dependsOn`, keeping the
-/// document's order where it says nothing.
-fn ordered_steps(workflow: &Workflow) -> Result<Vec<usize>, ExecutionError> {
+/// Every step id a step's *expressions* read, which is a dependency
+/// whether or not `dependsOn` says so.
+///
+/// "Tools MUST also treat runtime expression output references (e.g.,
+/// `$steps.stepId.outputs.field`) as implicit dependencies" — so two
+/// things matter. Only the fields that hold expressions are read, and
+/// within them only what the runtime would really evaluate: a whole
+/// `$…` string, a `{$…}` inside one, and in a condition the bare
+/// operands its parser reads. A payload that merely mentions a step in
+/// its text goes on the wire as text, and is no dependency at all.
+///
+/// A `Reusable` is followed into the components: where a parameter or
+/// an action is written makes no difference to what it reads.
+fn steps_named_by(step: &Step, description: &Description) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+
+    /// The step id an expression names, if it names one.
+    fn named_in(expression: &str) -> Option<String> {
+        let rest = expression.strip_prefix("$steps.")?;
+        let (id, _) = rest.split_once('.')?;
+        Some(id.to_owned())
+    }
+    fn read(text: &str, found: &mut BTreeSet<String>) {
+        found.extend(
+            expression::references(text)
+                .into_iter()
+                .filter_map(named_in),
+        );
+    }
+    /// A condition is read the way its own type reads it: a `simple`
+    /// one through the parser that evaluates it, anything else through
+    /// the `{$…}` its engine has filled in first.
+    fn read_condition(criterion: &Criterion, found: &mut BTreeSet<String>) {
+        let simple = matches!(
+            criterion.type_,
+            None | Some(CriterionType::Simple(CriterionKind::Simple))
+        );
+        if simple {
+            found.extend(
+                criterion::expressions_in(&criterion.condition)
+                    .iter()
+                    .filter_map(|expression| named_in(expression)),
+            );
+        } else {
+            // Only the `{$…}` — a pattern or a path is not evaluated as
+            // an expression even when the whole of it starts with `$`,
+            // which in a regex is an anchor.
+            found.extend(
+                expression::interpolations(&criterion.condition)
+                    .into_iter()
+                    .filter_map(named_in),
+            );
+        }
+    }
+    fn read_value(value: &ValueOrSelector, found: &mut BTreeSet<String>) {
+        match value {
+            ValueOrSelector::Literal(literal) => read_literal(literal, found),
+            // A selector's context is an expression; its selector is a
+            // JSONPath or a pointer, which the runtime does not
+            // evaluate as one.
+            ValueOrSelector::Selector(selector) => read(&selector.context, found),
+        }
+    }
+    fn read_literal(value: &Value, found: &mut BTreeSet<String>) {
+        match value {
+            Value::String(text) => read(text, found),
+            Value::Array(items) => items.iter().for_each(|item| read_literal(item, found)),
+            Value::Object(members) => members
+                .values()
+                .for_each(|member| read_literal(member, found)),
+            _ => {}
+        }
+    }
+    fn read_parameters(
+        list: &[ReusableOr<Parameter>],
+        description: &Description,
+        found: &mut BTreeSet<String>,
+    ) {
+        for entry in list {
+            match entry {
+                ReusableOr::Item(parameter) => read_value(&parameter.value, found),
+                ReusableOr::Reusable(reusable) => {
+                    // An override *replaces* the component's value, so
+                    // it replaces what that value read too: the
+                    // component's own dependency is not one here.
+                    if let Some(overridden) = &reusable.value {
+                        read_literal(overridden, found);
+                    } else if let Some(parameter) = reusable
+                        .reference
+                        .strip_prefix("$components.parameters.")
+                        .and_then(|name| {
+                            description
+                                .components
+                                .as_ref()
+                                .and_then(|components| components.parameters.get(name))
+                        })
+                    {
+                        read_value(&parameter.value, found);
+                    }
+                }
+            }
+        }
+    }
+    fn read_criteria(list: &[Criterion], found: &mut BTreeSet<String>) {
+        for criterion in list {
+            if let Some(context) = &criterion.context {
+                read(context, found);
+            }
+            read_condition(criterion, found);
+        }
+    }
+
+    read_parameters(&step.parameters, description, &mut found);
+    read_criteria(&step.success_criteria, &mut found);
+    for output in step.outputs.values() {
+        read_value(output, &mut found);
+    }
+    if let Some(body) = &step.request_body {
+        if let Some(payload) = &body.payload {
+            read_literal(payload, &mut found);
+        }
+        for replacement in &body.replacements {
+            read_value(&replacement.value, &mut found);
+        }
+    }
+    for entry in &step.on_success {
+        if let Ok(action) = success_action(entry, description) {
+            read_criteria(&action.criteria, &mut found);
+            read_parameters(&action.parameters, description, &mut found);
+        }
+    }
+    for entry in &step.on_failure {
+        if let Ok(action) = failure_action(entry, description) {
+            read_criteria(&action.criteria, &mut found);
+            read_parameters(&action.parameters, description, &mut found);
+        }
+    }
+
+    found.remove(&step.step_id);
+    found
+}
+
+/// Step indices in an order that respects `dependsOn` and the steps an
+/// expression reads, keeping the document's order where neither says
+/// anything.
+fn ordered_steps(
+    workflow: &Workflow,
+    description: &Description,
+) -> Result<Vec<usize>, ExecutionError> {
     let index: BTreeMap<&str, usize> = workflow
         .steps
         .iter()
@@ -1175,6 +1549,7 @@ fn ordered_steps(workflow: &Workflow) -> Result<Vec<usize>, ExecutionError> {
     for step in &workflow.steps {
         visit_step(
             workflow,
+            description,
             &index,
             step,
             &mut ordered,
@@ -1187,6 +1562,7 @@ fn ordered_steps(workflow: &Workflow) -> Result<Vec<usize>, ExecutionError> {
 
 fn visit_step(
     workflow: &Workflow,
+    description: &Description,
     index: &BTreeMap<&str, usize>,
     step: &Step,
     ordered: &mut Vec<usize>,
@@ -1208,6 +1584,24 @@ fn visit_step(
             })?;
         visit_step(
             workflow,
+            description,
+            index,
+            &workflow.steps[*at],
+            ordered,
+            visiting,
+            done,
+        )?;
+    }
+    // The same for the steps this one reads. A name that is not a step
+    // of this workflow is left alone: an expression may be wrong, and
+    // saying so belongs where it is evaluated, with the whole context.
+    for id in steps_named_by(step, description) {
+        let Some(at) = index.get(id.as_str()) else {
+            continue;
+        };
+        visit_step(
+            workflow,
+            description,
             index,
             &workflow.steps[*at],
             ordered,

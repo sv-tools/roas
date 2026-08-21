@@ -6,7 +6,8 @@
 
 use roas_arazzo::v1_1::Description;
 use roas_arazzo_executor::{
-    ExecutionError, HttpResponse, Options, Outcome, Progress, Run, execute, testing::Fake,
+    ExecutionError, HttpResponse, Options, Outcome, Performed, Progress, Run, execute,
+    testing::Fake,
 };
 use serde_json::{Value, json};
 
@@ -83,7 +84,7 @@ fn a_step_sends_what_its_parameters_say_and_keeps_what_it_named() {
     assert_eq!(report.outputs["pet"], json!("fluffy"));
     assert_eq!(report.steps.len(), 1);
     assert_eq!(report.steps[0].step_id, "findPet");
-    assert_eq!(report.steps[0].status, Some(200));
+    assert_eq!(report.steps[0].status(), Some(200));
     assert!(report.steps[0].passed);
     assert_eq!(report.steps[0].outputs["name"], json!("fluffy"));
     assert!(report.is_success());
@@ -360,12 +361,33 @@ fn a_step_can_call_another_workflow_and_take_its_outputs() {
     );
     assert_eq!(client.sent()[1].header("authorization"), Some("Bearer t-1"));
     assert_eq!(report.outputs["token"], json!("t-1"));
-    assert_eq!(report.steps.len(), 2);
     assert_eq!(
-        report.steps[0].workflow_id, "login",
-        "the called workflow's step"
+        report
+            .steps
+            .iter()
+            .map(|step| (step.workflow_id.as_str(), step.step_id.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("login", "post"),
+            ("buyPet", "authenticate"),
+            ("buyPet", "findPet")
+        ],
+        "the calling step is a step of its own, finished after what it called"
     );
-    assert_eq!(report.steps[1].workflow_id, "buyPet");
+    // The calling step records what it called, not a request.
+    assert_eq!(
+        report.steps[1].performed,
+        Performed::Workflow {
+            workflow_id: "login".to_owned(),
+            outcome: Outcome::Succeeded,
+        }
+    );
+    assert_eq!(report.steps[1].status(), None);
+    assert_eq!(
+        report.steps[1].outputs["token"],
+        json!("t-1"),
+        "the called workflow's outputs are the step's"
+    );
 }
 
 #[test]
