@@ -337,17 +337,14 @@ fn from_map(
     walk(value, rest, expression, what)
 }
 
-/// Every runtime expression a string really evaluates.
+/// Every `{$…}` a string fills in.
 ///
-/// This is what tells a reference from a mention: at run time a string
-/// is an expression only if the whole of it is one, or where a `{$…}`
-/// sits inside it. `"see $steps.a.outputs.x"` is a sentence, and goes
-/// on the wire as one.
-pub(crate) fn references(text: &str) -> Vec<&str> {
+/// This is all that happens to a string a caller only ever
+/// interpolates — a `regex` or `jsonpath` condition, say. An unbraced
+/// `$steps.b.outputs.x` in a pattern is pattern text, and matched as
+/// such.
+pub(crate) fn interpolations(text: &str) -> Vec<&str> {
     let mut found = Vec::new();
-    if is_expression(text) {
-        found.push(text);
-    }
     let mut at = 0;
     while let Some(start) = text[at..].find("{$").map(|start| at + start) {
         let Some(end) = text[start..].find('}').map(|end| start + end) else {
@@ -356,6 +353,20 @@ pub(crate) fn references(text: &str) -> Vec<&str> {
         found.push(&text[start + 1..end]);
         at = end + 1;
     }
+    found
+}
+
+/// Every runtime expression a *value* really evaluates: the whole
+/// string where the whole of it is one, and every `{$…}` inside it.
+///
+/// This is what tells a reference from a mention. `"see
+/// $steps.a.outputs.x"` is a sentence, and goes on the wire as one.
+pub(crate) fn references(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    if is_expression(text) {
+        found.push(text);
+    }
+    found.extend(interpolations(text));
     found
 }
 

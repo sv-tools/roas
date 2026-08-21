@@ -1109,3 +1109,78 @@ fn an_override_replaces_the_components_dependency_too() {
         client.sent()[0].url
     );
 }
+
+#[test]
+fn a_pattern_that_starts_with_a_dollar_is_a_pattern() {
+    // A `regex` condition is only ever interpolated, so an unbraced
+    // `$steps…` in it is text to match — and `$` in a regex is an
+    // anchor besides.
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "operationId": "listPets",
+            "successCriteria": [{
+                "context": "$response.body#/note",
+                "condition": "$steps.b.outputs.x",
+                "type": "regex"
+            }]
+        },
+        { "stepId": "b", "operationId": "listPets", "dependsOn": ["a"] }
+    ]));
+    let mut client = Fake::new()
+        .reply(200, &json!({ "note": "see $steps.b.outputs.x here" }))
+        .reply(200, &json!([]));
+
+    // The run starts at all, which is the point: `dependsOn` is the
+    // only dependency here, so there is no circle. The pattern itself
+    // matches nothing — `$` anchors the end of a string in a regex,
+    // which is exactly why it is not an expression.
+    let report = execute(&description, &options(), &mut client).expect("no cycle here");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a"],
+        "`a` ran first and its pattern did not match, so `b` was never reached"
+    );
+    assert!(!report.steps[0].passed);
+}
+
+#[test]
+fn a_braced_expression_in_a_pattern_is_still_a_dependency() {
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "operationId": "listPets",
+            "successCriteria": [{
+                "context": "$response.body#/name",
+                "condition": "^{$steps.b.outputs.name}$",
+                "type": "regex"
+            }]
+        },
+        {
+            "stepId": "b",
+            "operationId": "listPets",
+            "outputs": { "name": "$response.body#/name" }
+        }
+    ]));
+    let mut client = Fake::new()
+        .reply(200, &json!({ "name": "fluffy" }))
+        .reply(200, &json!({ "name": "fluffy" }));
+
+    let report = execute(&description, &options(), &mut client).expect("the workflow runs");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "a"],
+        "the step the pattern fills in from runs first"
+    );
+    assert_eq!(report.outcome, Outcome::Succeeded);
+}

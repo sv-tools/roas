@@ -1432,7 +1432,14 @@ fn steps_named_by(step: &Step, description: &Description) -> BTreeSet<String> {
                     .filter_map(|expression| named_in(expression)),
             );
         } else {
-            read(&criterion.condition, found);
+            // Only the `{$…}` — a pattern or a path is not evaluated as
+            // an expression even when the whole of it starts with `$`,
+            // which in a regex is an anchor.
+            found.extend(
+                expression::interpolations(&criterion.condition)
+                    .into_iter()
+                    .filter_map(named_in),
+            );
         }
     }
     fn read_value(value: &ValueOrSelector, found: &mut BTreeSet<String>) {
