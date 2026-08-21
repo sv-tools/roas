@@ -160,6 +160,30 @@ enum Operand {
     Literal(Value),
 }
 
+/// The runtime expressions a `simple` condition reads, found the way
+/// the condition itself is read.
+///
+/// Working this out by splitting on spaces misses
+/// `$statusCode==200&&$steps.b.outputs.ready`, where nothing separates
+/// the operands but the operators — and would find one inside a quoted
+/// literal, where there is none. The tokenizer already knows the
+/// difference, so it answers. A condition that does not tokenize names
+/// nothing; it will say so when it is evaluated.
+pub(crate) fn expressions_in(condition: &str) -> Vec<String> {
+    tokenize(condition).map_or_else(
+        |_| Vec::new(),
+        |tokens| {
+            tokens
+                .into_iter()
+                .filter_map(|token| match token {
+                    Token::Value(Operand::Expression(expression)) => Some(expression),
+                    _ => None,
+                })
+                .collect()
+        },
+    )
+}
+
 fn simple(condition: &str, scope: &Scope<'_>) -> Result<bool, CriterionError> {
     let tokens = tokenize(condition)?;
     let mut parser = Parser {

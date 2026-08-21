@@ -15,8 +15,8 @@ use crate::report::{
 use crate::select;
 use crate::select::SelectError;
 use roas_arazzo::v1_1::{
-    Criterion, Description, FailureActionType, Parameter, ParameterLocation, ReusableOr, Step,
-    SuccessActionType, ValueOrSelector, Workflow,
+    Criterion, CriterionKind, CriterionType, Description, FailureActionType, Parameter,
+    ParameterLocation, ReusableOr, Step, SuccessActionType, ValueOrSelector, Workflow,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -409,7 +409,7 @@ impl<'d> Run<'d> {
         }
     }
 
-    /// Hand back the response to the request [`Run::next`] asked for.
+    /// Hand back the response to the request [`Run::advance`] asked for.
     ///
     /// # Errors
     ///
@@ -1417,12 +1417,23 @@ fn steps_named_by(step: &Step, description: &Description) -> BTreeSet<String> {
                 .filter_map(named_in),
         );
     }
-    fn read_condition(text: &str, found: &mut BTreeSet<String>) {
-        found.extend(
-            expression::references_in_condition(text)
-                .into_iter()
-                .filter_map(named_in),
+    /// A condition is read the way its own type reads it: a `simple`
+    /// one through the parser that evaluates it, anything else through
+    /// the `{$…}` its engine has filled in first.
+    fn read_condition(criterion: &Criterion, found: &mut BTreeSet<String>) {
+        let simple = matches!(
+            criterion.type_,
+            None | Some(CriterionType::Simple(CriterionKind::Simple))
         );
+        if simple {
+            found.extend(
+                criterion::expressions_in(&criterion.condition)
+                    .iter()
+                    .filter_map(|expression| named_in(expression)),
+            );
+        } else {
+            read(&criterion.condition, found);
+        }
     }
     fn read_value(value: &ValueOrSelector, found: &mut BTreeSet<String>) {
         match value {
@@ -1452,11 +1463,12 @@ fn steps_named_by(step: &Step, description: &Description) -> BTreeSet<String> {
             match entry {
                 ReusableOr::Item(parameter) => read_value(&parameter.value, found),
                 ReusableOr::Reusable(reusable) => {
-                    // The override, and the component it names.
+                    // An override *replaces* the component's value, so
+                    // it replaces what that value read too: the
+                    // component's own dependency is not one here.
                     if let Some(overridden) = &reusable.value {
                         read_literal(overridden, found);
-                    }
-                    if let Some(parameter) = reusable
+                    } else if let Some(parameter) = reusable
                         .reference
                         .strip_prefix("$components.parameters.")
                         .and_then(|name| {
@@ -1477,7 +1489,7 @@ fn steps_named_by(step: &Step, description: &Description) -> BTreeSet<String> {
             if let Some(context) = &criterion.context {
                 read(context, found);
             }
-            read_condition(&criterion.condition, found);
+            read_condition(criterion, found);
         }
     }
 

@@ -359,17 +359,6 @@ pub(crate) fn references(text: &str) -> Vec<&str> {
     found
 }
 
-/// The same, for a `simple` condition — whose own parser reads a bare
-/// `$…` operand wherever one stands, so every such word counts.
-pub(crate) fn references_in_condition(text: &str) -> Vec<&str> {
-    let mut found = references(text);
-    found.extend(
-        text.split(|char: char| char.is_whitespace() || matches!(char, '(' | ')'))
-            .filter(|word| is_expression(word)),
-    );
-    found
-}
-
 /// Replace every `{$…}` in `text` with what it evaluates to.
 ///
 /// A string is what the caller asked for, so a string value is put in as

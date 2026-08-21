@@ -983,3 +983,129 @@ fn an_expression_inside_a_payload_string_is_still_a_dependency() {
         json!({ "note": "pet 7" })
     );
 }
+
+// ---- a fourth review: how a condition is read, and what an override
+//      replaces -------------------------------------------------------
+
+#[test]
+fn a_condition_with_no_spaces_in_it_still_names_its_dependency() {
+    // Nothing separates the operands but the operators, which is what
+    // splitting on spaces misses.
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "operationId": "placeOrder",
+            "successCriteria": [
+                { "condition": "$statusCode==201&&$steps.b.outputs.ready==true" }
+            ]
+        },
+        {
+            "stepId": "b",
+            "operationId": "listPets",
+            "outputs": { "ready": "$response.body#/ready" }
+        }
+    ]));
+    let mut client = Fake::new()
+        .reply(200, &json!({ "ready": true }))
+        .reply(201, &json!({}));
+
+    let report = execute(&description, &options(), &mut client).expect("the workflow runs");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "a"],
+        "the step the condition reads runs first"
+    );
+    assert_eq!(report.outcome, Outcome::Succeeded);
+}
+
+#[test]
+fn a_step_named_inside_a_quoted_literal_is_not_a_dependency() {
+    // The tokenizer knows a quoted string when it sees one, so this is
+    // a word to compare against, not a reference.
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "operationId": "listPets",
+            "successCriteria": [
+                { "condition": "$response.body#/note == '$steps.b.outputs.x'" }
+            ]
+        },
+        { "stepId": "b", "operationId": "listPets", "dependsOn": ["a"] }
+    ]));
+    let mut client = Fake::new()
+        .reply(200, &json!({ "note": "$steps.b.outputs.x" }))
+        .reply(200, &json!([]));
+
+    let report = execute(&description, &options(), &mut client).expect("no cycle here");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert!(report.steps[0].passed, "and it compared as a word");
+}
+
+#[test]
+fn an_override_replaces_the_components_dependency_too() {
+    // `fromB` reads step `b`, but this use of it supplies its own
+    // value — so `a` does not depend on `b`, and `b` may depend on `a`.
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "petStore", "url": "https://api.example.com/openapi.json", "type": "openapi" }
+        ],
+        "workflows": [{
+            "workflowId": "w",
+            "steps": [
+                {
+                    "stepId": "a",
+                    "operationId": "listPets",
+                    "parameters": [
+                        { "reference": "$components.parameters.fromB", "value": 123 }
+                    ]
+                },
+                {
+                    "stepId": "b",
+                    "operationId": "listPets",
+                    "dependsOn": ["a"],
+                    "outputs": { "value": "$response.body#/id" }
+                }
+            ]
+        }],
+        "components": {
+            "parameters": {
+                "fromB": { "name": "id", "in": "query", "value": "$steps.b.outputs.value" }
+            }
+        }
+    }))
+    .expect("a v1.1 description");
+    let mut client = Fake::new()
+        .reply(200, &json!([]))
+        .reply(200, &json!({ "id": 7 }));
+
+    let report = execute(&description, &options(), &mut client).expect("no cycle here");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert!(
+        client.sent()[0].url.ends_with("?id=123"),
+        "the override is what was sent: {}",
+        client.sent()[0].url
+    );
+}
