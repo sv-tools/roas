@@ -775,3 +775,211 @@ fn prose_mentioning_a_step_is_documentation_not_a_dependency() {
         "the document's own order stands"
     );
 }
+
+// ---- a third review: typos, inheritance, components, and mentions ---
+
+#[test]
+fn a_step_id_that_is_no_step_at_all_is_a_fault_not_a_silence() {
+    let description = one(json!([{
+        "stepId": "listPets",
+        "operationId": "listPets",
+        "successCriteria": [{ "condition": "$statusCode == 200" }]
+    }]));
+    let mut description = description;
+    description.workflows[0].outputs = serde_json::from_value(json!({
+        "typo": "$steps.doesNotExist.outputs.value"
+    }))
+    .expect("outputs");
+    let mut client = Fake::new().reply(500, &json!({}));
+
+    // The workflow stopped early, but this names no step it has: a
+    // stopped workflow excuses a step that did not run, not a typo.
+    let error = execute(&description, &options(), &mut client).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("which this workflow has not got"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn a_workflows_own_parameters_reach_the_workflow_it_calls() {
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "parameters": [{ "name": "who", "value": "ada" }],
+            "steps": [{ "stepId": "call", "workflowId": "login" }]
+        },
+        {
+            "workflowId": "login",
+            "steps": [{
+                "stepId": "post",
+                "operationId": "login",
+                "requestBody": { "payload": { "who": "$inputs.who" } }
+            }]
+        }
+    ]));
+    let mut client = Fake::new().reply(200, &json!({}));
+
+    execute(&description, &options(), &mut client).expect("the workflow runs");
+
+    assert_eq!(
+        serde_json::from_slice::<Value>(client.sent()[0].body.as_ref().expect("a body"))
+            .expect("json"),
+        json!({ "who": "ada" }),
+        "a parameter of the workflow applies to the step that calls another"
+    );
+}
+
+#[test]
+fn a_step_parameter_overrides_the_workflows_own() {
+    let description = description(json!([
+        {
+            "workflowId": "w",
+            "parameters": [{ "name": "who", "value": "ada" }],
+            "steps": [{
+                "stepId": "call",
+                "workflowId": "login",
+                "parameters": [{ "name": "who", "value": "grace" }]
+            }]
+        },
+        {
+            "workflowId": "login",
+            "steps": [{
+                "stepId": "post",
+                "operationId": "login",
+                "requestBody": { "payload": { "who": "$inputs.who" } }
+            }]
+        }
+    ]));
+    let mut client = Fake::new().reply(200, &json!({}));
+
+    execute(&description, &options(), &mut client).expect("the workflow runs");
+
+    assert_eq!(
+        serde_json::from_slice::<Value>(client.sent()[0].body.as_ref().expect("a body"))
+            .expect("json"),
+        json!({ "who": "grace" })
+    );
+}
+
+#[test]
+fn a_component_parameter_carries_its_dependency_with_it() {
+    // The dependency is inside the component, not in the step that
+    // uses it: `a` must still wait for `b`.
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "petStore", "url": "https://api.example.com/openapi.json", "type": "openapi" }
+        ],
+        "workflows": [{
+            "workflowId": "w",
+            "steps": [
+                {
+                    "stepId": "a",
+                    "operationId": "placeOrder",
+                    "parameters": [{ "reference": "$components.parameters.fromB" }]
+                },
+                {
+                    "stepId": "b",
+                    "operationId": "listPets",
+                    "outputs": { "value": "$response.body#/id" }
+                }
+            ]
+        }],
+        "components": {
+            "parameters": {
+                "fromB": { "name": "id", "in": "query", "value": "$steps.b.outputs.value" }
+            }
+        }
+    }))
+    .expect("a v1.1 description");
+    let mut client = Fake::new()
+        .reply(200, &json!({ "id": 7 }))
+        .reply(201, &json!({}));
+
+    let report = execute(&description, &options(), &mut client).expect("the workflow runs");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "a"],
+        "the step the component reads runs first"
+    );
+    assert!(client.sent()[1].url.ends_with("?id=7"));
+}
+
+#[test]
+fn a_payload_that_merely_mentions_a_step_is_text() {
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "operationId": "placeOrder",
+            "requestBody": { "payload": { "note": "see $steps.b.outputs.x for context" } }
+        },
+        {
+            "stepId": "b",
+            "operationId": "placeOrder",
+            "requestBody": { "payload": { "note": "as $steps.a.outputs.x says" } }
+        }
+    ]));
+    let mut client = Fake::new().reply(201, &json!({})).reply(201, &json!({}));
+
+    let report = execute(&description, &options(), &mut client).expect("no cycle here");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"],
+        "neither string is an expression, so neither is a dependency"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(client.sent()[0].body.as_ref().expect("a body"))
+            .expect("json"),
+        json!({ "note": "see $steps.b.outputs.x for context" }),
+        "and the text goes on the wire as written"
+    );
+}
+
+#[test]
+fn an_expression_inside_a_payload_string_is_still_a_dependency() {
+    let description = one(json!([
+        {
+            "stepId": "a",
+            "operationId": "placeOrder",
+            "requestBody": { "payload": { "note": "pet {$steps.b.outputs.id}" } }
+        },
+        {
+            "stepId": "b",
+            "operationId": "listPets",
+            "outputs": { "id": "$response.body#/id" }
+        }
+    ]));
+    let mut client = Fake::new()
+        .reply(200, &json!({ "id": 7 }))
+        .reply(201, &json!({}));
+
+    let report = execute(&description, &options(), &mut client).expect("the workflow runs");
+
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "a"]
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(client.sent()[1].body.as_ref().expect("a body"))
+            .expect("json"),
+        json!({ "note": "pet 7" })
+    );
+}

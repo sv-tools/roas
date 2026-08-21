@@ -6,7 +6,7 @@
 //! network at all.
 
 use crate::criterion;
-use crate::expression::{Exchange, ExpressionError, Scope, StepState, WorkflowState};
+use crate::expression::{self, Exchange, ExpressionError, Scope, StepState, WorkflowState};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::operation::{self, Source};
 use crate::report::{
@@ -178,6 +178,8 @@ fn scope<'s>(
         sources: &ambient.sources,
         components: &ambient.components,
         self_: ambient.self_.as_deref(),
+        declared_steps: &frame.declared,
+        declared_workflows: &ambient.workflows,
     }
 }
 
@@ -204,6 +206,8 @@ struct Frame<'d> {
     /// How many times each step has been attempted, for the report and
     /// for the caller's safety limit.
     attempts: BTreeMap<String, u32>,
+    /// Every step id this workflow declares.
+    declared: BTreeSet<String>,
     /// How many retries each *failure action* has spent on a step.
     /// `retryLimit` belongs to the action that states it, so a step
     /// that fails two different ways gets both actions' budgets.
@@ -250,6 +254,8 @@ struct Ambient {
     components: Value,
     /// The description's `$self`, for `$self`.
     self_: Option<String>,
+    /// Every workflow id the description declares.
+    workflows: BTreeSet<String>,
 }
 
 /// A workflow run, one request at a time.
@@ -317,6 +323,11 @@ impl<'d> Run<'d> {
                 sources,
                 components,
                 self_: description.self_.clone(),
+                workflows: description
+                    .workflows
+                    .iter()
+                    .map(|workflow| workflow.workflow_id.clone())
+                    .collect(),
             },
             frames: Vec::new(),
             queue,
@@ -542,10 +553,15 @@ impl<'d> Run<'d> {
         self.frames.push(Frame {
             workflow,
             inputs,
-            order: ordered_steps(workflow)?,
+            order: ordered_steps(workflow, self.description)?,
             at: 0,
             steps: BTreeMap::new(),
             outputs: BTreeMap::new(),
+            declared: workflow
+                .steps
+                .iter()
+                .map(|step| step.step_id.clone())
+                .collect(),
             attempts: BTreeMap::new(),
             retries: BTreeMap::new(),
             caller,
@@ -674,8 +690,13 @@ impl<'d> Run<'d> {
             .ok_or_else(|| ExecutionError::UnknownWorkflow(wanted.clone()))?;
 
         // A workflow step's parameters are the workflow's inputs.
-        // A workflow step's parameters are the workflow's inputs.
-        let arguments = step.parameters.clone();
+        // "When the step... specifies a `workflowId`, then all
+        // parameters map to workflow inputs", and a workflow's own
+        // parameters are "applicable for all steps described under this
+        // workflow... can be overridden at the step level but cannot be
+        // removed there" — so both lists go, the step's last.
+        let mut arguments = frame.workflow.parameters.clone();
+        arguments.extend(step.parameters.iter().cloned());
         let inputs = self.arguments(&arguments)?;
         self.enter(workflow, inputs, Some((step_id, Then::Advance)))
     }
@@ -1371,95 +1392,118 @@ fn visit<'d>(
 /// whether or not `dependsOn` says so.
 ///
 /// "Tools MUST also treat runtime expression output references (e.g.,
-/// `$steps.stepId.outputs.field`) as implicit dependencies" — so this
-/// reads the fields that hold expressions and no others. A description
-/// that mentions `$steps.a.outputs.x` in its prose is documenting, not
-/// depending, and treating the two alike turns a comment into a cycle.
-fn steps_named_by(step: &Step) -> BTreeSet<String> {
+/// `$steps.stepId.outputs.field`) as implicit dependencies" — so two
+/// things matter. Only the fields that hold expressions are read, and
+/// within them only what the runtime would really evaluate: a whole
+/// `$…` string, a `{$…}` inside one, and in a condition the bare
+/// operands its parser reads. A payload that merely mentions a step in
+/// its text goes on the wire as text, and is no dependency at all.
+///
+/// A `Reusable` is followed into the components: where a parameter or
+/// an action is written makes no difference to what it reads.
+fn steps_named_by(step: &Step, description: &Description) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    let mut note = |text: &str| {
-        let mut rest = text;
-        while let Some(at) = rest.find("$steps.") {
-            rest = &rest[at + "$steps.".len()..];
-            let named: String = rest
-                .chars()
-                .take_while(|char| char.is_alphanumeric() || matches!(char, '_' | '-' | '.'))
-                .collect();
-            // The id runs up to the field that follows it.
-            if let Some((id, _)) = named.split_once('.') {
-                found.insert(id.to_owned());
-            }
-        }
-    };
 
-    // A value may be a literal holding expressions, or a selector whose
-    // context is one.
-    fn value(value: &ValueOrSelector, note: &mut impl FnMut(&str)) {
+    /// The step id an expression names, if it names one.
+    fn named_in(expression: &str) -> Option<String> {
+        let rest = expression.strip_prefix("$steps.")?;
+        let (id, _) = rest.split_once('.')?;
+        Some(id.to_owned())
+    }
+    fn read(text: &str, found: &mut BTreeSet<String>) {
+        found.extend(
+            expression::references(text)
+                .into_iter()
+                .filter_map(named_in),
+        );
+    }
+    fn read_condition(text: &str, found: &mut BTreeSet<String>) {
+        found.extend(
+            expression::references_in_condition(text)
+                .into_iter()
+                .filter_map(named_in),
+        );
+    }
+    fn read_value(value: &ValueOrSelector, found: &mut BTreeSet<String>) {
         match value {
-            ValueOrSelector::Literal(literal) => {
-                fn walk(value: &Value, note: &mut impl FnMut(&str)) {
-                    match value {
-                        Value::String(text) => note(text),
-                        Value::Array(items) => items.iter().for_each(|item| walk(item, note)),
-                        Value::Object(members) => {
-                            members.values().for_each(|member| walk(member, note));
-                        }
-                        _ => {}
-                    }
-                }
-                walk(literal, note);
-            }
-            ValueOrSelector::Selector(selector) => {
-                note(&selector.context);
-                note(&selector.selector);
-            }
+            ValueOrSelector::Literal(literal) => read_literal(literal, found),
+            // A selector's context is an expression; its selector is a
+            // JSONPath or a pointer, which the runtime does not
+            // evaluate as one.
+            ValueOrSelector::Selector(selector) => read(&selector.context, found),
         }
     }
-    fn parameters(list: &[ReusableOr<Parameter>], note: &mut impl FnMut(&str)) {
+    fn read_literal(value: &Value, found: &mut BTreeSet<String>) {
+        match value {
+            Value::String(text) => read(text, found),
+            Value::Array(items) => items.iter().for_each(|item| read_literal(item, found)),
+            Value::Object(members) => members
+                .values()
+                .for_each(|member| read_literal(member, found)),
+            _ => {}
+        }
+    }
+    fn read_parameters(
+        list: &[ReusableOr<Parameter>],
+        description: &Description,
+        found: &mut BTreeSet<String>,
+    ) {
         for entry in list {
             match entry {
-                ReusableOr::Item(parameter) => value(&parameter.value, note),
+                ReusableOr::Item(parameter) => read_value(&parameter.value, found),
                 ReusableOr::Reusable(reusable) => {
-                    note(&reusable.reference);
+                    // The override, and the component it names.
                     if let Some(overridden) = &reusable.value {
-                        value(&ValueOrSelector::Literal(overridden.clone()), note);
+                        read_literal(overridden, found);
+                    }
+                    if let Some(parameter) = reusable
+                        .reference
+                        .strip_prefix("$components.parameters.")
+                        .and_then(|name| {
+                            description
+                                .components
+                                .as_ref()
+                                .and_then(|components| components.parameters.get(name))
+                        })
+                    {
+                        read_value(&parameter.value, found);
                     }
                 }
             }
         }
     }
-    fn criteria(list: &[Criterion], note: &mut impl FnMut(&str)) {
+    fn read_criteria(list: &[Criterion], found: &mut BTreeSet<String>) {
         for criterion in list {
             if let Some(context) = &criterion.context {
-                note(context);
+                read(context, found);
             }
-            note(&criterion.condition);
+            read_condition(&criterion.condition, found);
         }
     }
 
-    parameters(&step.parameters, &mut note);
-    criteria(&step.success_criteria, &mut note);
+    read_parameters(&step.parameters, description, &mut found);
+    read_criteria(&step.success_criteria, &mut found);
     for output in step.outputs.values() {
-        value(output, &mut note);
+        read_value(output, &mut found);
     }
     if let Some(body) = &step.request_body {
         if let Some(payload) = &body.payload {
-            value(&ValueOrSelector::Literal(payload.clone()), &mut note);
+            read_literal(payload, &mut found);
         }
         for replacement in &body.replacements {
-            value(&replacement.value, &mut note);
+            read_value(&replacement.value, &mut found);
         }
     }
-    for action in &step.on_success {
-        if let ReusableOr::Item(action) = action {
-            criteria(&action.criteria, &mut note);
-            parameters(&action.parameters, &mut note);
+    for entry in &step.on_success {
+        if let Ok(action) = success_action(entry, description) {
+            read_criteria(&action.criteria, &mut found);
+            read_parameters(&action.parameters, description, &mut found);
         }
     }
-    for action in &step.on_failure {
-        if let ReusableOr::Item(action) = action {
-            criteria(&action.criteria, &mut note);
-            parameters(&action.parameters, &mut note);
+    for entry in &step.on_failure {
+        if let Ok(action) = failure_action(entry, description) {
+            read_criteria(&action.criteria, &mut found);
+            read_parameters(&action.parameters, description, &mut found);
         }
     }
 
@@ -1470,7 +1514,10 @@ fn steps_named_by(step: &Step) -> BTreeSet<String> {
 /// Step indices in an order that respects `dependsOn` and the steps an
 /// expression reads, keeping the document's order where neither says
 /// anything.
-fn ordered_steps(workflow: &Workflow) -> Result<Vec<usize>, ExecutionError> {
+fn ordered_steps(
+    workflow: &Workflow,
+    description: &Description,
+) -> Result<Vec<usize>, ExecutionError> {
     let index: BTreeMap<&str, usize> = workflow
         .steps
         .iter()
@@ -1483,6 +1530,7 @@ fn ordered_steps(workflow: &Workflow) -> Result<Vec<usize>, ExecutionError> {
     for step in &workflow.steps {
         visit_step(
             workflow,
+            description,
             &index,
             step,
             &mut ordered,
@@ -1495,6 +1543,7 @@ fn ordered_steps(workflow: &Workflow) -> Result<Vec<usize>, ExecutionError> {
 
 fn visit_step(
     workflow: &Workflow,
+    description: &Description,
     index: &BTreeMap<&str, usize>,
     step: &Step,
     ordered: &mut Vec<usize>,
@@ -1516,6 +1565,7 @@ fn visit_step(
             })?;
         visit_step(
             workflow,
+            description,
             index,
             &workflow.steps[*at],
             ordered,
@@ -1526,12 +1576,13 @@ fn visit_step(
     // The same for the steps this one reads. A name that is not a step
     // of this workflow is left alone: an expression may be wrong, and
     // saying so belongs where it is evaluated, with the whole context.
-    for id in steps_named_by(step) {
+    for id in steps_named_by(step, description) {
         let Some(at) = index.get(id.as_str()) else {
             continue;
         };
         visit_step(
             workflow,
+            description,
             index,
             &workflow.steps[*at],
             ordered,

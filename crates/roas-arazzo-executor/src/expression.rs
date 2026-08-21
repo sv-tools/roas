@@ -12,7 +12,7 @@
 
 use crate::http::{HttpRequest, HttpResponse};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A step's exchange: what was sent, and what came back.
 ///
@@ -59,6 +59,13 @@ pub(crate) struct Scope<'a> {
     pub workflows: &'a BTreeMap<String, WorkflowState>,
     /// The description's `$self`, when it declares one.
     pub self_: Option<&'a str>,
+    /// Every step id this workflow declares. A step that is named but
+    /// has not run is a different thing from a name that is no step of
+    /// this workflow at all — one is how a workflow that stopped early
+    /// looks, the other is a typo.
+    pub declared_steps: &'a BTreeSet<String>,
+    /// Every workflow id the description declares, for the same reason.
+    pub declared_workflows: &'a BTreeSet<String>,
     /// The step being evaluated, when there is one.
     pub here: Option<&'a Exchange>,
     /// `sourceDescriptions`, by name.
@@ -144,10 +151,16 @@ pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, Exp
         ),
         "$workflows" => {
             let (id, rest) = split_first(&rest, expression, "a workflow id")?;
-            let workflow = scope
-                .workflows
-                .get(id)
-                .ok_or_else(|| not_run(expression, format!("workflow `{id}`")))?;
+            let Some(workflow) = scope.workflows.get(id) else {
+                return Err(if scope.declared_workflows.contains(id) {
+                    not_run(expression, format!("workflow `{id}`"))
+                } else {
+                    missing(
+                        expression,
+                        format!("workflow `{id}`, which this description has not got"),
+                    )
+                });
+            };
             // `inputs` and `outputs` are both fields of a workflow; the
             // bare shorthand names an output.
             match rest.split_first() {
@@ -162,10 +175,16 @@ pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, Exp
         }
         "$steps" => {
             let (id, rest) = split_first(&rest, expression, "a step id")?;
-            let step = scope
-                .steps
-                .get(id)
-                .ok_or_else(|| not_run(expression, format!("step `{id}`")))?;
+            let Some(step) = scope.steps.get(id) else {
+                return Err(if scope.declared_steps.contains(id) {
+                    not_run(expression, format!("step `{id}`"))
+                } else {
+                    missing(
+                        expression,
+                        format!("step `{id}`, which this workflow has not got"),
+                    )
+                });
+            };
             if let Some(rest) = rest.strip_prefix(&["outputs"][..]) {
                 match from_map(&step.outputs, rest, expression, "an output") {
                     // A step that failed named nothing, and saying it
@@ -318,6 +337,39 @@ fn from_map(
     walk(value, rest, expression, what)
 }
 
+/// Every runtime expression a string really evaluates.
+///
+/// This is what tells a reference from a mention: at run time a string
+/// is an expression only if the whole of it is one, or where a `{$…}`
+/// sits inside it. `"see $steps.a.outputs.x"` is a sentence, and goes
+/// on the wire as one.
+pub(crate) fn references(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    if is_expression(text) {
+        found.push(text);
+    }
+    let mut at = 0;
+    while let Some(start) = text[at..].find("{$").map(|start| at + start) {
+        let Some(end) = text[start..].find('}').map(|end| start + end) else {
+            break;
+        };
+        found.push(&text[start + 1..end]);
+        at = end + 1;
+    }
+    found
+}
+
+/// The same, for a `simple` condition — whose own parser reads a bare
+/// `$…` operand wherever one stands, so every such word counts.
+pub(crate) fn references_in_condition(text: &str) -> Vec<&str> {
+    let mut found = references(text);
+    found.extend(
+        text.split(|char: char| char.is_whitespace() || matches!(char, '(' | ')'))
+            .filter(|word| is_expression(word)),
+    );
+    found
+}
+
 /// Replace every `{$…}` in `text` with what it evaluates to.
 ///
 /// A string is what the caller asked for, so a string value is put in as
@@ -357,6 +409,8 @@ pub(crate) mod tests {
         pub here: Option<Exchange>,
         pub sources: Value,
         pub components: Value,
+        pub declared_steps: BTreeSet<String>,
+        pub declared_workflows: BTreeSet<String>,
     }
 
     impl Default for Fixture {
@@ -370,6 +424,16 @@ pub(crate) mod tests {
                 here: None,
                 sources: json!({ "petStore": { "url": "https://api.example.com/openapi.json" } }),
                 components: json!({ "parameters": { "locale": { "name": "locale" } } }),
+                // Every id the tests name, so a name that is absent is
+                // a step that has not run rather than a typo.
+                declared_steps: ["findPet", "call", "failed", "nope"]
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                declared_workflows: ["authenticate", "nope"]
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect(),
             }
         }
     }
@@ -385,6 +449,8 @@ pub(crate) mod tests {
                 here: self.here.as_ref(),
                 sources: &self.sources,
                 components: &self.components,
+                declared_steps: &self.declared_steps,
+                declared_workflows: &self.declared_workflows,
             }
         }
     }
