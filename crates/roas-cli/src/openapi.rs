@@ -397,6 +397,7 @@ mod tests {
     }
     use crate::{Cli, InputSource};
     use clap::Parser;
+    use clap::error::ErrorKind;
     use std::path::Path;
 
     #[test]
@@ -1202,5 +1203,107 @@ mod tests {
             }
             _ => panic!("expected Preview"),
         }
+    }
+    // ── argument constraints ────────────────────────────────────────────
+
+    /// The error a bad command line produces — guarded against passing
+    /// for the wrong reason. `InvalidSubcommand` would mean the test
+    /// lost track of where the command lives (as these did when the
+    /// OpenAPI commands moved under `openapi`), not that the constraint
+    /// under test held.
+    fn parse_error(args: &[&str]) -> ErrorKind {
+        let kind = Cli::try_parse_from(args)
+            .err()
+            .unwrap_or_else(|| panic!("{args:?} must not parse"))
+            .kind();
+        assert_ne!(
+            kind,
+            ErrorKind::InvalidSubcommand,
+            "{args:?} names a command that does not exist",
+        );
+        kind
+    }
+
+    #[test]
+    fn cli_rejects_unknown_ignore_value() {
+        let args = [
+            "roas",
+            "openapi",
+            "validate",
+            "--ignore",
+            "no-such-check",
+            "spec.json",
+        ];
+        assert_eq!(parse_error(&args), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn cli_rejects_convert_without_to() {
+        let args = ["roas", "openapi", "convert", "spec.json"];
+        assert_eq!(parse_error(&args), ErrorKind::MissingRequiredArgument);
+    }
+
+    /// `--load` is only meaningful when `--collapse` is active; clap's
+    /// `requires = "collapse"` must reject the flag on its own.
+    #[test]
+    fn cli_rejects_convert_load_without_collapse() {
+        let args = [
+            "roas",
+            "openapi",
+            "convert",
+            "--to",
+            "v3_2",
+            "--load",
+            "file",
+            "spec.json",
+        ];
+        assert_eq!(parse_error(&args), ErrorKind::MissingRequiredArgument);
+    }
+
+    /// `--merge-option` is only meaningful when at least one `--merge`
+    /// source is provided; clap's `requires = "merge"` must reject the
+    /// flag on its own.
+    #[test]
+    fn cli_rejects_merge_option_without_merge() {
+        let args = [
+            "roas",
+            "openapi",
+            "convert",
+            "--to",
+            "v3_2",
+            "--merge-option",
+            "base-wins",
+            "spec.json",
+        ];
+        assert_eq!(parse_error(&args), ErrorKind::MissingRequiredArgument);
+    }
+
+    /// `--apply-option` requires at least one `--apply` source.
+    #[test]
+    fn cli_rejects_apply_option_without_apply() {
+        let args = [
+            "roas",
+            "openapi",
+            "convert",
+            "--to",
+            "v3_2",
+            "--apply-option",
+            "error-on-zero-match",
+            "spec.json",
+        ];
+        assert_eq!(parse_error(&args), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn cli_rejects_unknown_preview_renderer() {
+        let args = [
+            "roas",
+            "openapi",
+            "preview",
+            "--renderer",
+            "stoplight",
+            "spec.json",
+        ];
+        assert_eq!(parse_error(&args), ErrorKind::InvalidValue);
     }
 }

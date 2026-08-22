@@ -361,52 +361,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cli_rejects_unknown_ignore_value() {
-        let res =
-            Cli::try_parse_from(["roas", "validate", "--ignore", "no-such-check", "spec.json"]);
-        assert!(res.is_err(), "unknown --ignore value must error");
-    }
-
-    #[test]
-    fn cli_rejects_convert_without_to() {
-        let res = Cli::try_parse_from(["roas", "convert", "spec.json"]);
-        assert!(res.is_err(), "convert without --to must error");
-    }
-
-    #[test]
-    fn cli_rejects_convert_load_without_collapse() {
-        // `--load` is only meaningful when `--collapse` is active;
-        // clap's `requires = "collapse"` must reject the flag on its own.
-        let res = Cli::try_parse_from([
-            "roas",
-            "convert",
-            "--to",
-            "v3_2",
-            "--load",
-            "file",
-            "spec.json",
-        ]);
-        assert!(res.is_err(), "--load without --collapse must error");
-    }
-
-    #[test]
-    fn cli_rejects_merge_option_without_merge() {
-        // `--merge-option` is only meaningful when at least one
-        // `--merge` source is provided; clap's `requires = "merge"`
-        // must reject the flag on its own.
-        let res = Cli::try_parse_from([
-            "roas",
-            "convert",
-            "--to",
-            "v3_2",
-            "--merge-option",
-            "base-wins",
-            "spec.json",
-        ]);
-        assert!(res.is_err(), "--merge-option without --merge must error");
-    }
-
-    #[test]
     fn read_input_json_file_returns_parsed_value_and_json_format() {
         let f = TempFile::write("ok.json", br#"{"hello":"world"}"#);
         let (v, fmt) = read_input(&InputSource::File(f.0.clone()), None).expect("parse ok");
@@ -524,27 +478,6 @@ pub(crate) mod tests {
         assert_eq!(src.display(), "<stdin>");
     }
 
-    #[test]
-    fn cli_rejects_apply_option_without_apply() {
-        // `--apply-option` requires at least one `--apply` source.
-        let res = Cli::try_parse_from([
-            "roas",
-            "convert",
-            "--to",
-            "v3_2",
-            "--apply-option",
-            "error-on-zero-match",
-            "spec.json",
-        ]);
-        assert!(res.is_err(), "--apply-option without --apply must error");
-    }
-
-    #[test]
-    fn cli_rejects_unknown_preview_renderer() {
-        let res = Cli::try_parse_from(["roas", "preview", "--renderer", "stoplight", "spec.json"]);
-        assert!(res.is_err(), "unknown renderer must be rejected");
-    }
-
     // ── completions / manpages ──────────────────────────────────────────
 
     #[test]
@@ -556,6 +489,17 @@ pub(crate) mod tests {
                 matches!(cli.command, Command::Completions { .. }),
                 "expected Completions for {shell}",
             );
+        }
+    }
+
+    /// OpenAPI's commands moved under `openapi` in 0.12.0 with no
+    /// aliases left behind, so the old root spellings must be unknown
+    /// subcommands rather than quietly doing something.
+    #[test]
+    fn cli_rejects_the_old_root_openapi_commands() {
+        for old in ["validate", "convert", "preview"] {
+            let res = Cli::try_parse_from(["roas", old, "spec.json"]);
+            assert!(res.is_err(), "`roas {old}` must no longer parse");
         }
     }
 

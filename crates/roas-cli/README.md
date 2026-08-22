@@ -228,11 +228,11 @@ The Homebrew formula auto-installs completions for bash/zsh/fish; the Docker ima
 
 ### `manpages`
 
-Generates troff manpages — top-level `roas.1` plus one per subcommand (`roas-validate.1`, `roas-convert.1`, `roas-preview.1`, …) — into an output directory:
+Generates troff manpages — top-level `roas.1`, one per group (`roas-openapi.1`, `roas-arazzo.1`, …) and one per command inside a group (`roas-openapi-validate.1`, `roas-arazzo-run.1`, …) — into an output directory:
 
 ```shell
 roas manpages --out /tmp/man
-man /tmp/man/roas-validate.1
+man /tmp/man/roas-openapi-validate.1
 ```
 
 For a system-wide install: `roas manpages --out "$(brew --prefix)/share/man/man1"` (Homebrew), or `roas manpages --out ~/.local/share/man/man1` for a per-user install. The Homebrew formula installs these automatically.
