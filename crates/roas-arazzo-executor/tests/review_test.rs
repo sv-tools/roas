@@ -1184,3 +1184,113 @@ fn a_braced_expression_in_a_pattern_is_still_a_dependency() {
     );
     assert_eq!(report.outcome, Outcome::Succeeded);
 }
+
+#[test]
+fn a_bare_operation_id_is_refused_while_a_source_is_missing() {
+    // Two descriptions are declared and one is supplied. The id is
+    // found in the one that is here, but that says nothing about the
+    // one that is not — so it cannot be shown to be the only one.
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "petStore", "url": "a", "type": "openapi" },
+            { "name": "other", "url": "b", "type": "openapi" }
+        ],
+        "workflows": [{
+            "workflowId": "w",
+            "steps": [{ "stepId": "s", "operationId": "listPets" }]
+        }]
+    }))
+    .expect("a v1.1 description");
+    let options = Options::new().source("petStore", "a", petstore());
+
+    let error = execute(&description, &options, &mut Fake::new()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("is named without a source description, and other was not supplied"),
+        "got: {error}"
+    );
+
+    // Naming the source settles it, with no need for the other.
+    let described: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "petStore", "url": "a", "type": "openapi" },
+            { "name": "other", "url": "b", "type": "openapi" }
+        ],
+        "workflows": [{
+            "workflowId": "w",
+            "steps": [{
+                "stepId": "s",
+                "operationId": "$sourceDescriptions.petStore.listPets"
+            }]
+        }]
+    }))
+    .expect("a v1.1 description");
+    let mut client = Fake::new().reply(200, &json!([]));
+    execute(&described, &options, &mut client).expect("the named source is enough");
+    assert_eq!(client.sent().len(), 1);
+}
+
+#[test]
+fn an_arazzo_source_that_is_missing_does_not_hold_an_operation() {
+    // A description of workflows cannot make an operation ambiguous, so
+    // its absence is no reason to refuse a bare id.
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "petStore", "url": "a", "type": "openapi" },
+            { "name": "shared", "url": "b", "type": "arazzo" }
+        ],
+        "workflows": [{
+            "workflowId": "w",
+            "steps": [{ "stepId": "s", "operationId": "listPets" }]
+        }]
+    }))
+    .expect("a v1.1 description");
+    let options = Options::new().source("petStore", "a", petstore());
+    let mut client = Fake::new().reply(200, &json!([]));
+
+    execute(&description, &options, &mut client).expect("the run goes ahead");
+
+    assert_eq!(client.sent().len(), 1);
+}
+
+#[test]
+fn ambiguity_already_proven_is_said_before_a_missing_source() {
+    // Two supplied descriptions both hold `listPets`, and a third is
+    // missing. Supplying the third cannot unprove the ambiguity, so the
+    // ambiguity is what to say.
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "petStore", "url": "a", "type": "openapi" },
+            { "name": "mirror", "url": "b", "type": "openapi" },
+            { "name": "absent", "url": "c", "type": "openapi" }
+        ],
+        "workflows": [{
+            "workflowId": "w",
+            "steps": [{ "stepId": "s", "operationId": "listPets" }]
+        }]
+    }))
+    .expect("a v1.1 description");
+    let options =
+        Options::new()
+            .source("petStore", "a", petstore())
+            .source("mirror", "b", petstore());
+
+    let error = execute(&description, &options, &mut Fake::new()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("is in more than one source description: mirror, petStore"),
+        "got: {error}"
+    );
+}
