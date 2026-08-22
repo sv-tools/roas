@@ -42,7 +42,8 @@ roas overlay convert --to v1_1 [FILE]      # upconvert an overlay
 roas overlay apply --overlay O.yaml [SPEC] # apply overlay(s) to a spec
 roas arazzo validate [FILE]                # validate an OpenAPI Arazzo description
 roas arazzo convert --to v1_1 [FILE]       # upconvert an Arazzo description
-roas arazzo run [FILE]                     # run a workflow against a real API
+roas arazzo list [FILE]                    # what workflows a description offers
+roas arazzo run --workflow ID [FILE]       # run one against a real API
 roas asyncapi validate [FILE]              # validate an AsyncAPI document
 roas asyncapi convert --to v3_1 [FILE]     # upconvert an AsyncAPI document
 roas preview [FILE]                        # open the spec in a browser via Redoc
@@ -152,6 +153,16 @@ cat workflow.json | roas arazzo validate       # description on stdin
 
 - **`arazzo validate`** — checks structure: required / non-empty fields, source-name and component/output-key patterns, uniqueness of source names / workflow ids / step ids, the step shape rules (OpenAPI / AsyncAPI / Workflow), criterion type / context / version constraints, and `goto` action targets. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed description.
 - **`arazzo convert --to <v1_0|v1_1>`** — upconverts a description. Only upconversion is supported (v1.0 → v1.1 adds `$self`, AsyncAPI steps, selectors, expression types, and action `parameters`); downconversion errors.
+- **`arazzo list`** — prints each workflow's id, summary, `dependsOn`, inputs (with types, and which are required) and steps. What to pass to `arazzo run --workflow`, and what inputs it wants.
+
+```text
+buyPet
+  summary: Find then order a pet
+  depends on: authenticate
+  inputs: petId (string, required), token (string)
+  steps: 2 (findPet, orderPet)
+```
+
 - **`arazzo run`** — runs a workflow via [`roas-arazzo-executor`](https://crates.io/crates/roas-arazzo-executor): every step's request, its criteria, its `retry` / `goto` / `end` actions, and the workflows it calls. This is the one command that talks to an API rather than reading a document.
 
 ```shell
@@ -167,6 +178,8 @@ workflow `buyPet` succeeded
   orderId = "o-1"
   petName = "fluffy"
 ```
+
+`--workflow <ID>` says which workflow to run. A description with one workflow needs no flag; with several the command stops and lists them rather than picking, since running the wrong one means real requests against a real API. A workflow's `dependsOn` still pulls in what it needs, in order, and those steps appear in the report under their own workflow.
 
 It needs the source descriptions the steps point at: name them with `--source <name>=<path>`, or let `--load file` / `--load http` fetch them by the URLs the description gives (a relative URL is read from beside the description). `--input name=value` sets one input — read as JSON where it is JSON, so `--input n=7` is a number and `--input n=seven` a string — and `--inputs <FILE>` takes an object of them. `--base-url <name>=<url>` sends a source's requests elsewhere, which is how a workflow written against production runs against a test server. `--max-steps` bounds a `goto` that loops.
 

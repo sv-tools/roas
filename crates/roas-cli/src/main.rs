@@ -39,11 +39,19 @@
 //!   apply --overlay <FILE> [SPEC]` applies overlay(s) to a target
 //!   spec (spec on stdin or as the positional arg).
 //!
-//! - `roas arazzo <validate|convert>` — work with OpenAPI Arazzo
-//!   workflow descriptions. `arazzo validate` parses + validates a
-//!   description; `arazzo convert --to v1_1` upconverts one (v1.0 →
+//! - `roas arazzo <validate|convert|run|list>` — work with OpenAPI
+//!   Arazzo workflow descriptions. `arazzo validate` parses + validates
+//!   a description; `arazzo convert --to v1_1` upconverts one (v1.0 →
 //!   v1.1). Arazzo describes workflows rather than transforming a spec,
-//!   so there is no `apply`.
+//!   so there is no `apply` — but there is `arazzo run`, which performs
+//!   every step's request against a real API and reports what happened.
+//!   It needs the source descriptions the workflow points at: pass them
+//!   with `--source <name>=<path>`, or `--load file` / `--load http` to
+//!   fetch them. The report goes to stderr and the workflow's outputs to
+//!   stdout, and the exit status follows the workflow. `--workflow <ID>`
+//!   says which one to run — required where a description offers more
+//!   than one, since the choice means real requests — and `arazzo list`
+//!   says what a description offers and what each workflow takes.
 //!
 //! - `roas asyncapi <validate|convert>` — work with AsyncAPI
 //!   documents. `asyncapi validate` parses + validates one (2.6, 3.0 or

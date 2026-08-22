@@ -141,6 +141,8 @@ pub(crate) enum ArazzoCommand {
     /// Run a workflow: perform every step's request and report what
     /// happened.
     Run(ArazzoRunArgs),
+    /// List the workflows a description offers, and what each one takes.
+    List(ArazzoListArgs),
 }
 
 #[derive(clap::Args)]
@@ -183,6 +185,17 @@ pub(crate) struct ArazzoConvertArgs {
     /// Output format. Defaults to the input format.
     #[arg(long, value_enum)]
     output_format: Option<InputFormat>,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct ArazzoListArgs {
+    /// Path to the Arazzo file (JSON or YAML). Pass `-`, or omit and
+    /// pipe the description, to read from stdin.
+    file: Option<PathBuf>,
+
+    /// Override format detection (see `arazzo validate --format`).
+    #[arg(long, value_enum)]
+    format: Option<InputFormat>,
 }
 
 #[derive(clap::Args)]
@@ -253,6 +266,7 @@ pub(crate) fn run_arazzo(cmd: ArazzoCommand) -> Result<()> {
         ArazzoCommand::Validate(args) => run_arazzo_validate(args),
         ArazzoCommand::Convert(args) => run_arazzo_convert(args),
         ArazzoCommand::Run(args) => run_arazzo_run(args),
+        ArazzoCommand::List(args) => run_arazzo_list(args),
     }
 }
 
@@ -301,6 +315,77 @@ fn run_arazzo_convert(args: ArazzoConvertArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_arazzo_list(args: ArazzoListArgs) -> Result<()> {
+    let source = resolve_input_source(args.file.as_deref())?;
+    let (value, _) = read_input(&source, args.format)?;
+    let detected = detect_or_use_arazzo(None, value)?;
+    let description = match detected {
+        DetectedArazzo::V1_1(description) => description,
+        DetectedArazzo::V1_0(description) => v1_1::Description::from(description),
+    };
+
+    for workflow in &description.workflows {
+        println!("{}", workflow.workflow_id);
+        if let Some(summary) = workflow
+            .summary
+            .as_deref()
+            .or(workflow.description.as_deref())
+        {
+            println!("  summary: {}", summary.lines().next().unwrap_or_default());
+        }
+        if !workflow.depends_on.is_empty() {
+            println!("  depends on: {}", workflow.depends_on.join(", "));
+        }
+        let inputs = inputs_of(workflow);
+        if !inputs.is_empty() {
+            println!("  inputs: {}", inputs.join(", "));
+        }
+        println!(
+            "  steps: {} ({})",
+            workflow.steps.len(),
+            workflow
+                .steps
+                .iter()
+                .map(|step| step.step_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The inputs a workflow takes, read off the JSON Schema it describes
+/// them with. Required ones say so; a schema this cannot read at all
+/// simply contributes nothing.
+fn inputs_of(workflow: &v1_1::Workflow) -> Vec<String> {
+    let Some(schema) = &workflow.inputs else {
+        return Vec::new();
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| {
+            properties
+                .iter()
+                .map(|(name, property)| {
+                    let type_ = property.get("type").and_then(Value::as_str);
+                    match (type_, required.contains(&name.as_str())) {
+                        (Some(type_), true) => format!("{name} ({type_}, required)"),
+                        (Some(type_), false) => format!("{name} ({type_})"),
+                        (None, true) => format!("{name} (required)"),
+                        (None, false) => name.clone(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
     let (value, input_format) = read_input(&source, args.format)?;
@@ -312,8 +397,24 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     };
 
     let mut options = Options::new();
-    if let Some(workflow) = &args.workflow {
-        options = options.workflow(workflow);
+    match &args.workflow {
+        Some(workflow) => options = options.workflow(workflow),
+        // Running a workflow means real requests against a real API, so
+        // which one is not a choice to make on someone's behalf. One
+        // workflow is no choice at all.
+        None if description.workflows.len() > 1 => {
+            let ids: Vec<&str> = description
+                .workflows
+                .iter()
+                .map(|workflow| workflow.workflow_id.as_str())
+                .collect();
+            bail!(
+                "this description has {} workflows — name one with `--workflow <ID>`: {}",
+                ids.len(),
+                ids.join(", ")
+            );
+        }
+        None => {}
     }
     if let Some(path) = &args.inputs {
         let (inputs, _) = read_input(&InputSource::File(path.clone()), None)
@@ -657,6 +758,104 @@ mod tests {
             format: None,
             output_format: Some(InputFormat::Json),
         }
+    }
+
+    #[test]
+    fn run_asks_which_workflow_when_the_description_offers_several() {
+        let several = TempFile::write(
+            "several.json",
+            &json!({
+                "arazzo": "1.1.0",
+                "info": { "title": "T", "version": "1.0.0" },
+                "sourceDescriptions": [
+                    { "name": "petStore", "url": "u", "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "first", "steps": [{ "stepId": "s", "workflowId": "second" }] },
+                    { "workflowId": "second", "steps": [{ "stepId": "s", "workflowId": "first" }] }
+                ]
+            }),
+        );
+        let (_, openapi) = runnable();
+        let mut args = run_args(&several, &openapi, "http://127.0.0.1:1");
+        args.workflow = None;
+        args.quiet = true;
+
+        let error = run_arazzo(ArazzoCommand::Run(args)).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "this description has 2 workflows — name one with `--workflow <ID>`: first, second",
+            "which one to run is not a choice to make on someone's behalf"
+        );
+    }
+
+    #[test]
+    fn run_needs_no_workflow_when_there_is_only_one() {
+        let (description, openapi) = runnable();
+        let (base, join) = server(1, 200, r#"{"id":7,"name":"fluffy"}"#);
+        let mut args = run_args(&description, &openapi, &base);
+        args.workflow = None;
+        args.quiet = true;
+
+        run_arazzo(ArazzoCommand::Run(args)).expect("one workflow is no choice at all");
+
+        assert_eq!(join.join().expect("the server thread").len(), 1);
+    }
+
+    #[test]
+    fn list_says_what_each_workflow_takes() {
+        // Reading it is enough to prove the shape; what it prints goes
+        // to stdout, which this harness does not capture.
+        let described = TempFile::write(
+            "described.json",
+            &json!({
+                "arazzo": "1.1.0",
+                "info": { "title": "T", "version": "1.0.0" },
+                "sourceDescriptions": [{ "name": "petStore", "url": "u", "type": "openapi" }],
+                "workflows": [{
+                    "workflowId": "buyPet",
+                    "summary": "Find then order a pet",
+                    "dependsOn": ["authenticate"],
+                    "inputs": {
+                        "type": "object",
+                        "required": ["petId"],
+                        "properties": {
+                            "petId": { "type": "string" },
+                            "note": {}
+                        }
+                    },
+                    "steps": [{ "stepId": "findPet", "operationId": "getPetById" }]
+                }, {
+                    "workflowId": "authenticate",
+                    "steps": [{ "stepId": "login", "operationId": "login" }]
+                }]
+            }),
+        );
+        run_arazzo(ArazzoCommand::List(ArazzoListArgs {
+            file: Some(described.0.clone()),
+            format: None,
+        }))
+        .expect("listing reads the document");
+
+        let description: v1_1::Description =
+            serde_json::from_str(&std::fs::read_to_string(&described.0).expect("the file"))
+                .expect("a description");
+        assert_eq!(
+            inputs_of(&description.workflows[0]),
+            ["note", "petId (string, required)"],
+            "a type and a requirement are said where the schema says them"
+        );
+        assert!(
+            inputs_of(&description.workflows[1]).is_empty(),
+            "a workflow that takes nothing lists nothing"
+        );
+    }
+
+    #[test]
+    fn cli_parses_arazzo_list() {
+        let cli = TestCli::try_parse_from(["roas", "list", "wf.yaml"]).unwrap();
+        assert!(matches!(cli.command, ArazzoCommand::List(_)));
     }
 
     #[test]
