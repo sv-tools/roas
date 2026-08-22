@@ -547,7 +547,17 @@ fn sources(
                 };
                 let uri = base
                     .join(&url)
-                    .with_context(|| format!("resolving source description URL `{url}`"))?
+                    .map_err(|error| {
+                        if base.cannot_be_a_base() {
+                            anyhow!(
+                                "`{url}` is relative, and `$self` (`{base}`) is not something a \
+                                 relative reference can be resolved against — give the source an \
+                                 absolute URL, or the description a hierarchical `$self`"
+                            )
+                        } else {
+                            anyhow!("resolving `{url}` against `{base}`: {error}")
+                        }
+                    })?
                     .to_string();
                 loader
                     .load_resource(&uri)
@@ -600,17 +610,15 @@ fn base_uri(from: &InputSource, self_: Option<&str>) -> Result<Url> {
     let Some(self_) = self_ else {
         return Ok(retrieval);
     };
-    let base = retrieval
+    // An absolute `$self` is the base, whatever shape it takes; a
+    // relative one is resolved against the retrieval URI first. Falling
+    // back to the retrieval URI is only for a description that sets no
+    // `$self` at all — doing it for a `$self` that cannot be a base
+    // would quietly resolve against the wrong document, which is the
+    // very thing `$self` is there to prevent.
+    retrieval
         .join(self_)
-        .with_context(|| format!("resolving `$self` `{self_}`"))?;
-    // A `$self` that cannot be a base — `urn:example:workflows`, say —
-    // names the document without being able to resolve anything against
-    // it. Where the document came from still can.
-    Ok(if base.cannot_be_a_base() {
-        retrieval
-    } else {
-        base
-    })
+        .with_context(|| format!("resolving `$self` `{self_}`"))
 }
 
 /// `name=value`, which is how the repeatable flags are written.
@@ -1013,15 +1021,28 @@ mod tests {
             ),
             "file:///tmp/canonical/api.json"
         );
+    }
 
-        // And a `$self` that cannot be a base names the document
-        // without being able to resolve anything against it.
-        let url = resolved(
-            "/tmp/retrieved/flow.json",
-            Some("urn:example:workflows"),
-            "api.json",
+    #[test]
+    fn a_self_that_is_not_hierarchical_is_still_the_base() {
+        // An absolute `$self` is the base whatever shape it takes. A
+        // relative source cannot be resolved against a URN — but the
+        // answer to that is to say so, not to quietly resolve against
+        // the directory the document happened to be read from, where a
+        // different `api.json` may well be sitting.
+        let from = InputSource::File(PathBuf::from("/tmp/retrieved/flow.json"));
+        let base = base_uri(&from, Some("urn:example:arazzo:flow")).expect("a base");
+        assert_eq!(base.as_str(), "urn:example:arazzo:flow");
+        assert!(base.join("api.json").is_err(), "nothing to resolve against");
+
+        // An absolute source URL needs no base, so a URN `$self` costs
+        // such a description nothing.
+        assert_eq!(
+            base.join("https://api.example.com/openapi.json")
+                .expect("an absolute URL stands on its own")
+                .as_str(),
+            "https://api.example.com/openapi.json"
         );
-        assert_eq!(url, "file:///tmp/retrieved/api.json");
     }
 
     #[test]
