@@ -138,15 +138,6 @@ Each crate keeps its versions behind feature flags and pulls in only what it
 needs: enable `v3_1` alone and no other OpenAPI version is compiled. Shared
 dependency versions live in the root `Cargo.toml`.
 
-## OpenAPI versions in detail
-
-| Version                                                   | Status                                                                                                     |
-|-----------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
-| [v2.0](https://spec.openapis.org/oas/v2.0.html) (Swagger) | parser, description validator, schema validator, converter to v3.0, rendering via `roas preview`           |
-| [v3.0.x](https://spec.openapis.org/oas/v3.0.4.html)       | parser, description validator, schema validator, converter to v3.1 / v3.2, rendering via `roas preview`    |
-| [v3.1.x](https://spec.openapis.org/oas/v3.1.2.html)       | parser, description validator, schema validator, converter to v3.2, rendering via `roas preview`           |
-| [v3.2.x](https://spec.openapis.org/oas/v3.2.0.html)       | parser, description validator, schema validator, rendering via `roas preview` (target of all upconverters) |
-
 ## Contributing
 
 See each crate's `README.md` for usage examples, and [`AGENTS.md`](AGENTS.md)
