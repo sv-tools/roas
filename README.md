@@ -34,17 +34,15 @@ Such cases are called out in the crate that makes the choice.
 ```shell
 cargo install roas-cli                                     # any platform with a Rust toolchain
 brew install sv-tools/apps/roas                            # macOS arm64, Linux arm64 / x86_64
-docker run --rm -v "$PWD:/specs" -w /specs ghcr.io/sv-tools/roas:latest validate openapi.yaml
+docker run --rm -v "$PWD:/specs" -w /specs ghcr.io/sv-tools/roas:latest openapi validate openapi.yaml
 ```
 
 | Command                                                | What it does                                                                                                      |
 |--------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `roas validate [FILE]`                                 | parse and validate an OpenAPI spec; version auto-detected, `--print` echoes it back                               |
-| `roas convert --to v3_2 [FILE]`                        | upconvert, optionally merging (`--merge`), applying overlays (`--apply`) and collapsing (`--collapse`) on the way |
+| `roas openapi validate\|convert\|preview`              | parse and validate an OpenAPI spec, upconvert it (merging, applying overlays and collapsing on the way), or render it in a browser |
 | `roas overlay validate\|convert\|apply`                | work with Overlay documents; `apply` edits a spec of any version                                                  |
 | `roas arazzo validate\|convert\|list\|run`             | work with Arazzo descriptions — `list` says what workflows one offers, `run` performs them                        |
 | `roas asyncapi validate\|convert`                      | work with AsyncAPI documents; `convert --to v3_0` reports what 2.6 → 3.x could not carry                          |
-| `roas preview [FILE]`                                  | serve the spec rendered with Redoc or Swagger UI, with `--watch` live reload                                      |
 | `roas completions <SHELL>` · `roas manpages --out DIR` | shell completions and troff manpages                                                                              |
 
 Every command that reads a document takes JSON or YAML, from a file or stdin,
@@ -53,7 +51,7 @@ to stderr and the document to stdout, so the commands pipe into one another —
 and into `jq`:
 
 ```shell
-roas convert --to v3_2 spec.json | roas validate --print | roas preview
+roas openapi convert --to v3_2 spec.json | roas openapi validate --print | roas openapi preview
 roas arazzo run buy.arazzo.yaml --load file --input petId=7 --output-format json | jq .orderId
 ```
 

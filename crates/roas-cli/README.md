@@ -27,7 +27,7 @@ The tap is [`sv-tools/homebrew-apps`](https://github.com/sv-tools/homebrew-apps)
 Multi-arch image (`linux/amd64`, `linux/arm64`):
 
 ```shell
-docker run --rm -v "$PWD:/specs" -w /specs ghcr.io/sv-tools/roas:latest validate openapi.yaml
+docker run --rm -v "$PWD:/specs" -w /specs ghcr.io/sv-tools/roas:latest openapi validate openapi.yaml
 ```
 
 Pinned versions: `ghcr.io/sv-tools/roas:<version>` — see the [GitHub Releases](https://github.com/sv-tools/roas/releases). The image's entrypoint is the `roas` binary, so any subcommand and flags follow `docker run ... ghcr.io/sv-tools/roas:<tag>`.
@@ -35,8 +35,9 @@ Pinned versions: `ghcr.io/sv-tools/roas:<version>` — see the [GitHub Releases]
 ## Usage
 
 ```shell
-roas validate [FILE]                       # parse + validate an OpenAPI spec
-roas convert --to v3_2 [FILE]              # upconvert across versions
+roas openapi validate [FILE]               # parse + validate an OpenAPI spec
+roas openapi convert --to v3_2 [FILE]      # upconvert across versions
+roas openapi preview [FILE]                # open the spec in a browser via Redoc
 roas overlay validate [FILE]               # validate an OpenAPI Overlay document
 roas overlay convert --to v1_1 [FILE]      # upconvert an overlay
 roas overlay apply --overlay O.yaml [SPEC] # apply overlay(s) to a spec
@@ -46,10 +47,9 @@ roas arazzo list [FILE]                    # what workflows a description offers
 roas arazzo run --workflow ID [FILE]       # run one against a real API
 roas asyncapi validate [FILE]              # validate an AsyncAPI document
 roas asyncapi convert --to v3_1 [FILE]     # upconvert an AsyncAPI document
-roas preview [FILE]                        # open the spec in a browser via Redoc
 ```
 
-The root `validate` and `convert` commands operate on OpenAPI specs; the `overlay` subcommand group operates on OpenAPI Overlay documents, the `arazzo` group on OpenAPI Arazzo workflow descriptions, and the `asyncapi` group on AsyncAPI documents.
+One subcommand group per specification: `openapi` for OpenAPI specs, `overlay` for OpenAPI Overlay documents, `arazzo` for OpenAPI Arazzo workflow descriptions, and `asyncapi` for AsyncAPI documents.
 
 Input can be JSON or YAML. With a file path, the parser is selected by extension (`.yaml` / `.yml` → YAML, everything else → JSON). Pass `-` as the file path, or omit it entirely and pipe the spec, to read from stdin; stdin defaults to JSON. `--format json|yaml` overrides everything.
 
@@ -58,22 +58,22 @@ Input can be JSON or YAML. With a file path, the parser is selected by extension
 Every subcommand accepts the spec on stdin, so they chain naturally. `validate` is silent on stdout by default — pass `--print` to echo the parsed spec downstream:
 
 ```shell
-cat spec.json | roas validate                           # auto: piped stdin
-cat spec.yaml | roas validate --format yaml             # stdin defaults to JSON; override
-roas convert --to v3_2 spec.json | roas validate --print | roas preview
+cat spec.json | roas openapi validate                    # auto: piped stdin
+cat spec.yaml | roas openapi validate --format yaml      # stdin defaults to JSON; override
+roas openapi convert --to v3_2 spec.json | roas openapi validate --print | roas openapi preview
 ```
 
-`preview --watch` requires a real file and is rejected for stdin input.
+`openapi preview --watch` requires a real file and is rejected for stdin input.
 
-### `validate`
+### `openapi validate`
 
 Auto-detects the spec version from the `openapi` / `swagger` field; pass `--from` to force. External `$ref`s are skipped by default; opt in with `--load`:
 
 ```shell
-roas validate spec.yaml                   # local refs only
-roas validate --load file spec.yaml       # follow `file://` $refs
-roas validate --load http spec.yaml       # follow `http(s)://` $refs
-roas validate --load file --load http spec.yaml  # both
+roas openapi validate spec.yaml                   # local refs only
+roas openapi validate --load file spec.yaml       # follow `file://` $refs
+roas openapi validate --load http spec.yaml       # follow `http(s)://` $refs
+roas openapi validate --load file --load http spec.yaml  # both
 ```
 
 `--ignore <CHECK>` skips a specific validation check; repeat the flag to skip more than one. The list is sourced from `roas::validation::Options` (via roas's `clap` feature), so it stays in sync with the library:
@@ -88,19 +88,19 @@ empty-info-title, empty-info-version, empty-response-description,
 empty-external-documentation-url
 ```
 
-Run `roas validate --help` for descriptions of each check.
+Run `roas openapi validate --help` for descriptions of each check.
 
 Pass `--print` to echo the parsed spec on stdout (diagnostics stay on stderr), so `validate` can sit in the middle of a pipeline. The output format matches the input: YAML in → YAML out, JSON in → JSON out.
 
-### `convert`
+### `openapi convert`
 
 Upconverts a spec to a target version by chaining the existing `From<v_X::Spec> for v_Y::Spec` migrations. Downconversion is not supported.
 
 ```shell
-roas convert --to v3_2 spec.json                          # JSON in → JSON out
-roas convert --to v3_2 spec.yaml                          # YAML in → YAML out
-roas convert --to v3_2 --output-format yaml spec.json     # switch format
-roas convert --to v3_1 --from v2 spec.yaml
+roas openapi convert --to v3_2 spec.json                          # JSON in → JSON out
+roas openapi convert --to v3_2 spec.yaml                          # YAML in → YAML out
+roas openapi convert --to v3_2 --output-format yaml spec.json     # switch format
+roas openapi convert --to v3_1 --from v2 spec.yaml
 ```
 
 Output goes to stdout. The format matches the input by default (YAML in → YAML out, JSON in → JSON out); pass `--output-format json|yaml` to override.
@@ -108,11 +108,11 @@ Output goes to stdout. The format matches the input by default (YAML in → YAML
 `--merge <FILE>` (repeatable) layers additional specs on top after conversion. Each merge source is loaded with the same format-detection rules as the base, upconverted to the target version, then merged in incoming-order via `roas::merge`. The merge runs *after* the version conversion and *before* `--collapse`. By default the merge is incoming-wins on scalar conflicts, base keeps its `info` / `openapi`, refs replace silently, and schemas are leaf-replaced. `--merge-option` (repeatable) tunes that:
 
 ```shell
-roas convert --to v3_2 --merge errors.yaml --merge auth.yaml base.json
-roas convert --to v3_2 --merge layer.yaml --merge-option base-wins spec.json
-roas convert --to v3_2 --merge layer.yaml --merge-option error-on-conflict spec.json
-roas convert --to v3_2 --merge layer.yaml --merge-option deep-merge-object-schemas spec.json
-roas convert --to v3_2 --merge layer.yaml --merge-option merge-info spec.json
+roas openapi convert --to v3_2 --merge errors.yaml --merge auth.yaml base.json
+roas openapi convert --to v3_2 --merge layer.yaml --merge-option base-wins spec.json
+roas openapi convert --to v3_2 --merge layer.yaml --merge-option error-on-conflict spec.json
+roas openapi convert --to v3_2 --merge layer.yaml --merge-option deep-merge-object-schemas spec.json
+roas openapi convert --to v3_2 --merge layer.yaml --merge-option merge-info spec.json
 ```
 
 Supported `--merge-option` values: `base-wins`, `error-on-conflict`, `deep-merge-object-schemas`, `merge-info`, `replace-lists-when-empty`. Under `error-on-conflict` the first real collision aborts the merge and `roas` exits non-zero with the conflicting path; the base spec is untouched on error.
@@ -120,9 +120,9 @@ Supported `--merge-option` values: `base-wins`, `error-on-conflict`, `deep-merge
 `--apply <FILE>` (repeatable) applies OpenAPI Overlay documents to the converted spec. Each overlay is loaded with extension-based format detection, its version detected from the `overlay` field, and applied via [`roas-overlay`](https://crates.io/crates/roas-overlay). The full convert pipeline is **convert → `--merge` → `--apply` → `--collapse`** — overlays apply before collapse so overlay-introduced inline components are lifted into `$ref`s too. (When `--apply` and `--collapse` are combined, the overlaid spec is re-parsed at the target version before collapsing, so it must still be a valid OpenAPI document.) `--apply-option` (repeatable) tunes the apply (`error-on-zero-match`, `error-on-mixed-kind-match`):
 
 ```shell
-roas convert --to v3_2 --apply patch.yaml spec.json
-roas convert --to v3_2 --merge layer.yaml --apply patch.yaml --collapse spec.json
-roas convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-match spec.json
+roas openapi convert --to v3_2 --apply patch.yaml spec.json
+roas openapi convert --to v3_2 --merge layer.yaml --apply patch.yaml --collapse spec.json
+roas openapi convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-match spec.json
 ```
 
 ### `overlay`
@@ -134,7 +134,7 @@ roas overlay validate overlay.yaml                          # parse + validate
 roas overlay convert --to v1_1 overlay.json                 # upconvert v1.0 → v1.1
 roas overlay apply --overlay patch.yaml spec.json           # apply to a spec
 cat spec.json | roas overlay apply --overlay patch.yaml     # spec on stdin
-roas overlay apply --overlay a.yaml --overlay b.yaml spec.json | roas validate
+roas overlay apply --overlay a.yaml --overlay b.yaml spec.json | roas openapi validate
 ```
 
 - **`overlay validate`** — checks structure: the `overlay` version, non-empty `actions`, valid RFC 9535 JSONPath in every `target` (and `copy`), and the mutual-exclusivity rules. `--ignore <CHECK>` skips a check (`empty-info-title`, `empty-info-version`); `--print` echoes the parsed overlay.
@@ -201,18 +201,18 @@ cat events.json | roas asyncapi validate         # document on stdin
 - **`asyncapi validate`** — checks structure and cross-references: required / non-empty fields, server and channel wiring, operation and reply targets, message and schema references (every `$ref` is followed to what it names, and judged against the kind of object that position holds), and channel parameters against the address. `--check <CHECK>` adjusts one check — `empty-info-title`, `empty-info-version` and `unused-channel-parameter` relax one, `external-reference` adds one, requiring the document to be self-contained. `--print` echoes the parsed document.
 - **`asyncapi convert --to <v2_6|v3_0|v3_1>`** — upconverts a document; downconversion errors. 3.0 → 3.1 is the object model unchanged. **2.6 → 3.x is lossy**: v3 keys a channel by name and carries the address inside it, moves operations to a map of their own and states them from the application's point of view (`publish` → `receive`, `subscribe` → `send`), and gives a parameter no schema. The conversion invents the names v3 needs and reports every one of them, along with everything it could not carry, to stderr — stdout is the document alone, so a pipeline is unaffected. `--strict` turns any such note into a failure (nothing is written to stdout), and `--quiet` silences the report.
 
-### `preview`
+### `openapi preview`
 
 Starts a local HTTP server on `127.0.0.1:<random>` that serves the spec, embedded inside an HTML page rendered with either [Redoc](https://redocly.com/redoc) (default) or [Swagger UI](https://swagger.io/tools/swagger-ui/), and opens the default browser pointed at it. Pass `--no-open` to skip the browser launch (the URL is printed to stderr in either case). Ctrl+C tears the server down.
 
 ```shell
-roas preview spec.yaml                               # Redoc (default)
-roas preview --renderer swagger-ui spec.yaml         # Swagger UI
-roas preview --watch spec.yaml                       # live-reload on file change
-roas preview --no-open --from v3_1 spec.json
+roas openapi preview spec.yaml                               # Redoc (default)
+roas openapi preview --renderer swagger-ui spec.yaml         # Swagger UI
+roas openapi preview --watch spec.yaml                       # live-reload on file change
+roas openapi preview --no-open --from v3_1 spec.json
 ```
 
-`--watch` watches the spec file and pushes a Server-Sent-Events reload to the browser on every change; the page reloads itself and re-fetches `/spec`. If a write produces a parse error the previous good JSON is kept and the error is logged to stderr. `--watch` requires a real file — stdin input is rejected. Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently. To preview an older spec under a v3.0+ renderer, upconvert it once with `roas convert --to v3_1 spec.json` and serve the result.
+`--watch` watches the spec file and pushes a Server-Sent-Events reload to the browser on every change; the page reloads itself and re-fetches `/spec`. If a write produces a parse error the previous good JSON is kept and the error is logged to stderr. `--watch` requires a real file — stdin input is rejected. Both renderers target OpenAPI 3.0 / 3.1 today — v3.2-specific fields are skipped silently. To preview an older spec under a v3.0+ renderer, upconvert it once with `roas openapi convert --to v3_1 spec.json` and serve the result.
 
 ### `completions`
 

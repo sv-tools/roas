@@ -239,7 +239,7 @@ pub(crate) struct ArazzoRunArgs {
     header: Vec<String>,
 
     /// Fetch the source descriptions the run needs, by the URLs the
-    /// description gives them. Same shape as `roas validate --load`:
+    /// description gives them. Same shape as `roas openapi validate --load`:
     /// `--load file` for `file://` (and paths beside the description),
     /// `--load http` for `http(s)://`; repeat to combine.
     #[arg(long, value_enum)]

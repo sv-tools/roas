@@ -1,4 +1,4 @@
-//! `roas preview <FILE>` — start a local HTTP server that renders the spec in
+//! `roas openapi preview <FILE>` — start a local HTTP server that renders the spec in
 //! a browser via [Redoc](https://redocly.com/redoc) or
 //! [Swagger UI](https://swagger.io/tools/swagger-ui/).
 //!
