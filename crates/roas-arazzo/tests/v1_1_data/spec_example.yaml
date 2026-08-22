@@ -1,0 +1,111 @@
+# The Arazzo Specification v1.1.0's own "Arazzo Specification Object
+# Example", copied here because it is the one published description that
+# mixes an OpenAPI source with an AsyncAPI one — two HTTP steps, then a
+# Kafka send and a correlated receive.
+#
+# Three things are corrected against the specification's own JSON Schema
+# (https://spec.openapis.org/arazzo/1.1/schema/2026-04-15), which the
+# published example does not satisfy:
+#
+#   * the two async steps used `operationPath`, which the schema's
+#     `asyncapi-step-object` does not allow — it is `operationId` or
+#     `channelPath`;
+#   * their values were operation ids rather than paths (no `#` pointer),
+#     so `operationId` is what they were all along;
+#   * the source declared as `petStoreDescription` was referenced twice
+#     as `$sourceDescriptions.petstoreDescription` — a lowercase `s`.
+#
+# Source: https://spec.openapis.org/arazzo/v1.1.0.html
+# The AsyncAPI document it names is real:
+# https://github.com/OAI/Arazzo-Specification/blob/main/examples/1.1.0/pet-asyncapi.yaml
+
+arazzo: 1.1.0
+$self: https://api.example.com/workflows/pet-purchase.arazzo.yaml
+info:
+  title: A pet purchasing workflow
+  summary: This Arazzo Description showcases the workflow for how to purchase a pet through a sequence of API calls
+  description: |
+      This Arazzo Description walks you through the workflow and steps of `searching` for, `selecting`, and `purchasing` an available pet.
+  version: 1.0.1
+sourceDescriptions:
+- name: petStoreDescription
+  url: https://github.com/swagger-api/swagger-petstore/blob/master/src/main/resources/openapi.yaml
+  type: openapi
+- name: asyncOrderApiDescription
+  url: https://raw.githubusercontent.com/OAI/Arazzo-Specification/main/examples/1.1.0/pet-asyncapi.yaml
+  type: asyncapi
+
+workflows:
+- workflowId: loginUserAndRetrievePet
+  summary: Login User and then retrieve pets
+  description: This workflow lays out the steps to login a user and then retrieve pets
+  inputs:
+      type: object
+      properties:
+          username:
+              type: string
+          password:
+              type: string
+          orderCorrelationId:
+              type: string
+  steps:
+  - stepId: loginStep
+    description: This step demonstrates the user login step
+    operationId: $sourceDescriptions.petStoreDescription.loginUser
+    parameters:
+      # parameters to inject into the loginUser operation (parameter name must be resolvable at the referenced operation and the value is determined using {expression} syntax)
+      - name: username
+        in: query
+        value: $inputs.username
+      - name: password
+        in: query
+        value: $inputs.password
+    successCriteria:
+      # assertions to determine step was successful
+      - condition: $statusCode == 200
+    outputs:
+      # outputs from this step
+      tokenExpires: $response.header.X-Expires-After
+      rateLimit: $response.header.X-Rate-Limit
+      sessionToken: $response.body
+  - stepId: getPetStep
+    description: retrieve a pet by status from the GET pets endpoint
+    operationPath: '{$sourceDescriptions.petStoreDescription.url}#/paths/~1pet~1findByStatus/get'
+    parameters:
+      - name: status
+        in: query
+        value: 'available'
+      - name: Authorization
+        in: header
+        value: $steps.loginStep.outputs.sessionToken
+    successCriteria:
+      - condition: $statusCode == 200
+    onSuccess:
+      - name: 'noPetsAvailable'
+        type: "end"
+        criteria:
+          - condition: $response.body#/0 == null
+    outputs:
+      petId: $response.body#/0/id
+  - stepId: purchasePetStep
+    description: purchase a pet by posting an message on place-order channel
+    operationId: $sourceDescriptions.asyncOrderApiDescription.placeOrder
+    action: send
+    parameters:
+    - name: orderCorrelationId
+      in: header
+      value: $inputs.orderCorrelationId
+    requestBody:
+      contentType: application/json
+      payload:
+        petId: $steps.getPetStep.outputs.petId
+  - stepId: confirmPetPurchaseStep
+    description: confirm the purchase of a pet
+    operationId: $sourceDescriptions.asyncOrderApiDescription.confirmOrder
+    correlationId: $inputs.orderCorrelationId
+    timeout: 6000
+    action: receive
+    outputs:
+      orderId: $message.payload.orderId
+  outputs:
+      orderId: $steps.confirmPetPurchaseStep.outputs.orderId
