@@ -565,28 +565,35 @@ fn sources(
 }
 
 /// A source description's URL as something the loader can fetch: an
-/// absolute URL as it stands, a relative one from beside the document
-/// that named it.
+/// absolute URL as it stands, a relative one resolved against the
+/// document that named it.
 ///
-/// The path half is turned into a URL by `Url`, not by writing
-/// `file://` in front of it: a directory named `hash#dir` would
-/// otherwise end the URL at the `#`, and the loader would read
-/// something else entirely.
+/// The relative half is a URI reference, not a path — it may carry
+/// percent escapes, a query, a fragment — so it is resolved by
+/// `Url::join` against the document's own URL. Treating it as path text
+/// would encode `api%20file.json` a second time and read for a file
+/// with a literal `%20` in its name.
 fn beside(url: &str, from: &InputSource) -> Result<String> {
-    if Url::parse(url).is_ok() {
-        return Ok(url.to_owned());
+    if let Ok(absolute) = Url::parse(url) {
+        return Ok(absolute.to_string());
     }
-    let path = match from {
-        InputSource::File(path) => path.parent().unwrap_or(Path::new(".")).join(url),
-        // Nothing to be beside: read it from the working directory.
-        InputSource::Stdin => PathBuf::from(url),
+    let here = |path: &Path| -> PathBuf {
+        path.canonicalize()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path))
     };
-    let absolute = path
-        .canonicalize()
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&path));
-    Url::from_file_path(&absolute)
+    let base = match from {
+        InputSource::File(path) => Url::from_file_path(here(path))
+            .map_err(|()| anyhow!("`{}` is not a path a URL can name", path.display()))?,
+        // Nothing to be beside: resolve from the working directory.
+        InputSource::Stdin => {
+            let directory = std::env::current_dir().context("reading the working directory")?;
+            Url::from_directory_path(&directory)
+                .map_err(|()| anyhow!("`{}` is not a path a URL can name", directory.display()))?
+        }
+    };
+    base.join(url)
         .map(|url| url.to_string())
-        .map_err(|()| anyhow!("`{}` is not a path a URL can name", absolute.display()))
+        .with_context(|| format!("resolving source description URL `{url}`"))
 }
 
 /// `name=value`, which is how the repeatable flags are written.
@@ -917,6 +924,20 @@ mod tests {
             format: args.format,
             output_format: args.output_format,
         }
+    }
+
+    #[test]
+    fn a_relative_url_keeps_its_uri_escapes() {
+        // `api%20file.json` names `api file.json`. Read as path text it
+        // would be encoded again, and name `api%20file.json` itself.
+        let from = InputSource::File(PathBuf::from("/tmp/flows/buy.arazzo.yaml"));
+        let url = beside("api%20file.json", &from).expect("a URL");
+        assert!(url.ends_with("/api%20file.json"), "{url}");
+        assert!(!url.contains("%2520"), "escaped a second time: {url}");
+
+        // A query and a fragment are the URL's, not the path's.
+        let with_query = beside("api.json?v=2", &from).expect("a URL");
+        assert!(with_query.ends_with("api.json?v=2"), "{with_query}");
     }
 
     #[test]

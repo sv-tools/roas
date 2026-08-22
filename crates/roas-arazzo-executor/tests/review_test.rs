@@ -1260,3 +1260,37 @@ fn an_arazzo_source_that_is_missing_does_not_hold_an_operation() {
 
     assert_eq!(client.sent().len(), 1);
 }
+
+#[test]
+fn ambiguity_already_proven_is_said_before_a_missing_source() {
+    // Two supplied descriptions both hold `listPets`, and a third is
+    // missing. Supplying the third cannot unprove the ambiguity, so the
+    // ambiguity is what to say.
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "petStore", "url": "a", "type": "openapi" },
+            { "name": "mirror", "url": "b", "type": "openapi" },
+            { "name": "absent", "url": "c", "type": "openapi" }
+        ],
+        "workflows": [{
+            "workflowId": "w",
+            "steps": [{ "stepId": "s", "operationId": "listPets" }]
+        }]
+    }))
+    .expect("a v1.1 description");
+    let options =
+        Options::new()
+            .source("petStore", "a", petstore())
+            .source("mirror", "b", petstore());
+
+    let error = execute(&description, &options, &mut Fake::new()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("is in more than one source description: mirror, petStore"),
+        "got: {error}"
+    );
+}

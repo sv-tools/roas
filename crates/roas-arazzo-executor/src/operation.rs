@@ -149,15 +149,7 @@ fn by_id<'s>(
 
     // A bare id must be unique across the descriptions — the spec says
     // so, and if it is not, guessing would send the request somewhere
-    // the author did not name. With a description missing, uniqueness
-    // cannot be shown at all: finding the id here says nothing about
-    // what is in the one that was left out.
-    if !missing.is_empty() {
-        return Err(OperationError::Unproven {
-            operation: operation.to_owned(),
-            missing: missing.join(", "),
-        });
-    }
+    // the author did not name.
     let mut hits = sources.iter().filter_map(|(name, source)| {
         search(&source.document, operation).map(|found| {
             (
@@ -169,20 +161,33 @@ fn by_id<'s>(
             )
         })
     });
-    let first = hits.next().ok_or_else(|| OperationError::Unknown {
-        operation: operation.to_owned(),
-    })?;
+    let first = hits.next();
     let rest: Vec<String> = hits.map(|(_, found)| found.name).collect();
-    if rest.is_empty() {
-        Ok(first)
-    } else {
-        let mut names = vec![first.1.name.clone()];
+
+    // Ambiguity is worth saying first: it is already proven, and
+    // supplying whatever is missing cannot unprove it.
+    if let Some((_, found)) = &first
+        && !rest.is_empty()
+    {
+        let mut names = vec![found.name.clone()];
         names.extend(rest);
-        Err(OperationError::Ambiguous {
+        return Err(OperationError::Ambiguous {
             operation: operation.to_owned(),
             sources: names.join(", "),
-        })
+        });
     }
+    // Otherwise a missing description leaves the question open: one hit
+    // here says nothing about what is in the one left out, and no hit
+    // says nothing either.
+    if !missing.is_empty() {
+        return Err(OperationError::Unproven {
+            operation: operation.to_owned(),
+            missing: missing.join(", "),
+        });
+    }
+    first.ok_or_else(|| OperationError::Unknown {
+        operation: operation.to_owned(),
+    })
 }
 
 /// Find the operation an `operationPath` points at: a source URL, then a
