@@ -16,7 +16,7 @@ use crate::select;
 use crate::select::SelectError;
 use roas_arazzo::v1_1::{
     Criterion, CriterionKind, CriterionType, Description, FailureActionType, Parameter,
-    ParameterLocation, ReusableOr, Step, SuccessActionType, ValueOrSelector, Workflow,
+    ParameterLocation, ReusableOr, SourceType, Step, SuccessActionType, ValueOrSelector, Workflow,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -271,6 +271,10 @@ pub struct Run<'d> {
     pending: Option<Pending>,
     wait: Option<Duration>,
     records: Vec<StepRecord>,
+    /// Source descriptions the run was not given, and which could hold
+    /// an operation — a bare `operationId` cannot be shown to be unique
+    /// while one of these is missing.
+    unsupplied: Vec<String>,
     taken: usize,
     report: Option<Box<ExecutionReport>>,
 }
@@ -335,6 +339,15 @@ impl<'d> Run<'d> {
             pending: None,
             wait: None,
             records: Vec::new(),
+            unsupplied: description
+                .source_descriptions
+                .iter()
+                // An Arazzo document holds workflows, not operations, so
+                // its absence cannot make an operation ambiguous.
+                .filter(|source| source.type_ != Some(SourceType::Arazzo))
+                .filter(|source| !options.sources.contains_key(&source.name))
+                .map(|source| source.name.clone())
+                .collect(),
             taken: 0,
             report: None,
         };
@@ -721,7 +734,12 @@ impl<'d> Run<'d> {
     fn build(&self, index: usize) -> Result<(HttpRequest, Exchange), ExecutionError> {
         let frame = self.frames.last().expect("a frame to build in");
         let step = &frame.workflow.steps[index];
-        let endpoint = operation::resolve(step, &self.options.sources, &self.options.base_urls)?;
+        let endpoint = operation::resolve(
+            step,
+            &self.options.sources,
+            &self.options.base_urls,
+            &self.unsupplied,
+        )?;
         let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
 
         // The workflow's parameters first, so a step's own override them.

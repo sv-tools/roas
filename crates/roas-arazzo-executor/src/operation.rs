@@ -53,6 +53,19 @@ pub enum OperationError {
         /// The names that hold it.
         sources: String,
     },
+    /// A bare `operationId` must be unique across the descriptions, and
+    /// with one of them missing that cannot be shown.
+    #[error(
+        "operation `{operation}` is named without a source description, and {missing} \
+         was not supplied — supply it, or name the source as \
+         `$sourceDescriptions.<name>.{operation}`"
+    )]
+    Unproven {
+        /// The `operationId` as written.
+        operation: String,
+        /// The description(s) that were not supplied.
+        missing: String,
+    },
     /// A source description was named but not supplied.
     #[error("source description `{0}` was not supplied — pass its document in the options")]
     MissingSource(String),
@@ -80,12 +93,13 @@ pub(crate) fn resolve(
     step: &Step,
     sources: &BTreeMap<String, Source>,
     base_urls: &BTreeMap<String, String>,
+    missing: &[String],
 ) -> Result<Endpoint, OperationError> {
     if step.channel_path.is_some() || step.action.is_some() {
         return Err(OperationError::Async(step.step_id.clone()));
     }
     if let Some(operation) = &step.operation_id {
-        let (source, found) = by_id(operation, sources)?;
+        let (source, found) = by_id(operation, sources, missing)?;
         return endpoint(source, &found, base_urls, operation);
     }
     if let Some(path) = &step.operation_path {
@@ -110,6 +124,7 @@ struct Found {
 fn by_id<'s>(
     operation: &str,
     sources: &'s BTreeMap<String, Source>,
+    missing: &[String],
 ) -> Result<(&'s Source, Found), OperationError> {
     if let Some(rest) = operation.strip_prefix("$sourceDescriptions.") {
         let (name, id) = rest
@@ -146,20 +161,33 @@ fn by_id<'s>(
             )
         })
     });
-    let first = hits.next().ok_or_else(|| OperationError::Unknown {
-        operation: operation.to_owned(),
-    })?;
+    let first = hits.next();
     let rest: Vec<String> = hits.map(|(_, found)| found.name).collect();
-    if rest.is_empty() {
-        Ok(first)
-    } else {
-        let mut names = vec![first.1.name.clone()];
+
+    // Ambiguity is worth saying first: it is already proven, and
+    // supplying whatever is missing cannot unprove it.
+    if let Some((_, found)) = &first
+        && !rest.is_empty()
+    {
+        let mut names = vec![found.name.clone()];
         names.extend(rest);
-        Err(OperationError::Ambiguous {
+        return Err(OperationError::Ambiguous {
             operation: operation.to_owned(),
             sources: names.join(", "),
-        })
+        });
     }
+    // Otherwise a missing description leaves the question open: one hit
+    // here says nothing about what is in the one left out, and no hit
+    // says nothing either.
+    if !missing.is_empty() {
+        return Err(OperationError::Unproven {
+            operation: operation.to_owned(),
+            missing: missing.join(", "),
+        });
+    }
+    first.ok_or_else(|| OperationError::Unknown {
+        operation: operation.to_owned(),
+    })
 }
 
 /// Find the operation an `operationPath` points at: a source URL, then a
@@ -351,7 +379,7 @@ pub(crate) mod tests {
     }
 
     fn find(step: &Step) -> Result<Endpoint, OperationError> {
-        resolve(step, &sources(), &BTreeMap::new())
+        resolve(step, &sources(), &BTreeMap::new(), &[])
     }
 
     #[test]
@@ -409,6 +437,7 @@ pub(crate) mod tests {
             &step("s", Some("getPetById"), None),
             &sources,
             &BTreeMap::new(),
+            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -487,8 +516,13 @@ pub(crate) mod tests {
         let base_urls =
             BTreeMap::from([("petStore".to_owned(), "http://127.0.0.1:8080/".to_owned())]);
         assert_eq!(
-            resolve(&step("s", Some("getPetById"), None), &sources(), &base_urls)
-                .map(|endpoint| endpoint.base),
+            resolve(
+                &step("s", Some("getPetById"), None),
+                &sources(),
+                &base_urls,
+                &[]
+            )
+            .map(|endpoint| endpoint.base),
             Ok("http://127.0.0.1:8080".to_owned())
         );
     }
@@ -513,7 +547,8 @@ pub(crate) mod tests {
             resolve(
                 &step("s", Some("listPets"), None),
                 &sources,
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                &[],
             )
             .map(|endpoint| endpoint.base),
             Ok("https://eu.example.com".to_owned())
@@ -540,7 +575,8 @@ pub(crate) mod tests {
             resolve(
                 &step("s", Some("listPets"), None),
                 &sources,
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                &[],
             )
             .map(|endpoint| endpoint.base),
             Ok("http://api.example.com/v2".to_owned())
@@ -560,7 +596,8 @@ pub(crate) mod tests {
             resolve(
                 &step("s", Some("listPets"), None),
                 &sources,
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                &[],
             ),
             Err(OperationError::NoServer("listPets".to_owned()))
         );
