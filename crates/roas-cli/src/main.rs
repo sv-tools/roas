@@ -3,7 +3,8 @@
 //! The root `validate` and `convert` commands operate on OpenAPI specs;
 //! the `overlay` subcommand group operates on OpenAPI Overlay documents,
 //! the `arazzo` group on OpenAPI Arazzo workflow descriptions, and the
-//! `asyncapi` group on AsyncAPI documents.
+//! `asyncapi` group on AsyncAPI documents. `arazzo run` is the one
+//! command that talks to an API rather than reading a document.
 //!
 //! - `roas validate [FILE]` — parse and validate an OpenAPI spec. Version is
 //!   auto-detected from the document; pass `--from` to force. External
@@ -284,7 +285,7 @@ impl MergeOptionFlag {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
-enum LoaderKind {
+pub(crate) enum LoaderKind {
     File,
     Http,
 }
@@ -432,7 +433,7 @@ pub(crate) fn read_input(
     Ok((value, resolved))
 }
 
-fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {
+pub(crate) fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {
     if kinds.is_empty() {
         return None;
     }
