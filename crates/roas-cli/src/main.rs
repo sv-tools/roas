@@ -118,7 +118,8 @@ enum Command {
     /// Work with OpenAPI Overlay documents: validate, convert, or apply.
     #[command(subcommand)]
     Overlay(OverlayCommand),
-    /// Work with OpenAPI Arazzo descriptions: validate or convert.
+    /// Work with OpenAPI Arazzo descriptions: validate, convert, run, or
+    /// list the workflows one offers.
     #[command(subcommand)]
     Arazzo(ArazzoCommand),
     /// Work with AsyncAPI documents: validate or convert.
