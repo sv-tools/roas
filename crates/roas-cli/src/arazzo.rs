@@ -15,6 +15,7 @@ use roas_arazzo_executor::{Client, Options, execute};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 use crate::{
     InputFormat, InputSource, LoaderKind, build_loader, read_input, resolve_input_source,
@@ -204,7 +205,8 @@ pub(crate) struct ArazzoRunArgs {
     /// pipe the description, to read from stdin.
     file: Option<PathBuf>,
 
-    /// The workflow to run. Defaults to the description's first.
+    /// The workflow to run. Required where the description offers more
+    /// than one — `arazzo list` says what it offers.
     #[arg(long, value_name = "ID")]
     workflow: Option<String>,
 
@@ -250,6 +252,13 @@ pub(crate) struct ArazzoRunArgs {
     /// Do not print the report to stderr.
     #[arg(long)]
     quiet: bool,
+
+    /// Skip a validation check before running (repeatable), as
+    /// `arazzo validate --ignore` does. The description is validated
+    /// first either way: a run makes real requests, and a description
+    /// that does not hold together should not make them.
+    #[arg(long, value_enum)]
+    ignore: Vec<ValidationOptions>,
 
     /// Override format detection (see `arazzo validate --format`).
     #[arg(long, value_enum)]
@@ -396,6 +405,25 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
         DetectedArazzo::V1_0(description) => v1_1::Description::from(description),
     };
 
+    // Before a single request: a description with two workflows of the
+    // same id, or a step that names nothing, has no business reaching
+    // an API.
+    let mut checks = EnumSet::<ValidationOptions>::empty();
+    for ignore in &args.ignore {
+        checks |= *ignore;
+    }
+    if let Err(errors) = description.validate(checks) {
+        for error in &errors.errors {
+            eprintln!("- {error}");
+        }
+        return Err(anyhow!(
+            "{}: the description does not validate ({} error{}), so nothing was run",
+            source.display(),
+            errors.errors.len(),
+            if errors.errors.len() == 1 { "" } else { "s" }
+        ));
+    }
+
     let mut options = Options::new();
     match &args.workflow {
         Some(workflow) => options = options.workflow(workflow),
@@ -434,6 +462,15 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     }
     for base_url in &args.base_url {
         let (name, url) = split_pair(base_url, "--base-url")?;
+        // Silently ignoring a typo would send the request to whatever
+        // the document says — production, most likely.
+        if !description
+            .source_descriptions
+            .iter()
+            .any(|source| source.name == name)
+        {
+            bail!("`--base-url {name}=…` names no source description of this document");
+        }
         options = options.base_url(name, url);
     }
     for header in &args.header {
@@ -507,7 +544,7 @@ fn sources(
                     // step turns out to need it, naming the source.
                     continue;
                 };
-                let uri = beside(&url, from);
+                let uri = beside(&url, from)?;
                 loader
                     .load_resource(&uri)
                     .with_context(|| {
@@ -530,9 +567,14 @@ fn sources(
 /// A source description's URL as something the loader can fetch: an
 /// absolute URL as it stands, a relative one from beside the document
 /// that named it.
-fn beside(url: &str, from: &InputSource) -> String {
-    if url.contains("://") {
-        return url.to_owned();
+///
+/// The path half is turned into a URL by `Url`, not by writing
+/// `file://` in front of it: a directory named `hash#dir` would
+/// otherwise end the URL at the `#`, and the loader would read
+/// something else entirely.
+fn beside(url: &str, from: &InputSource) -> Result<String> {
+    if Url::parse(url).is_ok() {
+        return Ok(url.to_owned());
     }
     let path = match from {
         InputSource::File(path) => path.parent().unwrap_or(Path::new(".")).join(url),
@@ -542,7 +584,9 @@ fn beside(url: &str, from: &InputSource) -> String {
     let absolute = path
         .canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&path));
-    format!("file://{}", absolute.display())
+    Url::from_file_path(&absolute)
+        .map(|url| url.to_string())
+        .map_err(|()| anyhow!("`{}` is not a path a URL can name", absolute.display()))
 }
 
 /// `name=value`, which is how the repeatable flags are written.
@@ -755,9 +799,135 @@ mod tests {
             load: Vec::new(),
             max_steps: Some(20),
             quiet: false,
+            ignore: Vec::new(),
             format: None,
             output_format: Some(InputFormat::Json),
         }
+    }
+
+    #[test]
+    fn run_refuses_a_base_url_for_a_source_that_is_not_there() {
+        let (description, openapi) = runnable();
+        let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
+        // A typo would otherwise be ignored, and the request would go
+        // wherever the document says — production, most likely.
+        args.base_url = vec!["petStroe=http://127.0.0.1:9".to_owned()];
+        args.quiet = true;
+
+        let error = run_arazzo(ArazzoCommand::Run(args)).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "`--base-url petStroe=…` names no source description of this document"
+        );
+    }
+
+    #[test]
+    fn run_validates_before_it_sends_anything() {
+        // Two workflows of the same id: `arazzo validate` rejects this,
+        // and a run has no business reaching an API with it.
+        let invalid = TempFile::write(
+            "invalid.json",
+            &json!({
+                "arazzo": "1.1.0",
+                "info": { "title": "T", "version": "1.0.0" },
+                "sourceDescriptions": [
+                    { "name": "petStore", "url": "u", "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "w", "steps": [{ "stepId": "a", "operationId": "getPetById" }] },
+                    { "workflowId": "w", "steps": [{ "stepId": "b", "operationId": "getPetById" }] }
+                ]
+            }),
+        );
+        let (_, openapi) = runnable();
+        let mut args = run_args(&invalid, &openapi, "http://127.0.0.1:1");
+        args.workflow = Some("w".to_owned());
+        args.quiet = true;
+
+        let error = run_arazzo(ArazzoCommand::Run(args)).unwrap_err();
+
+        assert!(
+            error.to_string().contains("does not validate"),
+            "got: {error}"
+        );
+        assert!(
+            error.to_string().contains("nothing was run"),
+            "and it says so plainly: {error}"
+        );
+    }
+
+    #[test]
+    fn run_can_be_told_to_let_a_check_pass() {
+        // An empty `info.title` fails validation but has nothing to do
+        // with whether the workflow runs.
+        let (base, join) = server(1, 200, r#"{"id":7,"name":"fluffy"}"#);
+        let (_, openapi) = runnable();
+        let lenient = TempFile::write(
+            "lenient.json",
+            &json!({
+                "arazzo": "1.1.0",
+                "info": { "title": "", "version": "1.0.0" },
+                "sourceDescriptions": [
+                    { "name": "petStore", "url": "https://api.example.com/openapi.json",
+                      "type": "openapi" }
+                ],
+                "workflows": [{
+                    "workflowId": "buyPet",
+                    "steps": [{
+                        "stepId": "findPet",
+                        "operationId": "getPetById",
+                        "parameters": [
+                            { "name": "petId", "in": "path", "value": "$inputs.petId" }
+                        ]
+                    }]
+                }]
+            }),
+        );
+        let mut args = run_args(&lenient, &openapi, &base);
+        args.quiet = true;
+
+        let strict = run_arazzo(ArazzoCommand::Run(ArazzoRunArgs {
+            ignore: Vec::new(),
+            ..clone_args(&args)
+        }))
+        .unwrap_err();
+        assert!(strict.to_string().contains("does not validate"), "{strict}");
+
+        args.ignore = vec![ValidationOptions::IgnoreEmptyInfoTitle];
+        run_arazzo(ArazzoCommand::Run(args)).expect("the check was let pass");
+        assert_eq!(join.join().expect("the server thread").len(), 1);
+    }
+
+    /// `ArazzoRunArgs` is not `Clone` — clap args rarely are — so the
+    /// test that needs two of them says how.
+    fn clone_args(args: &ArazzoRunArgs) -> ArazzoRunArgs {
+        ArazzoRunArgs {
+            file: args.file.clone(),
+            workflow: args.workflow.clone(),
+            input: args.input.clone(),
+            inputs: args.inputs.clone(),
+            source: args.source.clone(),
+            base_url: args.base_url.clone(),
+            header: args.header.clone(),
+            load: args.load.clone(),
+            max_steps: args.max_steps,
+            quiet: args.quiet,
+            ignore: args.ignore.clone(),
+            format: args.format,
+            output_format: args.output_format,
+        }
+    }
+
+    #[test]
+    fn a_relative_url_survives_a_directory_with_a_hash_in_its_name() {
+        // Written as `file://{path}`, this would end at the `#` and the
+        // loader would read something else entirely.
+        let from = InputSource::File(PathBuf::from("/tmp/hash#dir/buy.arazzo.yaml"));
+        let url = beside("./api.json", &from).expect("a URL");
+        assert!(url.starts_with("file://"), "{url}");
+        assert!(url.contains("hash%23dir"), "the `#` is escaped: {url}");
+        assert!(url.ends_with("api.json"), "{url}");
     }
 
     #[test]
@@ -993,11 +1163,11 @@ mod tests {
     fn a_relative_source_url_is_read_from_beside_the_document() {
         let from = InputSource::File(PathBuf::from("/tmp/flows/buy.arazzo.yaml"));
         assert_eq!(
-            beside("https://api.example.com/openapi.json", &from),
+            beside("https://api.example.com/openapi.json", &from).expect("a URL"),
             "https://api.example.com/openapi.json",
             "an absolute URL is left alone"
         );
-        let beside_it = beside("./petstore.yaml", &from);
+        let beside_it = beside("./petstore.yaml", &from).expect("a URL");
         assert!(beside_it.starts_with("file://"), "{beside_it}");
         assert!(beside_it.ends_with("petstore.yaml"), "{beside_it}");
         assert!(beside_it.contains("flows"), "{beside_it}");
@@ -1019,6 +1189,7 @@ mod tests {
             load: Vec::new(),
             max_steps: None,
             quiet: true,
+            ignore: Vec::new(),
             format: None,
             output_format: None,
         };

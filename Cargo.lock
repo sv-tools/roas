@@ -1336,6 +1336,7 @@ dependencies = [
  "serde_yaml_ng",
  "tokio",
  "tokio-stream",
+ "url",
  "webbrowser",
 ]
 

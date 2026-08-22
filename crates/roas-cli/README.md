@@ -183,6 +183,8 @@ workflow `buyPet` succeeded
 
 It needs the source descriptions the steps point at: name them with `--source <name>=<path>`, or let `--load file` / `--load http` fetch them by the URLs the description gives (a relative URL is read from beside the description). `--input name=value` sets one input — read as JSON where it is JSON, so `--input n=7` is a number and `--input n=seven` a string — and `--inputs <FILE>` takes an object of them. `--base-url <name>=<url>` sends a source's requests elsewhere, which is how a workflow written against production runs against a test server. `--max-steps` bounds a `goto` that loops.
 
+The description is validated before anything is sent — a run makes real requests, and a description that does not hold together should not make them. `--ignore <CHECK>` lets one pass, as `arazzo validate --ignore` does.
+
 The report goes to **stderr** and the workflow's outputs to **stdout**, so the outputs pipe onward; `--quiet` silences the report. The exit status follows the workflow: non-zero when it failed.
 
 ### `asyncapi`
