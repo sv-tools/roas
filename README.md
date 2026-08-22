@@ -9,7 +9,8 @@ v3.0.x, v3.1.x, and v3.2.x.
 ## Use it as a CLI
 
 [`roas-cli`](crates/roas-cli) ships a `roas` binary with `validate`,
-`convert`, `preview`, `overlay`, `arazzo`, and `asyncapi` subcommands. Install via Cargo,
+`convert`, `preview`, `overlay`, `arazzo` (including `arazzo run`, which
+executes a workflow against a real API), and `asyncapi` subcommands. Install via Cargo,
 Homebrew, or Docker — pick whichever fits the host:
 
 ```shell
