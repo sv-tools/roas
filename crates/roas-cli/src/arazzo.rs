@@ -14,7 +14,7 @@ use roas_arazzo::{v1_0, v1_1};
 use roas_arazzo_executor::{Client, Options, execute};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use url::Url;
 
 use crate::{
@@ -533,6 +533,7 @@ fn sources(
     }
 
     let mut loader = build_loader(&args.load);
+    let base = base_uri(from, description.self_.as_deref())?;
     let mut any = false;
     for declared in &description.source_descriptions {
         let url = declared.url.clone();
@@ -544,7 +545,10 @@ fn sources(
                     // step turns out to need it, naming the source.
                     continue;
                 };
-                let uri = beside(&url, from)?;
+                let uri = base
+                    .join(&url)
+                    .with_context(|| format!("resolving source description URL `{url}`"))?
+                    .to_string();
                 loader
                     .load_resource(&uri)
                     .with_context(|| {
@@ -564,36 +568,49 @@ fn sources(
     Ok((options, any))
 }
 
-/// A source description's URL as something the loader can fetch: an
-/// absolute URL as it stands, a relative one resolved against the
-/// document that named it.
+/// What a relative source description URL is resolved against.
 ///
-/// The relative half is a URI reference, not a path — it may carry
-/// percent escapes, a query, a fragment — so it is resolved by
-/// `Url::join` against the document's own URL. Treating it as path text
-/// would encode `api%20file.json` a second time and read for a file
-/// with a literal `%20` in its name.
-fn beside(url: &str, from: &InputSource) -> Result<String> {
-    if let Ok(absolute) = Url::parse(url) {
-        return Ok(absolute.to_string());
-    }
-    let here = |path: &Path| -> PathBuf {
-        path.canonicalize()
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path))
-    };
-    let base = match from {
-        InputSource::File(path) => Url::from_file_path(here(path))
-            .map_err(|()| anyhow!("`{}` is not a path a URL can name", path.display()))?,
-        // Nothing to be beside: resolve from the working directory.
+/// `$self`, where the description sets one: it "provides the
+/// self-assigned URI of this Arazzo Description, which also serves as
+/// its base URI in accordance with RFC 3986 Section 5.1.1". A relative
+/// `$self` is itself resolved against where the document was read from,
+/// and where there is no `$self` that retrieval URI is the base.
+///
+/// This matters for more than tidiness: a description read from one
+/// directory but self-identifying as another names its sources relative
+/// to the second, and resolving against the first can load a different
+/// OpenAPI document — and run the workflow against a different API.
+fn base_uri(from: &InputSource, self_: Option<&str>) -> Result<Url> {
+    let retrieval = match from {
+        InputSource::File(path) => {
+            let absolute = path
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path));
+            Url::from_file_path(&absolute)
+                .map_err(|()| anyhow!("`{}` is not a path a URL can name", absolute.display()))?
+        }
+        // Nothing to have been retrieved from: resolve from the working
+        // directory.
         InputSource::Stdin => {
             let directory = std::env::current_dir().context("reading the working directory")?;
             Url::from_directory_path(&directory)
                 .map_err(|()| anyhow!("`{}` is not a path a URL can name", directory.display()))?
         }
     };
-    base.join(url)
-        .map(|url| url.to_string())
-        .with_context(|| format!("resolving source description URL `{url}`"))
+    let Some(self_) = self_ else {
+        return Ok(retrieval);
+    };
+    let base = retrieval
+        .join(self_)
+        .with_context(|| format!("resolving `$self` `{self_}`"))?;
+    // A `$self` that cannot be a base — `urn:example:workflows`, say —
+    // names the document without being able to resolve anything against
+    // it. Where the document came from still can.
+    Ok(if base.cannot_be_a_base() {
+        retrieval
+    } else {
+        base
+    })
 }
 
 /// `name=value`, which is how the repeatable flags are written.
@@ -926,17 +943,26 @@ mod tests {
         }
     }
 
+    /// Where a relative source URL of `document` would be loaded from.
+    fn resolved(document: &str, self_: Option<&str>, url: &str) -> String {
+        let from = InputSource::File(PathBuf::from(document));
+        base_uri(&from, self_)
+            .expect("a base")
+            .join(url)
+            .expect("a URL")
+            .to_string()
+    }
+
     #[test]
     fn a_relative_url_keeps_its_uri_escapes() {
         // `api%20file.json` names `api file.json`. Read as path text it
         // would be encoded again, and name `api%20file.json` itself.
-        let from = InputSource::File(PathBuf::from("/tmp/flows/buy.arazzo.yaml"));
-        let url = beside("api%20file.json", &from).expect("a URL");
+        let url = resolved("/tmp/flows/buy.arazzo.yaml", None, "api%20file.json");
         assert!(url.ends_with("/api%20file.json"), "{url}");
         assert!(!url.contains("%2520"), "escaped a second time: {url}");
 
         // A query and a fragment are the URL's, not the path's.
-        let with_query = beside("api.json?v=2", &from).expect("a URL");
+        let with_query = resolved("/tmp/flows/buy.arazzo.yaml", None, "api.json?v=2");
         assert!(with_query.ends_with("api.json?v=2"), "{with_query}");
     }
 
@@ -944,11 +970,58 @@ mod tests {
     fn a_relative_url_survives_a_directory_with_a_hash_in_its_name() {
         // Written as `file://{path}`, this would end at the `#` and the
         // loader would read something else entirely.
-        let from = InputSource::File(PathBuf::from("/tmp/hash#dir/buy.arazzo.yaml"));
-        let url = beside("./api.json", &from).expect("a URL");
+        let url = resolved("/tmp/hash#dir/buy.arazzo.yaml", None, "./api.json");
         assert!(url.starts_with("file://"), "{url}");
         assert!(url.contains("hash%23dir"), "the `#` is escaped: {url}");
         assert!(url.ends_with("api.json"), "{url}");
+    }
+
+    #[test]
+    fn an_absolute_url_is_left_alone() {
+        assert_eq!(
+            resolved(
+                "/tmp/flows/buy.arazzo.yaml",
+                None,
+                "https://api.example.com/openapi.json"
+            ),
+            "https://api.example.com/openapi.json"
+        );
+    }
+
+    #[test]
+    fn self_is_the_base_a_relative_url_is_resolved_against() {
+        // A description read from one place and self-identifying as
+        // another names its sources relative to the second. Resolving
+        // against the first can load a different document, and run the
+        // workflow against a different API.
+        assert_eq!(
+            resolved(
+                "/tmp/retrieved/flow.json",
+                Some("file:///tmp/canonical/flow.json"),
+                "api.json"
+            ),
+            "file:///tmp/canonical/api.json"
+        );
+
+        // A relative `$self` is itself resolved against where the
+        // document was read from.
+        assert_eq!(
+            resolved(
+                "/tmp/retrieved/flow.json",
+                Some("../canonical/flow.json"),
+                "api.json"
+            ),
+            "file:///tmp/canonical/api.json"
+        );
+
+        // And a `$self` that cannot be a base names the document
+        // without being able to resolve anything against it.
+        let url = resolved(
+            "/tmp/retrieved/flow.json",
+            Some("urn:example:workflows"),
+            "api.json",
+        );
+        assert_eq!(url, "file:///tmp/retrieved/api.json");
     }
 
     #[test]
@@ -1182,16 +1255,10 @@ mod tests {
 
     #[test]
     fn a_relative_source_url_is_read_from_beside_the_document() {
-        let from = InputSource::File(PathBuf::from("/tmp/flows/buy.arazzo.yaml"));
-        assert_eq!(
-            beside("https://api.example.com/openapi.json", &from).expect("a URL"),
-            "https://api.example.com/openapi.json",
-            "an absolute URL is left alone"
-        );
-        let beside_it = beside("./petstore.yaml", &from).expect("a URL");
-        assert!(beside_it.starts_with("file://"), "{beside_it}");
-        assert!(beside_it.ends_with("petstore.yaml"), "{beside_it}");
-        assert!(beside_it.contains("flows"), "{beside_it}");
+        let url = resolved("/tmp/flows/buy.arazzo.yaml", None, "./petstore.yaml");
+        assert!(url.starts_with("file://"), "{url}");
+        assert!(url.ends_with("petstore.yaml"), "{url}");
+        assert!(url.contains("flows"), "{url}");
     }
 
     #[test]
