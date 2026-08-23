@@ -1584,3 +1584,78 @@ fn a_whole_step_divides_exactly_at_any_magnitude() {
         ["body: 9007199254740993 is not a multiple of 2"],
     );
 }
+
+// ── the review of b5c686f ────────────────────────────────────────────
+
+#[test]
+fn a_small_fraction_that_rounded_away_is_not_called_an_integer_either() {
+    // A fraction can round away at *any* magnitude — `1.0000000000000001`
+    // is `1.0` — which is why the rule cannot be a magnitude cutoff.
+    // Nothing distinguishes such a value from one written `1.0`, or from
+    // one written `1`, except the lexeme, and that is gone.
+    let validator = body_schema(json!({ "type": "integer" }));
+    for spelling in [b"1.0000000000000001".as_slice(), b"1.0".as_slice()] {
+        let found = errors(&validator, &posted(spelling));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("could NOT be established"),
+            "{}: {found:?}",
+            String::from_utf8_lossy(spelling),
+        );
+    }
+    // An integer that was written as one is still simply an integer.
+    assert!(errors(&validator, &posted(b"2251799813685248")).is_empty());
+
+    // And a fraction `serde_json` did keep is still a definite type
+    // failure rather than an undecidable one.
+    assert_eq!(
+        errors(&validator, &posted(b"2251799813685248.25")),
+        ["body: expected integer, got number"],
+    );
+}
+
+#[test]
+fn a_multiple_of_is_not_proved_by_a_quotient_that_rounded_its_input() {
+    // 9007199254740993 does not survive `f64` — it arrives as
+    // ...992 — so the quotient comes out exactly 2 and hides a
+    // remainder of 1.
+    let validator = body_schema(json!({
+        "type": "integer",
+        "multipleOf": 4_503_599_627_370_496_i64
+    }));
+    // The step is whole, so this one is decided exactly rather than
+    // divided at all.
+    assert_eq!(
+        errors(&validator, &posted(b"9007199254740993")),
+        ["body: 9007199254740993 is not a multiple of 4503599627370496"],
+    );
+    assert!(errors(&validator, &posted(b"9007199254740992")).is_empty());
+
+    // With a fractional step there is no exact path, and the value no
+    // longer survives the conversion — so it reports rather than guesses.
+    let fractional = body_schema(json!({ "type": "integer", "multipleOf": 1.5 }));
+    let found = errors(&fractional, &posted(b"9007199254740993"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+}
+
+#[test]
+fn the_multiple_of_tolerance_allows_for_rounding_and_nothing_more() {
+    let validator = body_schema(json!({ "type": "number", "multipleOf": 1 }));
+    // A different number, not a rounding artefact — a fixed 1e-9
+    // tolerance used to wave this through.
+    assert_eq!(
+        errors(&validator, &posted(b"1.0000000005")),
+        ["body: 1.0000000005 is not a multiple of 1"],
+    );
+    assert!(errors(&validator, &posted(b"2")).is_empty());
+
+    // Real rounding artefacts are still allowed for: 0.3 / 0.1 is
+    // 2.9999999999999996 in binary floating point.
+    let tenths = body_schema(json!({ "type": "number", "multipleOf": 0.1 }));
+    assert!(errors(&tenths, &posted(b"0.3")).is_empty());
+    assert_eq!(
+        errors(&tenths, &posted(b"0.35")),
+        ["body: 0.35 is not a multiple of 0.1"],
+    );
+}

@@ -70,7 +70,11 @@
 //! ## What it does not do yet
 //!
 //! Response validation, security requirements, `multipart/form-data`
-//! bodies, and XML. Anything a check could not judge is reported —
+//! bodies, and XML — and exact decimal arithmetic, which would need
+//! `serde_json`'s `arbitrary_precision`: numbers are compared as the
+//! IEEE-754 doubles they arrive as, and anything that would over-claim
+//! on top of one is reported rather than assumed. Anything a check
+//! could not judge is reported —
 //! [`ErrorKind::Unsupported`] for what is not implemented yet,
 //! [`ErrorKind::Unchecked`] for a description this crate can read but
 //! cannot apply faithfully — rather than passed over, so a request

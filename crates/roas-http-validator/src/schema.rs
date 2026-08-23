@@ -251,11 +251,11 @@ impl<'s> Checker<'s> {
                     && accepting
                         .iter()
                         .all(|schema_type| matches!(schema_type, SchemaType::Integer))
-                    && Num::whole(value).is_some_and(Num::is_approximate)
+                    && Num::of_value(value).is_some_and(|number| !number.is_whole())
                 {
                     self.unchecked(
-                        "is beyond the range a 64-bit float represents exactly, so whether it is \
-                         an integer could NOT be established",
+                        "arrived as a floating-point number, so whether it is an integer could \
+                         NOT be established",
                     );
                     return;
                 }
@@ -282,15 +282,17 @@ impl<'s> Checker<'s> {
                 Some(text) => self.string(text, string),
                 None => self.wrong_type("string", value),
             },
-            SingleSchema::Integer(integer) => match Num::whole(value) {
-                // `9007199254740993.5` reaches `serde_json` as
-                // `9007199254740994.0`, so "has no fractional part" is
-                // not something that can be established about it.
-                Some(number) if number.is_approximate() => self.unchecked(format!(
-                    "{number} is beyond the range a 64-bit float represents exactly, so whether \
-                     it is an integer could NOT be established",
+            SingleSchema::Integer(integer) => match Num::of_value(value) {
+                // Parsed as an integer, so it provably had no fraction.
+                Some(number) if number.is_whole() => self.integer(number, integer),
+                // It definitely has one.
+                Some(number) if !number.may_be_whole() => self.wrong_type("integer", value),
+                // It arrived as a float with nothing left of a fraction
+                // — which is not the same as never having had one.
+                Some(number) => self.unchecked(format!(
+                    "{number} arrived as a floating-point number, so whether it was written \
+                     without a fraction could NOT be established",
                 )),
-                Some(number) => self.integer(number, integer),
                 None => self.wrong_type("integer", value),
             },
             SingleSchema::Number(number) => match Num::of_value(value) {
@@ -382,15 +384,15 @@ impl<'s> Checker<'s> {
 
     fn number(&mut self, value: Num, schema: &NumberSchema) {
         if let Some(allowed) = &schema.enum_values {
-            let candidates = allowed.iter().copied().map(Num::of_f64);
+            let candidates = allowed.iter().copied().map(Num::Real);
             self.enumerated(value, candidates, allowed.len());
         }
         self.bounds(
             value,
-            schema.minimum.map(Num::of_f64),
-            schema.maximum.map(Num::of_f64),
-            schema.exclusive_minimum.map(Num::of_f64),
-            schema.exclusive_maximum.map(Num::of_f64),
+            schema.minimum.map(Num::Real),
+            schema.maximum.map(Num::Real),
+            schema.exclusive_minimum.map(Num::Real),
+            schema.exclusive_maximum.map(Num::Real),
             schema.multiple_of,
         );
     }
@@ -476,8 +478,8 @@ impl<'s> Checker<'s> {
         if let Some(step) = multiple_of
             && step != 0.0
         {
-            // Both whole: an exact remainder, no rounding involved, at
-            // any magnitude.
+            // A whole value and a whole step: an integer remainder, no
+            // float anywhere in it, at any magnitude.
             if let (Num::Exact(value), Some(step)) = (value, whole_step(step)) {
                 if value % step != 0 {
                     self.fail(format!("{value} is not a multiple of {step}"));
@@ -485,20 +487,31 @@ impl<'s> Checker<'s> {
                 return;
             }
 
+            // Everything else goes through a division, and a division
+            // is only evidence while its remainder survives it.
+            //
+            // `9007199254740993 / 4503599627370496` is `2.0000...` with
+            // a remainder of 1 — but the numerator does not fit an
+            // `f64`, so it arrives as `9007199254740992` and the
+            // quotient comes out exactly `2`. `9007199254740992 / 1.5`
+            // loses its remainder the other way, in a quotient too
+            // large to hold one. Neither can be called divisible.
             let quotient = value.as_f64() / step;
-            // The division has to leave a fractional part to look at.
-            // `9007199254740992 / 1.5` is 6004799503160661.33, which an
-            // `f64` stores as 6004799503160661.0 — the remainder is gone
-            // before it can be weighed, and the value would pass as
-            // divisible when it is not.
-            if value.is_approximate() || quotient.abs() >= EXACT_WHOLE_LIMIT {
+            if !value.survives_f64() || quotient.abs() >= EXACT_WHOLE_LIMIT {
                 self.unchecked(format!(
                     "whether {value} is a multiple of {step} could NOT be established: the \
                      division loses its remainder to floating point",
                 ));
                 return;
             }
-            if (quotient - quotient.round()).abs() > 1e-9 {
+
+            // Relative, not absolute: the error to allow for is the
+            // representation error of the quotient itself. A fixed
+            // `1e-9` would wave through `1.0000000005` against a step
+            // of `1`, which is not a rounding artefact but a different
+            // number.
+            let tolerance = f64::EPSILON * quotient.abs().max(1.0) * 4.0;
+            if (quotient - quotient.round()).abs() > tolerance {
                 self.fail(format!("{value} is not a multiple of {step}"));
             }
         }
@@ -687,7 +700,7 @@ fn accepts_type(schema_type: &SchemaType, value: &Value) -> bool {
     match schema_type {
         SchemaType::String => value.is_string(),
         SchemaType::Number => value.is_number(),
-        SchemaType::Integer => Num::whole(value).is_some(),
+        SchemaType::Integer => Num::of_value(value).is_some_and(Num::may_be_whole),
         SchemaType::Object => value.is_object(),
         SchemaType::Array => value.is_array(),
         SchemaType::Boolean => value.is_boolean(),
@@ -709,18 +722,17 @@ enum Num {
     Real(f64),
 }
 
-/// The magnitude at which an `f64`'s steps reach 1, so a fractional
-/// part can no longer survive being stored in one.
-///
-/// 2^52 rather than 2^53. Above 2^53 an `f64` cannot hold every
-/// integer, which is the better-known limit — but the one that matters
-/// here is lower: from 2^52 up, consecutive `f64`s are exactly 1 apart,
-/// so `9007199254740991.5` is stored as `9007199254740992.0` and looks
-/// like a whole number it never was.
+/// The magnitude at which an `f64`'s steps reach 1, so whole digits
+/// start being lost rather than only fractional ones.
 const EXACT_WHOLE_LIMIT: f64 = 4_503_599_627_370_496.0;
 
 impl Num {
     /// Any JSON number.
+    ///
+    /// `Exact` is reserved for numbers `serde_json` parsed **as
+    /// integers** — that is the only evidence available that the number
+    /// was written without a fraction. Everything else is a `Real`,
+    /// however whole it happens to look.
     fn of_value(value: &Value) -> Option<Self> {
         if let Some(number) = value.as_i64() {
             return Some(Num::Exact(i128::from(number)));
@@ -728,23 +740,13 @@ impl Num {
         if let Some(number) = value.as_u64() {
             return Some(Num::Exact(i128::from(number)));
         }
-        value.as_f64().map(Num::of_f64)
+        value.as_f64().map(Num::Real)
     }
 
-    /// A value seen as an integer. JSON Schema counts `1.0` as an
-    /// integer — a number with a zero fractional part — not only `1`.
-    fn whole(value: &Value) -> Option<Self> {
-        if let Some(number) = value.as_i64() {
-            return Some(Num::Exact(i128::from(number)));
-        }
-        if let Some(number) = value.as_u64() {
-            return Some(Num::Exact(i128::from(number)));
-        }
-        let number = value.as_f64()?;
-        (number.fract() == 0.0).then(|| Num::of_f64(number))
-    }
-
-    /// A schema bound, whole or not.
+    /// A schema bound.
+    ///
+    /// Same rule, and for the same reason: a bound `roas` holds as an
+    /// `f64` is one whose lexeme is already gone.
     fn of_number(number: &serde_json::Number) -> Self {
         if let Some(number) = number.as_i64() {
             return Num::Exact(i128::from(number));
@@ -752,23 +754,41 @@ impl Num {
         if let Some(number) = number.as_u64() {
             return Num::Exact(i128::from(number));
         }
-        number.as_f64().map_or(Num::Real(f64::NAN), Num::of_f64)
+        number.as_f64().map_or(Num::Real(f64::NAN), Num::Real)
     }
 
-    /// A number that reached this crate as an `f64`.
+    /// Whether the number is *provably* a whole number.
     ///
-    /// Only below [`EXACT_WHOLE_LIMIT`] does "no fractional part" mean
-    /// the number written had none: at or above it, a `.5` has already
-    /// been rounded away, so the value stays a real and is treated as
-    /// approximate. Integers that `serde_json` kept as integers never
-    /// come through here and stay exact at any magnitude.
-    fn of_f64(number: f64) -> Self {
-        if number.fract() == 0.0 && number.abs() < EXACT_WHOLE_LIMIT {
-            #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
-            Num::Exact(number as i128)
-        } else {
-            Num::Real(number)
+    /// Only an integer that survived parsing as an integer is. No
+    /// magnitude threshold can stand in for this: `2251799813685248.25`
+    /// is stored as `2251799813685248.0` at 2^51, and a small enough
+    /// fraction rounds away at *every* magnitude — `1.0000000000000001`
+    /// is `1.0`. The lexeme is the only proof, and it is gone by the
+    /// time this crate is handed a `Value`.
+    fn is_whole(self) -> bool {
+        matches!(self, Num::Exact(_))
+    }
+
+    /// Whether the number *could* be whole: it is, or it arrived as a
+    /// float with nothing left of a fraction.
+    fn may_be_whole(self) -> bool {
+        match self {
+            Num::Exact(_) => true,
+            Num::Real(number) => number.fract() == 0.0,
         }
+    }
+
+    /// Whether this number may not be the one that was written, in a
+    /// way that can flip a comparison.
+    ///
+    /// A real at or above [`EXACT_WHOLE_LIMIT`] has lost whole digits,
+    /// not just fractional ones, so it cannot settle a tie. Below that,
+    /// the ordinary floating-point caveats apply and are left alone:
+    /// every JSON Schema implementation compares `0.1` with the `f64`
+    /// nearest `0.1`, and flagging that would make the crate useless
+    /// rather than careful.
+    fn is_approximate(self) -> bool {
+        matches!(self, Num::Real(number) if number.abs() >= EXACT_WHOLE_LIMIT)
     }
 
     #[expect(clippy::cast_precision_loss, reason = "only for the inexact path")]
@@ -779,29 +799,26 @@ impl Num {
         }
     }
 
-    /// Whether this number may not be the one that was written.
-    ///
-    /// A real at or above [`EXACT_WHOLE_LIMIT`] has already lost
-    /// whatever fraction it had: `9007199254740993.5` arrives as
-    /// `9007199254740994.0`. It can still be compared, but it cannot
-    /// settle a tie, and it cannot be called a whole number.
-    ///
-    /// Below that magnitude the ordinary floating-point caveats apply
-    /// and are left alone: every JSON Schema implementation compares
-    /// `0.1` with the `f64` nearest `0.1`, and flagging that would make
-    /// the crate useless rather than careful.
-    fn is_approximate(self) -> bool {
-        matches!(self, Num::Real(number) if number.abs() >= EXACT_WHOLE_LIMIT)
+    /// Whether `as_f64` would give this number back unchanged.
+    fn survives_f64(self) -> bool {
+        match self {
+            Num::Exact(number) => {
+                let as_float = self.as_f64();
+                as_float.abs() < 1.701_411_834_604_692_3e38 && {
+                    #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
+                    let back = as_float as i128;
+                    back == number
+                }
+            }
+            Num::Real(_) => true,
+        }
     }
 
     /// Exact whenever either side is.
     ///
     /// An exact integer is never rounded to compare it with a float:
     /// the float's `floor` and `ceil` are themselves exact, so the
-    /// integer can be placed against them instead. What this cannot
-    /// recover is precision `serde_json` lost while parsing the
-    /// description — a bound written `9007199254740993.5` is already
-    /// `9007199254740994.0` by the time it arrives here.
+    /// integer can be placed against them instead.
     fn cmp(self, other: Self) -> Ordering {
         match (self, other) {
             (Num::Exact(mine), Num::Exact(theirs)) => mine.cmp(&theirs),
@@ -863,13 +880,18 @@ fn cmp_exact_to_float(exact: i128, float: f64) -> Ordering {
     }
 }
 
-/// A `multipleOf` step that is itself a whole number, for exact
-/// remainder arithmetic.
+/// A `multipleOf` step that is a whole number, for exact remainder
+/// arithmetic.
+///
+/// `roas` holds `multipleOf` as an `f64`, so the step's lexeme is gone
+/// either way; a whole one is taken at face value as the integer it
+/// looks like, which is what every implementation does with it.
 fn whole_step(step: f64) -> Option<i128> {
-    match Num::of_f64(step) {
-        Num::Exact(step) if step != 0 => Some(step),
-        _ => None,
+    if step.fract() != 0.0 || step == 0.0 || step.abs() >= 1.701_411_834_604_692_3e38 {
+        return None;
     }
+    #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
+    Some(step as i128)
 }
 
 #[cfg(test)]
@@ -990,13 +1012,19 @@ mod tests {
     }
 
     #[test]
-    fn an_integer_accepts_a_whole_number_however_it_was_written() {
+    fn an_integer_must_be_provably_whole_not_merely_whole_looking() {
+        // Parsed as an integer: proof enough.
         assert!(passes(&json!(3), json!({ "type": "integer" })));
-        assert!(passes(&json!(3.0), json!({ "type": "integer" })));
+        // Definitely has a fraction: definitely the wrong type.
         assert_eq!(
             failures(&json!(3.5), json!({ "type": "integer" })),
             ["expected integer, got number"],
         );
+        // `3.0` looks whole, but so does `3.0000000000000001` once an
+        // `f64` has had it — and nothing here can tell them apart.
+        let found = failures(&json!(3.0), json!({ "type": "integer" }));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("could NOT be established"), "{found:?}");
     }
 
     #[test]
