@@ -12,7 +12,9 @@
 //! about, so a body with three bad fields reports three failures rather
 //! than the first.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
+use std::fmt::Display;
 
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::SchemaType;
@@ -197,7 +199,7 @@ impl<'s> Checker<'s> {
                 Some(text) => self.string(text, string),
                 None => self.wrong_type("string", value),
             },
-            SingleSchema::Integer(integer) => match as_integer(value) {
+            SingleSchema::Integer(integer) => match Whole::of(value) {
                 Some(number) => self.integer(number, integer),
                 None => self.wrong_type("integer", value),
             },
@@ -270,11 +272,11 @@ impl<'s> Checker<'s> {
         }
     }
 
-    fn integer(&mut self, value: f64, schema: &IntegerSchema) {
+    fn integer(&mut self, value: Whole, schema: &IntegerSchema) {
         if let Some(allowed) = &schema.enum_values
             && !allowed
                 .iter()
-                .any(|candidate| (*candidate as f64 - value).abs() < f64::EPSILON)
+                .any(|candidate| Whole::Exact(i128::from(*candidate)) == value)
         {
             let names: Vec<String> = allowed
                 .iter()
@@ -282,20 +284,57 @@ impl<'s> Checker<'s> {
                 .collect();
             self.fail(format!("{value} is not one of: {}", names.join(", ")));
         }
-        self.bounds(
-            value,
-            schema.minimum.as_ref().and_then(serde_json::Number::as_f64),
-            schema.maximum.as_ref().and_then(serde_json::Number::as_f64),
-            schema
-                .exclusive_minimum
-                .as_ref()
-                .and_then(serde_json::Number::as_f64),
-            schema
-                .exclusive_maximum
-                .as_ref()
-                .and_then(serde_json::Number::as_f64),
-            schema.multiple_of,
-        );
+
+        let bound = |number: &Option<serde_json::Number>| number.as_ref().map(Whole::of_number);
+        for (limit, ordering, name, inclusive) in [
+            (bound(&schema.minimum), Ordering::Less, "minimum", true),
+            (bound(&schema.maximum), Ordering::Greater, "maximum", true),
+            (
+                bound(&schema.exclusive_minimum),
+                Ordering::Less,
+                "exclusiveMinimum",
+                false,
+            ),
+            (
+                bound(&schema.exclusive_maximum),
+                Ordering::Greater,
+                "exclusiveMaximum",
+                false,
+            ),
+        ] {
+            let Some(limit) = limit else { continue };
+            // Compared as `i128` whenever both sides are whole and fit,
+            // so `9007199254740993` against `maximum: 9007199254740992`
+            // is decided exactly rather than by two equal `f64`s.
+            let relation = value.cmp(limit);
+            let breached = relation == ordering || (!inclusive && relation == Ordering::Equal);
+            if breached {
+                let verb = match (ordering, inclusive) {
+                    (Ordering::Less, true) => "is below",
+                    (Ordering::Greater, true) => "is above",
+                    (Ordering::Less, _) => "is not above",
+                    (Ordering::Greater, _) => "is not below",
+                    _ => unreachable!("only Less and Greater are used"),
+                };
+                self.fail(format!("{value} {verb} {name} {limit}"));
+            }
+        }
+
+        if let Some(step) = schema.multiple_of
+            && step != 0.0
+        {
+            let divides = match (value, whole_step(step)) {
+                // Both whole: an exact remainder, no rounding involved.
+                (Whole::Exact(value), Some(step)) => value % step == 0,
+                _ => {
+                    let quotient = value.as_f64() / step;
+                    (quotient - quotient.round()).abs() <= 1e-9
+                }
+            };
+            if !divides {
+                self.fail(format!("{value} is not a multiple of {step}"));
+            }
+        }
     }
 
     fn number(&mut self, value: f64, schema: &NumberSchema) {
@@ -320,6 +359,9 @@ impl<'s> Checker<'s> {
         );
     }
 
+    /// `type: number` bounds. `roas` models every one of these as an
+    /// `f64` already, so there is no exactness to preserve here — only
+    /// `integer` carries `serde_json::Number` bounds.
     fn bounds(
         &mut self,
         value: f64,
@@ -458,8 +500,12 @@ impl<'s> Checker<'s> {
             }
         }
 
+        // `additionalProperties` judges what no other keyword reached —
+        // and, when it is a schema or `true`, evaluates it in turn.
+        let mut all_evaluated = false;
         match &schema.additional_properties {
-            None | Some(BoolOr::Bool(true)) => {}
+            None => {}
+            Some(BoolOr::Bool(true)) => all_evaluated = true,
             Some(BoolOr::Bool(false)) => {
                 for name in members.keys() {
                     if !evaluated.contains(name.as_str()) {
@@ -469,9 +515,37 @@ impl<'s> Checker<'s> {
                     }
                 }
             }
-            Some(BoolOr::Item(subschema)) => {
+            Some(subschema) => {
+                let BoolOr::Item(subschema) = subschema else {
+                    unreachable!("the boolean forms are matched above")
+                };
                 for (name, value) in members {
                     if !evaluated.contains(name.as_str()) {
+                        self.nested(name, |checker| checker.schema(value, subschema));
+                    }
+                }
+                all_evaluated = true;
+            }
+        }
+
+        // `unevaluatedProperties` then judges whatever is *still*
+        // unevaluated. In general that needs annotations collected
+        // across `allOf` and friends — but not here: `roas` models a
+        // composition as its own schema variant, one that carries no
+        // `properties` of its own, so an `ObjectSchema` is the only
+        // place this keyword can sit and the only properties in play
+        // are the ones just walked.
+        if !all_evaluated && let Some(unevaluated) = &schema.unevaluated_properties {
+            for (name, value) in members {
+                if evaluated.contains(name.as_str()) {
+                    continue;
+                }
+                match unevaluated {
+                    BoolOr::Bool(true) => {}
+                    BoolOr::Bool(false) => self.nested(name, |checker| {
+                        checker.fail("is not described, and unevaluatedProperties is `false`");
+                    }),
+                    BoolOr::Item(subschema) => {
                         self.nested(name, |checker| checker.schema(value, subschema));
                     }
                 }
@@ -501,7 +575,7 @@ fn accepts_type(schema_type: &SchemaType, value: &Value) -> bool {
     match schema_type {
         SchemaType::String => value.is_string(),
         SchemaType::Number => value.is_number(),
-        SchemaType::Integer => as_integer(value).is_some(),
+        SchemaType::Integer => Whole::of(value).is_some(),
         SchemaType::Object => value.is_object(),
         SchemaType::Array => value.is_array(),
         SchemaType::Boolean => value.is_boolean(),
@@ -510,11 +584,97 @@ fn accepts_type(schema_type: &SchemaType, value: &Value) -> bool {
     }
 }
 
-/// A value seen as an integer. JSON Schema counts `1.0` as an integer —
-/// a number with a zero fractional part — not only `1`.
-fn as_integer(value: &Value) -> Option<f64> {
-    let number = value.as_f64()?;
-    (number.fract() == 0.0).then_some(number)
+/// A JSON number that is a whole number, kept exact wherever it fits.
+///
+/// JSON Schema does not restrict numbers to IEEE-754, and OpenAPI's
+/// `format: int64` reaches values an `f64` cannot tell apart —
+/// `9007199254740993` and `9007199254740992` are the same float. So a
+/// whole number is carried as an `i128` and only falls back to `f64`
+/// when it genuinely is one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Whole {
+    Exact(i128),
+    Wide(f64),
+}
+
+impl Whole {
+    /// A value seen as an integer. JSON Schema counts `1.0` as an
+    /// integer — a number with a zero fractional part — not only `1`.
+    fn of(value: &Value) -> Option<Self> {
+        if let Some(number) = value.as_i64() {
+            return Some(Whole::Exact(i128::from(number)));
+        }
+        if let Some(number) = value.as_u64() {
+            return Some(Whole::Exact(i128::from(number)));
+        }
+        let number = value.as_f64()?;
+        (number.fract() == 0.0).then(|| Whole::of_f64(number))
+    }
+
+    /// A schema bound, whole or not.
+    fn of_number(number: &serde_json::Number) -> Self {
+        if let Some(number) = number.as_i64() {
+            return Whole::Exact(i128::from(number));
+        }
+        if let Some(number) = number.as_u64() {
+            return Whole::Exact(i128::from(number));
+        }
+        number.as_f64().map_or(Whole::Wide(f64::NAN), Whole::of_f64)
+    }
+
+    fn of_f64(number: f64) -> Self {
+        // Past 2^53 an `f64` has already lost the value it came from,
+        // so widening it to `i128` would recover nothing.
+        const EXACT_UP_TO: f64 = 9_007_199_254_740_992.0;
+        if number.fract() == 0.0 && number.abs() <= EXACT_UP_TO {
+            #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
+            Whole::Exact(number as i128)
+        } else {
+            Whole::Wide(number)
+        }
+    }
+
+    #[expect(clippy::cast_precision_loss, reason = "only for the inexact path")]
+    fn as_f64(self) -> f64 {
+        match self {
+            Whole::Exact(number) => number as f64,
+            Whole::Wide(number) => number,
+        }
+    }
+
+    /// Exact when both sides are whole; `f64` otherwise.
+    fn cmp(self, other: Self) -> Ordering {
+        match (self, other) {
+            (Whole::Exact(mine), Whole::Exact(theirs)) => mine.cmp(&theirs),
+            _ => self
+                .as_f64()
+                .partial_cmp(&other.as_f64())
+                .unwrap_or(Ordering::Equal),
+        }
+    }
+}
+
+impl Display for Whole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Whole::Exact(number) => write!(f, "{number}"),
+            Whole::Wide(number) => write!(f, "{number}"),
+        }
+    }
+}
+
+/// A `multipleOf` step that is itself a whole number, for exact
+/// remainder arithmetic.
+fn whole_step(step: f64) -> Option<i128> {
+    match Whole::of_f64(step) {
+        Whole::Exact(step) if step != 0 => Some(step),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    pub(crate) use super::tests::{failures, passes};
 }
 
 #[cfg(test)]
@@ -541,7 +701,7 @@ mod tests {
 
     /// Every failure as `pointer: message`, which is what the assertions
     /// below can read at a glance.
-    fn failures(value: &Value, schema_json: serde_json::Value) -> Vec<String> {
+    pub(crate) fn failures(value: &Value, schema_json: serde_json::Value) -> Vec<String> {
         check(value, &schema(schema_json), &spec())
             .into_iter()
             .map(|failure| {
@@ -554,7 +714,7 @@ mod tests {
             .collect()
     }
 
-    fn passes(value: &Value, schema_json: serde_json::Value) -> bool {
+    pub(crate) fn passes(value: &Value, schema_json: serde_json::Value) -> bool {
         failures(value, schema_json).is_empty()
     }
 
@@ -998,5 +1158,84 @@ mod tests {
             ),
             ["/name: is shorter than minLength 2 (1 characters)"],
         );
+    }
+}
+
+#[cfg(test)]
+mod exactness_tests {
+    use super::tests_support::{failures, passes};
+    use serde_json::json;
+
+    #[test]
+    fn an_integer_bound_is_compared_exactly_not_through_a_float() {
+        // Both sides round to the same `f64`; only exact arithmetic
+        // tells them apart.
+        let schema = json!({ "type": "integer", "maximum": 9_007_199_254_740_992_i64 });
+        assert!(passes(&json!(9_007_199_254_740_992_i64), schema.clone()));
+        assert_eq!(
+            failures(&json!(9_007_199_254_740_993_i64), schema),
+            ["9007199254740993 is above maximum 9007199254740992"],
+        );
+    }
+
+    #[test]
+    fn a_large_integer_enum_is_compared_exactly_too() {
+        let schema = json!({ "type": "integer", "enum": [9_007_199_254_740_992_i64] });
+        assert!(passes(&json!(9_007_199_254_740_992_i64), schema.clone()));
+        assert_eq!(
+            failures(&json!(9_007_199_254_740_993_i64), schema),
+            ["9007199254740993 is not one of: 9007199254740992"],
+        );
+    }
+
+    #[test]
+    fn a_large_multiple_of_divides_exactly() {
+        let schema = json!({ "type": "integer", "multipleOf": 1_000_000_007 });
+        assert!(passes(&json!(3_000_000_021_i64), schema.clone()));
+        assert_eq!(
+            failures(&json!(3_000_000_022_i64), schema),
+            ["3000000022 is not a multiple of 1000000007"],
+        );
+    }
+
+    #[test]
+    fn unevaluated_properties_judges_what_nothing_else_reached() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "id": { "type": "integer" } },
+            "unevaluatedProperties": false,
+        });
+        assert!(passes(&json!({ "id": 1 }), schema.clone()));
+        assert_eq!(
+            failures(&json!({ "id": 1, "extra": true }), schema),
+            ["/extra: is not described, and unevaluatedProperties is `false`"],
+        );
+    }
+
+    #[test]
+    fn unevaluated_properties_may_carry_a_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "id": { "type": "integer" } },
+            "unevaluatedProperties": { "type": "string" },
+        });
+        assert!(passes(&json!({ "id": 1, "tag": "x" }), schema.clone()));
+        assert_eq!(
+            failures(&json!({ "id": 1, "tag": 2 }), schema),
+            ["/tag: expected string, got integer"],
+        );
+    }
+
+    #[test]
+    fn additional_properties_evaluates_them_so_unevaluated_sees_nothing() {
+        // `additionalProperties: true` covers the rest, which leaves
+        // `unevaluatedProperties: false` with nothing to reject.
+        let schema = json!({
+            "type": "object",
+            "properties": { "id": { "type": "integer" } },
+            "additionalProperties": true,
+            "unevaluatedProperties": false,
+        });
+        assert!(passes(&json!({ "id": 1, "extra": true }), schema));
     }
 }

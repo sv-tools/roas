@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use roas::common::reference::RefOr;
-use roas::v3_2::media_type::MediaType;
+use roas::v3_2::media_type::{Encoding, MediaType};
 use roas::v3_2::request_body::RequestBody;
 use roas::v3_2::schema::{Schema, SingleSchema};
 use roas::v3_2::spec::Spec;
@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::parameter::is_json;
 use crate::report::{ErrorKind, Location, ValidationError};
-use crate::request::{RequestView, decode_query};
+use crate::request::RequestView;
 use crate::schema;
 
 /// Judge the body, appending whatever is wrong to `errors`.
@@ -39,17 +39,25 @@ pub(crate) fn validate(
         });
     };
 
-    let bytes = request.body.as_deref().unwrap_or_default();
-    if bytes.is_empty() {
-        // An absent body is only a problem when the description says
-        // one is required; `required` defaults to false.
+    let sent = request.content_type();
+
+    // `None` is "no body was supplied"; `Some(&[])` is "a body was
+    // supplied and it was empty", and those are different questions —
+    // an empty JSON body is malformed, an empty `text/plain` body is
+    // the empty string. The one case they agree on is an empty body
+    // with no `Content-Type`, which is how HTTP spells no body at all.
+    let absent = match request.body.as_deref() {
+        None => true,
+        Some(bytes) => bytes.is_empty() && sent.is_none(),
+    };
+    if absent {
+        // `required` defaults to false.
         if request_body.required == Some(true) {
             push(ErrorKind::Missing);
         }
         return;
     }
-
-    let sent = request.content_type();
+    let bytes = request.body.as_deref().unwrap_or_default();
     let Some((media_type, entry)) = select(&request_body.content, sent.as_deref()) else {
         push(ErrorKind::UnexpectedMediaType {
             got: sent,
@@ -72,7 +80,7 @@ pub(crate) fn validate(
         return;
     };
 
-    let value = match decode(bytes, &media_type, declared, spec) {
+    let value = match decode(bytes, &media_type, declared, entry.encoding.as_ref(), spec) {
         Ok(value) => value,
         Err(Decoded::Malformed(why)) => {
             push(ErrorKind::Malformed(why));
@@ -142,6 +150,7 @@ pub(crate) fn decode(
     bytes: &[u8],
     media_type: &str,
     declared: &RefOr<Schema>,
+    encoding: Option<&BTreeMap<String, Encoding>>,
     spec: &Spec,
 ) -> Result<Value, Decoded> {
     if is_json(media_type) {
@@ -151,17 +160,13 @@ pub(crate) fn decode(
 
     if media_type == "application/x-www-form-urlencoded" {
         let text = as_text(bytes)?;
-        let properties = object_properties(declared, spec);
-        let mut object = serde_json::Map::new();
-        for (name, value) in decode_query(&text) {
-            let property = properties
-                .as_ref()
-                .and_then(|properties| properties.get(&name));
-            let coerced =
-                crate::parameter::coerce(&value, property, spec).map_err(Decoded::Malformed)?;
-            object.insert(name, coerced);
-        }
-        return Ok(Value::Object(object));
+        return crate::parameter::read_form_body(
+            &text,
+            object_properties(declared, spec),
+            encoding,
+            spec,
+        )
+        .map_err(Decoded::Malformed);
     }
 
     // Text is judged as the string it is — a `text/plain` body with a

@@ -46,16 +46,19 @@
 //!
 //! | Feature | Covers |
 //! | --- | --- |
-//! | `http` | `http::Request`, `http::request::Parts` — and so axum, warp, tonic, hyper, reqwest |
+//! | `http` | `http::Request`, `http::request::Parts` — and so axum, warp, tonic, hyper |
 //! | `actix-web` | `actix_web::HttpRequest` |
 //! | `poem` | `poem::Request` |
 //! | `salvo` | `salvo_core::http::Request` |
 //! | `rocket` | `rocket::Request` |
+//! | `reqwest` | `reqwest::Request` and its blocking twin — the client's side, for checking an outgoing call |
 //!
-//! The body is never part of that conversion. A framework body is a
+//! The body is not part of that conversion. A framework body is a
 //! stream, and validating one means buffering it — how much, and
 //! whether at all, is the caller's decision, so the adapters convert
-//! the head and [`RequestView::with_body`] takes the bytes.
+//! the head and [`RequestView::with_body`] takes the bytes. The one
+//! exception is `reqwest`, where a non-streaming body is already bytes
+//! in memory and there is nothing to buffer.
 //!
 //! ## Versions
 //!

@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use roas::v3_2::path_item::Paths;
+use roas::v3_2::path_item::{PathItem, Paths};
 use roas::v3_2::server::Server;
 
 use crate::request::decode_path_segment;
@@ -25,8 +25,6 @@ use crate::request::decode_path_segment;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Router {
     routes: Vec<Route>,
-    /// Server base paths, longest first, each tried as a prefix to strip.
-    base_paths: Vec<String>,
 }
 
 /// What matching a path produced.
@@ -34,7 +32,11 @@ pub(crate) struct Router {
 pub(crate) struct Match<'r> {
     /// The template as the description spells it, e.g. `/pets/{petId}`.
     pub(crate) template: &'r str,
-    /// Path parameters, decoded, in the order the template names them.
+    /// Path parameters exactly as they arrived, still percent-encoded.
+    ///
+    /// Decoding happens after `style` has split them, not before: in a
+    /// non-exploded array `a%2Cb` is one item containing a comma, and
+    /// decoding first would turn the delimiter into a separator.
     pub(crate) parameters: BTreeMap<String, String>,
 }
 
@@ -42,6 +44,15 @@ pub(crate) struct Match<'r> {
 struct Route {
     template: String,
     segments: Vec<Segment>,
+    /// The base paths this route may arrive under, longest first.
+    ///
+    /// Per route rather than per description: a Server Object may sit on
+    /// the Operation Object or the Path Item Object as well as the root,
+    /// and the innermost one wins
+    /// ([§4.8.5](https://spec.openapis.org/oas/v3.2.0#operation-object)).
+    /// So one description can serve `/pets` under `/v1` and one
+    /// operation of it under `/v2`.
+    base_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,66 +72,39 @@ enum Part {
 impl Router {
     /// Build a router over a description's paths.
     ///
-    /// `base_path` overrides what the Server Objects imply; pass `None`
-    /// to derive the prefixes from `servers` instead.
+    /// `base_path` overrides every Server Object; pass `None` to derive
+    /// each route's prefixes from the servers that apply to it.
     pub(crate) fn new(paths: &Paths, servers: Option<&[Server]>, base_path: Option<&str>) -> Self {
+        let override_base = base_path.map(|base| vec![normalize_base(base)]);
         let routes = paths
             .iter()
-            .map(|(template, _)| Route::parse(template))
+            .map(|(template, path_item)| {
+                let base_paths = override_base
+                    .clone()
+                    .unwrap_or_else(|| effective_base_paths(path_item, servers));
+                Route::parse(template, base_paths)
+            })
             .collect();
-
-        let mut base_paths = match base_path {
-            Some(base) => vec![normalize_base(base)],
-            None => servers
-                .unwrap_or_default()
-                .iter()
-                .filter_map(server_base_path)
-                .collect(),
-        };
-        base_paths.retain(|base| !base.is_empty());
-        base_paths.sort_by_key(|base| std::cmp::Reverse(base.len()));
-        base_paths.dedup();
-
-        Self { routes, base_paths }
+        Self { routes }
     }
 
     /// The template `path` belongs to, or `None` when the description
     /// describes no such path.
     ///
-    /// A server base path is stripped when the request carries one, and
-    /// the unstripped path is tried as well — an application mounted
-    /// behind a proxy sees the path without the prefix its own
-    /// description advertises.
+    /// A route's own server base path is stripped when the request
+    /// carries one, and the unstripped path is tried as well — an
+    /// application mounted behind a proxy sees the path without the
+    /// prefix its own description advertises.
     pub(crate) fn route(&self, path: &str) -> Option<Match<'_>> {
-        for candidate in self.candidates(path) {
-            if let Some(matched) = self.best_match(candidate) {
-                return Some(matched);
-            }
-        }
-        None
-    }
-
-    /// `path` with each server base path stripped, longest first, and
-    /// then `path` itself.
-    fn candidates<'p>(&self, path: &'p str) -> impl Iterator<Item = &'p str> {
-        let stripped: Vec<&'p str> = self
-            .base_paths
-            .iter()
-            .filter_map(|base| strip_base(path, base))
-            .collect();
-        stripped.into_iter().chain(std::iter::once(path))
-    }
-
-    /// The most specific route that matches, per the specification's
-    /// rule that a concrete segment outranks a templated one.
-    fn best_match(&self, path: &str) -> Option<Match<'_>> {
         let mut best: Option<(&Route, BTreeMap<String, String>)> = None;
         for route in &self.routes {
-            let Some(parameters) = route.match_path(path) else {
+            let Some(parameters) = route.match_under_its_base_paths(path) else {
                 continue;
             };
             let better = match &best {
                 None => true,
+                // The specification's rule that a concrete segment
+                // outranks a templated one.
                 Some((incumbent, _)) => route.outranks(incumbent),
             };
             if better {
@@ -135,7 +119,7 @@ impl Router {
 }
 
 impl Route {
-    fn parse(template: &str) -> Self {
+    fn parse(template: &str, base_paths: Vec<String>) -> Self {
         let segments = template
             .split('/')
             .map(|segment| {
@@ -146,10 +130,25 @@ impl Route {
                 }
             })
             .collect();
+        let mut base_paths = base_paths;
+        base_paths.retain(|base| !base.is_empty());
+        base_paths.sort_by_key(|base| std::cmp::Reverse(base.len()));
+        base_paths.dedup();
         Self {
             template: template.to_owned(),
             segments,
+            base_paths,
         }
+    }
+
+    /// Match `path` with each of this route's base paths stripped,
+    /// longest first, and then with none stripped.
+    fn match_under_its_base_paths(&self, path: &str) -> Option<BTreeMap<String, String>> {
+        self.base_paths
+            .iter()
+            .filter_map(|base| strip_base(path, base))
+            .chain(std::iter::once(path))
+            .find_map(|candidate| self.match_path(candidate))
     }
 
     /// The path parameters `path` supplies, or `None` when it does not
@@ -164,6 +163,9 @@ impl Route {
         for (template, actual) in self.segments.iter().zip(segments) {
             match template {
                 Segment::Literal(literal) => {
+                    // A literal segment is compared decoded — `%20` and a
+                    // space are the same segment. Only captured values
+                    // stay encoded, because only they get split later.
                     if decode_path_segment(actual) != *literal {
                         return None;
                     }
@@ -254,12 +256,52 @@ fn match_parts(
                 if value.is_empty() {
                     return None;
                 }
-                parameters.insert(name.clone(), decode_path_segment(value));
+                // Kept as it arrived; `style` splits it before anything
+                // decodes it.
+                parameters.insert(name.clone(), value.to_owned());
             }
         }
         index += 1;
     }
     rest.is_empty().then_some(())
+}
+
+/// Every base path a route may arrive under.
+///
+/// The Server Objects that apply to an operation are its own, else its
+/// Path Item Object's, else the root's — the innermost wins. A route
+/// serves every operation under it, and the router matches a path before
+/// it knows the method, so the route accepts the union of what its
+/// operations accept.
+fn effective_base_paths(path_item: &PathItem, root: Option<&[Server]>) -> Vec<String> {
+    let inherited = path_item.servers.as_deref().or(root);
+    let operations = path_item
+        .operations
+        .iter()
+        .chain(path_item.additional_operations.iter())
+        .flat_map(|operations| operations.values());
+
+    let mut bases = Vec::new();
+    let mut any_operation = false;
+    for operation in operations {
+        any_operation = true;
+        let servers = operation.servers.as_deref().or(inherited);
+        bases.extend(
+            servers
+                .unwrap_or_default()
+                .iter()
+                .filter_map(server_base_path),
+        );
+    }
+    if !any_operation {
+        bases.extend(
+            inherited
+                .unwrap_or_default()
+                .iter()
+                .filter_map(server_base_path),
+        );
+    }
+    bases
 }
 
 /// The path component of a Server Object's URL, with any server
@@ -407,11 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn a_path_parameter_is_percent_decoded_after_the_split() {
+    fn a_path_parameter_is_captured_exactly_as_it_arrived() {
+        // Not decoded here: `style` splits the value first, and a
+        // percent-encoded delimiter is data rather than a separator.
         let router = router(&["/pets/{name}"]);
         assert_eq!(
             matched(&router, "/pets/rex%20the%20dog").1,
-            vec![("name".to_owned(), "rex the dog".to_owned())],
+            vec![("name".to_owned(), "rex%20the%20dog".to_owned())],
         );
     }
 
@@ -420,8 +464,14 @@ mod tests {
         let router = router(&["/files/{path}"]);
         assert_eq!(
             matched(&router, "/files/a%2Fb").1,
-            vec![("path".to_owned(), "a/b".to_owned())],
+            vec![("path".to_owned(), "a%2Fb".to_owned())],
         );
+    }
+
+    #[test]
+    fn a_literal_segment_is_compared_decoded() {
+        let router = router(&["/my pets"]);
+        assert_eq!(matched(&router, "/my%20pets").0, "/my pets");
     }
 
     #[test]
@@ -503,6 +553,100 @@ mod tests {
         }];
         let router = Router::new(&paths, Some(&servers), None);
         assert_eq!(matched(&router, "/pets").0, "/pets");
+    }
+
+    fn path_item_with(
+        servers: Option<Vec<Server>>,
+        operation_servers: Option<Vec<Server>>,
+    ) -> PathItem {
+        let operation = roas::v3_2::operation::Operation {
+            servers: operation_servers,
+            ..roas::v3_2::operation::Operation::default()
+        };
+        PathItem {
+            servers,
+            operations: Some([("get".to_owned(), operation)].into_iter().collect()),
+            ..PathItem::default()
+        }
+    }
+
+    fn server(url: &str) -> Server {
+        Server {
+            url: url.to_owned(),
+            ..Server::default()
+        }
+    }
+
+    #[test]
+    fn a_path_item_server_overrides_the_root_server() {
+        let paths: Paths = vec![(
+            "/pets".to_owned(),
+            path_item_with(Some(vec![server("https://api.example.com/v2")]), None),
+        )]
+        .into();
+        let root = [server("https://api.example.com/v1")];
+        let router = Router::new(&paths, Some(&root), None);
+        assert_eq!(matched(&router, "/v2/pets").0, "/pets");
+        assert!(router.route("/v1/pets").is_none());
+    }
+
+    #[test]
+    fn an_operation_server_overrides_the_path_item_and_the_root() {
+        let paths: Paths = vec![(
+            "/pets".to_owned(),
+            path_item_with(
+                Some(vec![server("/v2")]),
+                Some(vec![server("https://api.example.com/v3")]),
+            ),
+        )]
+        .into();
+        let root = [server("/v1")];
+        let router = Router::new(&paths, Some(&root), None);
+        assert_eq!(matched(&router, "/v3/pets").0, "/pets");
+        assert!(router.route("/v2/pets").is_none());
+        assert!(router.route("/v1/pets").is_none());
+    }
+
+    #[test]
+    fn one_description_can_serve_two_paths_under_different_bases() {
+        let paths: Paths = vec![
+            (
+                "/pets".to_owned(),
+                path_item_with(Some(vec![server("/v1")]), None),
+            ),
+            (
+                "/orders".to_owned(),
+                path_item_with(Some(vec![server("/v2")]), None),
+            ),
+        ]
+        .into();
+        let router = Router::new(&paths, None, None);
+        assert_eq!(matched(&router, "/v1/pets").0, "/pets");
+        assert_eq!(matched(&router, "/v2/orders").0, "/orders");
+        assert!(router.route("/v2/pets").is_none());
+    }
+
+    #[test]
+    fn a_path_item_without_operations_still_takes_the_servers_above_it() {
+        let paths: Paths = vec![("/pets".to_owned(), PathItem::default())].into();
+        let root = [server("/v1")];
+        let router = Router::new(&paths, Some(&root), None);
+        assert_eq!(matched(&router, "/v1/pets").0, "/pets");
+    }
+
+    #[test]
+    fn an_additional_operations_server_is_taken_into_account_too() {
+        let operation = roas::v3_2::operation::Operation {
+            servers: Some(vec![server("/v9")]),
+            ..roas::v3_2::operation::Operation::default()
+        };
+        let path_item = PathItem {
+            additional_operations: Some([("COPY".to_owned(), operation)].into_iter().collect()),
+            ..PathItem::default()
+        };
+        let paths: Paths = vec![("/pets".to_owned(), path_item)].into();
+        let router = Router::new(&paths, None, None);
+        assert_eq!(matched(&router, "/v9/pets").0, "/pets");
     }
 
     #[test]

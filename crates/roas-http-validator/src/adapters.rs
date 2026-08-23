@@ -10,6 +10,8 @@ mod actix;
 mod http;
 #[cfg(feature = "poem")]
 mod poem;
+#[cfg(feature = "reqwest")]
+mod reqwest;
 #[cfg(feature = "rocket")]
 mod rocket;
 #[cfg(feature = "salvo")]

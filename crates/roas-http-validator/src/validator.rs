@@ -12,7 +12,7 @@ use roas::v3_2::spec::Spec;
 use crate::body;
 use crate::parameter;
 use crate::report::{ErrorKind, Location, RoutingError, ValidationError, ValidationReport};
-use crate::request::RequestView;
+use crate::request::{RequestView, decode_path_segment};
 use crate::router::Router;
 
 /// What to check, and where the description's paths start.
@@ -152,17 +152,12 @@ impl Validator {
         let path_parameters = matched.parameters;
 
         let path_item = self.path_item(&template);
-        let method = request.method.to_ascii_lowercase();
-        let operations = path_item.and_then(|item| item.operations.as_ref());
-        let operation = operations.and_then(|operations| operations.get(&method));
-
-        let Some(operation) = operation else {
+        let Some((method, operation)) = path_item.and_then(|item| self.operation(item, request))
+        else {
             return Err(RoutingError::MethodNotAllowed {
                 template,
                 method: request.method.to_uppercase(),
-                allowed: operations
-                    .map(|operations| operations.keys().cloned().collect())
-                    .unwrap_or_default(),
+                allowed: path_item.map(allowed_methods).unwrap_or_default(),
             });
         };
 
@@ -176,7 +171,7 @@ impl Validator {
         }
 
         if self.options.reject_undescribed_query_parameters {
-            check_for_strays(&extracted, &parameters, &mut errors);
+            check_for_strays(&extracted, &parameters, &self.spec, &mut errors);
         }
 
         if !self.options.skip_body
@@ -196,11 +191,43 @@ impl Validator {
 
         Ok(ValidationReport {
             template,
-            method,
+            method: method.to_owned(),
             operation_id: operation.operation_id.clone(),
-            path_parameters: path_parameters.into_iter().collect(),
+            // Decoded here and only here: validation splits before it
+            // decodes, but a report is for a reader.
+            path_parameters: path_parameters
+                .iter()
+                .map(|(name, raw)| (name.clone(), decode_path_segment(raw)))
+                .collect(),
             errors,
         })
+    }
+
+    /// The operation a request's method names, and the key the Path
+    /// Item Object files it under.
+    ///
+    /// The eight methods the specification names live in `operations`
+    /// under lowercase keys. OpenAPI 3.2 added `additionalOperations`
+    /// for everything else — `COPY`, `LOCK`, `REPORT` — and those keys
+    /// are HTTP method names, which
+    /// [RFC 9110 §9.1](https://www.rfc-editor.org/rfc/rfc9110#name-overview)
+    /// makes case-sensitive, so they are matched exactly as written.
+    fn operation<'i>(
+        &self,
+        path_item: &'i PathItem,
+        request: &RequestView<'_>,
+    ) -> Option<(&'i str, &'i Operation)> {
+        let standard = request.method.to_ascii_lowercase();
+        if let Some(operations) = &path_item.operations
+            && let Some((key, operation)) = operations.get_key_value(&standard)
+        {
+            return Some((key.as_str(), operation));
+        }
+        path_item
+            .additional_operations
+            .as_ref()?
+            .get_key_value(request.method.as_ref())
+            .map(|(key, operation)| (key.as_str(), operation))
     }
 
     /// The Path Item Object for a template, following a `$ref` when the
@@ -261,6 +288,7 @@ impl Validator {
 fn check_for_strays(
     extracted: &parameter::Extracted<'_>,
     parameters: &[Parameter],
+    spec: &Spec,
     errors: &mut Vec<ValidationError>,
 ) {
     // `in: querystring` describes the query string whole, so there is no
@@ -271,18 +299,15 @@ fn check_for_strays(
     {
         return;
     }
-    let described: Vec<&str> = parameters
+    let described: Vec<String> = parameters
         .iter()
-        .filter_map(|parameter| match parameter {
-            Parameter::Query(query) => Some(query.name.as_str()),
-            _ => None,
-        })
+        .flat_map(|parameter| parameter::query_names(parameter, spec))
         .collect();
     for (name, _) in &extracted.query {
         // A `deepObject` parameter arrives as `id[role]`, so a name that
         // opens a bracket belongs to whatever precedes it.
         let base = name.split_once('[').map_or(name.as_str(), |(base, _)| base);
-        if !described.contains(&base) {
+        if !described.iter().any(|described| described == base) {
             errors.push(ValidationError {
                 location: Location::Query,
                 name: name.clone(),
@@ -290,6 +315,18 @@ fn check_for_strays(
             });
         }
     }
+}
+
+/// Every method a Path Item Object describes, standard and additional,
+/// as an `Allow` header would list them.
+fn allowed_methods(path_item: &PathItem) -> Vec<String> {
+    path_item
+        .operations
+        .iter()
+        .chain(path_item.additional_operations.iter())
+        .flat_map(|operations| operations.keys())
+        .cloned()
+        .collect()
 }
 
 /// What makes a parameter unique: its name and its location.

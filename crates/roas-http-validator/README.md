@@ -39,11 +39,12 @@ So this crate takes `RequestView` — the small set of things an OpenAPI descrip
 
 | Feature | Covers |
 |---|---|
-| `http` | `http::Request`, `http::request::Parts` — and so **axum**, warp, tonic, hyper, reqwest |
+| `http` | `http::Request`, `http::request::Parts` — and so **axum**, warp, tonic, hyper |
 | `actix-web` | `actix_web::HttpRequest` |
 | `poem` | `poem::Request` |
 | `salvo` | `salvo_core::http::Request` |
 | `rocket` | `rocket::Request` |
+| `reqwest` | `reqwest::Request` and its blocking twin — the *client's* side, for checking a call you are about to make |
 
 ```rust
 use roas_http_validator::ToRequestView;
@@ -63,7 +64,7 @@ let report = validator.validate(&request.request_view().with_body(body.as_slice(
 # Ok(()) }
 ```
 
-The body is never part of that conversion, on purpose. A framework body is a stream, and validating one means buffering it — how much, and whether at all, is the caller's decision, so the adapters convert the head and `with_body` takes the bytes.
+The body is not part of that conversion, on purpose. A framework body is a stream, and validating one means buffering it — how much, and whether at all, is the caller's decision, so the adapters convert the head and `with_body` takes the bytes. `reqwest` is the exception: a non-streaming body is already bytes in memory, so that adapter supplies it and client-side validation is a one-liner.
 
 ## Routing is a different answer from validation
 
@@ -84,7 +85,9 @@ match validator.validate(&RequestView::new("DELETE", "/pets")) {
 # Ok(()) }
 ```
 
-Path matching follows the specification's own rule that a concrete segment outranks a templated one, so `/pets/mine` wins over `/pets/{petId}`. A Server Object's base path is stripped when the request carries one — and the unstripped path is tried too, because an application behind a proxy sees the path without the prefix its own description advertises. `Options::base_path` overrides all of it.
+Path matching follows the specification's own rule that a concrete segment outranks a templated one, so `/pets/mine` wins over `/pets/{petId}`. A Server Object's base path is stripped when the request carries one — resolved per route, since a Server Object may sit on the Operation Object or the Path Item Object as well as the root and the innermost one wins — and the unstripped path is tried too, because an application behind a proxy sees the path without the prefix its own description advertises. `Options::base_path` overrides all of it.
+
+OpenAPI 3.2's `additionalOperations` is looked up alongside the eight standard methods, matched with the capitalization the description wrote, since [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#name-overview) makes method names case-sensitive.
 
 ## Parameters arrive as text
 
@@ -97,6 +100,8 @@ Path matching follows the specification's own rule that a concrete segment outra
 | `header` | `simple` |
 | `cookie` | `form` |
 | `querystring` | `content` (OpenAPI 3.2) |
+
+Splitting happens *before* decoding, so a percent-encoded delimiter stays data: in a non-exploded `form` array, `a%2Cb` is one item containing a comma rather than two items. (`spaceDelimited` has to be the exception — a literal space cannot appear in a query string at all, so `%20` is the only spelling its delimiter has.) The same `style`/`explode` machinery reads `application/x-www-form-urlencoded` bodies through their Encoding Object, so a repeated `tags=a&tags=b` field becomes the array it stands for.
 
 A parameter whose schema this crate cannot read structurally — a composition, say — stays a string, so the schema still judges it and the verdict is at worst too strict, never too lax.
 

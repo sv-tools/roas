@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::SchemaType;
 use roas::common::reference::RefOr;
-use roas::v3_2::media_type::MediaType;
+use roas::v3_2::media_type::{Encoding, MediaType};
 use roas::v3_2::parameter::{InCookieStyle, InHeaderStyle, InPathStyle, InQueryStyle, Parameter};
 use roas::v3_2::schema::{Schema, SingleSchema};
 use roas::v3_2::spec::Spec;
@@ -31,7 +31,7 @@ use serde_json::Value;
 
 use crate::body;
 use crate::report::{ErrorKind, Location, ValidationError};
-use crate::request::RequestView;
+use crate::request::{RequestView, decode_form, decode_path_segment, split_query};
 use crate::schema;
 
 /// How a parameter's value was flattened into text.
@@ -95,10 +95,70 @@ impl<'r> Extracted<'r> {
     pub(crate) fn new(request: &RequestView<'_>, path: &'r BTreeMap<String, String>) -> Self {
         Self {
             path,
-            query: request.query_pairs(),
+            query: request.query_pairs_raw(),
             cookies: request.cookies(),
         }
     }
+}
+
+/// Rebuild an `application/x-www-form-urlencoded` body.
+///
+/// A form body is a query string, and the Encoding Object says how each
+/// field was flattened with exactly the `style` and `explode` a query
+/// parameter uses — so it is read by the same code, field by field.
+/// Without that, `tags=a&tags=b` collapses to the last value instead of
+/// becoming a two-item array.
+pub(crate) fn read_form_body(
+    text: &str,
+    properties: Option<&BTreeMap<String, RefOr<Schema>>>,
+    encoding: Option<&BTreeMap<String, Encoding>>,
+    spec: &Spec,
+) -> Result<Value, String> {
+    let pairs = split_query(text);
+    let mut object = serde_json::Map::new();
+
+    // Described fields first, so each is read through its own schema.
+    if let Some(properties) = properties {
+        for (name, schema) in properties {
+            let field =
+                Described::form_field(name, encoding.and_then(|e| e.get(name)), Some(schema));
+            if let Some(value) = field.read_form_field(&pairs, spec)? {
+                object.insert(name.clone(), value);
+            }
+        }
+    }
+
+    // Then whatever else arrived, as the strings it arrived as, so
+    // `additionalProperties` still has something to judge.
+    for (name, value) in &pairs {
+        if !object.contains_key(name) {
+            object.insert(name.clone(), Value::String(decode_form(value)));
+        }
+    }
+    Ok(Value::Object(object))
+}
+
+/// The query-string names one parameter accounts for.
+///
+/// Usually just its own name — but a `form` object that explodes has no
+/// name in the query at all: its properties become top-level pairs, so
+/// `filter` with properties `role` and `age` accounts for `role=` and
+/// `age=`. Stray-parameter detection has to know that, or it rejects a
+/// request the extraction above reads perfectly well.
+pub(crate) fn query_names(parameter: &Parameter, spec: &Spec) -> Vec<String> {
+    let described = Described::of(parameter);
+    if described.location != Location::Query {
+        return Vec::new();
+    }
+    let mut names = vec![described.name.to_owned()];
+    if described.explode
+        && described.style == Style::Form
+        && let Some(schema) = described.schema
+        && let Shape::Object(Some(properties)) = Shape::of(schema, spec)
+    {
+        names.extend(properties.keys().cloned());
+    }
+    names
 }
 
 /// Judge one parameter, appending whatever is wrong to `errors`.
@@ -178,7 +238,13 @@ fn validate_as_content(
     let Some(declared) = &entry.schema else {
         return;
     };
-    let value = match body::decode(raw.as_bytes(), media_type, declared, spec) {
+    let value = match body::decode(
+        raw.as_bytes(),
+        media_type,
+        declared,
+        entry.encoding.as_ref(),
+        spec,
+    ) {
         Ok(value) => value,
         Err(body::Decoded::Malformed(why)) => {
             push(ErrorKind::Malformed(why));
@@ -219,6 +285,44 @@ pub(crate) fn is_json(media_type: &str) -> bool {
 }
 
 impl<'p> Described<'p> {
+    /// One field of a form body, described by its Encoding Object.
+    fn form_field(
+        name: &'p str,
+        encoding: Option<&Encoding>,
+        schema: Option<&'p RefOr<Schema>>,
+    ) -> Self {
+        let style = match encoding.and_then(|encoding| encoding.style.as_ref()) {
+            Some(InQueryStyle::SpaceDelimited) => Style::SpaceDelimited,
+            Some(InQueryStyle::PipeDelimited) => Style::PipeDelimited,
+            Some(InQueryStyle::DeepObject) => Style::DeepObject,
+            Some(InQueryStyle::Form) | None => Style::Form,
+        };
+        Self {
+            name,
+            location: Location::Query,
+            required: false,
+            style,
+            // As for a query parameter: `form` explodes by default.
+            explode: encoding
+                .and_then(|encoding| encoding.explode)
+                .unwrap_or(style == Style::Form),
+            schema,
+            content: None,
+        }
+    }
+
+    /// This field's value, read out of the form body's pairs.
+    fn read_form_field(
+        &self,
+        pairs: &[(String, String)],
+        spec: &Spec,
+    ) -> Result<Option<Value>, String> {
+        let shape = self
+            .schema
+            .map_or(Shape::Opaque, |schema| Shape::of(schema, spec));
+        self.read_query(pairs, &shape, spec)
+    }
+
     fn of(parameter: &'p Parameter) -> Self {
         match parameter {
             Parameter::Path(path) => Self {
@@ -294,12 +398,15 @@ impl<'p> Described<'p> {
     /// parameters, which are not flattened by `style` at all.
     fn raw_text(&self, request: &RequestView<'_>, extracted: &Extracted<'_>) -> Option<String> {
         match self.location {
-            Location::Path => extracted.path.get(self.name).cloned(),
+            Location::Path => extracted
+                .path
+                .get(self.name)
+                .map(|raw| self.decode_value(raw)),
             Location::Query => extracted
                 .query
                 .iter()
                 .find(|(name, _)| name == self.name)
-                .map(|(_, value)| value.clone()),
+                .map(|(_, value)| self.decode_value(value)),
             // The whole query string, as sent. Absent and empty are the
             // same thing for a query string, so an empty one still
             // counts as supplied.
@@ -352,6 +459,22 @@ impl<'p> Described<'p> {
         }
     }
 
+    /// Undo the transport encoding of one value, once `style` has
+    /// finished splitting it.
+    ///
+    /// Which encoding that is depends on where the value came from: a
+    /// path segment is percent-encoded, a query value is form-encoded
+    /// (`+` is a space), and header and cookie values are neither.
+    fn decode_value(&self, raw: &str) -> String {
+        match self.location {
+            Location::Path => decode_path_segment(raw),
+            Location::Query | Location::Querystring => decode_form(raw),
+            Location::Header | Location::Cookie | Location::Body | Location::Description => {
+                raw.to_owned()
+            }
+        }
+    }
+
     /// Strip the prefix `label` and `matrix` add: `.blue` and
     /// `;color=blue` both carry the value `blue`.
     fn undecorate<'v>(&self, raw: &'v str) -> &'v str {
@@ -367,15 +490,16 @@ impl<'p> Described<'p> {
         }
     }
 
-    /// Rebuild from one string, splitting it as the style says.
+    /// Rebuild from one string, splitting it as the style says and
+    /// decoding only afterwards.
     fn read_single(&self, raw: &str, shape: &Shape<'_>, spec: &Spec) -> Result<Value, String> {
         let separator = self.separator();
         match shape {
             Shape::Array(items) => {
-                let parts = self.split_list(raw, separator);
-                let values = parts
-                    .into_iter()
-                    .map(|part| coerce(&part, *items, spec))
+                let values = self
+                    .split_list(raw, separator)
+                    .iter()
+                    .map(|part| coerce(&self.decode_value(part), *items, spec))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::Array(values))
             }
@@ -383,15 +507,20 @@ impl<'p> Described<'p> {
                 let pairs = if self.explode {
                     // `role=admin,firstName=Alex`
                     self.split_list(raw, separator)
-                        .into_iter()
+                        .iter()
                         .filter_map(|part| {
-                            part.split_once('=')
-                                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                            part.split_once('=').map(|(name, value)| {
+                                (self.decode_value(name), self.decode_value(value))
+                            })
                         })
                         .collect()
                 } else {
                     // `role,admin,firstName,Alex`
-                    let flat = self.split_list(raw, separator);
+                    let flat: Vec<String> = self
+                        .split_list(raw, separator)
+                        .iter()
+                        .map(|part| self.decode_value(part))
+                        .collect();
                     flat.chunks(2)
                         .filter(|chunk| chunk.len() == 2)
                         .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
@@ -399,8 +528,8 @@ impl<'p> Described<'p> {
                 };
                 object_from(pairs, *properties, spec)
             }
-            Shape::Primitive(primitive) => coerce_primitive(raw, *primitive),
-            Shape::Opaque => Ok(Value::String(raw.to_owned())),
+            Shape::Primitive(primitive) => coerce_primitive(&self.decode_value(raw), *primitive),
+            Shape::Opaque => Ok(Value::String(self.decode_value(raw))),
         }
     }
 
@@ -420,10 +549,28 @@ impl<'p> Described<'p> {
 
     /// Split a flattened list, dropping the `name=` that exploded
     /// `matrix` repeats before every member.
+    ///
+    /// Splitting happens on the text as it arrived, so a delimiter that
+    /// was percent-encoded stays data: in a non-exploded `form` array,
+    /// `a%2Cb` is one item containing a comma, not two items.
+    ///
+    /// `spaceDelimited` is the exception, and has to be. A literal
+    /// space cannot appear in a query string at all
+    /// ([RFC 3986 §3.4](https://www.rfc-editor.org/rfc/rfc3986#section-3.4)),
+    /// so `%20` and `+` are the only spellings its delimiter has — which
+    /// leaves the style with no way to express a space *inside* a
+    /// member, as the specification itself notes of these styles.
     fn split_list(&self, raw: &str, separator: char) -> Vec<String> {
         if raw.is_empty() {
             return Vec::new();
         }
+        let normalized;
+        let raw = if separator == ' ' {
+            normalized = raw.replace("%20", " ").replace('+', " ");
+            normalized.as_str()
+        } else {
+            raw
+        };
         raw.split(separator)
             .map(|part| {
                 if self.style == Style::Matrix && self.explode {
@@ -452,7 +599,7 @@ impl<'p> Described<'p> {
                 .iter()
                 .filter_map(|(name, value)| {
                     let key = name.strip_prefix(&prefix)?.strip_suffix(']')?;
-                    Some((key.to_owned(), value.clone()))
+                    Some((key.to_owned(), self.decode_value(value)))
                 })
                 .collect();
             if members.is_empty() {
@@ -473,7 +620,7 @@ impl<'p> Described<'p> {
             let members: Vec<(String, String)> = pairs
                 .iter()
                 .filter(|(name, _)| properties.contains_key(name))
-                .cloned()
+                .map(|(name, value)| (name.clone(), self.decode_value(value)))
                 .collect();
             if members.is_empty() {
                 return Ok(None);
@@ -496,7 +643,7 @@ impl<'p> Described<'p> {
         {
             let values = mine
                 .into_iter()
-                .map(|value| coerce(value, *items, spec))
+                .map(|value| coerce(&self.decode_value(value), *items, spec))
                 .collect::<Result<Vec<_>, _>>()?;
             return Ok(Some(Value::Array(values)));
         }

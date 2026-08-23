@@ -159,7 +159,20 @@ impl<'a> RequestView<'a> {
     /// and repeats — `?tag=a&tag=b` is two pairs, not one.
     #[must_use]
     pub fn query_pairs(&self) -> Vec<(String, String)> {
-        self.query.as_deref().map(decode_query).unwrap_or_default()
+        self.query_pairs_raw()
+            .into_iter()
+            .map(|(name, value)| (name, decode_form(&value)))
+            .collect()
+    }
+
+    /// The same pairs with their **values** left encoded.
+    ///
+    /// Which is what validation needs: a delimiter that arrived
+    /// percent-encoded is data, not a separator, so `tags=a%2Cb` must
+    /// still be one item when `style` splits it on commas. Names are
+    /// decoded, because a name is never split.
+    pub(crate) fn query_pairs_raw(&self) -> Vec<(String, String)> {
+        self.query.as_deref().map(split_query).unwrap_or_default()
     }
 
     /// The cookies from the `Cookie` header, in the order sent.
@@ -188,14 +201,14 @@ pub trait ToRequestView {
     fn request_view(&self) -> RequestView<'_>;
 }
 
-/// `application/x-www-form-urlencoded` decoding: `+` is a space, `%XX`
-/// is a byte, and a pair without `=` has an empty value.
-pub(crate) fn decode_query(query: &str) -> Vec<(String, String)> {
+/// Split a query string into pairs, decoding the names and leaving the
+/// values as they arrived.
+pub(crate) fn split_query(query: &str) -> Vec<(String, String)> {
     query
         .split('&')
         .filter(|pair| !pair.is_empty())
         .map(|pair| match pair.split_once('=') {
-            Some((name, value)) => (decode_form(name), decode_form(value)),
+            Some((name, value)) => (decode_form(name), value.to_owned()),
             None => (decode_form(pair), String::new()),
         })
         .collect()
@@ -205,7 +218,7 @@ pub(crate) fn decode_query(query: &str) -> Vec<(String, String)> {
 /// UTF-8 becomes replacement characters rather than an error, because a
 /// malformed byte in one parameter should be reported by the schema
 /// that parameter is judged against, not by refusing the whole request.
-fn decode_form(value: &str) -> String {
+pub(crate) fn decode_form(value: &str) -> String {
     let plus_as_space = value.replace('+', " ");
     percent_encoding::percent_decode_str(&plus_as_space)
         .decode_utf8_lossy()
@@ -323,6 +336,26 @@ mod tests {
         let request = RequestView::new("POST", "/").with_body(b"{}".as_slice());
         assert_eq!(request.body.as_deref(), Some(b"{}".as_slice()));
         assert_eq!(RequestView::new("POST", "/").body, None);
+    }
+
+    #[test]
+    fn raw_pairs_keep_their_values_encoded_so_delimiters_stay_distinguishable() {
+        let request = RequestView::new("GET", "/").with_query("tags=a%2Cb&q=x+y");
+        assert_eq!(
+            request.query_pairs_raw(),
+            [
+                ("tags".to_owned(), "a%2Cb".to_owned()),
+                ("q".to_owned(), "x+y".to_owned()),
+            ],
+        );
+        // The public accessor still hands back what a reader expects.
+        assert_eq!(
+            request.query_pairs(),
+            [
+                ("tags".to_owned(), "a,b".to_owned()),
+                ("q".to_owned(), "x y".to_owned()),
+            ],
+        );
     }
 
     #[test]

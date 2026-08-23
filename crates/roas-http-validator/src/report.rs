@@ -155,7 +155,9 @@ impl Display for ErrorKind {
 pub struct ValidationReport {
     /// The Path Item template the request matched, e.g. `/pets/{petId}`.
     pub template: String,
-    /// The method, lowercased as the Path Item Object spells it.
+    /// The method as the Path Item Object spells it: lowercase for the
+    /// eight standard ones, and exactly as written for a method that
+    /// came from `additionalOperations`, whose keys are case-sensitive.
     pub method: String,
     /// The matched operation's `operationId`, when it has one.
     pub operation_id: Option<String>,

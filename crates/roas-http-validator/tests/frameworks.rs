@@ -14,6 +14,7 @@
     feature = "poem",
     feature = "salvo",
     feature = "rocket",
+    feature = "reqwest",
 ))]
 
 use roas_http_validator::{Options, ToRequestView, Validator};
@@ -342,5 +343,65 @@ mod rocket_framework {
                 "application/json",
             ));
         assert_takes_a_body(local.inner());
+    }
+}
+
+// ── reqwest: the client's side ───────────────────────────────────────
+
+#[cfg(feature = "reqwest")]
+mod reqwest_client {
+    use super::*;
+
+    fn get(url: &str) -> reqwest::Request {
+        reqwest::Client::new()
+            .get(url)
+            .header("x-request-id", "abc-123")
+            .header("cookie", "session=opensesame")
+            .build()
+            .expect("the request must build")
+    }
+
+    #[test]
+    fn a_reqwest_request_is_read_as_it_arrived() {
+        assert_reads_the_request(&get(&format!("https://api.example.com{PATH_AND_QUERY}")));
+    }
+
+    #[test]
+    fn a_blocking_reqwest_request_is_read_the_same_way() {
+        let request = reqwest::blocking::Client::new()
+            .get(format!("https://api.example.com{PATH_AND_QUERY}"))
+            .header("x-request-id", "abc-123")
+            .header("cookie", "session=opensesame")
+            .build()
+            .expect("the request must build");
+        assert_reads_the_request(&request);
+    }
+
+    #[test]
+    fn a_reqwest_request_reports_what_is_wrong_with_it() {
+        let request = reqwest::Client::new()
+            .get("https://api.example.com/pets?limit=1000")
+            .build()
+            .expect("the request must build");
+        assert_reports_the_same_errors(&request);
+    }
+
+    #[test]
+    fn a_reqwest_body_needs_no_buffering_because_it_is_already_bytes() {
+        // The one adapter that supplies the body itself: nothing here
+        // is a stream, so there is nothing for the caller to decide.
+        let request = reqwest::Client::new()
+            .post("https://api.example.com/pets")
+            .header("x-request-id", "abc-123")
+            .header("content-type", "application/json")
+            .body(r#"{"tag":"cute"}"#)
+            .build()
+            .expect("the request must build");
+
+        let report = validator()
+            .validate(&request.request_view())
+            .expect("the description describes POST /pets");
+        let errors: Vec<String> = report.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(errors, ["body: at /name: is required and was not sent"]);
     }
 }

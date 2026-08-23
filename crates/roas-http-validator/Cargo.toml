@@ -29,6 +29,9 @@ v2 = ["roas/v2", "v3_0"]
 # `http` covers axum, warp, tonic, hyper and anything else built on
 # `http::Request`; the rest carry their own type.
 http = ["dep:http"]
+# The client side: `reqwest::Request` and its blocking twin, for
+# checking an outgoing call against the description.
+reqwest = ["dep:reqwest"]
 actix-web = ["dep:actix-web"]
 poem = ["dep:poem"]
 salvo = ["dep:salvo_core"]
@@ -44,6 +47,7 @@ thiserror.workspace = true
 actix-web = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 poem = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 rocket = { workspace = true, optional = true }
 salvo_core = { workspace = true, optional = true }
 

@@ -623,3 +623,257 @@ fn a_parameter_reference_that_names_nothing_is_the_descriptions_fault() {
         "{report}",
     );
 }
+
+#[test]
+fn a_percent_encoded_delimiter_is_data_rather_than_a_separator() {
+    // `a%2Cb` is one item that contains a comma. Decoding before the
+    // split would turn it into two.
+    let validator = styled("form", false);
+    let strings = validator_with_string_items();
+    assert_eq!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("id=3%2C4")
+        ),
+        ["query parameter \"id\": cannot be read: \"3,4\" is not an integer"],
+    );
+    let report = strings
+        .validate(&RequestView::new("GET", "/x").with_query("id=a%2Cb"))
+        .expect("the description describes GET /x");
+    assert!(report.is_valid(), "{report}");
+}
+
+/// The same parameter with string items, so a comma inside one is legal.
+fn validator_with_string_items() -> Validator {
+    validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "id", "in": "query", "style": "form", "explode": false,
+              "schema": { "type": "array", "items": { "type": "string" },
+                          "minItems": 1, "maxItems": 1 } }
+        ] } }
+    }))
+}
+
+#[test]
+fn a_percent_encoded_path_delimiter_is_data_too() {
+    let validator = validator(json!({
+        "/x/{id}": { "get": { "parameters": [
+            { "name": "id", "in": "path", "required": true,
+              "schema": { "type": "array", "items": { "type": "string" },
+                          "minItems": 1, "maxItems": 1 } }
+        ] } }
+    }));
+    let report = validator
+        .validate(&RequestView::new("GET", "/x/a%2Cb"))
+        .expect("the description describes GET /x/{id}");
+    assert!(report.is_valid(), "{report}");
+    assert_eq!(
+        report.path_parameters,
+        [("id".to_owned(), "a,b".to_owned())]
+    );
+}
+
+// ── OpenAPI 3.2's `additionalOperations` ─────────────────────────────
+
+fn with_copy() -> Validator {
+    validator(json!({
+        "/pets": {
+            "get": { "operationId": "listPets" },
+            "additionalOperations": {
+                "COPY": {
+                    "operationId": "copyPet",
+                    "parameters": [
+                        { "name": "destination", "in": "query", "required": true,
+                          "schema": { "type": "string" } }
+                    ]
+                }
+            }
+        }
+    }))
+}
+
+#[test]
+fn a_non_standard_method_is_found_in_additional_operations() {
+    let report = with_copy()
+        .validate(&RequestView::new("COPY", "/pets").with_query("destination=/pets/8"))
+        .expect("`additionalOperations` describes COPY /pets");
+    assert!(report.is_valid(), "{report}");
+    assert_eq!(report.operation_id.as_deref(), Some("copyPet"));
+    // Reported as the description spells it, not lowercased.
+    assert_eq!(report.method, "COPY");
+}
+
+#[test]
+fn an_additional_operations_parameter_is_validated_like_any_other() {
+    assert_eq!(
+        errors(&with_copy(), &RequestView::new("COPY", "/pets")),
+        ["query parameter \"destination\": is required and was not sent"],
+    );
+}
+
+#[test]
+fn a_non_standard_method_is_matched_case_sensitively() {
+    // RFC 9110 makes method names case-sensitive, and the key here is
+    // `COPY`.
+    assert!(matches!(
+        with_copy().validate(&RequestView::new("copy", "/pets")),
+        Err(RoutingError::MethodNotAllowed { .. }),
+    ));
+}
+
+#[test]
+fn the_allowed_list_names_additional_operations_too() {
+    let error = with_copy()
+        .validate(&RequestView::new("DELETE", "/pets"))
+        .expect_err("the path offers no DELETE");
+    assert_eq!(
+        error,
+        RoutingError::MethodNotAllowed {
+            template: "/pets".to_owned(),
+            method: "DELETE".to_owned(),
+            allowed: vec!["get".to_owned(), "COPY".to_owned()],
+        },
+    );
+}
+
+// ── servers at every level ───────────────────────────────────────────
+
+#[test]
+fn an_operation_server_moves_just_that_operation() {
+    let validator = validator(json!({
+        "/pets": {
+            "get": { "operationId": "listPets" },
+            "post": { "operationId": "createPet", "servers": [{ "url": "https://api.example.com/v2" }] }
+        }
+    }));
+    let report = validator
+        .validate(&RequestView::new("POST", "/v2/pets"))
+        .expect("the operation's own server carries the `/v2` prefix");
+    assert_eq!(report.operation_id.as_deref(), Some("createPet"));
+}
+
+// ── bodies that arrived empty ────────────────────────────────────────
+
+#[test]
+fn an_empty_body_that_was_supplied_is_not_an_absent_body() {
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "required": true, "content": {
+            "application/json": { "schema": { "type": "object" } },
+            "text/plain": { "schema": { "type": "string" } }
+        } } } }
+    }));
+
+    // Nothing supplied at all.
+    assert_eq!(
+        errors(&validator, &RequestView::new("POST", "/x")),
+        ["body: is required and was not sent"],
+    );
+
+    // Supplied, empty, and claimed to be JSON — which it is not.
+    let empty_json = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/json")
+        .with_body(b"".as_slice());
+    let found = errors(&validator, &empty_json);
+    assert_eq!(found.len(), 1);
+    assert!(
+        found[0].starts_with("body: cannot be read: invalid JSON"),
+        "{found:?}"
+    );
+
+    // Supplied, empty, and claimed to be text — which the empty string is.
+    let empty_text = RequestView::new("POST", "/x")
+        .with_header("content-type", "text/plain")
+        .with_body(b"".as_slice());
+    assert!(errors(&validator, &empty_text).is_empty());
+}
+
+// ── form bodies with an Encoding Object ──────────────────────────────
+
+#[test]
+fn a_repeated_form_field_becomes_the_array_it_stands_for() {
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/x-www-form-urlencoded": { "schema": {
+                "type": "object",
+                "properties": { "tags": { "type": "array", "items": { "type": "string" } } }
+            } }
+        } } } }
+    }));
+    let request = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(b"tags=a&tags=b".as_slice());
+    assert!(errors(&validator, &request).is_empty());
+}
+
+#[test]
+fn a_form_field_honours_the_encoding_objects_style() {
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/x-www-form-urlencoded": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array", "items": { "type": "integer" } }
+                    }
+                },
+                "encoding": { "ids": { "style": "pipeDelimited", "explode": false } }
+            }
+        } } } }
+    }));
+    let request = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(b"ids=1|2|3".as_slice());
+    assert!(errors(&validator, &request).is_empty());
+
+    let bad = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(b"ids=1|x".as_slice());
+    assert_eq!(
+        errors(&validator, &bad),
+        ["body: cannot be read: \"x\" is not an integer"],
+    );
+}
+
+#[test]
+fn an_undescribed_form_field_is_still_offered_to_additional_properties() {
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/x-www-form-urlencoded": { "schema": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "additionalProperties": false
+            } }
+        } } } }
+    }));
+    let request = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(b"name=Rex&extra=1".as_slice());
+    assert_eq!(
+        errors(&validator, &request),
+        ["body: at /extra: is not described, and additionalProperties is `false`"],
+    );
+}
+
+// ── stray detection and exploded objects ─────────────────────────────
+
+#[test]
+fn an_exploded_object_parameter_is_not_mistaken_for_stray_parameters() {
+    let paths = json!({
+        "/x": { "get": { "parameters": [
+            { "name": "filter", "in": "query", "style": "form", "explode": true,
+              "schema": { "type": "object", "properties": {
+                  "role": { "type": "string" }, "age": { "type": "integer" }
+              } } }
+        ] } }
+    });
+    let strict = with_options(paths, Options::new().reject_undescribed_query_parameters());
+    let request = RequestView::new("GET", "/x").with_query("role=admin&age=42");
+    assert!(errors(&strict, &request).is_empty());
+
+    // Something the object does not declare is still a stray.
+    let stray = RequestView::new("GET", "/x").with_query("role=admin&nope=1");
+    assert_eq!(
+        errors(&strict, &stray),
+        ["query parameter \"nope\": is not described by this operation"],
+    );
+}
