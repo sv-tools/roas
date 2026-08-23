@@ -11,25 +11,36 @@
 //! Resolving happens once, when the validator is built, rather than per
 //! request: this is middleware, and the answer never changes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use roas::common::reference::ResolveReference;
 use roas::v3_2::path_item::PathItem;
 use roas::v3_2::spec::Spec;
 
-/// Every Path Item Object of a description, with its `$ref` followed and
-/// merged.
+/// Every Path Item Object of a description, with its `$ref` chain
+/// followed and merged.
 pub(crate) fn resolve(spec: &Spec) -> BTreeMap<String, PathItem> {
     let Some(paths) = &spec.paths else {
         return BTreeMap::new();
     };
     paths
         .iter()
-        .map(|(template, item)| (template.clone(), resolve_one(spec, item)))
+        .map(|(template, item)| {
+            let mut seen = BTreeSet::new();
+            (template.clone(), resolve_one(spec, item, &mut seen))
+        })
         .collect()
 }
 
-fn resolve_one(spec: &Spec, item: &PathItem) -> PathItem {
+/// Follow one Path Item Object's reference, and its reference, and so
+/// on — a component may point at another component.
+///
+/// When the chain cannot be finished — an external reference, a name
+/// that resolves to nothing, or a cycle — the `reference` field is left
+/// in place rather than cleared. That is what tells the validator the
+/// Path Item Object is incomplete, so it can say so instead of treating
+/// the missing half as absent.
+fn resolve_one(spec: &Spec, item: &PathItem, seen: &mut BTreeSet<String>) -> PathItem {
     let Some(reference) = &item.reference else {
         return item.clone();
     };
@@ -37,10 +48,21 @@ fn resolve_one(spec: &Spec, item: &PathItem) -> PathItem {
     if !reference.starts_with("#/") {
         return item.clone();
     }
+    // A chain that comes back to a reference it already followed would
+    // otherwise never end.
+    if !seen.insert(reference.clone()) {
+        return item.clone();
+    }
     let Some(referenced) = ResolveReference::<PathItem>::resolve_reference(spec, reference) else {
         return item.clone();
     };
-    merge(item, referenced)
+    let referenced = resolve_one(spec, referenced, seen);
+    let mut merged = merge(item, &referenced);
+    // Only a chain that finished counts as followed.
+    if referenced.reference.is_some() {
+        merged.reference = item.reference.clone();
+    }
+    merged
 }
 
 /// A Path Item Object with the one it references filled in behind it.
@@ -52,7 +74,8 @@ fn resolve_one(spec: &Spec, item: &PathItem) -> PathItem {
 /// local `get` beside a referenced `post` gives a path item with both.
 fn merge(local: &PathItem, referenced: &PathItem) -> PathItem {
     PathItem {
-        // Followed, so nothing downstream tries to follow it again.
+        // Followed; `resolve_one` puts it back if the chain did not
+        // actually finish.
         reference: None,
         summary: local.summary.clone().or_else(|| referenced.summary.clone()),
         description: local
@@ -207,6 +230,55 @@ mod tests {
             item.servers.as_ref().map(|servers| servers[0].url.clone()),
             Some("/v9".to_owned()),
         );
+    }
+
+    #[test]
+    fn a_reference_chain_is_followed_to_its_end() {
+        let mut paths = resolved(json!({
+            "openapi": "3.2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": { "/x": { "$ref": "#/components/pathItems/A" } },
+            "components": { "pathItems": {
+                "A": { "$ref": "#/components/pathItems/B" },
+                "B": { "get": { "operationId": "deep" } }
+            } }
+        }));
+        let item = paths.remove("/x").expect("the path must be present");
+        assert_eq!(
+            operation_ids(&item),
+            [("get".to_owned(), "deep".to_owned())]
+        );
+        assert!(item.reference.is_none());
+    }
+
+    #[test]
+    fn a_reference_cycle_ends_rather_than_recurring_forever() {
+        let mut paths = resolved(json!({
+            "openapi": "3.2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": { "/x": { "$ref": "#/components/pathItems/A" } },
+            "components": { "pathItems": {
+                "A": { "$ref": "#/components/pathItems/B" },
+                "B": { "$ref": "#/components/pathItems/A" }
+            } }
+        }));
+        let item = paths.remove("/x").expect("the path must be present");
+        // Unfinished, so the reference stays for the caller to report.
+        assert_eq!(item.reference.as_deref(), Some("#/components/pathItems/A"));
+    }
+
+    #[test]
+    fn a_chain_that_cannot_finish_keeps_its_reference() {
+        let mut paths = resolved(json!({
+            "openapi": "3.2.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": { "/x": { "$ref": "#/components/pathItems/A" } },
+            "components": { "pathItems": {
+                "A": { "$ref": "#/components/pathItems/Gone" }
+            } }
+        }));
+        let item = paths.remove("/x").expect("the path must be present");
+        assert_eq!(item.reference.as_deref(), Some("#/components/pathItems/A"));
     }
 
     #[test]

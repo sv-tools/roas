@@ -77,7 +77,7 @@ fn assert_takes_a_body(request: &impl ToRequestView) {
         .validate(&view)
         .expect("the description describes POST /pets");
     let errors: Vec<String> = report.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(errors, ["body: at /name: is required and was not sent"]);
+    assert_eq!(errors, ["body at /name: is required and was not sent"]);
 }
 
 // ── http: axum, warp, tonic, hyper, reqwest ──────────────────────────
@@ -415,6 +415,6 @@ mod reqwest_client {
             .validate(&request.request_view())
             .expect("the description describes POST /pets");
         let errors: Vec<String> = report.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(errors, ["body: at /name: is required and was not sent"]);
+        assert_eq!(errors, ["body at /name: is required and was not sent"]);
     }
 }

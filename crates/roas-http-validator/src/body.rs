@@ -31,10 +31,11 @@ pub(crate) fn validate(
     spec: &Spec,
     errors: &mut Vec<ValidationError>,
 ) {
-    let mut push = |kind: ErrorKind| {
+    let mut push = |pointer: String, kind: ErrorKind| {
         errors.push(ValidationError {
             location: Location::Body,
             name: String::new(),
+            pointer,
             kind,
         });
     };
@@ -50,23 +51,29 @@ pub(crate) fn validate(
     let Some(bytes) = request.body.as_deref() else {
         // `required` defaults to false.
         if request_body.required == Some(true) {
-            push(ErrorKind::Missing);
+            push(String::new(), ErrorKind::Missing);
         }
         return;
     };
 
     let Some((media_type, entry)) = select(&request_body.content, sent.as_deref()) else {
-        push(ErrorKind::UnexpectedMediaType {
-            got: sent,
-            expected: request_body.content.keys().cloned().collect(),
-        });
+        push(
+            String::new(),
+            ErrorKind::UnexpectedMediaType {
+                got: sent,
+                expected: request_body.content.keys().cloned().collect(),
+            },
+        );
         return;
     };
 
     let entry = match entry.get_item(spec) {
         Ok(entry) => entry,
         Err(error) => {
-            push(ErrorKind::UnresolvedReference(error.to_string()));
+            push(
+                String::new(),
+                ErrorKind::UnresolvedReference(error.to_string()),
+            );
             return;
         }
     };
@@ -80,24 +87,24 @@ pub(crate) fn validate(
     let value = match decode(bytes, &media_type, declared, entry.encoding.as_ref(), spec) {
         Ok(value) => value,
         Err(Decoded::Malformed(why)) => {
-            push(ErrorKind::Malformed(why));
+            push(String::new(), ErrorKind::Malformed(why));
             return;
         }
         Err(Decoded::Unsupported(what)) => {
-            push(ErrorKind::Unsupported(what));
+            push(String::new(), ErrorKind::Unsupported(what));
             return;
         }
     };
 
     for failure in schema::check(&value, declared, spec) {
-        push(match failure.kind {
-            schema::FailureKind::Unresolved => ErrorKind::UnresolvedReference(failure.message),
-            schema::FailureKind::Unchecked => ErrorKind::Unchecked(failure.message),
-            schema::FailureKind::Violated => ErrorKind::Schema {
-                pointer: failure.pointer,
-                message: failure.message,
+        push(
+            failure.pointer,
+            match failure.kind {
+                schema::FailureKind::Unresolved => ErrorKind::UnresolvedReference(failure.message),
+                schema::FailureKind::Unchecked => ErrorKind::Unchecked(failure.message),
+                schema::FailureKind::Violated => ErrorKind::Schema(failure.message),
             },
-        });
+        );
     }
 }
 

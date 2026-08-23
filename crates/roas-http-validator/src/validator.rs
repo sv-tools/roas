@@ -170,6 +170,17 @@ impl Validator {
         };
 
         let mut errors = Vec::new();
+        // A `$ref` chain that could not be followed leaves part of this
+        // Path Item Object unread — whatever it held went unapplied, so
+        // it is reported rather than passed over.
+        if let Some(reference) = path_item.and_then(|item| item.reference.as_ref()) {
+            errors.push(ValidationError {
+                location: Location::Description,
+                name: String::new(),
+                pointer: String::new(),
+                kind: ErrorKind::UnresolvedReference(reference.clone()),
+            });
+        }
         let parameters = self.parameters(path_item, operation, &mut errors);
         // Decoded once for the whole operation rather than per parameter.
         let extracted = parameter::Extracted::new(request, &path_parameters);
@@ -192,6 +203,7 @@ impl Validator {
                 Err(error) => errors.push(ValidationError {
                     location: Location::Body,
                     name: String::new(),
+                    pointer: String::new(),
                     kind: ErrorKind::UnresolvedReference(error.to_string()),
                 }),
             }
@@ -268,6 +280,7 @@ impl Validator {
                     Err(error) => errors.push(ValidationError {
                         location: Location::Description,
                         name: String::new(),
+                        pointer: String::new(),
                         kind: ErrorKind::UnresolvedReference(error.to_string()),
                     }),
                 }
@@ -300,6 +313,7 @@ fn check_for_strays(
             errors.push(ValidationError {
                 location: Location::Query,
                 name: name.clone(),
+                pointer: String::new(),
                 kind: ErrorKind::Undescribed,
             });
         }

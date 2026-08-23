@@ -350,11 +350,11 @@ fn a_json_body_is_judged_against_the_media_types_schema() {
     assert!(errors(&validator, &posting(br#"{"name":"Rex"}"#)).is_empty());
     assert_eq!(
         errors(&validator, &posting(br#"{"tag":"cute"}"#)),
-        ["body: at /name: is required and was not sent"],
+        ["body at /name: is required and was not sent"],
     );
     assert_eq!(
         errors(&validator, &posting(br#"{"name":7}"#)),
-        ["body: at /name: expected string, got integer"],
+        ["body at /name: expected string, got integer"],
     );
 }
 
@@ -401,7 +401,7 @@ fn a_media_type_range_matches_what_falls_under_it() {
         .with_body(br#"{"b":1}"#.as_slice());
     assert_eq!(
         errors(&validator, &request),
-        ["body: at /a: is required and was not sent"]
+        ["body at /a: is required and was not sent"]
     );
 }
 
@@ -585,7 +585,7 @@ fn a_querystring_parameter_judges_the_whole_query_at_once() {
     assert!(errors(&validator, &RequestView::new("GET", "/x").with_query("a=1")).is_empty());
     assert_eq!(
         errors(&validator, &RequestView::new("GET", "/x").with_query("b=1")),
-        ["querystring parameter \"params\": at /a: is required and was not sent"],
+        ["querystring parameter \"params\" at /a: is required and was not sent"],
     );
 }
 
@@ -850,7 +850,7 @@ fn an_undescribed_form_field_is_still_offered_to_additional_properties() {
         .with_body(b"name=Rex&extra=1".as_slice());
     assert_eq!(
         errors(&validator, &request),
-        ["body: at /extra: is not described, and additionalProperties is `false`"],
+        ["body at /extra: is not described, and additionalProperties is `false`"],
     );
 }
 
@@ -1174,7 +1174,7 @@ fn a_malformed_deep_object_name_is_reported_rather_than_ignored() {
 }
 
 #[test]
-fn an_integer_enum_matches_however_the_body_spells_the_number() {
+fn an_integer_enum_is_compared_by_value_not_by_representation() {
     let validator = validator(json!({
         "/x": { "post": { "requestBody": { "content": {
             "application/json": { "schema": {
@@ -1183,19 +1183,23 @@ fn an_integer_enum_matches_however_the_body_spells_the_number() {
             } }
         } } } }
     }));
-    for body in [
-        br#"{"n":9007199254740994}"#.as_slice(),
-        br#"{"n":9.007199254740994e15}"#.as_slice(),
-    ] {
-        let request = RequestView::new("POST", "/x")
-            .with_header("content-type", "application/json")
-            .with_body(body);
-        assert!(
-            errors(&validator, &request).is_empty(),
-            "{} must match the enum",
-            String::from_utf8_lossy(body),
-        );
-    }
+    let matching = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/json")
+        .with_body(br#"{"n":9007199254740994}"#.as_slice());
+    assert!(errors(&validator, &matching).is_empty());
+
+    // Written with an exponent, the same value reaches `serde_json` as
+    // an `f64` — indistinguishable from `9007199254740993.5`. It is not
+    // rejected and it is not accepted: it is reported as unchecked.
+    let exponent = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/json")
+        .with_body(br#"{"n":9.007199254740994e15}"#.as_slice());
+    let found = errors(&validator, &exponent);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with("body at /n: was NOT checked"),
+        "{found:?}"
+    );
 }
 
 #[test]
@@ -1223,4 +1227,172 @@ fn a_bound_whose_digits_were_lost_reports_that_it_could_not_check() {
         .with_header("content-type", "application/json")
         .with_body(br#"{"n":1}"#.as_slice());
     assert!(errors(&validator, &clear).is_empty());
+}
+
+// ── the review of f28be6c ────────────────────────────────────────────
+
+/// A body validated against one inline schema.
+fn body_schema(schema: serde_json::Value) -> Validator {
+    validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/json": { "schema": schema }
+        } } } }
+    }))
+}
+
+fn posted(body: &'static [u8]) -> RequestView<'static> {
+    RequestView::new("POST", "/x")
+        .with_header("content-type", "application/json")
+        .with_body(body)
+}
+
+#[test]
+fn a_not_whose_schema_cannot_be_applied_does_not_accept_the_value() {
+    // The pattern never compiles, so nothing established that the value
+    // fails the inner schema — and `not` may only accept on that basis.
+    let validator = body_schema(json!({ "not": { "type": "string", "pattern": "(" } }));
+    let found = errors(&validator, &posted(br#""anything""#));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // A `not` that really did reject still accepts.
+    let sound = body_schema(json!({ "not": { "type": "string" } }));
+    assert!(errors(&sound, &posted(b"1")).is_empty());
+}
+
+#[test]
+fn an_any_of_that_could_not_be_applied_is_not_a_plain_mismatch() {
+    let validator = body_schema(json!({
+        "anyOf": [{ "type": "integer" }, { "type": "string", "pattern": "(" }]
+    }));
+    // A branch really matched, so the unreadable one does not matter.
+    assert!(errors(&validator, &posted(b"1")).is_empty());
+
+    // None matched — but the string branch was never applied, because
+    // its pattern would not compile, so "no branch matched" is not
+    // something that was established. (The value has to be a string to
+    // reach the pattern at all: a type mismatch is decided first.)
+    let found = errors(&validator, &posted(br#""x""#));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+}
+
+#[test]
+fn a_one_of_with_an_unapplied_branch_cannot_count_its_matches() {
+    let validator = body_schema(json!({
+        "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "string", "pattern": "(" }
+        ]
+    }));
+    // Exactly one matched here — but the other branch was never
+    // applied, and it might have matched too.
+    let found = errors(&validator, &posted(br#""x""#));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // Two matches is a failure whatever the rest would have said.
+    let two = body_schema(json!({
+        "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "integer", "maximum": 10 },
+            { "type": "string", "pattern": "(" }
+        ]
+    }));
+    let found = errors(&two, &posted(b"5"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("exactly one is required"), "{found:?}");
+}
+
+#[test]
+fn a_number_past_the_exact_range_is_not_declared_an_integer() {
+    let validator = body_schema(json!({ "type": "integer" }));
+    // `9007199254740993.5` and `9007199254740994` are the same `f64`,
+    // so "has no fractional part" cannot be established of either.
+    let found = errors(&validator, &posted(b"9007199254740993.5"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // A plain integer literal is parsed exactly and decided normally.
+    assert!(errors(&validator, &posted(b"9007199254740994")).is_empty());
+    // And a small fractional value is still simply the wrong type.
+    assert_eq!(
+        errors(&validator, &posted(b"1.5")),
+        ["body: expected integer, got number"],
+    );
+}
+
+#[test]
+fn a_multi_typed_schema_inherits_the_same_caution() {
+    let integer_only = body_schema(json!({ "type": ["integer", "null"] }));
+    let found = errors(&integer_only, &posted(b"9007199254740993.5"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // `number` accepts it outright, so nothing is in doubt.
+    let with_number = body_schema(json!({ "type": ["integer", "number"] }));
+    assert!(errors(&with_number, &posted(b"9007199254740993.5")).is_empty());
+}
+
+#[test]
+fn an_unchecked_error_still_says_where_in_the_body_it_happened() {
+    let validator = body_schema(json!({
+        "type": "object",
+        "properties": { "user": {
+            "type": "object",
+            "properties": { "name": { "type": "string", "pattern": "(" } }
+        } }
+    }));
+    let found = errors(&validator, &posted(br#"{"user":{"name":"x"}}"#));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with("body at /user/name: was NOT checked"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_path_item_reference_chain_is_followed_all_the_way() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/x": { "$ref": "#/components/pathItems/A" } },
+        "components": { "pathItems": {
+            "A": { "$ref": "#/components/pathItems/B" },
+            "B": { "get": { "operationId": "deep" } }
+        } }
+    }))
+    .expect("the description must parse");
+    let report = Validator::new(spec)
+        .validate(&RequestView::new("GET", "/x"))
+        .expect("the chain reaches an operation");
+    assert!(report.is_valid(), "{report}");
+    assert_eq!(report.operation_id.as_deref(), Some("deep"));
+}
+
+#[test]
+fn a_path_item_reference_that_cannot_be_followed_is_reported() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/x": {
+            "$ref": "#/components/pathItems/Gone",
+            "get": { "operationId": "local" }
+        } }
+    }))
+    .expect("the description must parse");
+    let validator = Validator::new(spec);
+    let report = validator
+        .validate(&RequestView::new("GET", "/x"))
+        .expect("the local operation still describes GET /x");
+    // The local half still validates; the half that could not be read
+    // is reported rather than treated as absent.
+    assert_eq!(
+        report
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["description: has an unresolvable `$ref`: #/components/pathItems/Gone"],
+    );
 }

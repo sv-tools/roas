@@ -169,10 +169,11 @@ pub(crate) fn validate(
     errors: &mut Vec<ValidationError>,
 ) {
     let described = Described::of(parameter);
-    let mut push = |kind: ErrorKind| {
+    let mut push = |pointer: String, kind: ErrorKind| {
         errors.push(ValidationError {
             location: described.location,
             name: described.name.to_owned(),
+            pointer,
             kind,
         });
     };
@@ -181,7 +182,7 @@ pub(crate) fn validate(
     if let Some(content) = described.content {
         let Some(raw) = described.raw_text(request, extracted) else {
             if described.required {
-                push(ErrorKind::Missing);
+                push(String::new(), ErrorKind::Missing);
             }
             return;
         };
@@ -197,12 +198,12 @@ pub(crate) fn validate(
         Ok(Some(value)) => value,
         Ok(None) => {
             if described.required {
-                push(ErrorKind::Missing);
+                push(String::new(), ErrorKind::Missing);
             }
             return;
         }
         Err(why) => {
-            push(ErrorKind::Malformed(why));
+            push(String::new(), ErrorKind::Malformed(why));
             return;
         }
     };
@@ -221,7 +222,7 @@ fn validate_as_content(
     raw: &str,
     content: &BTreeMap<String, RefOr<MediaType>>,
     spec: &Spec,
-    push: &mut impl FnMut(ErrorKind),
+    push: &mut impl FnMut(String, ErrorKind),
 ) {
     // The specification requires exactly one entry here.
     let Some((media_type, entry)) = content.iter().next() else {
@@ -230,7 +231,10 @@ fn validate_as_content(
     let entry = match entry.get_item(spec) {
         Ok(entry) => entry,
         Err(error) => {
-            push(ErrorKind::UnresolvedReference(error.to_string()));
+            push(
+                String::new(),
+                ErrorKind::UnresolvedReference(error.to_string()),
+            );
             return;
         }
     };
@@ -246,11 +250,11 @@ fn validate_as_content(
     ) {
         Ok(value) => value,
         Err(body::Decoded::Malformed(why)) => {
-            push(ErrorKind::Malformed(why));
+            push(String::new(), ErrorKind::Malformed(why));
             return;
         }
         Err(body::Decoded::Unsupported(what)) => {
-            push(ErrorKind::Unsupported(what));
+            push(String::new(), ErrorKind::Unsupported(what));
             return;
         }
     };
@@ -262,17 +266,17 @@ fn report_failures(
     value: &Value,
     declared: &RefOr<Schema>,
     spec: &Spec,
-    push: &mut impl FnMut(ErrorKind),
+    push: &mut impl FnMut(String, ErrorKind),
 ) {
     for failure in schema::check(value, declared, spec) {
-        push(match failure.kind {
-            schema::FailureKind::Unresolved => ErrorKind::UnresolvedReference(failure.message),
-            schema::FailureKind::Unchecked => ErrorKind::Unchecked(failure.message),
-            schema::FailureKind::Violated => ErrorKind::Schema {
-                pointer: failure.pointer,
-                message: failure.message,
+        push(
+            failure.pointer,
+            match failure.kind {
+                schema::FailureKind::Unresolved => ErrorKind::UnresolvedReference(failure.message),
+                schema::FailureKind::Unchecked => ErrorKind::Unchecked(failure.message),
+                schema::FailureKind::Violated => ErrorKind::Schema(failure.message),
             },
-        });
+        );
     }
 }
 

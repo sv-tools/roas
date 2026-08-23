@@ -58,21 +58,28 @@ pub struct ValidationError {
     pub location: Location,
     /// The parameter name, or empty for the body.
     pub name: String,
+    /// Where inside the value, as an RFC 6901 JSON Pointer; empty when
+    /// the error is about the value as a whole.
+    ///
+    /// On the error rather than on one [`ErrorKind`], because *where*
+    /// is the same question whatever went wrong there: a `pattern` that
+    /// will not compile at `/user/name` needs pointing at exactly as
+    /// much as a type mismatch does.
+    pub pointer: String,
     /// What is wrong.
     pub kind: ErrorKind,
 }
 
 impl Display for ValidationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if self.name.is_empty() {
-            write!(f, "{}: {}", self.location, self.kind)
-        } else {
-            write!(
-                f,
-                "{} parameter {:?}: {}",
-                self.location, self.name, self.kind
-            )
+        write!(f, "{}", self.location)?;
+        if !self.name.is_empty() {
+            write!(f, " parameter {:?}", self.name)?;
         }
+        if !self.pointer.is_empty() {
+            write!(f, " at {}", self.pointer)?;
+        }
+        write!(f, ": {}", self.kind)
     }
 }
 
@@ -86,14 +93,8 @@ pub enum ErrorKind {
     /// absent.
     Missing,
 
-    /// The value did not satisfy its Schema Object. `pointer` is a JSON
-    /// Pointer into the value — empty for the value itself.
-    Schema {
-        /// Where inside the value, as a JSON Pointer.
-        pointer: String,
-        /// What the schema required and the value did not give.
-        message: String,
-    },
+    /// The value did not satisfy its Schema Object.
+    Schema(String),
 
     /// A body arrived, but its media type is not one the Request Body
     /// Object describes.
@@ -135,8 +136,7 @@ impl Display for ErrorKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             ErrorKind::Missing => f.write_str("is required and was not sent"),
-            ErrorKind::Schema { pointer, message } if pointer.is_empty() => f.write_str(message),
-            ErrorKind::Schema { pointer, message } => write!(f, "at {pointer}: {message}"),
+            ErrorKind::Schema(message) => f.write_str(message),
             ErrorKind::UnexpectedMediaType { got, expected } => {
                 let expected = expected.join(", ");
                 match got {
@@ -236,9 +236,13 @@ pub enum RoutingError {
     MethodNotAllowed {
         /// The template that matched.
         template: String,
-        /// The method that was asked for, uppercased.
+        /// The method token the request carried, exactly as it carried
+        /// it — a lowercase `get` is reported as `get`, because that is
+        /// why it was refused.
         method: String,
-        /// The methods the Path Item Object does describe, lowercased.
+        /// The methods the Path Item Object does describe, as method
+        /// tokens rather than OpenAPI's lowercase keys — so this is
+        /// what an `Allow` header wants.
         allowed: Vec<String>,
     },
 }
@@ -251,6 +255,16 @@ mod tests {
         ValidationError {
             location,
             name: name.to_owned(),
+            pointer: String::new(),
+            kind,
+        }
+    }
+
+    fn error_at(location: Location, pointer: &str, kind: ErrorKind) -> ValidationError {
+        ValidationError {
+            location,
+            name: String::new(),
+            pointer: pointer.to_owned(),
             kind,
         }
     }
@@ -277,13 +291,10 @@ mod tests {
     fn a_report_lists_every_error_it_found() {
         let report = report(vec![
             error(Location::Query, "limit", ErrorKind::Missing),
-            error(
+            error_at(
                 Location::Body,
-                "",
-                ErrorKind::Schema {
-                    pointer: "/name".to_owned(),
-                    message: "expected string, got integer".to_owned(),
-                },
+                "/name",
+                ErrorKind::Schema("expected string, got integer".to_owned()),
             ),
         ]);
         assert!(!report.is_valid());
@@ -291,7 +302,7 @@ mod tests {
             report.to_string(),
             "GET /pets/{petId} (getPet): 2 error(s)\n  \
              - query parameter \"limit\": is required and was not sent\n  \
-             - body: at /name: expected string, got integer",
+             - body at /name: expected string, got integer",
         );
         assert_eq!(report.into_result().unwrap_err().len(), 2);
     }
@@ -308,10 +319,7 @@ mod tests {
         let kinds = [
             (ErrorKind::Missing, "is required and was not sent"),
             (
-                ErrorKind::Schema {
-                    pointer: String::new(),
-                    message: "expected integer".to_owned(),
-                },
+                ErrorKind::Schema("expected integer".to_owned()),
                 "expected integer",
             ),
             (

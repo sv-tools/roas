@@ -120,15 +120,32 @@ impl<'s> Checker<'s> {
         self.pointer.truncate(restore);
     }
 
-    /// Whether `value` satisfies `schema`, without recording anything —
+    /// What `schema` makes of `value`, without recording anything —
     /// what `anyOf`, `oneOf` and `not` need.
-    fn passes(&self, value: &Value, schema: &RefOr<Schema>) -> bool {
+    ///
+    /// Three states, not two. A subschema that could not be applied is
+    /// not a subschema the value failed: reading it as one would let
+    /// `{ "not": { "pattern": "(" } }` accept anything at all, on the
+    /// strength of a check that never ran.
+    fn judge(&self, value: &Value, schema: &RefOr<Schema>) -> Verdict {
         let mut probe = Checker::new(self.spec);
         // The probe continues this walk, so it inherits its depth — a
         // cycle that runs through `anyOf` must still terminate.
         probe.depth = self.depth;
         probe.schema(value, schema);
-        probe.failures.is_empty()
+        if probe.failures.is_empty() {
+            return Verdict::Passed;
+        }
+        // Anything that stopped the schema being applied leaves no
+        // verdict at all, whether it was unreadable or unresolvable.
+        if probe
+            .failures
+            .iter()
+            .any(|failure| failure.kind != FailureKind::Violated)
+        {
+            return Verdict::Unchecked;
+        }
+        Verdict::Failed
     }
 
     fn schema(&mut self, value: &Value, schema: &RefOr<Schema>) {
@@ -162,37 +179,82 @@ impl<'s> Checker<'s> {
                 }
             }
             Schema::AnyOf(any_of) => {
-                if !any_of.any_of.iter().any(|s| self.passes(value, s)) {
+                let total = any_of.any_of.len();
+                let verdicts: Vec<Verdict> = any_of
+                    .any_of
+                    .iter()
+                    .map(|subschema| self.judge(value, subschema))
+                    .collect();
+                if verdicts.contains(&Verdict::Passed) {
+                    // One branch is enough, and this one really matched.
+                } else if verdicts.contains(&Verdict::Unchecked) {
+                    self.unchecked(format!(
+                        "no branch of `anyOf` matched, but not all {total} could be applied",
+                    ));
+                } else {
                     self.fail(format!(
-                        "does not match any of the {} schemas in `anyOf`",
-                        any_of.any_of.len(),
+                        "does not match any of the {total} schemas in `anyOf`"
                     ));
                 }
             }
             Schema::OneOf(one_of) => {
-                let matched = one_of
+                let total = one_of.one_of.len();
+                let verdicts: Vec<Verdict> = one_of
                     .one_of
                     .iter()
-                    .filter(|s| self.passes(value, s))
-                    .count();
-                if matched != 1 {
+                    .map(|subschema| self.judge(value, subschema))
+                    .collect();
+                let matched = verdicts.iter().filter(|v| **v == Verdict::Passed).count();
+                if matched > 1 {
+                    // More than one match is a failure whatever the
+                    // remaining branches would have said.
                     self.fail(format!(
-                        "matches {matched} of the {} schemas in `oneOf`; exactly one is required",
-                        one_of.one_of.len(),
+                        "matches {matched} of the {total} schemas in `oneOf`; exactly one is required",
+                    ));
+                } else if verdicts.contains(&Verdict::Unchecked) {
+                    // An unapplied branch might have matched too, and
+                    // `oneOf` turns on exactly how many did.
+                    self.unchecked(format!(
+                        "`oneOf` matched {matched} of {total} schemas, but not all of them could be applied",
+                    ));
+                } else if matched != 1 {
+                    self.fail(format!(
+                        "matches {matched} of the {total} schemas in `oneOf`; exactly one is required",
                     ));
                 }
             }
-            Schema::Not(not) => {
-                if self.passes(value, &not.not) {
-                    self.fail("matches the schema in `not`, which it must not");
+            Schema::Not(not) => match self.judge(value, &not.not) {
+                Verdict::Passed => self.fail("matches the schema in `not`, which it must not"),
+                Verdict::Failed => {}
+                // The value is accepted only when the inner schema
+                // really rejected it.
+                Verdict::Unchecked => {
+                    self.unchecked("the schema in `not` could not be applied");
                 }
-            }
+            },
             Schema::Multi(multi) => {
                 let actual = type_name(value);
-                let allowed = multi
+                let accepting: Vec<&SchemaType> = multi
                     .schema_types
                     .iter()
-                    .any(|schema_type| accepts_type(schema_type, value));
+                    .filter(|schema_type| accepts_type(schema_type, value))
+                    .collect();
+                // Accepted only because it looks like an integer, and
+                // whether it is one cannot be established — same
+                // ambiguity as a single `type: integer`.
+                if !accepting.is_empty()
+                    && accepting
+                        .iter()
+                        .all(|schema_type| matches!(schema_type, SchemaType::Integer))
+                    && Whole::of(value).is_some_and(Whole::is_approximate)
+                {
+                    self.unchecked(
+                        "is beyond the range a 64-bit float represents exactly, so whether it is \
+                         an integer could NOT be established",
+                    );
+                    return;
+                }
+                let allowed = !accepting.is_empty();
                 if !allowed {
                     let names: Vec<String> = multi
                         .schema_types
@@ -216,6 +278,13 @@ impl<'s> Checker<'s> {
                 None => self.wrong_type("string", value),
             },
             SingleSchema::Integer(integer) => match Whole::of(value) {
+                // `9007199254740993.5` reaches `serde_json` as
+                // `9007199254740994.0`, so "has no fractional part" is
+                // not something that can be established about it.
+                Some(number) if number.is_approximate() => self.unchecked(format!(
+                    "{number} is beyond the range a 64-bit float represents exactly, so whether \
+                     it is an integer could NOT be established",
+                )),
                 Some(number) => self.integer(number, integer),
                 None => self.wrong_type("integer", value),
             },
@@ -577,6 +646,16 @@ impl<'s> Checker<'s> {
             }
         }
     }
+}
+
+/// What a subschema made of a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    Passed,
+    Failed,
+    /// The subschema could not be applied, so there is no verdict —
+    /// which is not the same as the value failing it.
+    Unchecked,
 }
 
 /// The JSON Schema type name of a value, for error messages.

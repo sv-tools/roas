@@ -89,7 +89,7 @@ Path matching follows the specification's own rule that a concrete segment outra
 
 OpenAPI 3.2's `additionalOperations` is looked up alongside the eight standard methods. Both are matched case-sensitively, as [RFC 9110 §9.1](https://www.rfc-editor.org/rfc/rfc9110#section-9.1) requires of a method token: `additionalOperations` keys match the capitalization the description wrote, and the eight standard ones match only their uppercase spelling — `get` is a different method from `GET`, and no Path Item Object describes it. `MethodNotAllowed` reports the token the request carried and lists `allowed` as method tokens, so it drops straight into an `Allow` header.
 
-A Path Item Object that is a `$ref` is merged with what is written beside it rather than replaced by it: only a field present in *both* is [undefined](https://spec.openapis.org/oas/v3.2.0#path-item-object), so a local required parameter beside a reference that carries the operations keeps applying. Local wins where both define the same field, per method.
+A Path Item Object that is a `$ref` is merged with what is written beside it rather than replaced by it: only a field present in *both* is [undefined](https://spec.openapis.org/oas/v3.2.0#path-item-object), so a local required parameter beside a reference that carries the operations keeps applying. Local wins where both define the same field, per method. Reference chains are followed to their end, with cycle detection; one that cannot be finished is reported rather than read as an empty Path Item Object.
 
 ## Parameters arrive as text
 
@@ -109,7 +109,9 @@ A parameter whose schema this crate cannot read structurally — a composition, 
 
 ## Every error, not the first
 
-`ValidationReport::errors` collects everything wrong with the request, the way `roas`'s own description validator collects diagnostics: a client that sent three bad parameters is better served by hearing about all three. Each error names where it was found, which parameter it is about, and — inside a body — a JSON Pointer to the value.
+`ValidationReport::errors` collects everything wrong with the request, the way `roas`'s own description validator collects diagnostics: a client that sent three bad parameters is better served by hearing about all three. Each error names where it was found, which parameter it is about, and a JSON Pointer to the value inside it — `body at /user/name: …` — whatever went wrong there.
+
+"Wrong" includes "could not be judged". A subschema that cannot be applied — a `pattern` that will not compile, a number whose digits floating point already lost — yields no verdict rather than a failing one, and `not`, `anyOf` and `oneOf` all carry that third state instead of reading it as a mismatch. Otherwise `{ "not": { "pattern": "(" } }` would accept anything at all, on the strength of a check that never ran.
 
 ## Versions
 
