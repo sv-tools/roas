@@ -85,9 +85,9 @@ match validator.validate(&RequestView::new("DELETE", "/pets")) {
 # Ok(()) }
 ```
 
-Path matching follows the specification's own rule that a concrete segment outranks a templated one, so `/pets/mine` wins over `/pets/{petId}`. A Server Object's base path is stripped when the request carries one — resolved per route, since a Server Object may sit on the Operation Object or the Path Item Object as well as the root and the innermost one wins — and the unstripped path is tried too, because an application behind a proxy sees the path without the prefix its own description advertises. `Options::base_path` overrides all of it.
+Path matching follows the specification's own rule that a concrete segment outranks a templated one, so `/pets/mine` wins over `/pets/{petId}`. A Server Object's base path is stripped when the request carries one — resolved per *operation*, since a Server Object may sit on the Operation Object as well as the Path Item Object and the root and the innermost one wins, so `GET /pets` under `/v1` and `POST /pets` under `/v2` route separately — and the unstripped path is tried too, because an application behind a proxy sees the path without the prefix its own description advertises. `Options::base_path` overrides all of it.
 
-OpenAPI 3.2's `additionalOperations` is looked up alongside the eight standard methods, matched with the capitalization the description wrote, since [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#name-overview) makes method names case-sensitive.
+OpenAPI 3.2's `additionalOperations` is looked up alongside the eight standard methods. Both are matched case-sensitively, as [RFC 9110 §9.1](https://www.rfc-editor.org/rfc/rfc9110#section-9.1) requires of a method token: `additionalOperations` keys match the capitalization the description wrote, and the eight standard ones match only their uppercase spelling — `get` is a different method from `GET`, and no Path Item Object describes it.
 
 ## Parameters arrive as text
 

@@ -56,8 +56,12 @@ pub struct RequestView<'a> {
     /// may repeat, so this is a list rather than a map.
     pub headers: Vec<(Cow<'a, str>, Cow<'a, str>)>,
 
-    /// The body, already buffered. `None` means "no body was supplied",
-    /// which is not the same as an empty body.
+    /// The body, already buffered.
+    ///
+    /// `None` means no body was supplied; `Some(&[])` means one was and
+    /// it was empty. Validation keeps them apart — an empty JSON body is
+    /// malformed where an absent optional one is fine — so a caller that
+    /// means "no body" leaves this `None` rather than passing no bytes.
     pub body: Option<Cow<'a, [u8]>>,
 }
 

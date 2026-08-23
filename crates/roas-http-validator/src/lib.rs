@@ -75,6 +75,7 @@
 //! never looks valid because nothing looked at it.
 
 mod body;
+mod method;
 mod parameter;
 mod report;
 mod request;

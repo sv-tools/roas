@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 
-use roas::common::reference::ResolveReference;
 use roas::v3_2::operation::Operation;
 use roas::v3_2::parameter::Parameter;
 use roas::v3_2::path_item::PathItem;
@@ -13,7 +12,7 @@ use crate::body;
 use crate::parameter;
 use crate::report::{ErrorKind, Location, RoutingError, ValidationError, ValidationReport};
 use crate::request::{RequestView, decode_path_segment};
-use crate::router::Router;
+use crate::router::{self, Router};
 
 /// What to check, and where the description's paths start.
 ///
@@ -115,12 +114,7 @@ impl Validator {
     /// Prepare a v3.2 description.
     #[must_use]
     pub fn with_options(spec: Spec, options: Options) -> Self {
-        let router = match &spec.paths {
-            Some(paths) => {
-                Router::new(paths, spec.servers.as_deref(), options.base_path.as_deref())
-            }
-            None => Router::default(),
-        };
+        let router = Router::new(&spec, options.base_path.as_deref());
         Self {
             spec,
             router,
@@ -142,12 +136,12 @@ impl Validator {
     /// no such method on it — which is a different answer from "the
     /// request is invalid", and usually a different response code.
     pub fn validate(&self, request: &RequestView<'_>) -> Result<ValidationReport, RoutingError> {
-        let matched =
-            self.router
-                .route(&request.path)
-                .ok_or_else(|| RoutingError::PathNotFound {
-                    path: request.path.clone().into_owned(),
-                })?;
+        let matched = self
+            .router
+            .route(&request.path, &request.method)
+            .ok_or_else(|| RoutingError::PathNotFound {
+                path: request.path.clone().into_owned(),
+            })?;
         let template = matched.template.to_owned();
         let path_parameters = matched.parameters;
 
@@ -206,20 +200,18 @@ impl Validator {
     /// The operation a request's method names, and the key the Path
     /// Item Object files it under.
     ///
-    /// The eight methods the specification names live in `operations`
-    /// under lowercase keys. OpenAPI 3.2 added `additionalOperations`
-    /// for everything else — `COPY`, `LOCK`, `REPORT` — and those keys
-    /// are HTTP method names, which
-    /// [RFC 9110 §9.1](https://www.rfc-editor.org/rfc/rfc9110#name-overview)
-    /// makes case-sensitive, so they are matched exactly as written.
+    /// See [`crate::method`] for why `get` does not find `get`.
     fn operation<'i>(
         &self,
         path_item: &'i PathItem,
         request: &RequestView<'_>,
     ) -> Option<(&'i str, &'i Operation)> {
-        let standard = request.method.to_ascii_lowercase();
-        if let Some(operations) = &path_item.operations
-            && let Some((key, operation)) = operations.get_key_value(&standard)
+        // Each map is searched with its own key and never the other's.
+        if let Some(key) = crate::method::standard(&request.method)
+            && let Some((key, operation)) = path_item
+                .operations
+                .as_ref()
+                .and_then(|operations| operations.get_key_value(&key))
         {
             return Some((key.as_str(), operation));
         }
@@ -230,24 +222,10 @@ impl Validator {
             .map(|(key, operation)| (key.as_str(), operation))
     }
 
-    /// The Path Item Object for a template, following a `$ref` when the
-    /// entry is one.
+    /// The Path Item Object for a template, with its `$ref` followed.
     fn path_item(&self, template: &str) -> Option<&PathItem> {
         let item = self.spec.paths.as_ref()?.paths.get(template)?;
-        // A Path Item Object may itself be a reference. Adjacent fields
-        // are implementation-defined; what is local wins here, and the
-        // reference fills in only when there is nothing local. Resolving
-        // through the spec rather than through a temporary `RefOr` keeps
-        // the borrow tied to `self`.
-        if item.operations.is_none()
-            && let Some(reference) = &item.reference
-            && reference.starts_with("#/")
-            && let Some(resolved) =
-                ResolveReference::<PathItem>::resolve_reference(&self.spec, reference)
-        {
-            return Some(resolved);
-        }
-        Some(item)
+        Some(router::resolve_path_item(&self.spec, item))
     }
 
     /// The parameters that apply to one operation: the Path Item
@@ -299,15 +277,11 @@ fn check_for_strays(
     {
         return;
     }
-    let described: Vec<String> = parameters
-        .iter()
-        .flat_map(|parameter| parameter::query_names(parameter, spec))
-        .collect();
     for (name, _) in &extracted.query {
-        // A `deepObject` parameter arrives as `id[role]`, so a name that
-        // opens a bracket belongs to whatever precedes it.
-        let base = name.split_once('[').map_or(name.as_str(), |(base, _)| base);
-        if !described.iter().any(|described| described == base) {
+        if !parameters
+            .iter()
+            .any(|parameter| parameter::accounts_for(parameter, name, spec))
+        {
             errors.push(ValidationError {
                 location: Location::Query,
                 name: name.clone(),

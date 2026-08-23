@@ -116,6 +116,7 @@ pub(crate) fn read_form_body(
 ) -> Result<Value, String> {
     let pairs = split_query(text);
     let mut object = serde_json::Map::new();
+    let mut fields = Vec::new();
 
     // Described fields first, so each is read through its own schema.
     if let Some(properties) = properties {
@@ -125,43 +126,41 @@ pub(crate) fn read_form_body(
             if let Some(value) = field.read_form_field(&pairs, spec)? {
                 object.insert(name.clone(), value);
             }
+            fields.push(field);
         }
     }
 
     // Then whatever else arrived, as the strings it arrived as, so
-    // `additionalProperties` still has something to judge.
+    // `additionalProperties` still has something to judge. A pair a
+    // described field already consumed is not "whatever else": an
+    // exploded object property `filter` swallows `role=admin`, and
+    // adding a top-level `role` beside it would both misdescribe the
+    // body and trip `additionalProperties: false`.
     for (name, value) in &pairs {
-        if !object.contains_key(name) {
-            object.insert(name.clone(), Value::String(decode_form(value)));
+        if object.contains_key(name) || fields.iter().any(|field| field.accounts_for(name, spec)) {
+            continue;
         }
+        object.insert(name.clone(), Value::String(decode_form(value)));
     }
     Ok(Value::Object(object))
 }
 
-/// The query-string names one parameter accounts for.
+/// Whether one parameter accounts for a query-string name.
 ///
-/// Usually just its own name — but a `form` object that explodes has no
-/// name in the query at all: its properties become top-level pairs, so
-/// `filter` with properties `role` and `age` accounts for `role=` and
-/// `age=`. Stray-parameter detection has to know that, or it rejects a
-/// request the extraction above reads perfectly well.
-pub(crate) fn query_names(parameter: &Parameter, spec: &Spec) -> Vec<String> {
-    let described = Described::of(parameter);
-    if described.location != Location::Query {
-        return Vec::new();
-    }
-    let mut names = vec![described.name.to_owned()];
-    if described.explode
-        && described.style == Style::Form
-        && let Some(schema) = described.schema
-        && let Shape::Object(Some(properties)) = Shape::of(schema, spec)
-    {
-        names.extend(properties.keys().cloned());
-    }
-    names
+/// Usually that means the name *is* the parameter's — but not always,
+/// and both exceptions matter to stray detection.
+///
+/// A `deepObject` parameter arrives as `filter[role]`, so it accounts
+/// for anything under its bracket. And a `form` object that explodes
+/// has no name in the query at all: its properties become top-level
+/// pairs, so `filter` accounts for `role` and `age` and **not** for
+/// `filter` — which is what makes `?filter=garbage` a stray rather
+/// than something silently ignored.
+pub(crate) fn accounts_for(parameter: &Parameter, name: &str, spec: &Spec) -> bool {
+    Described::of(parameter).accounts_for(name, spec)
 }
 
-/// Judge one parameter, appending whatever is wrong to `errors`.
+/// Judge one parameter, appending whatever is wrong to `errors`./// Judge one parameter, appending whatever is wrong to `errors`.
 pub(crate) fn validate(
     parameter: &Parameter,
     request: &RequestView<'_>,
@@ -309,6 +308,26 @@ impl<'p> Described<'p> {
             schema,
             content: None,
         }
+    }
+
+    /// Whether this parameter or form field accounts for a pair named
+    /// `name` — see [`accounts_for`].
+    fn accounts_for(&self, name: &str, spec: &Spec) -> bool {
+        if self.location != Location::Query {
+            return false;
+        }
+        if self.style == Style::DeepObject {
+            return name == self.name || name.starts_with(&format!("{}[", self.name));
+        }
+        if self.explode
+            && self.style == Style::Form
+            && let Some(schema) = self.schema
+            && let Shape::Object(Some(properties)) = Shape::of(schema, spec)
+        {
+            // The name itself is never serialized in this form.
+            return properties.contains_key(name);
+        }
+        name == self.name
     }
 
     /// This field's value, read out of the form body's pairs.

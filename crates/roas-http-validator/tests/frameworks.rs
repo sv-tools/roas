@@ -387,6 +387,19 @@ mod reqwest_client {
     }
 
     #[test]
+    fn a_reqwest_request_takes_a_body_from_the_caller() {
+        // A request built without one behaves like every other adapter's.
+        let request = reqwest::Client::new()
+            .post("https://api.example.com/pets")
+            .header("x-request-id", "abc-123")
+            .header("content-type", "application/json")
+            .build()
+            .expect("the request must build");
+        assert_eq!(request.request_view().body, None);
+        assert_takes_a_body(&request);
+    }
+
+    #[test]
     fn a_reqwest_body_needs_no_buffering_because_it_is_already_bytes() {
         // The one adapter that supplies the body itself: nothing here
         // is a stream, so there is nothing for the caller to decide.

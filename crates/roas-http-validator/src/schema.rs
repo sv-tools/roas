@@ -642,14 +642,22 @@ impl Whole {
         }
     }
 
-    /// Exact when both sides are whole; `f64` otherwise.
+    /// Exact whenever either side is.
+    ///
+    /// An exact integer is never rounded to compare it with a float:
+    /// the float's `floor` and `ceil` are themselves exact, so the
+    /// integer can be placed against them instead. What this cannot
+    /// recover is precision `serde_json` lost while parsing the
+    /// description — a bound written `9007199254740993.5` is already
+    /// `9007199254740994.0` by the time it arrives here.
     fn cmp(self, other: Self) -> Ordering {
         match (self, other) {
             (Whole::Exact(mine), Whole::Exact(theirs)) => mine.cmp(&theirs),
-            _ => self
-                .as_f64()
-                .partial_cmp(&other.as_f64())
-                .unwrap_or(Ordering::Equal),
+            (Whole::Exact(mine), Whole::Wide(theirs)) => cmp_exact_to_float(mine, theirs),
+            (Whole::Wide(mine), Whole::Exact(theirs)) => cmp_exact_to_float(theirs, mine).reverse(),
+            (Whole::Wide(mine), Whole::Wide(theirs)) => {
+                mine.partial_cmp(&theirs).unwrap_or(Ordering::Equal)
+            }
         }
     }
 }
@@ -660,6 +668,46 @@ impl Display for Whole {
             Whole::Exact(number) => write!(f, "{number}"),
             Whole::Wide(number) => write!(f, "{number}"),
         }
+    }
+}
+
+/// Place an exact integer against a float without rounding the integer.
+///
+/// `floor` and `ceil` of a finite `f64` are exact `f64`s, and inside
+/// `i128`'s range they convert exactly — so the comparison happens in
+/// `i128` with the float's fractional part decided separately.
+fn cmp_exact_to_float(exact: i128, float: f64) -> Ordering {
+    if float.is_nan() {
+        return Ordering::Equal;
+    }
+    // Beyond `i128` the float wins outright, in whichever direction.
+    const I128_LIMIT: f64 = 1.701_411_834_604_692_3e38;
+    if float > I128_LIMIT {
+        return Ordering::Less;
+    }
+    if float < -I128_LIMIT {
+        return Ordering::Greater;
+    }
+
+    let floor = float.floor();
+    let ceil = float.ceil();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "bounded by I128_LIMIT above"
+    )]
+    let (floor_exact, ceil_exact) = (floor as i128, ceil as i128);
+
+    if exact < floor_exact {
+        Ordering::Less
+    } else if exact > ceil_exact {
+        Ordering::Greater
+    } else if exact == floor_exact && floor < float {
+        // The float has a fractional part, so it sits above its floor.
+        Ordering::Less
+    } else if exact == ceil_exact && ceil > float {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
     }
 }
 

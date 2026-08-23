@@ -877,3 +877,185 @@ fn an_exploded_object_parameter_is_not_mistaken_for_stray_parameters() {
         ["query parameter \"nope\": is not described by this operation"],
     );
 }
+
+// ── the review of 87a5a41 ────────────────────────────────────────────
+
+#[test]
+fn an_operation_server_does_not_move_the_other_methods_on_that_path() {
+    let validator = validator(json!({
+        "/pets": {
+            "get": { "operationId": "listPets", "servers": [{ "url": "/v1" }] },
+            "post": { "operationId": "createPet", "servers": [{ "url": "/v2" }] }
+        }
+    }));
+    assert_eq!(
+        validator
+            .validate(&RequestView::new("GET", "/v1/pets"))
+            .expect("GET lives under /v1")
+            .operation_id
+            .as_deref(),
+        Some("listPets"),
+    );
+    assert_eq!(
+        validator
+            .validate(&RequestView::new("POST", "/v2/pets"))
+            .expect("POST lives under /v2")
+            .operation_id
+            .as_deref(),
+        Some("createPet"),
+    );
+    // Each prefix belongs to one method only.
+    assert!(matches!(
+        validator.validate(&RequestView::new("GET", "/v2/pets")),
+        Err(RoutingError::PathNotFound { .. }),
+    ));
+    assert!(matches!(
+        validator.validate(&RequestView::new("POST", "/v1/pets")),
+        Err(RoutingError::PathNotFound { .. }),
+    ));
+}
+
+#[test]
+fn a_referenced_path_items_servers_are_used_for_routing() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/pets": { "$ref": "#/components/pathItems/Shared" } },
+        "components": { "pathItems": { "Shared": {
+            "servers": [{ "url": "https://api.example.com/v2" }],
+            "get": { "operationId": "shared" }
+        } } }
+    }))
+    .expect("the description must parse");
+    let report = Validator::new(spec)
+        .validate(&RequestView::new("GET", "/v2/pets"))
+        .expect("the referenced path item carries the /v2 prefix");
+    assert_eq!(report.operation_id.as_deref(), Some("shared"));
+}
+
+#[test]
+fn a_method_token_is_case_sensitive() {
+    // RFC 9110 §9.1. `get` is a different method from `GET`, and no
+    // Path Item Object describes it.
+    let validator = validator(json!({ "/pets": { "get": { "operationId": "listPets" } } }));
+    assert!(
+        validator
+            .validate(&RequestView::new("GET", "/pets"))
+            .is_ok()
+    );
+    for spelling in ["get", "GeT", "Get"] {
+        assert!(
+            matches!(
+                validator.validate(&RequestView::new(spelling, "/pets")),
+                Err(RoutingError::MethodNotAllowed { .. }),
+            ),
+            "`{spelling}` must not be taken for GET",
+        );
+    }
+}
+
+#[test]
+fn an_exploded_object_field_is_not_duplicated_beside_itself_in_a_form_body() {
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/x-www-form-urlencoded": {
+                "schema": {
+                    "type": "object",
+                    "properties": { "filter": { "type": "object", "properties": {
+                        "role": { "type": "string" }
+                    } } },
+                    "additionalProperties": false
+                },
+                "encoding": { "filter": { "style": "form", "explode": true } }
+            }
+        } } } }
+    }));
+    let request = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(b"role=admin".as_slice());
+    // `role` is consumed into `filter`; it must not reappear at the root
+    // and trip `additionalProperties: false`.
+    assert!(errors(&validator, &request).is_empty());
+}
+
+#[test]
+fn the_name_of_an_exploded_object_parameter_is_itself_a_stray() {
+    // With `style: form, explode: true` the parameter's own name is
+    // never serialized, so `?filter=garbage` names nothing.
+    let paths = json!({
+        "/x": { "get": { "parameters": [
+            { "name": "filter", "in": "query", "style": "form", "explode": true,
+              "schema": { "type": "object", "properties": { "role": { "type": "string" } } } }
+        ] } }
+    });
+    let strict = with_options(paths, Options::new().reject_undescribed_query_parameters());
+    assert_eq!(
+        errors(
+            &strict,
+            &RequestView::new("GET", "/x").with_query("filter=garbage")
+        ),
+        ["query parameter \"filter\": is not described by this operation"],
+    );
+    assert!(
+        errors(
+            &strict,
+            &RequestView::new("GET", "/x").with_query("role=admin")
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn an_empty_body_with_no_media_type_is_still_a_body_that_was_supplied() {
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/json": { "schema": { "type": "object" } }
+        } } } }
+    }));
+    // Nothing supplied: nothing to say, the body is not required.
+    assert!(errors(&validator, &RequestView::new("POST", "/x")).is_empty());
+    // Supplied and empty, with no media type to read it as.
+    let supplied = RequestView::new("POST", "/x").with_body(b"".as_slice());
+    assert_eq!(
+        errors(&validator, &supplied),
+        ["body: no media type was sent; expected one of: application/json"],
+    );
+}
+
+#[test]
+fn an_exact_integer_is_never_rounded_to_meet_a_fractional_bound() {
+    let validator = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "n", "in": "query",
+              "schema": { "type": "integer", "maximum": 10.5, "minimum": -10.5 } }
+        ] } }
+    }));
+    assert!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("n=10")
+        )
+        .is_empty()
+    );
+    assert!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("n=-10")
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("n=11")
+        ),
+        ["query parameter \"n\": 11 is above maximum 10.5"],
+    );
+    assert_eq!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("n=-11")
+        ),
+        ["query parameter \"n\": -11 is below minimum -10.5"],
+    );
+}

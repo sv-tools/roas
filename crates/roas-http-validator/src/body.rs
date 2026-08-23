@@ -42,22 +42,19 @@ pub(crate) fn validate(
     let sent = request.content_type();
 
     // `None` is "no body was supplied"; `Some(&[])` is "a body was
-    // supplied and it was empty", and those are different questions —
-    // an empty JSON body is malformed, an empty `text/plain` body is
-    // the empty string. The one case they agree on is an empty body
-    // with no `Content-Type`, which is how HTTP spells no body at all.
-    let absent = match request.body.as_deref() {
-        None => true,
-        Some(bytes) => bytes.is_empty() && sent.is_none(),
-    };
-    if absent {
+    // supplied and it was empty". Those are different questions and get
+    // different answers — an empty JSON body is malformed, an empty
+    // `text/plain` body is the empty string, and an empty body whose
+    // media type the operation does not describe is still a body of the
+    // wrong media type. A caller that means "no body" passes `None`.
+    let Some(bytes) = request.body.as_deref() else {
         // `required` defaults to false.
         if request_body.required == Some(true) {
             push(ErrorKind::Missing);
         }
         return;
-    }
-    let bytes = request.body.as_deref().unwrap_or_default();
+    };
+
     let Some((media_type, entry)) = select(&request_body.content, sent.as_deref()) else {
         push(ErrorKind::UnexpectedMediaType {
             got: sent,

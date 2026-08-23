@@ -16,8 +16,11 @@
 
 use std::collections::BTreeMap;
 
-use roas::v3_2::path_item::{PathItem, Paths};
+use roas::common::reference::ResolveReference;
+use roas::v3_2::operation::Operation;
+use roas::v3_2::path_item::PathItem;
 use roas::v3_2::server::Server;
+use roas::v3_2::spec::Spec;
 
 use crate::request::decode_path_segment;
 
@@ -44,15 +47,25 @@ pub(crate) struct Match<'r> {
 struct Route {
     template: String,
     segments: Vec<Segment>,
-    /// The base paths this route may arrive under, longest first.
+    /// The base paths each operation may arrive under, keyed as the
+    /// Path Item Object keys it, longest first.
     ///
-    /// Per route rather than per description: a Server Object may sit on
-    /// the Operation Object or the Path Item Object as well as the root,
+    /// Per operation rather than per route: a Server Object may sit on
+    /// the Operation Object as well as the Path Item Object and the root,
     /// and the innermost one wins
     /// ([§4.8.5](https://spec.openapis.org/oas/v3.2.0#operation-object)).
-    /// So one description can serve `/pets` under `/v1` and one
-    /// operation of it under `/v2`.
-    base_paths: Vec<String>,
+    /// One route can therefore serve `GET` under `/v1` and `POST` under
+    /// `/v2` — and `GET /v2/pets` must *not* match, which is why the
+    /// method reaches the router rather than being applied afterwards.
+    method_bases: BTreeMap<String, Vec<String>>,
+    /// The same, for `additionalOperations`, keyed by the method name
+    /// as written. Kept apart from `method_bases` so neither map is
+    /// ever searched with the other's key.
+    additional_bases: BTreeMap<String, Vec<String>>,
+    /// The base paths for a method this Path Item Object does not
+    /// describe. Matching the path anyway is what lets the caller
+    /// answer "no such method here" instead of "no such path".
+    inherited_bases: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,32 +86,49 @@ impl Router {
     /// Build a router over a description's paths.
     ///
     /// `base_path` overrides every Server Object; pass `None` to derive
-    /// each route's prefixes from the servers that apply to it.
-    pub(crate) fn new(paths: &Paths, servers: Option<&[Server]>, base_path: Option<&str>) -> Self {
+    /// each operation's prefixes from the servers that apply to it.
+    ///
+    /// Takes the whole `Spec` rather than just its paths because a Path
+    /// Item Object may be a `$ref`, and the Server Objects that decide
+    /// where a route lives can be on the far side of it.
+    pub(crate) fn new(spec: &Spec, base_path: Option<&str>) -> Self {
+        let Some(paths) = &spec.paths else {
+            return Self::default();
+        };
         let override_base = base_path.map(|base| vec![normalize_base(base)]);
         let routes = paths
             .iter()
             .map(|(template, path_item)| {
-                let base_paths = override_base
-                    .clone()
-                    .unwrap_or_else(|| effective_base_paths(path_item, servers));
-                Route::parse(template, base_paths)
+                let path_item = resolve_path_item(spec, path_item);
+                let inherited = path_item.servers.as_deref().or(spec.servers.as_deref());
+                let (method_bases, additional_bases, inherited_bases) = match &override_base {
+                    Some(base) => (BTreeMap::new(), BTreeMap::new(), base.clone()),
+                    None => (
+                        base_paths_per_operation(path_item.operations.as_ref(), inherited),
+                        base_paths_per_operation(
+                            path_item.additional_operations.as_ref(),
+                            inherited,
+                        ),
+                        base_paths_of(inherited),
+                    ),
+                };
+                Route::parse(template, method_bases, additional_bases, inherited_bases)
             })
             .collect();
         Self { routes }
     }
 
-    /// The template `path` belongs to, or `None` when the description
-    /// describes no such path.
+    /// The template `path` belongs to when it carries `method`, or
+    /// `None` when the description describes no such path.
     ///
-    /// A route's own server base path is stripped when the request
-    /// carries one, and the unstripped path is tried as well — an
-    /// application mounted behind a proxy sees the path without the
+    /// The route's base path for *that method* is stripped when the
+    /// request carries one, and the unstripped path is tried as well —
+    /// an application mounted behind a proxy sees the path without the
     /// prefix its own description advertises.
-    pub(crate) fn route(&self, path: &str) -> Option<Match<'_>> {
+    pub(crate) fn route(&self, path: &str, method: &str) -> Option<Match<'_>> {
         let mut best: Option<(&Route, BTreeMap<String, String>)> = None;
         for route in &self.routes {
-            let Some(parameters) = route.match_under_its_base_paths(path) else {
+            let Some(parameters) = route.match_under_its_base_paths(path, method) else {
                 continue;
             };
             let better = match &best {
@@ -119,7 +149,12 @@ impl Router {
 }
 
 impl Route {
-    fn parse(template: &str, base_paths: Vec<String>) -> Self {
+    fn parse(
+        template: &str,
+        method_bases: BTreeMap<String, Vec<String>>,
+        additional_bases: BTreeMap<String, Vec<String>>,
+        inherited_bases: Vec<String>,
+    ) -> Self {
         let segments = template
             .split('/')
             .map(|segment| {
@@ -130,21 +165,39 @@ impl Route {
                 }
             })
             .collect();
-        let mut base_paths = base_paths;
-        base_paths.retain(|base| !base.is_empty());
-        base_paths.sort_by_key(|base| std::cmp::Reverse(base.len()));
-        base_paths.dedup();
         Self {
             template: template.to_owned(),
             segments,
-            base_paths,
+            method_bases: method_bases
+                .into_iter()
+                .map(|(key, bases)| (key, tidy(bases)))
+                .collect(),
+            additional_bases: additional_bases
+                .into_iter()
+                .map(|(key, bases)| (key, tidy(bases)))
+                .collect(),
+            inherited_bases: tidy(inherited_bases),
         }
     }
 
-    /// Match `path` with each of this route's base paths stripped,
-    /// longest first, and then with none stripped.
-    fn match_under_its_base_paths(&self, path: &str) -> Option<BTreeMap<String, String>> {
-        self.base_paths
+    /// The base paths that apply to one method — this operation's own,
+    /// or the ones inherited when the Path Item Object does not describe
+    /// the method at all.
+    fn bases_for(&self, method: &str) -> &[String] {
+        crate::method::standard(method)
+            .and_then(|key| self.method_bases.get(&key))
+            .or_else(|| self.additional_bases.get(method))
+            .map_or(self.inherited_bases.as_slice(), Vec::as_slice)
+    }
+
+    /// Match `path` with each base path for `method` stripped, longest
+    /// first, and then with none stripped.
+    fn match_under_its_base_paths(
+        &self,
+        path: &str,
+        method: &str,
+    ) -> Option<BTreeMap<String, String>> {
+        self.bases_for(method)
             .iter()
             .filter_map(|base| strip_base(path, base))
             .chain(std::iter::once(path))
@@ -266,45 +319,58 @@ fn match_parts(
     rest.is_empty().then_some(())
 }
 
-/// Every base path a route may arrive under.
+/// A Path Item Object with its `$ref` followed.
 ///
-/// The Server Objects that apply to an operation are its own, else its
-/// Path Item Object's, else the root's — the innermost wins. A route
-/// serves every operation under it, and the router matches a path before
-/// it knows the method, so the route accepts the union of what its
-/// operations accept.
-fn effective_base_paths(path_item: &PathItem, root: Option<&[Server]>) -> Vec<String> {
-    let inherited = path_item.servers.as_deref().or(root);
-    let operations = path_item
-        .operations
-        .iter()
-        .chain(path_item.additional_operations.iter())
-        .flat_map(|operations| operations.values());
+/// Adjacent fields are implementation-defined; what is local wins here,
+/// and the reference fills in only when there is nothing local. Shared
+/// with the validator so routing and validation never disagree about
+/// which Path Item Object they are looking at.
+pub(crate) fn resolve_path_item<'s>(spec: &'s Spec, item: &'s PathItem) -> &'s PathItem {
+    if item.operations.is_none()
+        && let Some(reference) = &item.reference
+        && reference.starts_with("#/")
+        && let Some(resolved) = ResolveReference::<PathItem>::resolve_reference(spec, reference)
+    {
+        return resolved;
+    }
+    item
+}
 
-    let mut bases = Vec::new();
-    let mut any_operation = false;
-    for operation in operations {
-        any_operation = true;
-        let servers = operation.servers.as_deref().or(inherited);
-        bases.extend(
-            servers
-                .unwrap_or_default()
-                .iter()
-                .filter_map(server_base_path),
-        );
-    }
-    if !any_operation {
-        bases.extend(
-            inherited
-                .unwrap_or_default()
-                .iter()
-                .filter_map(server_base_path),
-        );
-    }
+/// The base paths for each operation of one operation map, keyed as
+/// that map keys them.
+fn base_paths_per_operation(
+    operations: Option<&BTreeMap<String, Operation>>,
+    inherited: Option<&[Server]>,
+) -> BTreeMap<String, Vec<String>> {
+    operations
+        .into_iter()
+        .flatten()
+        .map(|(key, operation)| {
+            let servers = operation.servers.as_deref().or(inherited);
+            (key.clone(), base_paths_of(servers))
+        })
+        .collect()
+}
+
+/// The base paths a set of Server Objects describes.
+fn base_paths_of(servers: Option<&[Server]>) -> Vec<String> {
+    servers
+        .unwrap_or_default()
+        .iter()
+        .filter_map(server_base_path)
+        .collect()
+}
+
+/// Longest first, no empties, no duplicates — the order a prefix is
+/// stripped in.
+fn tidy(mut bases: Vec<String>) -> Vec<String> {
+    bases.retain(|base| !base.is_empty());
+    bases.sort_by_key(|base| std::cmp::Reverse(base.len()));
+    bases.dedup();
     bases
 }
 
-/// The path component of a Server Object's URL, with any server
+/// The path component of a Server Object's URL/// The path component of a Server Object's URL, with any server
 /// variables replaced by their defaults.
 fn server_base_path(server: &Server) -> Option<String> {
     let url = resolve_server_variables(server)?;
@@ -368,28 +434,50 @@ fn strip_base<'p>(path: &'p str, base: &str) -> Option<&'p str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roas::v3_2::path_item::PathItem;
+    use roas::v3_2::path_item::{PathItem, Paths};
 
-    fn router(templates: &[&str]) -> Router {
-        let paths: Paths = templates
-            .iter()
-            .map(|template| ((*template).to_owned(), PathItem::default()))
-            .collect::<Vec<_>>()
-            .into();
-        Router::new(&paths, None, None)
+    /// A description holding exactly these paths and servers.
+    fn spec_of(paths: Vec<(String, PathItem)>, servers: Option<Vec<Server>>) -> Spec {
+        let paths: Paths = paths.into();
+        Spec {
+            paths: Some(paths),
+            servers,
+            ..Spec::default()
+        }
     }
 
+    fn router(templates: &[&str]) -> Router {
+        let paths = templates
+            .iter()
+            .map(|template| ((*template).to_owned(), PathItem::default()))
+            .collect();
+        Router::new(&spec_of(paths, None), None)
+    }
+
+    /// Every test below asks about `GET` unless it says otherwise.
     fn matched<'r>(router: &'r Router, path: &str) -> (&'r str, Vec<(String, String)>) {
-        let found = router.route(path).expect("path must match");
+        matched_with(router, path, "GET")
+    }
+
+    fn matched_with<'r>(
+        router: &'r Router,
+        path: &str,
+        method: &str,
+    ) -> (&'r str, Vec<(String, String)>) {
+        let found = router.route(path, method).expect("path must match");
         (found.template, found.parameters.into_iter().collect())
+    }
+
+    fn routes(router: &Router, path: &str) -> bool {
+        router.route(path, "GET").is_some()
     }
 
     #[test]
     fn a_literal_path_matches_itself() {
         let router = router(&["/pets"]);
         assert_eq!(matched(&router, "/pets"), ("/pets", vec![]));
-        assert!(router.route("/pet").is_none());
-        assert!(router.route("/pets/7").is_none());
+        assert!(!routes(&router, "/pet"));
+        assert!(!routes(&router, "/pets/7"));
     }
 
     #[test]
@@ -439,13 +527,13 @@ mod tests {
                 vec![("format".to_owned(), "json".to_owned())]
             ),
         );
-        assert!(router.route("/report.").is_none());
+        assert!(!routes(&router, "/report."));
     }
 
     #[test]
     fn two_adjacent_parameters_cannot_be_told_apart_so_nothing_matches() {
         let router = router(&["/{a}{b}"]);
-        assert!(router.route("/xy").is_none());
+        assert!(!routes(&router, "/xy"));
     }
 
     #[test]
@@ -477,17 +565,18 @@ mod tests {
     #[test]
     fn an_empty_parameter_is_not_a_value() {
         let router = router(&["/pets/{petId}"]);
-        assert!(router.route("/pets/").is_none());
+        assert!(!routes(&router, "/pets/"));
     }
 
     #[test]
     fn a_server_base_path_is_stripped_before_matching() {
-        let paths: Paths = vec![("/pets".to_owned(), PathItem::default())].into();
-        let servers = [Server {
-            url: "https://api.example.com/v1".to_owned(),
-            ..Server::default()
-        }];
-        let router = Router::new(&paths, Some(&servers), None);
+        let router = Router::new(
+            &spec_of(
+                vec![("/pets".to_owned(), PathItem::default())],
+                Some(vec![server("https://api.example.com/v1")]),
+            ),
+            None,
+        );
         assert_eq!(matched(&router, "/v1/pets").0, "/pets");
         // A proxy may already have stripped it.
         assert_eq!(matched(&router, "/pets").0, "/pets");
@@ -495,25 +584,27 @@ mod tests {
 
     #[test]
     fn a_base_path_only_strips_whole_segments() {
-        let paths: Paths = vec![("/pets".to_owned(), PathItem::default())].into();
-        let servers = [Server {
-            url: "/v1".to_owned(),
-            ..Server::default()
-        }];
-        let router = Router::new(&paths, Some(&servers), None);
-        assert!(router.route("/v10/pets").is_none());
+        let router = Router::new(
+            &spec_of(
+                vec![("/pets".to_owned(), PathItem::default())],
+                Some(vec![server("/v1")]),
+            ),
+            None,
+        );
+        assert!(!routes(&router, "/v10/pets"));
     }
 
     #[test]
     fn an_explicit_base_path_overrides_the_servers() {
-        let paths: Paths = vec![("/pets".to_owned(), PathItem::default())].into();
-        let servers = [Server {
-            url: "https://api.example.com/v1".to_owned(),
-            ..Server::default()
-        }];
-        let router = Router::new(&paths, Some(&servers), Some("api"));
+        let router = Router::new(
+            &spec_of(
+                vec![("/pets".to_owned(), PathItem::default())],
+                Some(vec![server("https://api.example.com/v1")]),
+            ),
+            Some("api"),
+        );
         assert_eq!(matched(&router, "/api/pets").0, "/pets");
-        assert!(router.route("/v1/pets").is_none());
+        assert!(!routes(&router, "/v1/pets"));
     }
 
     #[test]
@@ -522,36 +613,42 @@ mod tests {
             "version": { "default": "v2", "enum": ["v1", "v2"] }
         }))
         .expect("server variables must parse");
-        let paths: Paths = vec![("/pets".to_owned(), PathItem::default())].into();
-        let servers = [Server {
-            url: "https://api.example.com/{version}".to_owned(),
-            variables: Some(variables),
-            ..Server::default()
-        }];
-        let router = Router::new(&paths, Some(&servers), None);
+        let router = Router::new(
+            &spec_of(
+                vec![("/pets".to_owned(), PathItem::default())],
+                Some(vec![Server {
+                    url: "https://api.example.com/{version}".to_owned(),
+                    variables: Some(variables),
+                    ..Server::default()
+                }]),
+            ),
+            None,
+        );
         assert_eq!(matched(&router, "/v2/pets").0, "/pets");
     }
 
     #[test]
     fn a_server_with_a_variable_and_no_definition_contributes_no_base_path() {
-        let paths: Paths = vec![("/pets".to_owned(), PathItem::default())].into();
-        let servers = [Server {
-            url: "https://api.example.com/{version}".to_owned(),
-            ..Server::default()
-        }];
-        let router = Router::new(&paths, Some(&servers), None);
+        let router = Router::new(
+            &spec_of(
+                vec![("/pets".to_owned(), PathItem::default())],
+                Some(vec![server("https://api.example.com/{version}")]),
+            ),
+            None,
+        );
         assert_eq!(matched(&router, "/pets").0, "/pets");
-        assert!(router.route("/v1/pets").is_none());
+        assert!(!routes(&router, "/v1/pets"));
     }
 
     #[test]
     fn a_server_without_a_path_contributes_no_prefix() {
-        let paths: Paths = vec![("/pets".to_owned(), PathItem::default())].into();
-        let servers = [Server {
-            url: "https://api.example.com".to_owned(),
-            ..Server::default()
-        }];
-        let router = Router::new(&paths, Some(&servers), None);
+        let router = Router::new(
+            &spec_of(
+                vec![("/pets".to_owned(), PathItem::default())],
+                Some(vec![server("https://api.example.com")]),
+            ),
+            None,
+        );
         assert_eq!(matched(&router, "/pets").0, "/pets");
     }
 
@@ -579,58 +676,72 @@ mod tests {
 
     #[test]
     fn a_path_item_server_overrides_the_root_server() {
-        let paths: Paths = vec![(
-            "/pets".to_owned(),
-            path_item_with(Some(vec![server("https://api.example.com/v2")]), None),
-        )]
-        .into();
-        let root = [server("https://api.example.com/v1")];
-        let router = Router::new(&paths, Some(&root), None);
+        let router = Router::new(
+            &spec_of(
+                vec![(
+                    "/pets".to_owned(),
+                    path_item_with(Some(vec![server("https://api.example.com/v2")]), None),
+                )],
+                Some(vec![server("https://api.example.com/v1")]),
+            ),
+            None,
+        );
         assert_eq!(matched(&router, "/v2/pets").0, "/pets");
-        assert!(router.route("/v1/pets").is_none());
+        assert!(!routes(&router, "/v1/pets"));
     }
 
     #[test]
     fn an_operation_server_overrides_the_path_item_and_the_root() {
-        let paths: Paths = vec![(
-            "/pets".to_owned(),
-            path_item_with(
-                Some(vec![server("/v2")]),
-                Some(vec![server("https://api.example.com/v3")]),
+        let router = Router::new(
+            &spec_of(
+                vec![(
+                    "/pets".to_owned(),
+                    path_item_with(
+                        Some(vec![server("/v2")]),
+                        Some(vec![server("https://api.example.com/v3")]),
+                    ),
+                )],
+                Some(vec![server("/v1")]),
             ),
-        )]
-        .into();
-        let root = [server("/v1")];
-        let router = Router::new(&paths, Some(&root), None);
+            None,
+        );
         assert_eq!(matched(&router, "/v3/pets").0, "/pets");
-        assert!(router.route("/v2/pets").is_none());
-        assert!(router.route("/v1/pets").is_none());
+        assert!(!routes(&router, "/v2/pets"));
+        assert!(!routes(&router, "/v1/pets"));
     }
 
     #[test]
     fn one_description_can_serve_two_paths_under_different_bases() {
-        let paths: Paths = vec![
-            (
-                "/pets".to_owned(),
-                path_item_with(Some(vec![server("/v1")]), None),
+        let router = Router::new(
+            &spec_of(
+                vec![
+                    (
+                        "/pets".to_owned(),
+                        path_item_with(Some(vec![server("/v1")]), None),
+                    ),
+                    (
+                        "/orders".to_owned(),
+                        path_item_with(Some(vec![server("/v2")]), None),
+                    ),
+                ],
+                None,
             ),
-            (
-                "/orders".to_owned(),
-                path_item_with(Some(vec![server("/v2")]), None),
-            ),
-        ]
-        .into();
-        let router = Router::new(&paths, None, None);
+            None,
+        );
         assert_eq!(matched(&router, "/v1/pets").0, "/pets");
         assert_eq!(matched(&router, "/v2/orders").0, "/orders");
-        assert!(router.route("/v2/pets").is_none());
+        assert!(!routes(&router, "/v2/pets"));
     }
 
     #[test]
     fn a_path_item_without_operations_still_takes_the_servers_above_it() {
-        let paths: Paths = vec![("/pets".to_owned(), PathItem::default())].into();
-        let root = [server("/v1")];
-        let router = Router::new(&paths, Some(&root), None);
+        let router = Router::new(
+            &spec_of(
+                vec![("/pets".to_owned(), PathItem::default())],
+                Some(vec![server("/v1")]),
+            ),
+            None,
+        );
         assert_eq!(matched(&router, "/v1/pets").0, "/pets");
     }
 
@@ -644,14 +755,13 @@ mod tests {
             additional_operations: Some([("COPY".to_owned(), operation)].into_iter().collect()),
             ..PathItem::default()
         };
-        let paths: Paths = vec![("/pets".to_owned(), path_item)].into();
-        let router = Router::new(&paths, None, None);
-        assert_eq!(matched(&router, "/v9/pets").0, "/pets");
+        let router = Router::new(&spec_of(vec![("/pets".to_owned(), path_item)], None), None);
+        assert_eq!(matched_with(&router, "/v9/pets", "COPY").0, "/pets");
     }
 
     #[test]
     fn a_router_over_no_paths_matches_nothing() {
-        assert!(router(&[]).route("/pets").is_none());
+        assert!(!routes(&router(&[]), "/pets"));
     }
 
     #[test]
