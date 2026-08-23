@@ -156,8 +156,21 @@ impl Validator {
         let path_parameters = matched.parameters;
 
         let path_item = self.path_item(&template);
-        let Some((method, operation)) = path_item.and_then(|item| self.operation(item, request))
-        else {
+        // A `$ref` chain that could not be followed leaves part of this
+        // Path Item Object unread.
+        let unresolved = path_item.and_then(|item| item.reference.clone());
+        let found = path_item.and_then(|item| self.operation(item, request));
+
+        let Some((method, operation)) = found else {
+            // With half the Path Item Object unread, "no such method"
+            // is not something that can be said: the half that did not
+            // arrive may well have described it.
+            if let Some(reference) = unresolved {
+                return Err(RoutingError::Unresolved {
+                    template,
+                    reference,
+                });
+            }
             return Err(RoutingError::MethodNotAllowed {
                 template,
                 // The token the request actually carried, not a
@@ -170,15 +183,15 @@ impl Validator {
         };
 
         let mut errors = Vec::new();
-        // A `$ref` chain that could not be followed leaves part of this
-        // Path Item Object unread — whatever it held went unapplied, so
-        // it is reported rather than passed over.
-        if let Some(reference) = path_item.and_then(|item| item.reference.as_ref()) {
+        // An operation was found, so the request can still be judged —
+        // but whatever the unread half held went unapplied, and saying
+        // so is the difference between "valid" and "not checked".
+        if let Some(reference) = unresolved {
             errors.push(ValidationError {
                 location: Location::Description,
                 name: String::new(),
                 pointer: String::new(),
-                kind: ErrorKind::UnresolvedReference(reference.clone()),
+                kind: ErrorKind::UnresolvedReference(reference),
             });
         }
         let parameters = self.parameters(path_item, operation, &mut errors);

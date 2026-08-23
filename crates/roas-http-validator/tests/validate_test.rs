@@ -1396,3 +1396,121 @@ fn a_path_item_reference_that_cannot_be_followed_is_reported() {
         ["description: has an unresolvable `$ref`: #/components/pathItems/Gone"],
     );
 }
+
+// ── the review of 7ce9d3d ────────────────────────────────────────────
+
+#[test]
+fn a_number_bound_past_the_exact_range_is_not_silently_applied() {
+    // `maximum: 9007199254740993.5` reaches this crate as
+    // `9007199254740994.0`, so a value that lands on it cannot be
+    // decided — `type: number` gets the same caution as `type: integer`.
+    let validator =
+        body_schema(json!({ "type": "number", "maximum": 9_007_199_254_740_993.5_f64 }));
+    let found = errors(&validator, &posted(b"9007199254740994"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // Clear of the boundary, it is decided as usual, both ways.
+    assert!(errors(&validator, &posted(b"1.5")).is_empty());
+    assert_eq!(
+        errors(&validator, &posted(b"1e300")).len(),
+        1,
+        "a value far above the maximum is still a plain failure",
+    );
+}
+
+#[test]
+fn ordinary_decimal_bounds_are_left_alone() {
+    // Below 2^53 the usual floating-point caveats apply and are not
+    // worth flagging: every implementation compares `0.1` with the
+    // `f64` nearest `0.1`.
+    let validator = body_schema(json!({ "type": "number", "maximum": 0.1, "minimum": 0.1 }));
+    assert!(errors(&validator, &posted(b"0.1")).is_empty());
+}
+
+#[test]
+fn a_number_enum_past_the_exact_range_reports_rather_than_guesses() {
+    let validator = body_schema(json!({
+        "type": "number",
+        "enum": [9_007_199_254_740_994.0_f64]
+    }));
+    let found = errors(&validator, &posted(b"9007199254740994"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // Two numbers that differ as floats differed as written, so a
+    // definite mismatch is still definite.
+    assert_eq!(errors(&validator, &posted(b"1")).len(), 1);
+}
+
+#[test]
+fn a_definite_failure_settles_a_schema_whatever_else_could_not_be_applied() {
+    // `"x"` is definitely too short, so the inner schema definitely
+    // fails and `not` definitely passes — the lookahead the pattern
+    // wants, which this crate's regex engine will not compile, does not
+    // get a say.
+    let validator = body_schema(json!({
+        "not": { "type": "string", "minLength": 2, "pattern": "(?=a)" }
+    }));
+    assert!(errors(&validator, &posted(br#""x""#)).is_empty());
+
+    // With nothing definite either way, it is still unchecked.
+    let undecided = body_schema(json!({
+        "not": { "type": "string", "minLength": 1, "pattern": "(?=a)" }
+    }));
+    let found = errors(&undecided, &posted(br#""x""#));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+}
+
+#[test]
+fn a_bare_unresolvable_path_item_reference_is_neither_a_404_nor_a_405() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/x": { "$ref": "#/components/pathItems/Gone" } }
+    }))
+    .expect("the description must parse");
+    let error = Validator::new(spec)
+        .validate(&RequestView::new("GET", "/x"))
+        .expect_err("the path item could not be read");
+    assert_eq!(
+        error,
+        RoutingError::Unresolved {
+            template: "/x".to_owned(),
+            reference: "#/components/pathItems/Gone".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn an_unreadable_path_item_does_not_claim_a_method_is_unavailable() {
+    // A local `get` exists, but the unread half may describe `POST`, so
+    // `MethodNotAllowed` would be a claim this crate cannot make.
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/x": {
+            "$ref": "#/components/pathItems/Gone",
+            "get": { "operationId": "local" }
+        } }
+    }))
+    .expect("the description must parse");
+    let validator = Validator::new(spec);
+    assert!(matches!(
+        validator.validate(&RequestView::new("POST", "/x")),
+        Err(RoutingError::Unresolved { .. }),
+    ));
+    // The half that is readable still validates, and still says so.
+    let report = validator
+        .validate(&RequestView::new("GET", "/x"))
+        .expect("the local operation describes GET /x");
+    assert_eq!(
+        report
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["description: has an unresolvable `$ref`: #/components/pathItems/Gone"],
+    );
+}

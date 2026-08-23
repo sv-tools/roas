@@ -136,16 +136,21 @@ impl<'s> Checker<'s> {
         if probe.failures.is_empty() {
             return Verdict::Passed;
         }
-        // Anything that stopped the schema being applied leaves no
-        // verdict at all, whether it was unreadable or unresolvable.
+        // The constraints of one schema are a conjunction, and in
+        // three-valued logic `false AND unknown` is false: one
+        // constraint the value definitely broke settles the schema,
+        // however many others could not be applied. `minLength: 2`
+        // rejects `"x"` whether or not the `pattern` beside it compiles.
         if probe
             .failures
             .iter()
-            .any(|failure| failure.kind != FailureKind::Violated)
+            .any(|failure| failure.kind == FailureKind::Violated)
         {
-            return Verdict::Unchecked;
+            return Verdict::Failed;
         }
-        Verdict::Failed
+        // Nothing definite either way: everything recorded was a check
+        // that could not be made.
+        Verdict::Unchecked
     }
 
     fn schema(&mut self, value: &Value, schema: &RefOr<Schema>) {
@@ -246,7 +251,7 @@ impl<'s> Checker<'s> {
                     && accepting
                         .iter()
                         .all(|schema_type| matches!(schema_type, SchemaType::Integer))
-                    && Whole::of(value).is_some_and(Whole::is_approximate)
+                    && Num::whole(value).is_some_and(Num::is_approximate)
                 {
                     self.unchecked(
                         "is beyond the range a 64-bit float represents exactly, so whether it is \
@@ -277,7 +282,7 @@ impl<'s> Checker<'s> {
                 Some(text) => self.string(text, string),
                 None => self.wrong_type("string", value),
             },
-            SingleSchema::Integer(integer) => match Whole::of(value) {
+            SingleSchema::Integer(integer) => match Num::whole(value) {
                 // `9007199254740993.5` reaches `serde_json` as
                 // `9007199254740994.0`, so "has no fractional part" is
                 // not something that can be established about it.
@@ -288,7 +293,7 @@ impl<'s> Checker<'s> {
                 Some(number) => self.integer(number, integer),
                 None => self.wrong_type("integer", value),
             },
-            SingleSchema::Number(number) => match value.as_f64() {
+            SingleSchema::Number(number) => match Num::of_value(value) {
                 Some(found) => self.number(found, number),
                 None => self.wrong_type("number", value),
             },
@@ -357,42 +362,95 @@ impl<'s> Checker<'s> {
         }
     }
 
-    fn integer(&mut self, value: Whole, schema: &IntegerSchema) {
-        if let Some(allowed) = &schema.enum_values
-            && !allowed
+    fn integer(&mut self, value: Num, schema: &IntegerSchema) {
+        if let Some(allowed) = &schema.enum_values {
+            let candidates = allowed
                 .iter()
-                .any(|candidate| Whole::Exact(i128::from(*candidate)).cmp(value) == Ordering::Equal)
-        {
-            let names: Vec<String> = allowed
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect();
-            self.fail(format!("{value} is not one of: {}", names.join(", ")));
+                .map(|candidate| Num::Exact(i128::from(*candidate)));
+            self.enumerated(value, candidates, allowed.len());
         }
+        let bound = |number: &Option<serde_json::Number>| number.as_ref().map(Num::of_number);
+        self.bounds(
+            value,
+            bound(&schema.minimum),
+            bound(&schema.maximum),
+            bound(&schema.exclusive_minimum),
+            bound(&schema.exclusive_maximum),
+            schema.multiple_of,
+        );
+    }
 
-        let bound = |number: &Option<serde_json::Number>| number.as_ref().map(Whole::of_number);
+    fn number(&mut self, value: Num, schema: &NumberSchema) {
+        if let Some(allowed) = &schema.enum_values {
+            let candidates = allowed.iter().copied().map(Num::of_f64);
+            self.enumerated(value, candidates, allowed.len());
+        }
+        self.bounds(
+            value,
+            schema.minimum.map(Num::of_f64),
+            schema.maximum.map(Num::of_f64),
+            schema.exclusive_minimum.map(Num::of_f64),
+            schema.exclusive_maximum.map(Num::of_f64),
+            schema.multiple_of,
+        );
+    }
+
+    /// `enum` over numbers.
+    ///
+    /// Two numbers that differ as `f64` differed as written, so "no
+    /// member matched" is always safe to say. A member that *does*
+    /// match but sits past the exact range is the uncertain case: two
+    /// different literals could have landed on it.
+    fn enumerated(&mut self, value: Num, candidates: impl Iterator<Item = Num>, total: usize) {
+        let mut names = Vec::with_capacity(total);
+        let mut matched = None;
+        for candidate in candidates {
+            names.push(candidate.to_string());
+            if matched.is_none() && candidate.cmp(value) == Ordering::Equal {
+                matched = Some(candidate);
+            }
+        }
+        match matched {
+            Some(candidate) if candidate.is_approximate() || value.is_approximate() => {
+                self.unchecked(format!(
+                    "{value} and the `enum` member {candidate} are beyond the range a 64-bit \
+                     float represents exactly, so whether they are the same number could NOT be \
+                     established",
+                ));
+            }
+            Some(_) => {}
+            None => self.fail(format!("{value} is not one of: {}", names.join(", "))),
+        }
+    }
+
+    /// `minimum` / `maximum` / their exclusive twins / `multipleOf`,
+    /// for both `integer` and `number`.
+    fn bounds(
+        &mut self,
+        value: Num,
+        minimum: Option<Num>,
+        maximum: Option<Num>,
+        exclusive_minimum: Option<Num>,
+        exclusive_maximum: Option<Num>,
+        multiple_of: Option<f64>,
+    ) {
         for (limit, ordering, name, inclusive) in [
-            (bound(&schema.minimum), Ordering::Less, "minimum", true),
-            (bound(&schema.maximum), Ordering::Greater, "maximum", true),
+            (minimum, Ordering::Less, "minimum", true),
+            (maximum, Ordering::Greater, "maximum", true),
+            (exclusive_minimum, Ordering::Less, "exclusiveMinimum", false),
             (
-                bound(&schema.exclusive_minimum),
-                Ordering::Less,
-                "exclusiveMinimum",
-                false,
-            ),
-            (
-                bound(&schema.exclusive_maximum),
+                exclusive_maximum,
                 Ordering::Greater,
                 "exclusiveMaximum",
                 false,
             ),
         ] {
             let Some(limit) = limit else { continue };
-            // Compared as `i128` whenever both sides are whole and fit,
-            // so `9007199254740993` against `maximum: 9007199254740992`
-            // is decided exactly rather than by two equal `f64`s.
+            // Compared exactly whenever both sides are whole and fit, so
+            // `9007199254740993` against `maximum: 9007199254740992` is
+            // decided rather than rounded into a tie.
             let relation = value.cmp(limit);
-            // A tie against a bound (or a value) that `serde_json` may
+            // A tie against a bound (or a value) that floating point may
             // already have rounded is not a decision — it is the one
             // case where the lost digits would have settled it.
             if relation == Ordering::Equal && (limit.is_approximate() || value.is_approximate()) {
@@ -415,82 +473,25 @@ impl<'s> Checker<'s> {
             }
         }
 
-        if let Some(step) = schema.multiple_of
+        if let Some(step) = multiple_of
             && step != 0.0
         {
+            if value.is_approximate() {
+                self.unchecked(format!(
+                    "{value} is beyond the range a 64-bit float represents exactly, so whether \
+                     it is a multiple of {step} could NOT be established",
+                ));
+                return;
+            }
             let divides = match (value, whole_step(step)) {
                 // Both whole: an exact remainder, no rounding involved.
-                (Whole::Exact(value), Some(step)) => value % step == 0,
+                (Num::Exact(value), Some(step)) => value % step == 0,
                 _ => {
                     let quotient = value.as_f64() / step;
                     (quotient - quotient.round()).abs() <= 1e-9
                 }
             };
             if !divides {
-                self.fail(format!("{value} is not a multiple of {step}"));
-            }
-        }
-    }
-
-    fn number(&mut self, value: f64, schema: &NumberSchema) {
-        if let Some(allowed) = &schema.enum_values
-            && !allowed
-                .iter()
-                .any(|candidate| (candidate - value).abs() < f64::EPSILON)
-        {
-            let names: Vec<String> = allowed
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect();
-            self.fail(format!("{value} is not one of: {}", names.join(", ")));
-        }
-        self.bounds(
-            value,
-            schema.minimum,
-            schema.maximum,
-            schema.exclusive_minimum,
-            schema.exclusive_maximum,
-            schema.multiple_of,
-        );
-    }
-
-    /// `type: number` bounds. `roas` models every one of these as an
-    /// `f64` already, so there is no exactness to preserve here — only
-    /// `integer` carries `serde_json::Number` bounds.
-    fn bounds(
-        &mut self,
-        value: f64,
-        minimum: Option<f64>,
-        maximum: Option<f64>,
-        exclusive_minimum: Option<f64>,
-        exclusive_maximum: Option<f64>,
-        multiple_of: Option<f64>,
-    ) {
-        if let Some(min) = minimum
-            && value < min
-        {
-            self.fail(format!("{value} is below minimum {min}"));
-        }
-        if let Some(max) = maximum
-            && value > max
-        {
-            self.fail(format!("{value} is above maximum {max}"));
-        }
-        if let Some(min) = exclusive_minimum
-            && value <= min
-        {
-            self.fail(format!("{value} is not above exclusiveMinimum {min}"));
-        }
-        if let Some(max) = exclusive_maximum
-            && value >= max
-        {
-            self.fail(format!("{value} is not below exclusiveMaximum {max}"));
-        }
-        if let Some(step) = multiple_of
-            && step != 0.0
-        {
-            let quotient = value / step;
-            if (quotient - quotient.round()).abs() > 1e-9 {
                 self.fail(format!("{value} is not a multiple of {step}"));
             }
         }
@@ -679,7 +680,7 @@ fn accepts_type(schema_type: &SchemaType, value: &Value) -> bool {
     match schema_type {
         SchemaType::String => value.is_string(),
         SchemaType::Number => value.is_number(),
-        SchemaType::Integer => Whole::of(value).is_some(),
+        SchemaType::Integer => Num::whole(value).is_some(),
         SchemaType::Object => value.is_object(),
         SchemaType::Array => value.is_array(),
         SchemaType::Boolean => value.is_boolean(),
@@ -688,45 +689,56 @@ fn accepts_type(schema_type: &SchemaType, value: &Value) -> bool {
     }
 }
 
-/// A JSON number that is a whole number, kept exact wherever it fits.
+/// A JSON number, kept exact wherever it fits.
 ///
 /// JSON Schema does not restrict numbers to IEEE-754, and OpenAPI's
 /// `format: int64` reaches values an `f64` cannot tell apart —
-/// `9007199254740993` and `9007199254740992` are the same float. So a
-/// whole number is carried as an `i128` and only falls back to `f64`
-/// when it genuinely is one.
+/// `9007199254740993` and `9007199254740992` are the same float. A
+/// whole number is therefore carried as an `i128`, and only what
+/// genuinely is a real falls back to `f64`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Whole {
+enum Num {
     Exact(i128),
-    Wide(f64),
+    Real(f64),
 }
 
 /// The largest magnitude an `f64` represents every integer up to.
 const EXACT_UP_TO: f64 = 9_007_199_254_740_992.0;
 
-impl Whole {
-    /// A value seen as an integer. JSON Schema counts `1.0` as an
-    /// integer — a number with a zero fractional part — not only `1`.
-    fn of(value: &Value) -> Option<Self> {
+impl Num {
+    /// Any JSON number.
+    fn of_value(value: &Value) -> Option<Self> {
         if let Some(number) = value.as_i64() {
-            return Some(Whole::Exact(i128::from(number)));
+            return Some(Num::Exact(i128::from(number)));
         }
         if let Some(number) = value.as_u64() {
-            return Some(Whole::Exact(i128::from(number)));
+            return Some(Num::Exact(i128::from(number)));
+        }
+        value.as_f64().map(Num::of_f64)
+    }
+
+    /// A value seen as an integer. JSON Schema counts `1.0` as an
+    /// integer — a number with a zero fractional part — not only `1`.
+    fn whole(value: &Value) -> Option<Self> {
+        if let Some(number) = value.as_i64() {
+            return Some(Num::Exact(i128::from(number)));
+        }
+        if let Some(number) = value.as_u64() {
+            return Some(Num::Exact(i128::from(number)));
         }
         let number = value.as_f64()?;
-        (number.fract() == 0.0).then(|| Whole::of_f64(number))
+        (number.fract() == 0.0).then(|| Num::of_f64(number))
     }
 
     /// A schema bound, whole or not.
     fn of_number(number: &serde_json::Number) -> Self {
         if let Some(number) = number.as_i64() {
-            return Whole::Exact(i128::from(number));
+            return Num::Exact(i128::from(number));
         }
         if let Some(number) = number.as_u64() {
-            return Whole::Exact(i128::from(number));
+            return Num::Exact(i128::from(number));
         }
-        number.as_f64().map_or(Whole::Wide(f64::NAN), Whole::of_f64)
+        number.as_f64().map_or(Num::Real(f64::NAN), Num::of_f64)
     }
 
     fn of_f64(number: f64) -> Self {
@@ -734,28 +746,33 @@ impl Whole {
         // so widening it to `i128` would recover nothing.
         if number.fract() == 0.0 && number.abs() <= EXACT_UP_TO {
             #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
-            Whole::Exact(number as i128)
+            Num::Exact(number as i128)
         } else {
-            Whole::Wide(number)
+            Num::Real(number)
         }
     }
 
     #[expect(clippy::cast_precision_loss, reason = "only for the inexact path")]
     fn as_f64(self) -> f64 {
         match self {
-            Whole::Exact(number) => number as f64,
-            Whole::Wide(number) => number,
+            Num::Exact(number) => number as f64,
+            Num::Real(number) => number,
         }
     }
 
-    /// Whether this number may not be the one the description wrote.
+    /// Whether this number may not be the one that was written.
     ///
-    /// Past 2^53 an `f64` cannot hold every integer, and `serde_json`
-    /// parses a fractional literal into one long before this crate sees
-    /// it — `9007199254740993.5` arrives as `9007199254740994.0`. Such
-    /// a number can still be compared, but it cannot settle a tie.
+    /// Past 2^53 an `f64` cannot hold every integer, and a fractional
+    /// literal is parsed into one long before this crate sees it —
+    /// `9007199254740993.5` arrives as `9007199254740994.0`. Such a
+    /// number can still be compared, but it cannot settle a tie.
+    ///
+    /// Below that magnitude the ordinary floating-point caveats apply
+    /// and are left alone: every JSON Schema implementation compares
+    /// `0.1` with the `f64` nearest `0.1`, and flagging that would make
+    /// the crate useless rather than careful.
     fn is_approximate(self) -> bool {
-        matches!(self, Whole::Wide(number) if number.abs() > EXACT_UP_TO)
+        matches!(self, Num::Real(number) if number.abs() > EXACT_UP_TO)
     }
 
     /// Exact whenever either side is.
@@ -768,21 +785,21 @@ impl Whole {
     /// `9007199254740994.0` by the time it arrives here.
     fn cmp(self, other: Self) -> Ordering {
         match (self, other) {
-            (Whole::Exact(mine), Whole::Exact(theirs)) => mine.cmp(&theirs),
-            (Whole::Exact(mine), Whole::Wide(theirs)) => cmp_exact_to_float(mine, theirs),
-            (Whole::Wide(mine), Whole::Exact(theirs)) => cmp_exact_to_float(theirs, mine).reverse(),
-            (Whole::Wide(mine), Whole::Wide(theirs)) => {
+            (Num::Exact(mine), Num::Exact(theirs)) => mine.cmp(&theirs),
+            (Num::Exact(mine), Num::Real(theirs)) => cmp_exact_to_float(mine, theirs),
+            (Num::Real(mine), Num::Exact(theirs)) => cmp_exact_to_float(theirs, mine).reverse(),
+            (Num::Real(mine), Num::Real(theirs)) => {
                 mine.partial_cmp(&theirs).unwrap_or(Ordering::Equal)
             }
         }
     }
 }
 
-impl Display for Whole {
+impl Display for Num {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Whole::Exact(number) => write!(f, "{number}"),
-            Whole::Wide(number) => write!(f, "{number}"),
+            Num::Exact(number) => write!(f, "{number}"),
+            Num::Real(number) => write!(f, "{number}"),
         }
     }
 }
@@ -830,8 +847,8 @@ fn cmp_exact_to_float(exact: i128, float: f64) -> Ordering {
 /// A `multipleOf` step that is itself a whole number, for exact
 /// remainder arithmetic.
 fn whole_step(step: f64) -> Option<i128> {
-    match Whole::of_f64(step) {
-        Whole::Exact(step) if step != 0 => Some(step),
+    match Num::of_f64(step) {
+        Num::Exact(step) if step != 0 => Some(step),
         _ => None,
     }
 }

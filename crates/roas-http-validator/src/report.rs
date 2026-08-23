@@ -232,6 +232,21 @@ pub enum RoutingError {
     /// A template matched, but it describes no such method. The methods
     /// it does describe are named, which is what an `Allow` response
     /// header needs.
+    /// A template matched, but its Path Item Object could not be read:
+    /// a `$ref` that names nothing, points outside the document, or
+    /// closes a cycle.
+    ///
+    /// Neither "no such path" nor "no such method" — the description is
+    /// broken, and the request cannot be judged either way. Usually a
+    /// 500 rather than a 404 or a 405.
+    #[error("{template} references {reference}, which could not be resolved")]
+    Unresolved {
+        /// The template that matched.
+        template: String,
+        /// The reference that could not be followed.
+        reference: String,
+    },
+
     #[error("{template} describes no {method} operation (it has: {})", allowed.join(", "))]
     MethodNotAllowed {
         /// The template that matched.
@@ -382,6 +397,14 @@ mod tests {
             }
             .to_string(),
             "no path in the description matches \"/nope\"",
+        );
+        assert_eq!(
+            RoutingError::Unresolved {
+                template: "/pets".to_owned(),
+                reference: "#/components/pathItems/Gone".to_owned(),
+            }
+            .to_string(),
+            "/pets references #/components/pathItems/Gone, which could not be resolved",
         );
         assert_eq!(
             RoutingError::MethodNotAllowed {
