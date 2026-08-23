@@ -113,7 +113,7 @@ A parameter whose schema this crate cannot read structurally — a composition, 
 
 "Wrong" includes "could not be judged". A subschema that cannot be applied — a `pattern` that will not compile, a number whose digits floating point already lost — yields no verdict rather than a failing one, and `not`, `anyOf` and `oneOf` all carry that third state instead of reading it as a mismatch. Otherwise `{ "not": { "pattern": "(" } }` would accept anything at all, on the strength of a check that never ran. The logic is properly three-valued, so a constraint the value *definitely* broke still settles the schema: `minLength: 2` rejects `"x"` whether or not the `pattern` beside it compiles.
 
-Numbers are compared exactly wherever they fit an `i128`, and past 2^53 — where an `f64` no longer holds every integer, and `9007199254740993.5` and `9007199254740994` become the same value — a comparison that lands on a tie is reported as unchecked rather than decided. Below that, ordinary floating-point behaviour is left alone.
+Numbers are compared exactly wherever they fit an `i128`. Past **2^52** — not 2^53: that is where consecutive `f64`s become exactly 1 apart, so `9007199254740991.5` is stored as `9007199254740992.0` and looks like a whole number it never was — a value that arrived as a float is treated as approximate. It is not called an integer, it cannot settle a tie against a bound, and it cannot be divided by a `multipleOf` whose quotient would round its own remainder away. Integers that `serde_json` kept as integers stay exact at any magnitude, and below the limit ordinary floating-point behaviour is left alone.
 
 ## Versions
 

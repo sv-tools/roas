@@ -229,9 +229,6 @@ pub enum RoutingError {
         path: String,
     },
 
-    /// A template matched, but it describes no such method. The methods
-    /// it does describe are named, which is what an `Allow` response
-    /// header needs.
     /// A template matched, but its Path Item Object could not be read:
     /// a `$ref` that names nothing, points outside the document, or
     /// closes a cycle.
@@ -247,6 +244,9 @@ pub enum RoutingError {
         reference: String,
     },
 
+    /// A template matched, but it describes no such method. The methods
+    /// it does describe are named, which is what an `Allow` response
+    /// header needs.
     #[error("{template} describes no {method} operation (it has: {})", allowed.join(", "))]
     MethodNotAllowed {
         /// The template that matched.

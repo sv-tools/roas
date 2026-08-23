@@ -476,22 +476,29 @@ impl<'s> Checker<'s> {
         if let Some(step) = multiple_of
             && step != 0.0
         {
-            if value.is_approximate() {
+            // Both whole: an exact remainder, no rounding involved, at
+            // any magnitude.
+            if let (Num::Exact(value), Some(step)) = (value, whole_step(step)) {
+                if value % step != 0 {
+                    self.fail(format!("{value} is not a multiple of {step}"));
+                }
+                return;
+            }
+
+            let quotient = value.as_f64() / step;
+            // The division has to leave a fractional part to look at.
+            // `9007199254740992 / 1.5` is 6004799503160661.33, which an
+            // `f64` stores as 6004799503160661.0 — the remainder is gone
+            // before it can be weighed, and the value would pass as
+            // divisible when it is not.
+            if value.is_approximate() || quotient.abs() >= EXACT_WHOLE_LIMIT {
                 self.unchecked(format!(
-                    "{value} is beyond the range a 64-bit float represents exactly, so whether \
-                     it is a multiple of {step} could NOT be established",
+                    "whether {value} is a multiple of {step} could NOT be established: the \
+                     division loses its remainder to floating point",
                 ));
                 return;
             }
-            let divides = match (value, whole_step(step)) {
-                // Both whole: an exact remainder, no rounding involved.
-                (Num::Exact(value), Some(step)) => value % step == 0,
-                _ => {
-                    let quotient = value.as_f64() / step;
-                    (quotient - quotient.round()).abs() <= 1e-9
-                }
-            };
-            if !divides {
+            if (quotient - quotient.round()).abs() > 1e-9 {
                 self.fail(format!("{value} is not a multiple of {step}"));
             }
         }
@@ -702,8 +709,15 @@ enum Num {
     Real(f64),
 }
 
-/// The largest magnitude an `f64` represents every integer up to.
-const EXACT_UP_TO: f64 = 9_007_199_254_740_992.0;
+/// The magnitude at which an `f64`'s steps reach 1, so a fractional
+/// part can no longer survive being stored in one.
+///
+/// 2^52 rather than 2^53. Above 2^53 an `f64` cannot hold every
+/// integer, which is the better-known limit — but the one that matters
+/// here is lower: from 2^52 up, consecutive `f64`s are exactly 1 apart,
+/// so `9007199254740991.5` is stored as `9007199254740992.0` and looks
+/// like a whole number it never was.
+const EXACT_WHOLE_LIMIT: f64 = 4_503_599_627_370_496.0;
 
 impl Num {
     /// Any JSON number.
@@ -741,10 +755,15 @@ impl Num {
         number.as_f64().map_or(Num::Real(f64::NAN), Num::of_f64)
     }
 
+    /// A number that reached this crate as an `f64`.
+    ///
+    /// Only below [`EXACT_WHOLE_LIMIT`] does "no fractional part" mean
+    /// the number written had none: at or above it, a `.5` has already
+    /// been rounded away, so the value stays a real and is treated as
+    /// approximate. Integers that `serde_json` kept as integers never
+    /// come through here and stay exact at any magnitude.
     fn of_f64(number: f64) -> Self {
-        // Past 2^53 an `f64` has already lost the value it came from,
-        // so widening it to `i128` would recover nothing.
-        if number.fract() == 0.0 && number.abs() <= EXACT_UP_TO {
+        if number.fract() == 0.0 && number.abs() < EXACT_WHOLE_LIMIT {
             #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
             Num::Exact(number as i128)
         } else {
@@ -762,17 +781,17 @@ impl Num {
 
     /// Whether this number may not be the one that was written.
     ///
-    /// Past 2^53 an `f64` cannot hold every integer, and a fractional
-    /// literal is parsed into one long before this crate sees it —
-    /// `9007199254740993.5` arrives as `9007199254740994.0`. Such a
-    /// number can still be compared, but it cannot settle a tie.
+    /// A real at or above [`EXACT_WHOLE_LIMIT`] has already lost
+    /// whatever fraction it had: `9007199254740993.5` arrives as
+    /// `9007199254740994.0`. It can still be compared, but it cannot
+    /// settle a tie, and it cannot be called a whole number.
     ///
     /// Below that magnitude the ordinary floating-point caveats apply
     /// and are left alone: every JSON Schema implementation compares
     /// `0.1` with the `f64` nearest `0.1`, and flagging that would make
     /// the crate useless rather than careful.
     fn is_approximate(self) -> bool {
-        matches!(self, Num::Real(number) if number.abs() > EXACT_UP_TO)
+        matches!(self, Num::Real(number) if number.abs() >= EXACT_WHOLE_LIMIT)
     }
 
     /// Exact whenever either side is.

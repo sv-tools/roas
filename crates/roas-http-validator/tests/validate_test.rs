@@ -1514,3 +1514,73 @@ fn an_unreadable_path_item_does_not_claim_a_method_is_unavailable() {
         ["description: has an unresolvable `$ref`: #/components/pathItems/Gone"],
     );
 }
+
+// ── the review of d3b7d97 ────────────────────────────────────────────
+
+#[test]
+fn a_fraction_that_rounded_into_a_whole_number_is_not_called_an_integer() {
+    // `9007199254740991.5` is stored as `9007199254740992.0`: from 2^52
+    // up, consecutive floats are 1 apart, so the `.5` is gone. It looks
+    // whole and never was.
+    let validator = body_schema(json!({ "type": "integer" }));
+    let found = errors(&validator, &posted(b"9007199254740991.5"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // An integer `serde_json` kept as an integer is exact at any
+    // magnitude, and still decided normally.
+    assert!(errors(&validator, &posted(b"9007199254740992")).is_empty());
+    assert!(errors(&validator, &posted(b"9007199254740993")).is_empty());
+}
+
+#[test]
+fn a_bound_that_rounded_into_a_whole_number_cannot_settle_a_tie() {
+    let validator = body_schema(json!({
+        "type": "integer",
+        "maximum": 4_503_599_627_370_496.5_f64
+    }));
+    // The bound is stored as 4503599627370496.0, so a value that lands
+    // on it is the undecidable case: it is below the maximum as
+    // written, and equal to it as stored.
+    let found = errors(&validator, &posted(b"4503599627370496"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // The guard stays narrow — anything not on the tie is still
+    // decided, in both directions.
+    assert!(errors(&validator, &posted(b"1")).is_empty());
+    assert_eq!(
+        errors(&validator, &posted(b"4503599627370497")),
+        ["body: 4503599627370497 is above maximum 4503599627370496"],
+    );
+}
+
+#[test]
+fn a_multiple_of_whose_division_loses_its_remainder_is_not_declared_divisible() {
+    // 9007199254740992 / 1.5 is 6004799503160661.33, which an `f64`
+    // stores as 6004799503160661.0 — the remainder is gone before it
+    // can be weighed.
+    let validator = body_schema(json!({ "type": "integer", "multipleOf": 1.5 }));
+    let found = errors(&validator, &posted(b"9007199254740992"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // In the range where the division does leave a remainder to weigh,
+    // it is weighed.
+    assert!(errors(&validator, &posted(b"3")).is_empty());
+    assert_eq!(
+        errors(&validator, &posted(b"4")),
+        ["body: 4 is not a multiple of 1.5"],
+    );
+}
+
+#[test]
+fn a_whole_step_divides_exactly_at_any_magnitude() {
+    // Both sides whole means an integer remainder, with no float in it.
+    let validator = body_schema(json!({ "type": "integer", "multipleOf": 2 }));
+    assert!(errors(&validator, &posted(b"9007199254740992")).is_empty());
+    assert_eq!(
+        errors(&validator, &posted(b"9007199254740993")),
+        ["body: 9007199254740993 is not a multiple of 2"],
+    );
+}

@@ -142,9 +142,16 @@ impl Validator {
     ///
     /// # Errors
     ///
-    /// [`RoutingError`] when the description describes no such path or
-    /// no such method on it — which is a different answer from "the
-    /// request is invalid", and usually a different response code.
+    /// [`RoutingError`] when the request cannot be judged at all, which
+    /// is a different answer from "the request is invalid" and usually a
+    /// different response code:
+    ///
+    /// - [`RoutingError::PathNotFound`] — no template matches the path.
+    /// - [`RoutingError::MethodNotAllowed`] — a template matches and
+    ///   describes other methods, but not this one.
+    /// - [`RoutingError::Unresolved`] — a template matches but its Path
+    ///   Item Object could not be read, so neither of the above can be
+    ///   said honestly.
     pub fn validate(&self, request: &RequestView<'_>) -> Result<ValidationReport, RoutingError> {
         let matched = self
             .router
