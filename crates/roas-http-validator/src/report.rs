@@ -113,6 +113,13 @@ pub enum ErrorKind {
     /// skipped: "not validated" must never read as "valid".
     Unsupported(String),
 
+    /// The description could be read but not applied faithfully, so the
+    /// value went **unchecked** — a `pattern` that will not compile, or
+    /// a bound whose digits were lost to floating point before this
+    /// crate ever saw it. Same guarantee as [`ErrorKind::Unsupported`]:
+    /// unchecked never reads as valid.
+    Unchecked(String),
+
     /// A `$ref` in the description could not be resolved, so there was
     /// no schema to judge the value against.
     UnresolvedReference(String),
@@ -141,6 +148,7 @@ impl Display for ErrorKind {
             ErrorKind::Unsupported(what) => {
                 write!(f, "was NOT checked — {what} is not implemented yet")
             }
+            ErrorKind::Unchecked(why) => write!(f, "was NOT checked — {why}"),
             ErrorKind::UnresolvedReference(reference) => {
                 write!(f, "has an unresolvable `$ref`: {reference}")
             }
@@ -155,9 +163,9 @@ impl Display for ErrorKind {
 pub struct ValidationReport {
     /// The Path Item template the request matched, e.g. `/pets/{petId}`.
     pub template: String,
-    /// The method as the Path Item Object spells it: lowercase for the
-    /// eight standard ones, and exactly as written for a method that
-    /// came from `additionalOperations`, whose keys are case-sensitive.
+    /// The HTTP method token the matched operation describes — `GET`,
+    /// not the `get` that OpenAPI keys it under, and exactly as written
+    /// for one that came from `additionalOperations`.
     pub method: String,
     /// The matched operation's `operationId`, when it has one.
     pub operation_id: Option<String>,
@@ -195,12 +203,7 @@ impl Display for ValidationReport {
             Some(id) => format!(" ({id})"),
             None => String::new(),
         };
-        write!(
-            f,
-            "{} {}{operation}: ",
-            self.method.to_uppercase(),
-            self.template,
-        )?;
+        write!(f, "{} {}{operation}: ", self.method, self.template)?;
         if self.errors.is_empty() {
             return f.write_str("valid");
         }
@@ -255,7 +258,7 @@ mod tests {
     fn report(errors: Vec<ValidationError>) -> ValidationReport {
         ValidationReport {
             template: "/pets/{petId}".to_owned(),
-            method: "get".to_owned(),
+            method: "GET".to_owned(),
             operation_id: Some("getPet".to_owned()),
             path_parameters: vec![("petId".to_owned(), "7".to_owned())],
             errors,
@@ -336,6 +339,10 @@ mod tests {
             (
                 ErrorKind::UnresolvedReference("#/components/schemas/Gone".to_owned()),
                 "has an unresolvable `$ref`: #/components/schemas/Gone",
+            ),
+            (
+                ErrorKind::Unchecked("the bound lost its digits".to_owned()),
+                "was NOT checked — the bound lost its digits",
             ),
             (ErrorKind::Undescribed, "is not described by this operation"),
         ];

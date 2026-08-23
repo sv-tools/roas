@@ -69,7 +69,7 @@ fn a_method_the_path_does_not_offer_names_the_ones_it_does() {
         RoutingError::MethodNotAllowed {
             template: "/pets".to_owned(),
             method: "DELETE".to_owned(),
-            allowed: vec!["get".to_owned(), "post".to_owned()],
+            allowed: vec!["GET".to_owned(), "POST".to_owned()],
         },
     );
 }
@@ -105,7 +105,7 @@ fn a_report_names_the_operation_and_the_path_parameters_it_read() {
         .expect("the description describes GET /pets/{petId}");
     assert!(report.is_valid(), "{report}");
     assert_eq!(report.template, "/pets/{petId}");
-    assert_eq!(report.method, "get");
+    assert_eq!(report.method, "GET");
     assert_eq!(report.operation_id.as_deref(), Some("getPet"));
     assert_eq!(
         report.path_parameters,
@@ -731,7 +731,7 @@ fn the_allowed_list_names_additional_operations_too() {
         RoutingError::MethodNotAllowed {
             template: "/pets".to_owned(),
             method: "DELETE".to_owned(),
-            allowed: vec!["get".to_owned(), "COPY".to_owned()],
+            allowed: vec!["GET".to_owned(), "COPY".to_owned()],
         },
     );
 }
@@ -1058,4 +1058,169 @@ fn an_exact_integer_is_never_rounded_to_meet_a_fractional_bound() {
         ),
         ["query parameter \"n\": -11 is below minimum -10.5"],
     );
+}
+
+// ── the review of e7bb350 ────────────────────────────────────────────
+
+#[test]
+fn a_field_written_beside_a_path_item_ref_is_not_dropped() {
+    // The reference carries the operations; the required header is
+    // written at the call site. Both apply.
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/x": {
+            "$ref": "#/components/pathItems/Shared",
+            "parameters": [
+                { "name": "X-Local", "in": "header", "required": true,
+                  "schema": { "type": "string" } }
+            ]
+        } },
+        "components": { "pathItems": { "Shared": {
+            "get": { "operationId": "shared" }
+        } } }
+    }))
+    .expect("the description must parse");
+    let validator = Validator::new(spec);
+
+    assert_eq!(
+        errors(&validator, &RequestView::new("GET", "/x")),
+        ["header parameter \"X-Local\": is required and was not sent"],
+    );
+    let ok = RequestView::new("GET", "/x").with_header("x-local", "here");
+    assert!(errors(&validator, &ok).is_empty());
+}
+
+#[test]
+fn a_method_not_allowed_error_reads_as_http_would_write_it() {
+    let validator = validator(json!({
+        "/pets": {
+            "get": { "operationId": "listPets" },
+            "additionalOperations": { "COPY": { "operationId": "copyPet" } }
+        }
+    }));
+    // The token the request carried, verbatim — and an `Allow` list of
+    // real method tokens rather than OpenAPI's lowercase keys.
+    let error = validator
+        .validate(&RequestView::new("get", "/pets"))
+        .expect_err("`get` is not `GET`");
+    assert_eq!(
+        error,
+        RoutingError::MethodNotAllowed {
+            template: "/pets".to_owned(),
+            method: "get".to_owned(),
+            allowed: vec!["GET".to_owned(), "COPY".to_owned()],
+        },
+    );
+    assert_eq!(
+        error.to_string(),
+        "/pets describes no get operation (it has: GET, COPY)",
+    );
+}
+
+#[test]
+fn an_undescribed_method_at_an_operations_own_prefix_is_a_405_not_a_404() {
+    let validator = validator(json!({
+        "/pets": { "get": { "operationId": "listPets", "servers": [{ "url": "/v2" }] } }
+    }));
+    // `/v2/pets` is demonstrably a path this description serves.
+    let error = validator
+        .validate(&RequestView::new("DELETE", "/v2/pets"))
+        .expect_err("the path offers no DELETE");
+    assert_eq!(
+        error,
+        RoutingError::MethodNotAllowed {
+            template: "/pets".to_owned(),
+            method: "DELETE".to_owned(),
+            allowed: vec!["GET".to_owned()],
+        },
+    );
+    // A path it does not serve is still a 404.
+    assert!(matches!(
+        validator.validate(&RequestView::new("DELETE", "/v9/pets")),
+        Err(RoutingError::PathNotFound { .. }),
+    ));
+}
+
+#[test]
+fn a_malformed_deep_object_name_is_reported_rather_than_ignored() {
+    let paths = json!({
+        "/x": { "get": { "parameters": [
+            { "name": "filter", "in": "query", "style": "deepObject", "explode": true,
+              "schema": { "type": "object", "properties": { "role": { "type": "string" } } } }
+        ] } }
+    });
+    let strict = with_options(paths, Options::new().reject_undescribed_query_parameters());
+    // None of these decode into anything, so none of them may pass as
+    // "described".
+    for query in [
+        "filter=garbage",
+        "filter[role=admin",
+        "filter[role]junk=admin",
+    ] {
+        assert_eq!(
+            errors(&strict, &RequestView::new("GET", "/x").with_query(query)).len(),
+            1,
+            "{query} must be reported",
+        );
+    }
+    assert!(
+        errors(
+            &strict,
+            &RequestView::new("GET", "/x").with_query("filter[role]=admin")
+        )
+        .is_empty(),
+    );
+}
+
+#[test]
+fn an_integer_enum_matches_however_the_body_spells_the_number() {
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/json": { "schema": {
+                "type": "object",
+                "properties": { "n": { "type": "integer", "enum": [9_007_199_254_740_994_i64] } }
+            } }
+        } } } }
+    }));
+    for body in [
+        br#"{"n":9007199254740994}"#.as_slice(),
+        br#"{"n":9.007199254740994e15}"#.as_slice(),
+    ] {
+        let request = RequestView::new("POST", "/x")
+            .with_header("content-type", "application/json")
+            .with_body(body);
+        assert!(
+            errors(&validator, &request).is_empty(),
+            "{} must match the enum",
+            String::from_utf8_lossy(body),
+        );
+    }
+}
+
+#[test]
+fn a_bound_whose_digits_were_lost_reports_that_it_could_not_check() {
+    // `serde_json` parses 9007199254740993.5 as 9007199254740994.0 long
+    // before this crate sees it, so the tie cannot be settled — and an
+    // unsettled tie must not read as valid.
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/json": { "schema": {
+                "type": "object",
+                "properties": { "n": { "type": "integer", "maximum": 9_007_199_254_740_993.5_f64 } }
+            } }
+        } } } }
+    }));
+    let request = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/json")
+        .with_body(br#"{"n":9007199254740994}"#.as_slice());
+    let found = errors(&validator, &request);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+
+    // A value clear of the boundary is still decided normally.
+    let clear = RequestView::new("POST", "/x")
+        .with_header("content-type", "application/json")
+        .with_body(br#"{"n":1}"#.as_slice());
+    assert!(errors(&validator, &clear).is_empty());
 }

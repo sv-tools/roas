@@ -40,8 +40,12 @@ use std::borrow::Cow;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RequestView<'a> {
-    /// The HTTP method. Compared case-insensitively against the
-    /// lowercase keys a Path Item Object uses.
+    /// The HTTP method, as the request carried it.
+    ///
+    /// Matched case-sensitively, as
+    /// [RFC 9110 §9.1](https://www.rfc-editor.org/rfc/rfc9110#section-9.1)
+    /// requires of a method token: `GET` finds the `get` a Path Item
+    /// Object keys it under, and `get` finds nothing.
     pub method: Cow<'a, str>,
 
     /// The path, without the query string. Percent-encoding is kept as

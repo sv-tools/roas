@@ -70,13 +70,16 @@
 //! ## What it does not do yet
 //!
 //! Response validation, security requirements, `multipart/form-data`
-//! bodies, and XML. Anything a check could not judge is reported as
-//! [`ErrorKind::Unsupported`] rather than passed over, so a request
+//! bodies, and XML. Anything a check could not judge is reported —
+//! [`ErrorKind::Unsupported`] for what is not implemented yet,
+//! [`ErrorKind::Unchecked`] for a description this crate can read but
+//! cannot apply faithfully — rather than passed over, so a request
 //! never looks valid because nothing looked at it.
 
 mod body;
 mod method;
 mod parameter;
+mod paths;
 mod report;
 mod request;
 mod router;

@@ -265,9 +265,10 @@ fn report_failures(
     push: &mut impl FnMut(ErrorKind),
 ) {
     for failure in schema::check(value, declared, spec) {
-        push(match failure.unresolved {
-            Some(reference) => ErrorKind::UnresolvedReference(reference),
-            None => ErrorKind::Schema {
+        push(match failure.kind {
+            schema::FailureKind::Unresolved => ErrorKind::UnresolvedReference(failure.message),
+            schema::FailureKind::Unchecked => ErrorKind::Unchecked(failure.message),
+            schema::FailureKind::Violated => ErrorKind::Schema {
                 pointer: failure.pointer,
                 message: failure.message,
             },
@@ -310,6 +311,15 @@ impl<'p> Described<'p> {
         }
     }
 
+    /// The property a `deepObject` pair names, as `filter[role]` names
+    /// `role`. The one place this shape is spelled out, so accounting
+    /// and decoding cannot disagree about what counts.
+    fn deep_object_key<'n>(&self, name: &'n str) -> Option<&'n str> {
+        name.strip_prefix(self.name)?
+            .strip_prefix('[')?
+            .strip_suffix(']')
+    }
+
     /// Whether this parameter or form field accounts for a pair named
     /// `name` — see [`accounts_for`].
     fn accounts_for(&self, name: &str, spec: &Spec) -> bool {
@@ -317,7 +327,11 @@ impl<'p> Described<'p> {
             return false;
         }
         if self.style == Style::DeepObject {
-            return name == self.name || name.starts_with(&format!("{}[", self.name));
+            // Exactly what the decoder accepts, and nothing more: a
+            // `filter[role` that never closes, or a bare `filter`,
+            // contributes no value, so calling it described would let it
+            // slip past strict checking while doing nothing.
+            return self.deep_object_key(name).is_some();
         }
         if self.explode
             && self.style == Style::Form
@@ -613,11 +627,10 @@ impl<'p> Described<'p> {
     ) -> Result<Option<Value>, String> {
         // `deepObject`: `id[role]=admin&id[firstName]=Alex`
         if self.style == Style::DeepObject {
-            let prefix = format!("{}[", self.name);
             let members: Vec<(String, String)> = pairs
                 .iter()
                 .filter_map(|(name, value)| {
-                    let key = name.strip_prefix(&prefix)?.strip_suffix(']')?;
+                    let key = self.deep_object_key(name)?;
                     Some((key.to_owned(), self.decode_value(value)))
                 })
                 .collect();

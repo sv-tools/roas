@@ -25,16 +25,29 @@ use roas::v3_2::schema::{
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
 
-/// One way in which a value did not satisfy its schema.
+/// One way in which a value did not satisfy its schema — or could not
+/// be judged against it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Failure {
     /// RFC 6901 JSON Pointer to the offending value; empty for the root.
     pub(crate) pointer: String,
     /// What the schema wanted.
     pub(crate) message: String,
-    /// Set when the schema could not be read at all, rather than the
-    /// value failing it — an unresolvable `$ref`.
-    pub(crate) unresolved: Option<String>,
+    /// Whether the value broke the schema, or the schema could not be
+    /// applied to it.
+    pub(crate) kind: FailureKind,
+}
+
+/// Why a value is being reported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FailureKind {
+    /// The value broke the schema.
+    Violated,
+    /// A `$ref` named nothing, so there was no schema to apply.
+    Unresolved,
+    /// The schema could be read but not applied faithfully, so the
+    /// value went **unchecked** — never "valid".
+    Unchecked,
 }
 
 /// Judge `value` against `schema`, collecting every failure.
@@ -72,10 +85,20 @@ impl<'s> Checker<'s> {
 
     /// Record a failure at the current pointer.
     fn fail(&mut self, message: impl Into<String>) {
+        self.record(FailureKind::Violated, message);
+    }
+
+    /// Record that the value could not be judged, rather than that it
+    /// failed. "Not checked" must never read as "valid".
+    fn unchecked(&mut self, message: impl Into<String>) {
+        self.record(FailureKind::Unchecked, message);
+    }
+
+    fn record(&mut self, kind: FailureKind, message: impl Into<String>) {
         self.failures.push(Failure {
             pointer: self.pointer.clone(),
             message: message.into(),
-            unresolved: None,
+            kind,
         });
     }
 
@@ -110,8 +133,8 @@ impl<'s> Checker<'s> {
 
     fn schema(&mut self, value: &Value, schema: &RefOr<Schema>) {
         if self.depth >= MAX_DEPTH {
-            self.fail(format!(
-                "schema nests more than {MAX_DEPTH} levels deep, so the value was NOT checked",
+            self.unchecked(format!(
+                "the schema nests more than {MAX_DEPTH} levels deep"
             ));
             return;
         }
@@ -123,14 +146,7 @@ impl<'s> Checker<'s> {
     fn dispatch(&mut self, value: &Value, schema: &RefOr<Schema>) {
         match schema.get_item(self.spec) {
             Ok(resolved) => self.resolved(value, resolved),
-            Err(error) => {
-                let reference = error.to_string();
-                self.failures.push(Failure {
-                    pointer: self.pointer.clone(),
-                    message: reference.clone(),
-                    unresolved: Some(reference),
-                });
-            }
+            Err(error) => self.record(FailureKind::Unresolved, error.to_string()),
         }
     }
 
@@ -265,8 +281,8 @@ impl<'s> Checker<'s> {
                 // A pattern this crate cannot compile is the
                 // description's problem, not the request's — but saying
                 // nothing would let an unchecked value look checked.
-                Err(error) => self.fail(format!(
-                    "pattern {pattern:?} could not be compiled, so the value was NOT checked: {error}",
+                Err(error) => self.unchecked(format!(
+                    "pattern {pattern:?} could not be compiled: {error}",
                 )),
             }
         }
@@ -276,7 +292,7 @@ impl<'s> Checker<'s> {
         if let Some(allowed) = &schema.enum_values
             && !allowed
                 .iter()
-                .any(|candidate| Whole::Exact(i128::from(*candidate)) == value)
+                .any(|candidate| Whole::Exact(i128::from(*candidate)).cmp(value) == Ordering::Equal)
         {
             let names: Vec<String> = allowed
                 .iter()
@@ -307,6 +323,16 @@ impl<'s> Checker<'s> {
             // so `9007199254740993` against `maximum: 9007199254740992`
             // is decided exactly rather than by two equal `f64`s.
             let relation = value.cmp(limit);
+            // A tie against a bound (or a value) that `serde_json` may
+            // already have rounded is not a decision — it is the one
+            // case where the lost digits would have settled it.
+            if relation == Ordering::Equal && (limit.is_approximate() || value.is_approximate()) {
+                self.unchecked(format!(
+                    "{name} {limit} is beyond the range a 64-bit float represents exactly, so \
+                     {value} could NOT be checked against it",
+                ));
+                continue;
+            }
             let breached = relation == ordering || (!inclusive && relation == Ordering::Equal);
             if breached {
                 let verb = match (ordering, inclusive) {
@@ -478,9 +504,8 @@ impl<'s> Checker<'s> {
         if let Some(patterns) = &schema.pattern_properties {
             for (pattern, subschema) in patterns {
                 let Ok(regex) = regex::Regex::new(pattern) else {
-                    self.fail(format!(
-                        "patternProperties key {pattern:?} could not be compiled, so those \
-                         properties were NOT checked",
+                    self.unchecked(format!(
+                        "patternProperties key {pattern:?} could not be compiled",
                     ));
                     continue;
                 };
@@ -597,6 +622,9 @@ enum Whole {
     Wide(f64),
 }
 
+/// The largest magnitude an `f64` represents every integer up to.
+const EXACT_UP_TO: f64 = 9_007_199_254_740_992.0;
+
 impl Whole {
     /// A value seen as an integer. JSON Schema counts `1.0` as an
     /// integer — a number with a zero fractional part — not only `1`.
@@ -625,7 +653,6 @@ impl Whole {
     fn of_f64(number: f64) -> Self {
         // Past 2^53 an `f64` has already lost the value it came from,
         // so widening it to `i128` would recover nothing.
-        const EXACT_UP_TO: f64 = 9_007_199_254_740_992.0;
         if number.fract() == 0.0 && number.abs() <= EXACT_UP_TO {
             #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
             Whole::Exact(number as i128)
@@ -640,6 +667,16 @@ impl Whole {
             Whole::Exact(number) => number as f64,
             Whole::Wide(number) => number,
         }
+    }
+
+    /// Whether this number may not be the one the description wrote.
+    ///
+    /// Past 2^53 an `f64` cannot hold every integer, and `serde_json`
+    /// parses a fractional literal into one long before this crate sees
+    /// it — `9007199254740993.5` arrives as `9007199254740994.0`. Such
+    /// a number can still be compared, but it cannot settle a tie.
+    fn is_approximate(self) -> bool {
+        matches!(self, Whole::Wide(number) if number.abs() > EXACT_UP_TO)
     }
 
     /// Exact whenever either side is.
@@ -819,7 +856,7 @@ mod tests {
     fn a_pattern_that_will_not_compile_is_reported_not_ignored() {
         let found = failures(&json!("x"), json!({ "type": "string", "pattern": "(" }));
         assert_eq!(found.len(), 1);
-        assert!(found[0].contains("was NOT checked"), "{found:?}");
+        assert!(found[0].contains("could not be compiled"), "{found:?}");
     }
 
     #[test]
@@ -1171,7 +1208,7 @@ mod tests {
             &spec(),
         );
         assert_eq!(found.len(), 1);
-        assert!(found[0].unresolved.is_some(), "{found:?}");
+        assert_eq!(found[0].kind, FailureKind::Unresolved, "{found:?}");
         assert!(found[0].message.contains("not found"), "{found:?}");
     }
 
@@ -1191,7 +1228,7 @@ mod tests {
             &spec,
         );
         assert_eq!(found.len(), 1);
-        assert!(found[0].message.contains("NOT checked"), "{found:?}");
+        assert_eq!(found[0].kind, FailureKind::Unchecked, "{found:?}");
     }
 
     #[test]

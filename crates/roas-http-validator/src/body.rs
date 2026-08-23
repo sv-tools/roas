@@ -90,9 +90,10 @@ pub(crate) fn validate(
     };
 
     for failure in schema::check(&value, declared, spec) {
-        push(match failure.unresolved {
-            Some(reference) => ErrorKind::UnresolvedReference(reference),
-            None => ErrorKind::Schema {
+        push(match failure.kind {
+            schema::FailureKind::Unresolved => ErrorKind::UnresolvedReference(failure.message),
+            schema::FailureKind::Unchecked => ErrorKind::Unchecked(failure.message),
+            schema::FailureKind::Violated => ErrorKind::Schema {
                 pointer: failure.pointer,
                 message: failure.message,
             },

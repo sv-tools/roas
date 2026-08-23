@@ -10,9 +10,10 @@ use roas::v3_2::spec::Spec;
 
 use crate::body;
 use crate::parameter;
+use crate::paths;
 use crate::report::{ErrorKind, Location, RoutingError, ValidationError, ValidationReport};
 use crate::request::{RequestView, decode_path_segment};
-use crate::router::{self, Router};
+use crate::router::Router;
 
 /// What to check, and where the description's paths start.
 ///
@@ -100,6 +101,9 @@ impl Options {
 #[derive(Clone, Debug)]
 pub struct Validator {
     spec: Spec,
+    /// Every Path Item Object with its `$ref` followed and merged,
+    /// resolved once here rather than on every request.
+    path_items: BTreeMap<String, PathItem>,
     router: Router,
     options: Options,
 }
@@ -114,9 +118,15 @@ impl Validator {
     /// Prepare a v3.2 description.
     #[must_use]
     pub fn with_options(spec: Spec, options: Options) -> Self {
-        let router = Router::new(&spec, options.base_path.as_deref());
+        let path_items = paths::resolve(&spec);
+        let router = Router::new(
+            &path_items,
+            spec.servers.as_deref(),
+            options.base_path.as_deref(),
+        );
         Self {
             spec,
+            path_items,
             router,
             options,
         }
@@ -150,7 +160,11 @@ impl Validator {
         else {
             return Err(RoutingError::MethodNotAllowed {
                 template,
-                method: request.method.to_uppercase(),
+                // The token the request actually carried, not a
+                // normalization of it: `get` was refused *because* it is
+                // not `GET`, and saying "no GET here" beside an `Allow`
+                // naming `GET` would be nonsense.
+                method: request.method.clone().into_owned(),
                 allowed: path_item.map(allowed_methods).unwrap_or_default(),
             });
         };
@@ -185,7 +199,7 @@ impl Validator {
 
         Ok(ValidationReport {
             template,
-            method: method.to_owned(),
+            method,
             operation_id: operation.operation_id.clone(),
             // Decoded here and only here: validation splits before it
             // decodes, but a report is for a reader.
@@ -205,7 +219,7 @@ impl Validator {
         &self,
         path_item: &'i PathItem,
         request: &RequestView<'_>,
-    ) -> Option<(&'i str, &'i Operation)> {
+    ) -> Option<(String, &'i Operation)> {
         // Each map is searched with its own key and never the other's.
         if let Some(key) = crate::method::standard(&request.method)
             && let Some((key, operation)) = path_item
@@ -213,19 +227,20 @@ impl Validator {
                 .as_ref()
                 .and_then(|operations| operations.get_key_value(&key))
         {
-            return Some((key.as_str(), operation));
+            return Some((crate::method::from_standard_key(key), operation));
         }
         path_item
             .additional_operations
             .as_ref()?
             .get_key_value(request.method.as_ref())
-            .map(|(key, operation)| (key.as_str(), operation))
+            // Already a method token: `additionalOperations` is keyed by
+            // the method itself.
+            .map(|(key, operation)| (key.clone(), operation))
     }
 
-    /// The Path Item Object for a template, with its `$ref` followed.
+    /// The Path Item Object for a template, already resolved.
     fn path_item(&self, template: &str) -> Option<&PathItem> {
-        let item = self.spec.paths.as_ref()?.paths.get(template)?;
-        Some(router::resolve_path_item(&self.spec, item))
+        self.path_items.get(template)
     }
 
     /// The parameters that apply to one operation: the Path Item
@@ -291,16 +306,21 @@ fn check_for_strays(
     }
 }
 
-/// Every method a Path Item Object describes, standard and additional,
-/// as an `Allow` header would list them.
+/// Every method a Path Item Object describes, as method tokens — which
+/// is what an `Allow` header wants, and what `operations`' lowercase
+/// keys are not.
 fn allowed_methods(path_item: &PathItem) -> Vec<String> {
-    path_item
+    let standard = path_item
         .operations
         .iter()
-        .chain(path_item.additional_operations.iter())
-        .flat_map(|operations| operations.keys())
-        .cloned()
-        .collect()
+        .flatten()
+        .map(|(key, _)| crate::method::from_standard_key(key));
+    let additional = path_item
+        .additional_operations
+        .iter()
+        .flatten()
+        .map(|(key, _)| key.clone());
+    standard.chain(additional).collect()
 }
 
 /// What makes a parameter unique: its name and its location.

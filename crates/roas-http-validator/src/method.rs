@@ -28,6 +28,12 @@ pub(crate) fn standard(method: &str) -> Option<String> {
     (method == method.to_ascii_uppercase()).then(|| method.to_ascii_lowercase())
 }
 
+/// The HTTP method token an `operations` key stands for: `get` is the
+/// key OpenAPI writes for the method `GET`.
+pub(crate) fn from_standard_key(key: &str) -> String {
+    key.to_ascii_uppercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,6 +51,12 @@ mod tests {
         assert_eq!(standard("get"), None);
         assert_eq!(standard("GeT"), None);
         assert_eq!(standard("Get"), None);
+    }
+
+    #[test]
+    fn a_standard_key_names_the_method_it_stands_for() {
+        assert_eq!(from_standard_key("get"), "GET");
+        assert_eq!(from_standard_key("delete"), "DELETE");
     }
 
     #[test]
