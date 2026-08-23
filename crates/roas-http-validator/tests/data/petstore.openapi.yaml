@@ -1,0 +1,71 @@
+# A small description that exercises everything the validator reads: a
+# templated path, a concrete path that must outrank it, parameters in
+# all four locations, a JSON body, and a server base path.
+openapi: 3.2.0
+info:
+  title: Pets
+  version: 1.0.0
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /pets:
+    parameters:
+      - name: X-Request-Id
+        in: header
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listPets
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - name: tags
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: session
+          in: cookie
+          schema:
+            type: string
+            minLength: 3
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+  /pets/mine:
+    get:
+      operationId: listMyPets
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        tag:
+          type: string

@@ -1,0 +1,602 @@
+//! Reading one Parameter Object's value out of a request.
+//!
+//! This is where a request validator does most of its real work, and
+//! where the naive version goes wrong. A parameter arrives as text —
+//! `?limit=10` is the two characters `1` and `0`, not the number ten —
+//! so before a Schema Object can judge it, the text has to be turned
+//! back into the value the description says it is. `style` and `explode`
+//! say how it was flattened on the way out; this undoes that.
+//!
+//! All seven styles of
+//! [§4.8.11.2](https://spec.openapis.org/oas/v3.2.0#style-values) are
+//! handled: `matrix`, `label` and `simple` for paths, `form`,
+//! `spaceDelimited`, `pipeDelimited` and `deepObject` for queries.
+//!
+//! What the value is turned *into* is decided by the schema: an
+//! `integer` parameter parses as a number, an `array` splits, an
+//! `object` reassembles. A schema this crate cannot read that way — a
+//! composition, say — leaves the value a string, so the schema still
+//! judges it and the verdict is at worst too strict, never too lax.
+
+use std::collections::BTreeMap;
+
+use roas::common::bool_or::BoolOr;
+use roas::common::formats::SchemaType;
+use roas::common::reference::RefOr;
+use roas::v3_2::media_type::MediaType;
+use roas::v3_2::parameter::{InCookieStyle, InHeaderStyle, InPathStyle, InQueryStyle, Parameter};
+use roas::v3_2::schema::{Schema, SingleSchema};
+use roas::v3_2::spec::Spec;
+use serde_json::Value;
+
+use crate::body;
+use crate::report::{ErrorKind, Location, ValidationError};
+use crate::request::RequestView;
+use crate::schema;
+
+/// How a parameter's value was flattened into text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Style {
+    Matrix,
+    Label,
+    Simple,
+    Form,
+    SpaceDelimited,
+    PipeDelimited,
+    DeepObject,
+}
+
+/// The fields of a Parameter Object this module cares about, with the
+/// four `in` variants flattened into one shape.
+struct Described<'p> {
+    name: &'p str,
+    location: Location,
+    required: bool,
+    style: Style,
+    explode: bool,
+    schema: Option<&'p RefOr<Schema>>,
+    content: Option<&'p BTreeMap<String, RefOr<MediaType>>>,
+}
+
+/// What kind of value the schema says this parameter holds.
+enum Shape<'s> {
+    Primitive(Primitive),
+    Array(Option<&'s RefOr<Schema>>),
+    Object(Option<&'s BTreeMap<String, RefOr<Schema>>>),
+    /// A schema this module does not read structurally — a composition,
+    /// a `$ref` that does not resolve, or no schema at all.
+    Opaque,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Primitive {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    Null,
+}
+
+/// What one request yields once rather than once per parameter.
+///
+/// Decoding the query string and the cookie header is not free, and an
+/// operation with ten parameters would otherwise do it ten times — this
+/// is middleware, on the request path of every call.
+pub(crate) struct Extracted<'r> {
+    /// Path parameters, as the matched template read them.
+    pub(crate) path: &'r BTreeMap<String, String>,
+    /// The query string, decoded, in order and with repeats.
+    pub(crate) query: Vec<(String, String)>,
+    /// The cookies from the `Cookie` header, in the order sent.
+    pub(crate) cookies: Vec<(String, String)>,
+}
+
+impl<'r> Extracted<'r> {
+    pub(crate) fn new(request: &RequestView<'_>, path: &'r BTreeMap<String, String>) -> Self {
+        Self {
+            path,
+            query: request.query_pairs(),
+            cookies: request.cookies(),
+        }
+    }
+}
+
+/// Judge one parameter, appending whatever is wrong to `errors`.
+pub(crate) fn validate(
+    parameter: &Parameter,
+    request: &RequestView<'_>,
+    extracted: &Extracted<'_>,
+    spec: &Spec,
+    errors: &mut Vec<ValidationError>,
+) {
+    let described = Described::of(parameter);
+    let mut push = |kind: ErrorKind| {
+        errors.push(ValidationError {
+            location: described.location,
+            name: described.name.to_owned(),
+            kind,
+        });
+    };
+
+    // A parameter serialized as a media type rather than by `style`.
+    if let Some(content) = described.content {
+        let Some(raw) = described.raw_text(request, extracted) else {
+            if described.required {
+                push(ErrorKind::Missing);
+            }
+            return;
+        };
+        validate_as_content(&raw, content, spec, &mut push);
+        return;
+    }
+
+    let shape = described
+        .schema
+        .map_or(Shape::Opaque, |schema| Shape::of(schema, spec));
+
+    let value = match described.read(request, extracted, &shape, spec) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            if described.required {
+                push(ErrorKind::Missing);
+            }
+            return;
+        }
+        Err(why) => {
+            push(ErrorKind::Malformed(why));
+            return;
+        }
+    };
+
+    let Some(declared) = described.schema else {
+        return;
+    };
+    report_failures(&value, declared, spec, &mut push);
+}
+
+/// A parameter whose value is a document of its own — `content` rather
+/// than `style`. The body decoder does the reading, so a `querystring`
+/// parameter carrying `application/x-www-form-urlencoded` and a body
+/// carrying it are read by the same code.
+fn validate_as_content(
+    raw: &str,
+    content: &BTreeMap<String, RefOr<MediaType>>,
+    spec: &Spec,
+    push: &mut impl FnMut(ErrorKind),
+) {
+    // The specification requires exactly one entry here.
+    let Some((media_type, entry)) = content.iter().next() else {
+        return;
+    };
+    let entry = match entry.get_item(spec) {
+        Ok(entry) => entry,
+        Err(error) => {
+            push(ErrorKind::UnresolvedReference(error.to_string()));
+            return;
+        }
+    };
+    let Some(declared) = &entry.schema else {
+        return;
+    };
+    let value = match body::decode(raw.as_bytes(), media_type, declared, spec) {
+        Ok(value) => value,
+        Err(body::Decoded::Malformed(why)) => {
+            push(ErrorKind::Malformed(why));
+            return;
+        }
+        Err(body::Decoded::Unsupported(what)) => {
+            push(ErrorKind::Unsupported(what));
+            return;
+        }
+    };
+    report_failures(&value, declared, spec, push);
+}
+
+/// Turn schema failures into validation errors.
+fn report_failures(
+    value: &Value,
+    declared: &RefOr<Schema>,
+    spec: &Spec,
+    push: &mut impl FnMut(ErrorKind),
+) {
+    for failure in schema::check(value, declared, spec) {
+        push(match failure.unresolved {
+            Some(reference) => ErrorKind::UnresolvedReference(reference),
+            None => ErrorKind::Schema {
+                pointer: failure.pointer,
+                message: failure.message,
+            },
+        });
+    }
+}
+
+/// Whether a media type carries JSON, `+json` suffixes included.
+pub(crate) fn is_json(media_type: &str) -> bool {
+    let media_type = media_type.trim().to_ascii_lowercase();
+    media_type == "application/json"
+        || media_type.ends_with("+json")
+        || media_type.starts_with("application/json;")
+}
+
+impl<'p> Described<'p> {
+    fn of(parameter: &'p Parameter) -> Self {
+        match parameter {
+            Parameter::Path(path) => Self {
+                name: &path.name,
+                location: Location::Path,
+                // The specification requires `required: true` here, and
+                // a path parameter that did not arrive means the path
+                // did not match at all — so this is always true.
+                required: true,
+                style: match path.style {
+                    Some(InPathStyle::Matrix) => Style::Matrix,
+                    Some(InPathStyle::Label) => Style::Label,
+                    Some(InPathStyle::Simple) | None => Style::Simple,
+                },
+                explode: path.explode.unwrap_or(false),
+                schema: path.schema.as_ref(),
+                content: path.content.as_ref(),
+            },
+            Parameter::Querystring(querystring) => Self {
+                name: &querystring.name,
+                location: Location::Querystring,
+                required: querystring.required.unwrap_or(false),
+                // `in: querystring` is defined only through `content`;
+                // `style` and `explode` have no meaning for it.
+                style: Style::Simple,
+                explode: false,
+                schema: None,
+                content: Some(&querystring.content),
+            },
+            Parameter::Query(query) => Self {
+                name: &query.name,
+                location: Location::Query,
+                required: query.required.unwrap_or(false),
+                style: match query.style {
+                    Some(InQueryStyle::SpaceDelimited) => Style::SpaceDelimited,
+                    Some(InQueryStyle::PipeDelimited) => Style::PipeDelimited,
+                    Some(InQueryStyle::DeepObject) => Style::DeepObject,
+                    Some(InQueryStyle::Form) | None => Style::Form,
+                },
+                // `form` explodes by default; every other style does not.
+                explode: query
+                    .explode
+                    .unwrap_or(matches!(query.style, Some(InQueryStyle::Form) | None)),
+                schema: query.schema.as_ref(),
+                content: query.content.as_ref(),
+            },
+            Parameter::Header(header) => Self {
+                name: &header.name,
+                location: Location::Header,
+                required: header.required.unwrap_or(false),
+                style: match header.style {
+                    Some(InHeaderStyle::Simple) | None => Style::Simple,
+                },
+                explode: header.explode.unwrap_or(false),
+                schema: header.schema.as_ref(),
+                content: header.content.as_ref(),
+            },
+            Parameter::Cookie(cookie) => Self {
+                name: &cookie.name,
+                location: Location::Cookie,
+                required: cookie.required.unwrap_or(false),
+                style: match cookie.style {
+                    Some(InCookieStyle::Form) | None => Style::Form,
+                },
+                explode: cookie.explode.unwrap_or(true),
+                schema: cookie.schema.as_ref(),
+                content: cookie.content.as_ref(),
+            },
+        }
+    }
+
+    /// The parameter's text exactly as it arrived, for `content`
+    /// parameters, which are not flattened by `style` at all.
+    fn raw_text(&self, request: &RequestView<'_>, extracted: &Extracted<'_>) -> Option<String> {
+        match self.location {
+            Location::Path => extracted.path.get(self.name).cloned(),
+            Location::Query => extracted
+                .query
+                .iter()
+                .find(|(name, _)| name == self.name)
+                .map(|(_, value)| value.clone()),
+            // The whole query string, as sent. Absent and empty are the
+            // same thing for a query string, so an empty one still
+            // counts as supplied.
+            Location::Querystring => Some(request.query.as_deref().unwrap_or_default().to_owned()),
+            Location::Header => request.header(self.name).map(str::to_owned),
+            Location::Cookie => extracted
+                .cookies
+                .iter()
+                .find(|(name, _)| name == self.name)
+                .map(|(_, value)| value.clone()),
+            Location::Body | Location::Description => None,
+        }
+    }
+
+    /// The parameter's value, rebuilt from the request. `Ok(None)` means
+    /// it was not sent at all.
+    fn read(
+        &self,
+        request: &RequestView<'_>,
+        extracted: &Extracted<'_>,
+        shape: &Shape<'_>,
+        spec: &Spec,
+    ) -> Result<Option<Value>, String> {
+        match self.location {
+            Location::Path => {
+                let Some(raw) = extracted.path.get(self.name) else {
+                    return Ok(None);
+                };
+                self.read_single(self.undecorate(raw), shape, spec)
+                    .map(Some)
+            }
+            Location::Query => self.read_query(&extracted.query, shape, spec),
+            Location::Header => {
+                let values: Vec<&str> = request.header_values(self.name).collect();
+                if values.is_empty() {
+                    return Ok(None);
+                }
+                // A header repeated is the same as a header whose value
+                // is the values joined by commas (RFC 9110 §5.3).
+                self.read_single(&values.join(","), shape, spec).map(Some)
+            }
+            Location::Cookie => {
+                let found = extracted.cookies.iter().find(|(name, _)| name == self.name);
+                let Some((_, raw)) = found else {
+                    return Ok(None);
+                };
+                self.read_single(raw, shape, spec).map(Some)
+            }
+            Location::Querystring | Location::Body | Location::Description => Ok(None),
+        }
+    }
+
+    /// Strip the prefix `label` and `matrix` add: `.blue` and
+    /// `;color=blue` both carry the value `blue`.
+    fn undecorate<'v>(&self, raw: &'v str) -> &'v str {
+        match self.style {
+            Style::Label => raw.strip_prefix('.').unwrap_or(raw),
+            Style::Matrix => {
+                let raw = raw.strip_prefix(';').unwrap_or(raw);
+                // Non-exploded: `;id=3,4`. Exploded: `;id=3;id=4`, whose
+                // first `name=` is stripped here and the rest below.
+                raw.strip_prefix(&format!("{}=", self.name)).unwrap_or(raw)
+            }
+            _ => raw,
+        }
+    }
+
+    /// Rebuild from one string, splitting it as the style says.
+    fn read_single(&self, raw: &str, shape: &Shape<'_>, spec: &Spec) -> Result<Value, String> {
+        let separator = self.separator();
+        match shape {
+            Shape::Array(items) => {
+                let parts = self.split_list(raw, separator);
+                let values = parts
+                    .into_iter()
+                    .map(|part| coerce(&part, *items, spec))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Array(values))
+            }
+            Shape::Object(properties) => {
+                let pairs = if self.explode {
+                    // `role=admin,firstName=Alex`
+                    self.split_list(raw, separator)
+                        .into_iter()
+                        .filter_map(|part| {
+                            part.split_once('=')
+                                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                        })
+                        .collect()
+                } else {
+                    // `role,admin,firstName,Alex`
+                    let flat = self.split_list(raw, separator);
+                    flat.chunks(2)
+                        .filter(|chunk| chunk.len() == 2)
+                        .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
+                        .collect()
+                };
+                object_from(pairs, *properties, spec)
+            }
+            Shape::Primitive(primitive) => coerce_primitive(raw, *primitive),
+            Shape::Opaque => Ok(Value::String(raw.to_owned())),
+        }
+    }
+
+    /// The character that separates the members of a flattened list.
+    fn separator(&self) -> char {
+        match self.style {
+            Style::SpaceDelimited => ' ',
+            Style::PipeDelimited => '|',
+            // `label` separates with the same `.` it opens with, whether
+            // or not it explodes: `.3.4.5`.
+            Style::Label => '.',
+            // Exploded `matrix` repeats the whole `;name=` per member.
+            Style::Matrix if self.explode => ';',
+            _ => ',',
+        }
+    }
+
+    /// Split a flattened list, dropping the `name=` that exploded
+    /// `matrix` repeats before every member.
+    fn split_list(&self, raw: &str, separator: char) -> Vec<String> {
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        raw.split(separator)
+            .map(|part| {
+                if self.style == Style::Matrix && self.explode {
+                    part.strip_prefix(&format!("{}=", self.name))
+                        .unwrap_or(part)
+                        .to_owned()
+                } else {
+                    part.to_owned()
+                }
+            })
+            .collect()
+    }
+
+    /// Rebuild from the query string, where a value may be spread over
+    /// several pairs rather than flattened into one.
+    fn read_query(
+        &self,
+        pairs: &[(String, String)],
+        shape: &Shape<'_>,
+        spec: &Spec,
+    ) -> Result<Option<Value>, String> {
+        // `deepObject`: `id[role]=admin&id[firstName]=Alex`
+        if self.style == Style::DeepObject {
+            let prefix = format!("{}[", self.name);
+            let members: Vec<(String, String)> = pairs
+                .iter()
+                .filter_map(|(name, value)| {
+                    let key = name.strip_prefix(&prefix)?.strip_suffix(']')?;
+                    Some((key.to_owned(), value.clone()))
+                })
+                .collect();
+            if members.is_empty() {
+                return Ok(None);
+            }
+            let properties = match shape {
+                Shape::Object(properties) => *properties,
+                _ => None,
+            };
+            return object_from(members, properties, spec).map(Some);
+        }
+
+        // An exploded object spreads its properties over top-level
+        // pairs, so what identifies it is the property names.
+        if self.explode
+            && let Shape::Object(Some(properties)) = shape
+        {
+            let members: Vec<(String, String)> = pairs
+                .iter()
+                .filter(|(name, _)| properties.contains_key(name))
+                .cloned()
+                .collect();
+            if members.is_empty() {
+                return Ok(None);
+            }
+            return object_from(members, Some(*properties), spec).map(Some);
+        }
+
+        let mine: Vec<&String> = pairs
+            .iter()
+            .filter(|(name, _)| name == self.name)
+            .map(|(_, value)| value)
+            .collect();
+        if mine.is_empty() {
+            return Ok(None);
+        }
+
+        // An exploded array is one pair per member.
+        if self.explode
+            && let Shape::Array(items) = shape
+        {
+            let values = mine
+                .into_iter()
+                .map(|value| coerce(value, *items, spec))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(Some(Value::Array(values)));
+        }
+
+        self.read_single(mine[0], shape, spec).map(Some)
+    }
+}
+
+/// Build an object from name/value pairs, coercing each member through
+/// the property schema that names it.
+fn object_from(
+    pairs: Vec<(String, String)>,
+    properties: Option<&BTreeMap<String, RefOr<Schema>>>,
+    spec: &Spec,
+) -> Result<Value, String> {
+    let mut object = serde_json::Map::new();
+    for (name, value) in pairs {
+        let property = properties.and_then(|properties| properties.get(&name));
+        object.insert(name, coerce(&value, property, spec)?);
+    }
+    Ok(Value::Object(object))
+}
+
+/// Coerce one string through whatever schema describes it.
+pub(crate) fn coerce(
+    raw: &str,
+    schema: Option<&RefOr<Schema>>,
+    spec: &Spec,
+) -> Result<Value, String> {
+    match schema.map(|schema| Shape::of(schema, spec)) {
+        Some(Shape::Primitive(primitive)) => coerce_primitive(raw, primitive),
+        _ => Ok(Value::String(raw.to_owned())),
+    }
+}
+
+/// Turn text back into the primitive the schema says it is.
+fn coerce_primitive(raw: &str, primitive: Primitive) -> Result<Value, String> {
+    match primitive {
+        Primitive::String => Ok(Value::String(raw.to_owned())),
+        Primitive::Integer => raw
+            .parse::<i64>()
+            .map(Value::from)
+            .map_err(|_| format!("{raw:?} is not an integer")),
+        Primitive::Number => raw
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(|| format!("{raw:?} is not a number")),
+        // The specification's own encoding of a boolean, and only it —
+        // accepting `1` or `yes` would be inventing a dialect.
+        Primitive::Boolean => match raw {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Err(format!("{raw:?} is not `true` or `false`")),
+        },
+        Primitive::Null => match raw {
+            "" | "null" => Ok(Value::Null),
+            _ => Err(format!("{raw:?} is not null")),
+        },
+    }
+}
+
+impl<'s> Shape<'s> {
+    /// What kind of value a schema describes, as far as rebuilding a
+    /// flattened parameter needs to know.
+    fn of(schema: &'s RefOr<Schema>, spec: &'s Spec) -> Self {
+        let Ok(resolved) = schema.get_item(spec) else {
+            return Shape::Opaque;
+        };
+        match resolved {
+            Schema::Single(single) => match single.as_ref() {
+                SingleSchema::String(_) => Shape::Primitive(Primitive::String),
+                SingleSchema::Integer(_) => Shape::Primitive(Primitive::Integer),
+                SingleSchema::Number(_) => Shape::Primitive(Primitive::Number),
+                SingleSchema::Boolean(_) => Shape::Primitive(Primitive::Boolean),
+                SingleSchema::Null(_) => Shape::Primitive(Primitive::Null),
+                SingleSchema::Array(array) => Shape::Array(match &array.items {
+                    Some(BoolOr::Item(items)) => Some(items),
+                    _ => None,
+                }),
+                SingleSchema::Object(object) => Shape::Object(object.properties.as_ref()),
+            },
+            // `type: [integer, "null"]` is an integer that may be
+            // absent; coerce as the first type that is not null so the
+            // text still becomes a number.
+            Schema::Multi(multi) => multi
+                .schema_types
+                .iter()
+                .find_map(|schema_type| match schema_type {
+                    SchemaType::String => Some(Shape::Primitive(Primitive::String)),
+                    SchemaType::Integer => Some(Shape::Primitive(Primitive::Integer)),
+                    SchemaType::Number => Some(Shape::Primitive(Primitive::Number)),
+                    SchemaType::Boolean => Some(Shape::Primitive(Primitive::Boolean)),
+                    SchemaType::Array => Some(Shape::Array(None)),
+                    SchemaType::Object => Some(Shape::Object(None)),
+                    SchemaType::Null | SchemaType::Custom(_) => None,
+                })
+                .unwrap_or(Shape::Opaque),
+            _ => Shape::Opaque,
+        }
+    }
+}

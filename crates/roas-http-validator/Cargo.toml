@@ -1,0 +1,52 @@
+[package]
+name = "roas-http-validator"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["openapi", "validation", "http", "request", "middleware"]
+description = "Validates HTTP requests against an OpenAPI description, with adapters for axum, actix-web, poem, salvo and rocket"
+readme = "README.md"
+categories = ["web-programming", "development-tools::testing"]
+include = ["src", "Cargo.toml", "README.md"]
+publish = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+
+# Accept an OpenAPI description written to an older version, upconverting
+# it to v3.2 first. Without these only a v3.2 description is accepted.
+v3_1 = ["roas/v3_1"]
+v3_0 = ["roas/v3_0", "v3_1"]
+v2 = ["roas/v2", "v3_0"]
+
+# Adapters from a framework's own request type to `RequestView`.
+# `http` covers axum, warp, tonic, hyper and anything else built on
+# `http::Request`; the rest carry their own type.
+http = ["dep:http"]
+actix-web = ["dep:actix-web"]
+poem = ["dep:poem"]
+salvo = ["dep:salvo_core"]
+rocket = ["dep:rocket"]
+
+[dependencies]
+roas = { version = ">=0.17.3", path = "../roas", features = ["v3_2"] }
+percent-encoding.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+actix-web = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+poem = { workspace = true, optional = true }
+rocket = { workspace = true, optional = true }
+salvo_core = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum.workspace = true
+serde_yaml_ng.workspace = true
