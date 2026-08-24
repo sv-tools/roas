@@ -19,7 +19,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -79,10 +79,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let response = app.clone().oneshot(request).await?;
         let status = response.status();
+        let allow = response
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY).await?;
 
         println!("\n{method} {uri}");
         println!("  → {status}");
+        if let Some(allow) = allow {
+            println!("    Allow: {allow}");
+        }
         for line in String::from_utf8_lossy(&bytes).lines() {
             println!("    {line}");
         }
@@ -100,33 +108,58 @@ async fn validate(
     let (parts, body) = request.into_parts();
 
     // Buffering happens here, deliberately and with a limit.
-    let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "body too large to validate\n",
-        )
-            .into_response();
+    let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
+        Ok(bytes) => bytes,
+        // Two different failures wear the same error type. Only one of
+        // them is the cap being hit; the other is the body's stream
+        // giving out part-way, which is a malformed request rather than
+        // an oversized one.
+        Err(error) if exceeded_the_limit(&error) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "body too large to validate\n",
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "could not read the request body\n").into_response();
+        }
     };
 
     // `parts` is `http::request::Parts`, which the `http` adapter reads
     // without copying anything out of it.
     let view = parts.request_view().with_body(bytes.as_ref());
 
-    let outcome = match validator.validate(&view) {
+    let refusal = match validator.validate(&view) {
         Err(RoutingError::PathNotFound { .. }) => {
-            Some((StatusCode::NOT_FOUND, "no such path\n".to_owned()))
+            Some((StatusCode::NOT_FOUND, "no such path\n".to_owned()).into_response())
         }
-        Err(RoutingError::MethodNotAllowed { allowed, .. }) => Some((
-            StatusCode::METHOD_NOT_ALLOWED,
-            format!("allowed: {}\n", allowed.join(", ")),
-        )),
-        Err(RoutingError::Unresolved { reference, .. }) => Some((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("the description references {reference}, which is missing\n"),
-        )),
+        Err(RoutingError::MethodNotAllowed { allowed, .. }) => {
+            // RFC 9110 §15.5.6 requires an `Allow` header on a 405, and
+            // `allowed` is already a list of method tokens rather than
+            // OpenAPI's lowercase keys — so it goes straight in.
+            let allow = allowed.join(", ");
+            Some(
+                (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    [(header::ALLOW, allow.clone())],
+                    format!("allowed: {allow}\n"),
+                )
+                    .into_response(),
+            )
+        }
+        Err(RoutingError::Unresolved { reference, .. }) => Some(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the description references {reference}, which is missing\n"),
+            )
+                .into_response(),
+        ),
         // `RoutingError` is `#[non_exhaustive]`; anything new is a
         // refusal rather than a request that quietly gets through.
-        Err(other) => Some((StatusCode::INTERNAL_SERVER_ERROR, format!("{other}\n"))),
+        Err(other) => {
+            Some((StatusCode::INTERNAL_SERVER_ERROR, format!("{other}\n")).into_response())
+        }
         Ok(report) => {
             // Only definite violations refuse the request. What could
             // not be checked is logged and let through — a choice this
@@ -140,17 +173,34 @@ async fn validate(
                     StatusCode::BAD_REQUEST,
                     format!("{}\n", violations.join("\n")),
                 )
+                    .into_response()
             })
         }
     };
-    if let Some((status, message)) = outcome {
-        return (status, message).into_response();
+    if let Some(response) = refusal {
+        return response;
     }
 
     // Put back what was taken apart, so the handler sees a whole
     // request with a readable body.
     next.run(Request::from_parts(parts, Body::from(bytes)))
         .await
+}
+
+/// Whether collecting the body failed because it passed [`MAX_BODY`],
+/// rather than because the stream itself broke.
+///
+/// The distinction is buried in the error's source chain, which is the
+/// only place it exists.
+fn exceeded_the_limit(error: &axum::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = source {
+        if cause.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 async fn list_pets() -> &'static str {

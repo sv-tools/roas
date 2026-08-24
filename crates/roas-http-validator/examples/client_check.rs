@@ -39,6 +39,10 @@ paths:
               properties:
                 name: { type: string, minLength: 1 }
                 age: { type: integer, minimum: 0 }
+                # `roas` models `multipleOf` as an `f64`, so the step
+                # stands for any decimal that rounds to it — enough to
+                # disprove divisibility, never enough to prove it.
+                weight: { type: number, multipleOf: 0.5 }
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -57,6 +61,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r#"{"name":"Rex"}"#,
             false,
         ),
+        (
+            "a call carrying a value nothing here can decide",
+            r#"{"name":"Rex","weight":2.5}"#,
+            true,
+        ),
     ];
 
     for (what, body, with_header) in calls {
@@ -70,11 +79,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("\n{what}");
         match check(&validator, &request) {
-            Ok(()) => {
+            Verdict::Matches => {
                 println!("  ✓ matches the description — safe to send");
                 // client.execute(request)?;
             }
-            Err(problems) => {
+            // Not the same as matching, and a contract test that
+            // treated it as such would be reporting a check it never
+            // made. What to do about it is the caller's call: fail the
+            // test, warn, or send anyway.
+            Verdict::Undetermined(notes) => {
+                println!("  ? nothing found wrong, but not everything could be checked");
+                for note in notes {
+                    println!("    {note}");
+                }
+            }
+            Verdict::Violates(problems) => {
                 for problem in problems {
                     println!("  ✗ {problem}");
                 }
@@ -85,21 +104,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Whatever is wrong with a request this client is about to make.
-///
-/// # Errors
-///
-/// The problems found, so a test can fail on them.
-fn check(validator: &Validator, request: &reqwest::blocking::Request) -> Result<(), Vec<String>> {
+/// What a contract check can honestly conclude.
+enum Verdict {
+    /// Every check ran, and the call passed all of them.
+    Matches,
+    /// Nothing was found wrong — but some check could not be made, so
+    /// "nothing found wrong" is not "nothing wrong".
+    Undetermined(Vec<String>),
+    /// The call does not match the description.
+    Violates(Vec<String>),
+}
+
+/// Judge a request this client is about to make.
+fn check(validator: &Validator, request: &reqwest::blocking::Request) -> Verdict {
     // No `with_body` here: the adapter already has the bytes.
-    let report = validator
-        .validate(&request.request_view())
-        .map_err(|error| vec![error.to_string()])?;
+    let report = match validator.validate(&request.request_view()) {
+        Ok(report) => report,
+        // The description does not describe this call at all, which for
+        // a client is as much a mismatch as a bad field.
+        Err(error) => return Verdict::Violates(vec![error.to_string()]),
+    };
 
     let problems: Vec<String> = report.violations().map(ToString::to_string).collect();
-    if problems.is_empty() {
-        Ok(())
+    if !problems.is_empty() {
+        return Verdict::Violates(problems);
+    }
+    let notes: Vec<String> = report.unchecked().map(ToString::to_string).collect();
+    if notes.is_empty() {
+        Verdict::Matches
     } else {
-        Err(problems)
+        Verdict::Undetermined(notes)
     }
 }
