@@ -475,80 +475,71 @@ impl<'s> Checker<'s> {
         if let Some(step) = multiple_of
             && step != 0.0
         {
-            // An operand that lost digits cannot be divided into
-            // anything: `multipleOf: 9007199254740993.5` is stored as
-            // `…994`, and so is a value written `…993.5`, so a clean
-            // remainder between them would prove nothing.
-            if value.is_approximate() || Num::Real(step).is_approximate() {
-                self.unchecked(format!(
-                    "whether {value} is a multiple of {step} could NOT be established: one of \
-                     them lost digits to floating point",
-                ));
-                return;
-            }
+            self.divisibility(value, step);
+        }
+    }
 
-            // A whole value and a whole step: an integer remainder, with
-            // no float anywhere in it — so this comes before any
-            // question of what survives an `f64`, which it never enters.
-            if let (Num::Exact(value), Some(step)) = (value, whole_step(step)) {
-                if value % step != 0 {
-                    self.fail(format!("{value} is not a multiple of {step}"));
-                }
-                return;
-            }
+    /// `multipleOf`, which is the one keyword an unnoticed rounding
+    /// error flips outright.
+    ///
+    /// Every other numeric keyword is an inequality, with a half-line of
+    /// slack either side of the boundary — an operand being an
+    /// ulp out only matters exactly at it. Divisibility has no slack at
+    /// all: it is true on a set of measure zero, so an ulp anywhere
+    /// changes the answer. It therefore gets the strict treatment,
+    /// where every number that reached this crate as a float stands for
+    /// the range between its neighbours rather than for itself.
+    ///
+    /// The consequence is deliberate and worth knowing: `roas` models
+    /// `multipleOf` as an `f64`, so the step is *always* a number whose
+    /// written form is gone — `1.0000000000000001` and `1` are the same
+    /// double. Divisibility can therefore be **disproved** but never
+    /// proved, and a value that looks like a multiple is reported as
+    /// unchecked rather than accepted.
+    fn divisibility(&mut self, value: Num, step: f64) {
+        // Zero is a multiple of everything, whatever the step turns out
+        // to have been.
+        if value.as_f64() == 0.0 && value.survives_f64() {
+            return;
+        }
+        if value.is_approximate() || Num::Real(step).is_approximate() {
+            self.unchecked(format!(
+                "whether {value} is a multiple of {step} could NOT be established: one of them \
+                 lost digits to floating point",
+            ));
+            return;
+        }
+        if !value.survives_f64() {
+            self.unchecked(format!(
+                "whether {value} is a multiple of {step} could NOT be established: it does not \
+                 survive conversion to a 64-bit float",
+            ));
+            return;
+        }
 
-            // Everything past here divides, and dividing a value the
-            // conversion has already changed proves nothing about the
-            // value that arrived.
-            if !value.survives_f64() {
-                self.unchecked(format!(
-                    "whether {value} is a multiple of {step} could NOT be established: it does \
-                     not survive conversion to a 64-bit float",
-                ));
-                return;
-            }
+        let (value_low, value_high) = magnitude_range(value.provable_range());
+        let (step_low, step_high) = magnitude_range(Num::Real(step).provable_range());
+        if step_low <= 0.0 {
+            self.unchecked(format!(
+                "whether {value} is a multiple of {step} could NOT be established: the step's \
+                 own range reaches zero",
+            ));
+            return;
+        }
 
-            // Both numbers are exactly the decimals they were written
-            // as, so the question has an exact answer — and it is
-            // reached with integer arithmetic on their mantissas rather
-            // than by dividing and hoping the remainder survives.
-            // `2814749767106564 / 1.25` is `…251.2`, which an `f64`
-            // rounds to `…251.0`: a zero residual that proves nothing.
-            if is_exact_decimal(value.as_f64()) && is_exact_decimal(step) {
-                if !divides_exactly(value.as_f64(), step) {
-                    self.fail(format!("{value} is not a multiple of {step}"));
-                }
-                return;
-            }
-
-            let quotient = value.as_f64() / step;
-            // A quotient too large to carry a fraction has lost the
-            // remainder before it could be weighed.
-            if quotient.abs() >= EXACT_WHOLE_LIMIT {
-                self.unchecked(format!(
-                    "whether {value} is a multiple of {step} could NOT be established: the \
-                     division loses its remainder to floating point",
-                ));
-                return;
-            }
-
-            // Neither number is exactly what was written, so only a
-            // remainder far enough from zero to survive that says
-            // anything. Relative to the quotient, since that is the
-            // scale its own representation error lives at.
-            let residual = (quotient - quotient.round()).abs();
-            let tolerance = f64::EPSILON * quotient.abs().max(1.0) * 4.0;
-            if residual > tolerance {
-                self.fail(format!("{value} is not a multiple of {step}"));
-            } else {
-                // `1.0000000000000002` is one ULP from `1`, and no
-                // tolerance can tell that from an artefact of the
-                // division. Deciding it needs the decimals themselves.
-                self.unchecked(format!(
-                    "whether {value} is a multiple of {step} could NOT be established: the \
-                     remainder is within floating-point rounding of zero",
-                ));
-            }
+        // Every quotient the true operands could have produced.
+        let lowest = value_low / step_high;
+        let highest = value_high / step_low;
+        if lowest.ceil() <= highest {
+            // Some whole quotient is possible, so the value may well be
+            // a multiple — of a step nobody can pin down.
+            self.unchecked(format!(
+                "whether {value} is a multiple of {step} could NOT be established: {step} stands \
+                 for any number that rounds to it, and some of them divide {value} exactly",
+            ));
+        } else {
+            // No whole quotient is possible for any of them.
+            self.fail(format!("{value} is not a multiple of {step}"));
         }
     }
 
@@ -874,6 +865,23 @@ impl Num {
         }
     }
 
+    /// The range the true number lies in, admitting nothing about a
+    /// float beyond the two values it sits between.
+    ///
+    /// Stricter than [`Num::interval`], which widens only past
+    /// [`EXACT_WHOLE_LIMIT`]: an inequality has slack, so comparing
+    /// `0.1` with the `f64` nearest `0.1` is what everyone does and is
+    /// left alone. Divisibility has none, so it gets this instead.
+    fn provable_range(self) -> (f64, f64) {
+        match self {
+            Num::Exact(_) => {
+                let number = self.as_f64();
+                (number, number)
+            }
+            Num::Real(number) => (number.next_down(), number.next_up()),
+        }
+    }
+
     /// Compare, admitting that the answer may not be knowable.
     ///
     /// Exact wherever both sides are: two integers are compared as
@@ -947,6 +955,12 @@ impl From<Ordering> for Compared {
     }
 }
 
+/// The range of magnitudes a signed range covers.
+fn magnitude_range((low, high): (f64, f64)) -> (f64, f64) {
+    let (low, high) = (low.abs(), high.abs());
+    (low.min(high), low.max(high))
+}
+
 /// Place an exact integer against a number that may have lost digits.
 fn compare_exact_to(exact: i128, real: Num) -> Compared {
     let (low, high) = real.interval();
@@ -1003,88 +1017,6 @@ fn cmp_exact_to_float(exact: i128, float: f64) -> Ordering {
     } else {
         Ordering::Equal
     }
-}
-
-/// A finite non-zero `f64` as an odd mantissa and a power of two:
-/// `f == mantissa * 2^exponent`, with `mantissa` odd.
-///
-/// Every `f64` is exactly such a number, which is what makes exact
-/// reasoning about them possible without any float arithmetic at all.
-fn decompose(number: f64) -> Option<(u64, i32)> {
-    if !number.is_finite() || number == 0.0 {
-        return None;
-    }
-    let bits = number.abs().to_bits();
-    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
-    let fraction = bits & ((1_u64 << 52) - 1);
-    let (mut mantissa, mut exponent) = if exponent_bits == 0 {
-        (fraction, -1074) // subnormal: no implicit leading bit
-    } else {
-        (fraction | (1_u64 << 52), exponent_bits - 1075)
-    };
-    if mantissa == 0 {
-        return None;
-    }
-    let trailing = mantissa.trailing_zeros();
-    mantissa >>= trailing;
-    exponent += trailing as i32;
-    Some((mantissa, exponent))
-}
-
-/// Whether `value` is an exact integer multiple of `step`, decided
-/// without dividing.
-///
-/// With `value = mv * 2^pv` and `step = ms * 2^ps` and both mantissas
-/// odd, the quotient is `(mv / ms) * 2^(pv - ps)`. An odd `ms` that does
-/// not divide `mv` leaves an odd denominator no power of two can clear,
-/// and an odd quotient times a negative power of two is never whole —
-/// so the answer is exactly these two conditions.
-fn divides_exactly(value: f64, step: f64) -> bool {
-    let (Some((value_mantissa, value_exponent)), Some((step_mantissa, step_exponent))) =
-        (decompose(value), decompose(step))
-    else {
-        // Zero is a multiple of anything; a zero step never gets here.
-        return value == 0.0;
-    };
-    value_mantissa % step_mantissa == 0 && value_exponent >= step_exponent
-}
-
-/// Whether this `f64` is exactly the decimal it prints as.
-///
-/// Every `f64` is exactly *some* finite decimal — `0.1` is exactly
-/// `0.1000000000000000055511151231257827…`, needing all 55 of the
-/// fractional digits its exponent implies. What `{}` prints is the
-/// shortest decimal that round-trips, which is the number the author
-/// wrote. The two agree only when the value is dyadic enough to be
-/// written out in full, as `1.25` is and `0.1` is not — and only then
-/// is exact arithmetic on the stored double arithmetic on what was
-/// meant.
-fn is_exact_decimal(number: f64) -> bool {
-    let Some((_, exponent)) = decompose(number) else {
-        return true; // zero
-    };
-    if exponent >= 0 {
-        return true; // a whole number, printed in full
-    }
-    let printed = format!("{number}");
-    let fraction_digits = printed
-        .split_once('.')
-        .map_or(0, |(_, fraction)| fraction.len());
-    fraction_digits == exponent.unsigned_abs() as usize
-}
-
-/// A `multipleOf` step that is a whole number, for exact remainder
-/// arithmetic.
-///
-/// `roas` holds `multipleOf` as an `f64`, so the step's lexeme is gone
-/// either way; a whole one is taken at face value as the integer it
-/// looks like, which is what every implementation does with it.
-fn whole_step(step: f64) -> Option<i128> {
-    if step.fract() != 0.0 || step == 0.0 || step.abs() >= 1.701_411_834_604_692_3e38 {
-        return None;
-    }
-    #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
-    Some(step as i128)
 }
 
 #[cfg(test)]
@@ -1247,23 +1179,25 @@ mod tests {
     }
 
     #[test]
-    fn a_multiple_of_that_only_rounds_to_zero_is_not_proven() {
-        // 0.3 / 0.1 is 2.9999999999999996 in binary floating point. The
-        // remainder is within rounding of zero, which is not the same as
-        // being zero — deciding it needs exact decimal arithmetic.
+    fn divisibility_can_be_disproved_but_not_proved() {
+        // The step is an `f64`, so `0.1` stands for every decimal that
+        // rounds to it — and some of those divide 0.3 exactly.
         let found = failures(&json!(0.3), json!({ "type": "number", "multipleOf": 0.1 }));
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].contains("could NOT be established"), "{found:?}");
 
-        // A remainder well clear of zero is still a definite failure.
+        // None of them divides 0.35, so that is a definite failure.
         assert_eq!(
             failures(&json!(0.35), json!({ "type": "number", "multipleOf": 0.1 })),
             ["0.35 is not a multiple of 0.1"],
         );
-        // And a step that divides exactly in binary is exact.
+    }
+
+    #[test]
+    fn zero_is_a_multiple_of_anything_at_all() {
         assert!(passes(
-            &json!(2.5),
-            json!({ "type": "number", "multipleOf": 0.5 })
+            &json!(0),
+            json!({ "type": "integer", "multipleOf": 7 })
         ));
     }
 
@@ -1619,9 +1553,8 @@ mod exactness_tests {
     }
 
     #[test]
-    fn a_large_multiple_of_divides_exactly() {
+    fn a_large_multiple_of_is_still_disproved_exactly() {
         let schema = json!({ "type": "integer", "multipleOf": 1_000_000_007 });
-        assert!(passes(&json!(3_000_000_021_i64), schema.clone()));
         assert_eq!(
             failures(&json!(3_000_000_022_i64), schema),
             ["3000000022 is not a multiple of 1000000007"],

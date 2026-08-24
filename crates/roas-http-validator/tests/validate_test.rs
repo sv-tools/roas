@@ -1555,42 +1555,6 @@ fn a_bound_that_rounded_into_a_whole_number_cannot_settle_a_tie() {
     );
 }
 
-#[test]
-fn a_multiple_of_is_decided_on_mantissas_rather_than_by_dividing() {
-    // 9007199254740992 / 1.5 is 6004799503160661.33, which an `f64`
-    // stores as 6004799503160661.0 — a division would see a remainder
-    // of zero and call it divisible. Both numbers are exactly the
-    // decimals they were written as, so the answer comes from their
-    // mantissas instead, and it is definite.
-    let validator = body_schema(json!({ "type": "integer", "multipleOf": 1.5 }));
-    assert_eq!(
-        errors(&validator, &posted(b"9007199254740992")),
-        ["body: 9007199254740992 is not a multiple of 1.5"],
-    );
-    assert!(errors(&validator, &posted(b"3")).is_empty());
-    assert_eq!(
-        errors(&validator, &posted(b"4")),
-        ["body: 4 is not a multiple of 1.5"],
-    );
-
-    // A value that does not survive conversion to a float is not the
-    // number being divided, so nothing can be said about it.
-    let found = errors(&validator, &posted(b"9007199254740993"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-}
-
-#[test]
-fn a_whole_step_divides_exactly_at_any_magnitude() {
-    // Both sides whole means an integer remainder, with no float in it.
-    let validator = body_schema(json!({ "type": "integer", "multipleOf": 2 }));
-    assert!(errors(&validator, &posted(b"9007199254740992")).is_empty());
-    assert_eq!(
-        errors(&validator, &posted(b"9007199254740993")),
-        ["body: 9007199254740993 is not a multiple of 2"],
-    );
-}
-
 // ── the review of b5c686f ────────────────────────────────────────────
 
 #[test]
@@ -1617,71 +1581,6 @@ fn a_small_fraction_that_rounded_away_is_not_called_an_integer_either() {
     assert_eq!(
         errors(&validator, &posted(b"2251799813685248.25")),
         ["body: expected integer, got number"],
-    );
-}
-
-#[test]
-fn a_multiple_of_is_not_proved_by_a_quotient_that_rounded_its_input() {
-    // 9007199254740993 does not survive `f64` — it arrives as
-    // ...992 — so the quotient comes out exactly 2 and hides a
-    // remainder of 1.
-    let validator = body_schema(json!({
-        "type": "integer",
-        "multipleOf": 4_503_599_627_370_496_i64
-    }));
-    // The step is 2^52, where a stored double no longer pins down the
-    // number written, so neither instance can be decided against it.
-    for spelling in [
-        b"9007199254740993".as_slice(),
-        b"9007199254740992".as_slice(),
-    ] {
-        let found = errors(&validator, &posted(spelling));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].contains("could NOT be established"), "{found:?}");
-    }
-
-    // A fractional step that is exactly the decimal it was written as
-    // is decided exactly too, on the mantissas rather than by dividing.
-    let fractional = body_schema(json!({ "type": "integer", "multipleOf": 1.5 }));
-    assert_eq!(
-        errors(&fractional, &posted(b"9007199254740992")),
-        ["body: 9007199254740992 is not a multiple of 1.5"],
-    );
-    assert!(errors(&fractional, &posted(b"3")).is_empty());
-
-    // But a value that no longer survives conversion cannot be, since
-    // the number being divided is not the number that arrived.
-    let found = errors(&fractional, &posted(b"9007199254740993"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-}
-
-#[test]
-fn the_multiple_of_tolerance_allows_for_rounding_and_nothing_more() {
-    let validator = body_schema(json!({ "type": "number", "multipleOf": 1 }));
-    // A different number, not a rounding artefact — a fixed 1e-9
-    // tolerance used to wave this through.
-    assert_eq!(
-        errors(&validator, &posted(b"1.0000000005")),
-        ["body: 1.0000000005 is not a multiple of 1"],
-    );
-    assert!(errors(&validator, &posted(b"2")).is_empty());
-
-    // One ULP away from 1: inside any tolerance, and still a different
-    // number. Neither accepted nor rejected.
-    let found = errors(&validator, &posted(b"1.0000000000000002"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
-
-    // 0.3 / 0.1 is 2.9999999999999996: within rounding of a whole
-    // quotient, which is not the same as being one.
-    let tenths = body_schema(json!({ "type": "number", "multipleOf": 0.1 }));
-    let found = errors(&tenths, &posted(b"0.3"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
-    assert_eq!(
-        errors(&tenths, &posted(b"0.35")),
-        ["body: 0.35 is not a multiple of 0.1"],
     );
 }
 
@@ -1729,24 +1628,6 @@ fn a_bound_that_lost_digits_does_not_produce_a_false_violation_either() {
 }
 
 #[test]
-fn a_multiple_of_operand_that_lost_digits_decides_nothing() {
-    // The step is stored as 9007199254740994, so a clean remainder
-    // against it would prove nothing about the 9007199254740993.5 that
-    // was written.
-    let step = body_schema(json!({ "type": "number", "multipleOf": 9_007_199_254_740_993.5_f64 }));
-    let found = errors(&step, &posted(b"9007199254740994"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
-
-    // And the same the other way round: a value that lost digits
-    // cannot be divided by anything either.
-    let value = body_schema(json!({ "type": "number", "multipleOf": 9_007_199_254_740_994_i64 }));
-    let found = errors(&value, &posted(b"9007199254740993.5"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
-}
-
-#[test]
 fn exact_integers_are_still_decided_exactly_on_both_sides() {
     // The guard is about numbers that lost digits, not about size:
     // `integer` bounds come through `serde_json::Number`, which keeps
@@ -1769,43 +1650,70 @@ fn exact_integers_are_still_decided_exactly_on_both_sides() {
 
 // ── the review of 6de60cd ────────────────────────────────────────────
 
-#[test]
-fn a_quotient_that_rounded_to_a_whole_number_is_not_proof_of_divisibility() {
-    // 2814749767106564 / 1.25 is exactly 2251799813685251.2, which an
-    // `f64` stores as 2251799813685251.0 — well below any quotient
-    // cutoff, with a residual of exactly zero. Only exact arithmetic on
-    // the two mantissas catches it.
-    let validator = body_schema(json!({ "type": "integer", "multipleOf": 1.25 }));
-    assert_eq!(
-        errors(&validator, &posted(b"2814749767106564")),
-        ["body: 2814749767106564 is not a multiple of 1.25"],
-    );
-    // And a value that really is a multiple is still accepted.
-    assert!(errors(&validator, &posted(b"2814749767106565")).is_empty());
-}
+// ── the review of 0586160 ────────────────────────────────────────────
 
 #[test]
-fn exact_decimals_are_decided_and_inexact_ones_are_reported() {
-    // `1.25`, `0.5` and `2.5` are exactly the decimals they print as,
-    // so their divisibility has an exact answer.
-    let halves = body_schema(json!({ "type": "number", "multipleOf": 0.5 }));
-    assert!(errors(&halves, &posted(b"2.5")).is_empty());
-    assert_eq!(
-        errors(&halves, &posted(b"2.25")),
-        ["body: 2.25 is not a multiple of 0.5"],
-    );
-
-    // `0.1` is not: the double is 0.1000000000000000055511151231257827,
-    // and 0.3 is not a multiple of *that*, though it is of the 0.1 the
-    // author wrote. Neither answer can be given, so neither is.
-    let tenths = body_schema(json!({ "type": "number", "multipleOf": 0.1 }));
-    let found = errors(&tenths, &posted(b"0.3"));
+fn a_step_that_lost_its_written_form_cannot_prove_a_multiple() {
+    // `multipleOf: 1.0000000000000001` is stored as `1.0`, and `1` is a
+    // multiple of `1.0` but not of what was written. The step stands for
+    // every decimal that rounds to it, so a value that looks like a
+    // multiple is reported rather than accepted.
+    let validator =
+        body_schema(json!({ "type": "integer", "multipleOf": 1.000_000_000_000_000_1_f64 }));
+    let found = errors(&validator, &posted(b"1"));
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("could NOT be established"), "{found:?}");
 
-    // A remainder far enough from zero to survive is still definite.
+    // Nothing in that range divides 3 either way but two — and two is
+    // not in it — so this one is definite.
+    let halves = body_schema(json!({ "type": "number", "multipleOf": 2 }));
     assert_eq!(
-        errors(&tenths, &posted(b"0.35")),
-        ["body: 0.35 is not a multiple of 0.1"],
+        errors(&halves, &posted(b"5")),
+        ["body: 5 is not a multiple of 2"],
+    );
+}
+
+#[test]
+fn a_value_that_lost_its_written_form_cannot_be_a_proven_multiple_either() {
+    // `2.5000000000000001` is stored as `2.5`, which is a multiple of
+    // `0.5` — but the number written was not.
+    let validator = body_schema(json!({ "type": "number", "multipleOf": 0.5 }));
+    let found = errors(&validator, &posted(b"2.5000000000000001"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
+
+    // A value no candidate step divides is still definitely wrong.
+    assert_eq!(
+        errors(&validator, &posted(b"2.25")),
+        ["body: 2.25 is not a multiple of 0.5"],
+    );
+}
+
+#[test]
+fn zero_is_a_multiple_of_whatever_the_step_turns_out_to_have_been() {
+    let validator = body_schema(json!({ "type": "integer", "multipleOf": 1.5 }));
+    assert!(errors(&validator, &posted(b"0")).is_empty());
+}
+
+#[test]
+fn a_caller_can_tell_a_violation_from_something_that_was_not_checked() {
+    // Both kinds in one report: `limit` is definitely too large, and
+    // divisibility against a float step is not knowable.
+    let validator = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "limit", "in": "query",
+              "schema": { "type": "integer", "maximum": 10, "multipleOf": 2 } }
+        ] } }
+    }));
+    let report = validator
+        .validate(&RequestView::new("GET", "/x").with_query("limit=100"))
+        .expect("the description describes GET /x");
+
+    assert!(!report.is_valid());
+    assert_eq!(report.violations().count(), 1);
+    assert_eq!(report.unchecked().count(), 1);
+    assert!(
+        report.violations().all(|error| !error.kind.is_unchecked()),
+        "{report}",
     );
 }

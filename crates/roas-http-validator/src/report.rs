@@ -132,6 +132,21 @@ pub enum ErrorKind {
     Undescribed,
 }
 
+impl ErrorKind {
+    /// Whether this says a check could not be made, rather than that the
+    /// request broke a rule.
+    ///
+    /// The two want different responses. A violation is the client's
+    /// fault and answers with a 400; an unchecked result is a limit of
+    /// the description or of floating point, and a caller may reasonably
+    /// let it through, log it, or treat it as a 400 too — but it should
+    /// be that caller's decision, made knowingly.
+    #[must_use]
+    pub fn is_unchecked(&self) -> bool {
+        matches!(self, ErrorKind::Unsupported(_) | ErrorKind::Unchecked(_))
+    }
+}
+
 impl Display for ErrorKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -176,10 +191,31 @@ pub struct ValidationReport {
 }
 
 impl ValidationReport {
-    /// Whether the request satisfied the description.
+    /// Whether the request satisfied the description, with nothing left
+    /// unchecked.
+    ///
+    /// Both halves matter: see [`violations`](Self::violations) and
+    /// [`unchecked`](Self::unchecked) to tell them apart.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         self.errors.is_empty()
+    }
+
+    /// The errors that are definitely the request's fault.
+    pub fn violations(&self) -> impl Iterator<Item = &ValidationError> {
+        self.errors
+            .iter()
+            .filter(|error| !error.kind.is_unchecked())
+    }
+
+    /// The errors that say a check could not be made — nothing is known
+    /// to be wrong, and nothing is known to be right.
+    ///
+    /// A validator that reported these as violations would reject valid
+    /// requests; one that dropped them would call unexamined requests
+    /// valid. They are kept and labelled so the caller can choose.
+    pub fn unchecked(&self) -> impl Iterator<Item = &ValidationError> {
+        self.errors.iter().filter(|error| error.kind.is_unchecked())
     }
 
     /// The errors, as one `Err` when there are any.
@@ -327,6 +363,29 @@ mod tests {
         let mut report = report(Vec::new());
         report.operation_id = None;
         assert_eq!(report.to_string(), "GET /pets/{petId}: valid");
+    }
+
+    #[test]
+    fn a_report_tells_violations_apart_from_what_it_could_not_check() {
+        let report = report(vec![
+            error(Location::Query, "limit", ErrorKind::Missing),
+            error(
+                Location::Body,
+                "",
+                ErrorKind::Unchecked("the bound lost its digits".to_owned()),
+            ),
+            error(
+                Location::Body,
+                "",
+                ErrorKind::Unsupported("multipart bodies".to_owned()),
+            ),
+        ]);
+        assert!(!report.is_valid());
+        assert_eq!(report.violations().count(), 1);
+        assert_eq!(report.unchecked().count(), 2);
+        assert!(!ErrorKind::Missing.is_unchecked());
+        assert!(ErrorKind::Unchecked(String::new()).is_unchecked());
+        assert!(ErrorKind::Unsupported(String::new()).is_unchecked());
     }
 
     #[test]
