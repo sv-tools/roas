@@ -378,7 +378,7 @@ impl<'s> Checker<'s> {
             bound(&schema.maximum),
             bound(&schema.exclusive_minimum),
             bound(&schema.exclusive_maximum),
-            schema.multiple_of,
+            schema.multiple_of.as_ref().map(Num::of_number),
         );
     }
 
@@ -393,7 +393,7 @@ impl<'s> Checker<'s> {
             schema.maximum.map(Num::Real),
             schema.exclusive_minimum.map(Num::Real),
             schema.exclusive_maximum.map(Num::Real),
-            schema.multiple_of,
+            schema.multiple_of.as_ref().map(Num::of_number),
         );
     }
 
@@ -437,7 +437,7 @@ impl<'s> Checker<'s> {
         maximum: Option<Num>,
         exclusive_minimum: Option<Num>,
         exclusive_maximum: Option<Num>,
-        multiple_of: Option<f64>,
+        multiple_of: Option<Num>,
     ) {
         for (limit, ordering, name, inclusive) in [
             (minimum, Compared::Less, "minimum", true),
@@ -473,7 +473,7 @@ impl<'s> Checker<'s> {
         }
 
         if let Some(step) = multiple_of
-            && step != 0.0
+            && step.as_f64() != 0.0
         {
             self.divisibility(value, step);
         }
@@ -483,33 +483,47 @@ impl<'s> Checker<'s> {
     /// error flips outright.
     ///
     /// Every other numeric keyword is an inequality, with a half-line of
-    /// slack either side of the boundary — an operand being an
-    /// ulp out only matters exactly at it. Divisibility has no slack at
-    /// all: it is true on a set of measure zero, so an ulp anywhere
-    /// changes the answer. It therefore gets the strict treatment,
-    /// where every number that reached this crate as a float stands for
-    /// the range between its neighbours rather than for itself.
+    /// slack either side of the boundary — an operand being an ulp out
+    /// only matters exactly at it. Divisibility has no slack at all: it
+    /// is true on a set of measure zero, so an ulp anywhere changes the
+    /// answer. It therefore gets the strict treatment, where a number
+    /// whose written form is gone stands for the range between its
+    /// neighbours rather than for itself.
     ///
-    /// The consequence is deliberate and worth knowing: `roas` models
-    /// `multipleOf` as an `f64`, so the step is *always* a number whose
-    /// written form is gone — `1.0000000000000001` and `1` are the same
-    /// double. Divisibility can therefore be **disproved** but never
-    /// proved, and a value that looks like a multiple is reported as
-    /// unchecked rather than accepted.
-    fn divisibility(&mut self, value: Num, step: f64) {
+    /// Which numbers those are is the whole question. `roas` keeps
+    /// `multipleOf` as a `serde_json::Number`, so an integer step is
+    /// still an integer and `multipleOf: 2` against `4` has an exact
+    /// answer. A step written `1.5` — or `1.0000000000000001`, which is
+    /// the same `f64` as `1` — does not, and divisibility against one of
+    /// those can be disproved but never proved.
+    fn divisibility(&mut self, value: Num, step: Num) {
         // Zero is a multiple of everything, whatever the step turns out
         // to have been — but only a zero that can be *proven* zero.
         // `1e-324` underflows to `0.0`, and it is not a multiple of two.
         if value == Num::Exact(0) {
             return;
         }
-        if value.is_approximate() || Num::Real(step).is_approximate() {
+        if value.is_approximate() || step.is_approximate() {
             self.unchecked(format!(
                 "whether {value} is a multiple of {step} could NOT be established: one of them \
                  lost digits to floating point",
             ));
             return;
         }
+
+        // Both numbers survived parsing as integers, so both are exactly
+        // what was written: an integer remainder, with no float in it,
+        // at any magnitude.
+        if let (Num::Exact(value), Num::Exact(step)) = (value, step) {
+            if value % step != 0 {
+                self.fail(format!("{value} is not a multiple of {step}"));
+            }
+            return;
+        }
+
+        // Past here at least one operand's written form is gone, so the
+        // most that can be established is that *no* number it stands for
+        // divides the other.
         if !value.survives_f64() {
             self.unchecked(format!(
                 "whether {value} is a multiple of {step} could NOT be established: it does not \
@@ -519,7 +533,7 @@ impl<'s> Checker<'s> {
         }
 
         let (value_low, value_high) = magnitude_range(value.provable_range());
-        let (step_low, step_high) = magnitude_range(Num::Real(step).provable_range());
+        let (step_low, step_high) = magnitude_range(step.provable_range());
         if step_low <= 0.0 {
             self.unchecked(format!(
                 "whether {value} is a multiple of {step} could NOT be established: the step's \
@@ -532,14 +546,11 @@ impl<'s> Checker<'s> {
         let lowest = value_low / step_high;
         let highest = value_high / step_low;
         if lowest.ceil() <= highest {
-            // Some whole quotient is possible, so the value may well be
-            // a multiple — of a step nobody can pin down.
             self.unchecked(format!(
                 "whether {value} is a multiple of {step} could NOT be established: {step} stands \
                  for any number that rounds to it, and some of them divide {value} exactly",
             ));
         } else {
-            // No whole quotient is possible for any of them.
             self.fail(format!("{value} is not a multiple of {step}"));
         }
     }

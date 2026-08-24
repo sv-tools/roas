@@ -315,3 +315,48 @@ mod tests {
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }
+
+/// Whether a `multipleOf` is the positive number
+/// [JSON Schema §6.2.1](https://json-schema.org/draft/2020-12/json-schema-validation#section-6.2.1)
+/// requires it to be.
+///
+/// Judged on the widest form the number offers rather than always
+/// through `f64`: `multipleOf` is kept as a `serde_json::Number` so that
+/// an integer step stays an integer, and asking this question should not
+/// be the one place that throws that away.
+///
+/// Only the v3.1 and v3.2 validators ask it; v2 and v3.0 carry the
+/// keyword without a rule about its sign.
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
+pub fn is_positive(number: &serde_json::Number) -> bool {
+    if let Some(number) = number.as_u64() {
+        return number > 0;
+    }
+    if let Some(number) = number.as_i64() {
+        return number > 0;
+    }
+    number.as_f64().is_some_and(|number| number > 0.0)
+}
+
+#[cfg(all(test, any(feature = "v3_1", feature = "v3_2")))]
+mod multiple_of_tests {
+    use super::is_positive;
+
+    fn number(json: &str) -> serde_json::Number {
+        serde_json::from_str(json).expect("the number must parse")
+    }
+
+    #[test]
+    fn a_positive_multiple_of_is_accepted_however_it_was_written() {
+        for json in ["1", "0.5", "1e-3", "9007199254740993"] {
+            assert!(is_positive(&number(json)), "{json} is positive");
+        }
+    }
+
+    #[test]
+    fn zero_and_negatives_are_rejected() {
+        for json in ["0", "0.0", "-1", "-0.5"] {
+            assert!(!is_positive(&number(json)), "{json} is not positive");
+        }
+    }
+}

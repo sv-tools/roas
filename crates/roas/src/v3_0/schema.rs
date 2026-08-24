@@ -498,7 +498,7 @@ pub struct IntegerSchema {
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple_of: Option<f64>,
+    pub multiple_of: Option<serde_json::Number>,
 
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
@@ -618,7 +618,7 @@ pub struct NumberSchema {
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple_of: Option<f64>,
+    pub multiple_of: Option<serde_json::Number>,
 
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".

@@ -626,7 +626,7 @@ pub struct IntegerSchema {
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple_of: Option<f64>,
+    pub multiple_of: Option<serde_json::Number>,
 
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
@@ -732,7 +732,7 @@ pub struct NumberSchema {
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple_of: Option<f64>,
+    pub multiple_of: Option<serde_json::Number>,
 
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
@@ -1345,8 +1345,8 @@ impl ValidateWithContext<Spec> for IntegerSchema {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
         // Spec: multipleOf MUST be > 0 (JSON Schema 2020-12 §6.2.1).
-        if let Some(m) = self.multiple_of
-            && m <= 0.0
+        if let Some(m) = &self.multiple_of
+            && !crate::common::helpers::is_positive(m)
         {
             ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
         }
@@ -1361,8 +1361,8 @@ impl ValidateWithContext<Spec> for NumberSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
-        if let Some(m) = self.multiple_of
-            && m <= 0.0
+        if let Some(m) = &self.multiple_of
+            && !crate::common::helpers::is_positive(m)
         {
             ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
         }
@@ -2343,7 +2343,7 @@ mod tests {
             (
                 "integer multipleOf <= 0",
                 Schema::Single(Box::new(SingleSchema::Integer(IntegerSchema {
-                    multiple_of: Some(0.0),
+                    multiple_of: Some(0.into()),
                     ..Default::default()
                 }))),
                 "multipleOf",
@@ -2351,7 +2351,7 @@ mod tests {
             (
                 "number multipleOf < 0",
                 Schema::Single(Box::new(SingleSchema::Number(NumberSchema {
-                    multiple_of: Some(-1.0),
+                    multiple_of: Some((-1).into()),
                     ..Default::default()
                 }))),
                 "multipleOf",

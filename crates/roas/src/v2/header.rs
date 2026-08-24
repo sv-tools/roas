@@ -114,7 +114,7 @@ pub struct IntegerHeader {
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple_of: Option<f64>,
+    pub multiple_of: Option<serde_json::Number>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -167,7 +167,7 @@ pub struct NumberHeader {
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple_of: Option<f64>,
+    pub multiple_of: Option<serde_json::Number>,
 
     /// Allows extensions to the Swagger Schema.
     /// The field name MUST begin with `x-`, for example, `x-internal-id`.
@@ -349,7 +349,7 @@ mod tests {
                 exclusive_maximum: Some(true),
                 minimum: Some(1.into()),
                 exclusive_minimum: Some(true),
-                multiple_of: Some(1.0),
+                multiple_of: Some(serde_json::Number::from_f64(1.0).expect("1.0 is finite"),),
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert("x-extra".to_owned(), "extension".into());
@@ -382,7 +382,7 @@ mod tests {
                 exclusive_maximum: Some(true),
                 minimum: Some(1.0),
                 exclusive_minimum: Some(true),
-                multiple_of: Some(1.0),
+                multiple_of: Some(serde_json::Number::from_f64(1.0).expect("1.0 is finite"),),
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert("x-extra".to_owned(), "extension".into());
@@ -484,7 +484,7 @@ mod tests {
                 exclusive_maximum: Some(true),
                 minimum: Some(1.into()),
                 exclusive_minimum: Some(true),
-                multiple_of: Some(1.0),
+                multiple_of: Some(serde_json::Number::from_f64(1.0).expect("1.0 is finite"),),
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert("x-extra".to_owned(), "extension".into());
@@ -517,7 +517,7 @@ mod tests {
                 exclusive_maximum: Some(true),
                 minimum: Some(1.0),
                 exclusive_minimum: Some(true),
-                multiple_of: Some(1.0),
+                multiple_of: Some(serde_json::Number::from_f64(1.0).expect("1.0 is finite"),),
                 extensions: Some({
                     let mut map = BTreeMap::new();
                     map.insert("x-extra".to_owned(), "extension".into());
