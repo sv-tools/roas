@@ -22,6 +22,7 @@ binary you use from a shell or a CI job.
 | **Overlay**         | 1.0, 1.1                           | parse · validate · apply to a target document, with a report of what each action matched · upconvert 1.0 → 1.1                                                                                               | [`roas-overlay`](crates/roas-overlay)                 |
 | **Arazzo**          | 1.0, 1.1                           | parse · validate · upconvert 1.0 → 1.1                                                                                                                                                                       | [`roas-arazzo`](crates/roas-arazzo)                   |
 | **Arazzo, running** | 1.0, 1.1                           | perform every step's request, judge its criteria, follow its `retry` / `goto` / `end` actions and the workflows it calls, and report what happened                                                           | [`roas-arazzo-executor`](crates/roas-arazzo-executor) |
+| **OpenAPI, serving**| 2.0, 3.0.x, 3.1.x, 3.2.x           | judge a live HTTP request against the description — route it, rebuild every parameter from its `style`, and check it and the body against their schemas                                                      | [`roas-http-validator`](crates/roas-http-validator)   |
 
 Where a specification and its published JSON Schema disagree, these crates
 follow the **prose**; the schemas do not track the specifications one for one.
@@ -111,6 +112,18 @@ asserted rather than spent. Runtime expressions, `simple` / `regex` /
 validation and parallelism are reported where they are met rather than passed
 over.
 
+### [`roas-http-validator`](crates/roas-http-validator) — OpenAPI, serving
+
+The description turned on incoming traffic: given a request, it finds the Path
+Item the path belongs to, rebuilds every parameter from the `style` that
+flattened it, and judges each one — and the body — against its Schema Object.
+Rust has no single request type to take (`http::Request` is version-split
+between actix-web's 0.2 and hyper 1's 1.x, and Rocket shares nothing with
+either), so the crate takes a small `RequestView` and ships one adapter per
+framework: `http` — and with it axum, warp, tonic and hyper — plus actix-web,
+poem, salvo and rocket. Routing failures are a different answer from validation
+failures, because a 404 is a different response from a 400.
+
 ### [`roas-file-fetcher`](crates/roas-file-fetcher) · [`roas-http-fetcher`](crates/roas-http-fetcher) — loading
 
 `roas` resolves external `$ref`s through `ResourceFetcher` /
@@ -128,6 +141,7 @@ registry, a cache, or an embedded bundle.
 | [`roas-overlay`](crates/roas-overlay)                 | [![docs.rs](https://docs.rs/roas-overlay/badge.svg)](https://docs.rs/roas-overlay)                 | [![crates.io](https://img.shields.io/crates/v/roas-overlay.svg)](https://crates.io/crates/roas-overlay)                 |
 | [`roas-arazzo`](crates/roas-arazzo)                   | [![docs.rs](https://docs.rs/roas-arazzo/badge.svg)](https://docs.rs/roas-arazzo)                   | [![crates.io](https://img.shields.io/crates/v/roas-arazzo.svg)](https://crates.io/crates/roas-arazzo)                   |
 | [`roas-arazzo-executor`](crates/roas-arazzo-executor) | [![docs.rs](https://docs.rs/roas-arazzo-executor/badge.svg)](https://docs.rs/roas-arazzo-executor) | [![crates.io](https://img.shields.io/crates/v/roas-arazzo-executor.svg)](https://crates.io/crates/roas-arazzo-executor) |
+| [`roas-http-validator`](crates/roas-http-validator)   | [![docs.rs](https://docs.rs/roas-http-validator/badge.svg)](https://docs.rs/roas-http-validator) | [![crates.io](https://img.shields.io/crates/v/roas-http-validator.svg)](https://crates.io/crates/roas-http-validator) |
 | [`roas-file-fetcher`](crates/roas-file-fetcher)       | [![docs.rs](https://docs.rs/roas-file-fetcher/badge.svg)](https://docs.rs/roas-file-fetcher)       | [![crates.io](https://img.shields.io/crates/v/roas-file-fetcher.svg)](https://crates.io/crates/roas-file-fetcher)       |
 | [`roas-http-fetcher`](crates/roas-http-fetcher)       | [![docs.rs](https://docs.rs/roas-http-fetcher/badge.svg)](https://docs.rs/roas-http-fetcher)       | [![crates.io](https://img.shields.io/crates/v/roas-http-fetcher.svg)](https://crates.io/crates/roas-http-fetcher)       |
 | [`roas-cli`](crates/roas-cli)                         | —                                                                                                  | [![crates.io](https://img.shields.io/crates/v/roas-cli.svg)](https://crates.io/crates/roas-cli)                         |

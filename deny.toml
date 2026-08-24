@@ -100,6 +100,11 @@ exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
     #{ allow = ["Zlib"], crate = "adler32" },
+
+    # actix-web's hasher. Zlib is a permissive, OSI-approved, BSD-family
+    # license with no copyleft term; it is allowed here rather than
+    # workspace-wide so the next Zlib crate is still a deliberate decision.
+    { allow = ["Zlib"], crate = "foldhash" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,
