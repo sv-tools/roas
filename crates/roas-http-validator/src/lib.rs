@@ -31,6 +31,14 @@
 //! # Ok(()) }
 //! ```
 //!
+//! ## Examples
+//!
+//! The repository carries three runnable ones: `validate` for the shape
+//! of the whole crate, `axum_layer` for the same thing as middleware
+//! (and for what buffering a body actually looks like), and
+//! `client_check` for asking whether a call you are about to *make*
+//! matches the description.
+//!
 //! ## Which request type
 //!
 //! None of them, and all of them. Rust has no single HTTP request type

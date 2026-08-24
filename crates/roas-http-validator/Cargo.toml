@@ -54,3 +54,17 @@ salvo_core = { workspace = true, optional = true }
 [dev-dependencies]
 axum.workspace = true
 serde_yaml_ng.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }
+
+# `validate` needs no framework at all; the other two show one each.
+[[example]]
+name = "validate"
+
+[[example]]
+name = "axum_layer"
+required-features = ["http"]
+
+[[example]]
+name = "client_check"
+required-features = ["reqwest"]

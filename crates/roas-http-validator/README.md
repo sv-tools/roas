@@ -29,6 +29,22 @@ GET /pets (listPets): 1 error(s)
   - query parameter "limit": 1000 is above maximum 100
 ```
 
+## Examples
+
+Three, runnable, one per way this crate gets used:
+
+```shell
+cargo run -p roas-http-validator --example validate                        # the whole shape, no framework
+cargo run -p roas-http-validator --features http    --example axum_layer   # as axum middleware
+cargo run -p roas-http-validator --features reqwest --example client_check # checking a call before sending it
+```
+
+[`validate`](examples/validate.rs) judges a handful of requests against one description and turns each verdict into the response a server would send — including the difference between a 404, a 405, a 400 and a description that could not be read.
+
+[`axum_layer`](examples/axum_layer.rs) is the same thing as middleware, and is where the body decision becomes concrete: it buffers with an explicit cap, validates, and puts the body back so the handler can still read it. It drives the router directly rather than binding a port, so it runs and finishes.
+
+[`client_check`](examples/client_check.rs) asks the other question — "is the call I am about to make one the API described?" — which is what a contract test wants and wants without a server.
+
 ## Which request type?
 
 None of them, and all of them.
