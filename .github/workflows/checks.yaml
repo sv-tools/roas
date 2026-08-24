@@ -229,7 +229,7 @@ jobs:
       actions: read
       contents: read
       security-events: write  # SARIF upload to the Security tab
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
   OsvScanner:
     name: OSV Scanner
     # Flat scan of the current tree. Runs on push (post-merge to
@@ -244,7 +244,7 @@ jobs:
       actions: read
       contents: read
       security-events: write  # SARIF upload to the Security tab
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
   PublishCrateJob:
     name: Test publishing per crate
     needs: RustMeta
