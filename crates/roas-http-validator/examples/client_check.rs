@@ -13,7 +13,7 @@
 //! non-streaming reqwest body is already bytes in memory, so there is
 //! nothing to buffer and nothing for the caller to decide.
 
-use roas_http_validator::{ToRequestView, Validator};
+use roas_http_validator::{RoutingError, ToRequestView, Validator};
 
 const PETSTORE: &str = r#"
 openapi: 3.2.0
@@ -120,9 +120,21 @@ fn check(validator: &Validator, request: &reqwest::blocking::Request) -> Verdict
     // No `with_body` here: the adapter already has the bytes.
     let report = match validator.validate(&request.request_view()) {
         Ok(report) => report,
-        // The description does not describe this call at all, which for
-        // a client is as much a mismatch as a bad field.
-        Err(error) => return Verdict::Violates(vec![error.to_string()]),
+        // The API describes no such path, or no such method on it. The
+        // call really does not match — as much a mismatch as a bad
+        // field, and for a client the more interesting kind.
+        Err(
+            error @ (RoutingError::PathNotFound { .. } | RoutingError::MethodNotAllowed { .. }),
+        ) => {
+            return Verdict::Violates(vec![error.to_string()]);
+        }
+        // The *description* is broken, not the call. Blaming the call
+        // for a `$ref` that names nothing would fail a contract test
+        // for something the caller cannot fix by changing the request.
+        // The wildcard goes the same way for the same reason: a new
+        // routing outcome this example has never seen is not evidence
+        // against the request.
+        Err(error) => return Verdict::Undetermined(vec![error.to_string()]),
     };
 
     let problems: Vec<String> = report.violations().map(ToString::to_string).collect();
