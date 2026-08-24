@@ -143,7 +143,17 @@ impl ErrorKind {
     /// be that caller's decision, made knowingly.
     #[must_use]
     pub fn is_unchecked(&self) -> bool {
-        matches!(self, ErrorKind::Unsupported(_) | ErrorKind::Unchecked(_))
+        matches!(
+            self,
+            ErrorKind::Unsupported(_)
+                | ErrorKind::Unchecked(_)
+                // A `$ref` that names nothing left no schema to judge
+                // the value against, so nothing about the value was
+                // established — that is the description's defect, and
+                // reporting it as the client's would answer a broken
+                // document with a 400.
+                | ErrorKind::UnresolvedReference(_)
+        )
     }
 }
 
@@ -383,9 +393,29 @@ mod tests {
         assert!(!report.is_valid());
         assert_eq!(report.violations().count(), 1);
         assert_eq!(report.unchecked().count(), 2);
-        assert!(!ErrorKind::Missing.is_unchecked());
-        assert!(ErrorKind::Unchecked(String::new()).is_unchecked());
-        assert!(ErrorKind::Unsupported(String::new()).is_unchecked());
+        for definite in [
+            ErrorKind::Missing,
+            ErrorKind::Schema("wrong".to_owned()),
+            ErrorKind::Malformed("wrong".to_owned()),
+            ErrorKind::Undescribed,
+            ErrorKind::UnexpectedMediaType {
+                got: None,
+                expected: Vec::new(),
+            },
+        ] {
+            assert!(
+                !definite.is_unchecked(),
+                "{definite} is the request's fault"
+            );
+        }
+        for undecided in [
+            ErrorKind::Unchecked(String::new()),
+            ErrorKind::Unsupported(String::new()),
+            // Nothing was judged, so nothing was found wrong.
+            ErrorKind::UnresolvedReference("#/nope".to_owned()),
+        ] {
+            assert!(undecided.is_unchecked(), "{undecided} judged nothing");
+        }
     }
 
     #[test]

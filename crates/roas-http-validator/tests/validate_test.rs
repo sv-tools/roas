@@ -1717,3 +1717,41 @@ fn a_caller_can_tell_a_violation_from_something_that_was_not_checked() {
         "{report}",
     );
 }
+
+// ── the review of 77b89d6 ────────────────────────────────────────────
+
+#[test]
+fn only_a_provable_zero_is_a_multiple_of_everything() {
+    let validator = body_schema(json!({ "type": "number", "multipleOf": 2 }));
+    // Written as an integer, so it is provably zero.
+    assert!(errors(&validator, &posted(b"0")).is_empty());
+
+    // `1e-324` underflows to `0.0` — it is not zero, and it is not a
+    // multiple of two.
+    for spelling in [b"1e-324".as_slice(), b"0.0".as_slice()] {
+        let found = errors(&validator, &posted(spelling));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("could NOT be established"),
+            "{}: {found:?}",
+            String::from_utf8_lossy(spelling),
+        );
+    }
+}
+
+#[test]
+fn an_unresolvable_reference_is_not_the_requests_fault() {
+    let validator = validator(json!({
+        "/x": { "post": { "requestBody": { "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/Gone" } }
+        } } } }
+    }));
+    let report = validator
+        .validate(&posted(br#"{"anything":true}"#))
+        .expect("the description describes POST /x");
+
+    // Nothing was judged, so nothing was found wrong with the request.
+    assert!(!report.is_valid());
+    assert_eq!(report.violations().count(), 0, "{report}");
+    assert_eq!(report.unchecked().count(), 1, "{report}");
+}

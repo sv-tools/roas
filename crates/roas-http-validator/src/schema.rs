@@ -498,8 +498,9 @@ impl<'s> Checker<'s> {
     /// unchecked rather than accepted.
     fn divisibility(&mut self, value: Num, step: f64) {
         // Zero is a multiple of everything, whatever the step turns out
-        // to have been.
-        if value.as_f64() == 0.0 && value.survives_f64() {
+        // to have been — but only a zero that can be *proven* zero.
+        // `1e-324` underflows to `0.0`, and it is not a multiple of two.
+        if value == Num::Exact(0) {
             return;
         }
         if value.is_approximate() || Num::Real(step).is_approximate() {

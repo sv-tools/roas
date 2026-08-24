@@ -111,7 +111,7 @@ A parameter whose schema this crate cannot read structurally — a composition, 
 
 `ValidationReport::errors` collects everything wrong with the request, the way `roas`'s own description validator collects diagnostics: a client that sent three bad parameters is better served by hearing about all three. Each error names where it was found, which parameter it is about, and a JSON Pointer to the value inside it — `body at /user/name: …` — whatever went wrong there.
 
-`violations()` and `unchecked()` split the errors for you: the first is what the request definitely got wrong, the second is what could not be judged either way. `is_valid()` requires both to be empty, and which of the two warrants a 400 is the caller's call to make knowingly.
+`violations()` and `unchecked()` split the errors for you: the first is what the request definitely got wrong, the second is what could not be judged either way — an unresolvable `$ref` counts as the latter, since a schema that could not be reached judged nothing. `is_valid()` requires both to be empty, and which of the two warrants a 400 is the caller's call to make knowingly.
 
 "Wrong" includes "could not be judged". A subschema that cannot be applied — a `pattern` that will not compile, a number whose digits floating point already lost — yields no verdict rather than a failing one, and `not`, `anyOf` and `oneOf` all carry that third state instead of reading it as a mismatch. Otherwise `{ "not": { "pattern": "(" } }` would accept anything at all, on the strength of a check that never ran. The logic is properly three-valued, so a constraint the value *definitely* broke still settles the schema: `minLength: 2` rejects `"x"` whether or not the `pattern` beside it compiles.
 
