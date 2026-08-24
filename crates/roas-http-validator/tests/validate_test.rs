@@ -1556,22 +1556,28 @@ fn a_bound_that_rounded_into_a_whole_number_cannot_settle_a_tie() {
 }
 
 #[test]
-fn a_multiple_of_whose_division_loses_its_remainder_is_not_declared_divisible() {
+fn a_multiple_of_is_decided_on_mantissas_rather_than_by_dividing() {
     // 9007199254740992 / 1.5 is 6004799503160661.33, which an `f64`
-    // stores as 6004799503160661.0 — the remainder is gone before it
-    // can be weighed.
+    // stores as 6004799503160661.0 — a division would see a remainder
+    // of zero and call it divisible. Both numbers are exactly the
+    // decimals they were written as, so the answer comes from their
+    // mantissas instead, and it is definite.
     let validator = body_schema(json!({ "type": "integer", "multipleOf": 1.5 }));
-    let found = errors(&validator, &posted(b"9007199254740992"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-
-    // In the range where the division does leave a remainder to weigh,
-    // it is weighed.
+    assert_eq!(
+        errors(&validator, &posted(b"9007199254740992")),
+        ["body: 9007199254740992 is not a multiple of 1.5"],
+    );
     assert!(errors(&validator, &posted(b"3")).is_empty());
     assert_eq!(
         errors(&validator, &posted(b"4")),
         ["body: 4 is not a multiple of 1.5"],
     );
+
+    // A value that does not survive conversion to a float is not the
+    // number being divided, so nothing can be said about it.
+    let found = errors(&validator, &posted(b"9007199254740993"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
 }
 
 #[test]
@@ -1634,9 +1640,17 @@ fn a_multiple_of_is_not_proved_by_a_quotient_that_rounded_its_input() {
         assert!(found[0].contains("could NOT be established"), "{found:?}");
     }
 
-    // With a fractional step there is no exact path, and the value no
-    // longer survives the conversion — so it reports rather than guesses.
+    // A fractional step that is exactly the decimal it was written as
+    // is decided exactly too, on the mantissas rather than by dividing.
     let fractional = body_schema(json!({ "type": "integer", "multipleOf": 1.5 }));
+    assert_eq!(
+        errors(&fractional, &posted(b"9007199254740992")),
+        ["body: 9007199254740992 is not a multiple of 1.5"],
+    );
+    assert!(errors(&fractional, &posted(b"3")).is_empty());
+
+    // But a value that no longer survives conversion cannot be, since
+    // the number being divided is not the number that arrived.
     let found = errors(&fractional, &posted(b"9007199254740993"));
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("was NOT checked"), "{found:?}");
@@ -1750,5 +1764,48 @@ fn exact_integers_are_still_decided_exactly_on_both_sides() {
     assert_eq!(
         errors(&validator, &posted(b"9007199254740996")),
         ["body: 9007199254740996 is above maximum 9007199254740995"],
+    );
+}
+
+// ── the review of 6de60cd ────────────────────────────────────────────
+
+#[test]
+fn a_quotient_that_rounded_to_a_whole_number_is_not_proof_of_divisibility() {
+    // 2814749767106564 / 1.25 is exactly 2251799813685251.2, which an
+    // `f64` stores as 2251799813685251.0 — well below any quotient
+    // cutoff, with a residual of exactly zero. Only exact arithmetic on
+    // the two mantissas catches it.
+    let validator = body_schema(json!({ "type": "integer", "multipleOf": 1.25 }));
+    assert_eq!(
+        errors(&validator, &posted(b"2814749767106564")),
+        ["body: 2814749767106564 is not a multiple of 1.25"],
+    );
+    // And a value that really is a multiple is still accepted.
+    assert!(errors(&validator, &posted(b"2814749767106565")).is_empty());
+}
+
+#[test]
+fn exact_decimals_are_decided_and_inexact_ones_are_reported() {
+    // `1.25`, `0.5` and `2.5` are exactly the decimals they print as,
+    // so their divisibility has an exact answer.
+    let halves = body_schema(json!({ "type": "number", "multipleOf": 0.5 }));
+    assert!(errors(&halves, &posted(b"2.5")).is_empty());
+    assert_eq!(
+        errors(&halves, &posted(b"2.25")),
+        ["body: 2.25 is not a multiple of 0.5"],
+    );
+
+    // `0.1` is not: the double is 0.1000000000000000055511151231257827,
+    // and 0.3 is not a multiple of *that*, though it is of the 0.1 the
+    // author wrote. Neither answer can be given, so neither is.
+    let tenths = body_schema(json!({ "type": "number", "multipleOf": 0.1 }));
+    let found = errors(&tenths, &posted(b"0.3"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
+
+    // A remainder far enough from zero to survive is still definite.
+    assert_eq!(
+        errors(&tenths, &posted(b"0.35")),
+        ["body: 0.35 is not a multiple of 0.1"],
     );
 }

@@ -508,6 +508,19 @@ impl<'s> Checker<'s> {
                 return;
             }
 
+            // Both numbers are exactly the decimals they were written
+            // as, so the question has an exact answer — and it is
+            // reached with integer arithmetic on their mantissas rather
+            // than by dividing and hoping the remainder survives.
+            // `2814749767106564 / 1.25` is `…251.2`, which an `f64`
+            // rounds to `…251.0`: a zero residual that proves nothing.
+            if is_exact_decimal(value.as_f64()) && is_exact_decimal(step) {
+                if !divides_exactly(value.as_f64(), step) {
+                    self.fail(format!("{value} is not a multiple of {step}"));
+                }
+                return;
+            }
+
             let quotient = value.as_f64() / step;
             // A quotient too large to carry a fraction has lost the
             // remainder before it could be weighed.
@@ -519,20 +532,18 @@ impl<'s> Checker<'s> {
                 return;
             }
 
+            // Neither number is exactly what was written, so only a
+            // remainder far enough from zero to survive that says
+            // anything. Relative to the quotient, since that is the
+            // scale its own representation error lives at.
             let residual = (quotient - quotient.round()).abs();
-            if residual == 0.0 {
-                return;
-            }
-            // Relative to the quotient, since that is the scale its own
-            // representation error lives at.
             let tolerance = f64::EPSILON * quotient.abs().max(1.0) * 4.0;
             if residual > tolerance {
                 self.fail(format!("{value} is not a multiple of {step}"));
             } else {
-                // Within the rounding allowance is not the same as
-                // divisible: `1.0000000000000002` is one ULP from `1`,
-                // and no tolerance can tell that from an artefact of the
-                // division. Deciding it needs exact decimal arithmetic.
+                // `1.0000000000000002` is one ULP from `1`, and no
+                // tolerance can tell that from an artefact of the
+                // division. Deciding it needs the decimals themselves.
                 self.unchecked(format!(
                     "whether {value} is a multiple of {step} could NOT be established: the \
                      remainder is within floating-point rounding of zero",
@@ -992,6 +1003,74 @@ fn cmp_exact_to_float(exact: i128, float: f64) -> Ordering {
     } else {
         Ordering::Equal
     }
+}
+
+/// A finite non-zero `f64` as an odd mantissa and a power of two:
+/// `f == mantissa * 2^exponent`, with `mantissa` odd.
+///
+/// Every `f64` is exactly such a number, which is what makes exact
+/// reasoning about them possible without any float arithmetic at all.
+fn decompose(number: f64) -> Option<(u64, i32)> {
+    if !number.is_finite() || number == 0.0 {
+        return None;
+    }
+    let bits = number.abs().to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let (mut mantissa, mut exponent) = if exponent_bits == 0 {
+        (fraction, -1074) // subnormal: no implicit leading bit
+    } else {
+        (fraction | (1_u64 << 52), exponent_bits - 1075)
+    };
+    if mantissa == 0 {
+        return None;
+    }
+    let trailing = mantissa.trailing_zeros();
+    mantissa >>= trailing;
+    exponent += trailing as i32;
+    Some((mantissa, exponent))
+}
+
+/// Whether `value` is an exact integer multiple of `step`, decided
+/// without dividing.
+///
+/// With `value = mv * 2^pv` and `step = ms * 2^ps` and both mantissas
+/// odd, the quotient is `(mv / ms) * 2^(pv - ps)`. An odd `ms` that does
+/// not divide `mv` leaves an odd denominator no power of two can clear,
+/// and an odd quotient times a negative power of two is never whole —
+/// so the answer is exactly these two conditions.
+fn divides_exactly(value: f64, step: f64) -> bool {
+    let (Some((value_mantissa, value_exponent)), Some((step_mantissa, step_exponent))) =
+        (decompose(value), decompose(step))
+    else {
+        // Zero is a multiple of anything; a zero step never gets here.
+        return value == 0.0;
+    };
+    value_mantissa % step_mantissa == 0 && value_exponent >= step_exponent
+}
+
+/// Whether this `f64` is exactly the decimal it prints as.
+///
+/// Every `f64` is exactly *some* finite decimal — `0.1` is exactly
+/// `0.1000000000000000055511151231257827…`, needing all 55 of the
+/// fractional digits its exponent implies. What `{}` prints is the
+/// shortest decimal that round-trips, which is the number the author
+/// wrote. The two agree only when the value is dyadic enough to be
+/// written out in full, as `1.25` is and `0.1` is not — and only then
+/// is exact arithmetic on the stored double arithmetic on what was
+/// meant.
+fn is_exact_decimal(number: f64) -> bool {
+    let Some((_, exponent)) = decompose(number) else {
+        return true; // zero
+    };
+    if exponent >= 0 {
+        return true; // a whole number, printed in full
+    }
+    let printed = format!("{number}");
+    let fraction_digits = printed
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    fraction_digits == exponent.unsigned_abs() as usize
 }
 
 /// A `multipleOf` step that is a whole number, for exact remainder
