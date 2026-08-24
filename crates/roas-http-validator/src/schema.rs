@@ -405,22 +405,25 @@ impl<'s> Checker<'s> {
     /// different literals could have landed on it.
     fn enumerated(&mut self, value: Num, candidates: impl Iterator<Item = Num>, total: usize) {
         let mut names = Vec::with_capacity(total);
-        let mut matched = None;
+        let mut uncertain = None;
         for candidate in candidates {
             names.push(candidate.to_string());
-            if matched.is_none() && candidate.cmp(value) == Ordering::Equal {
-                matched = Some(candidate);
+            match candidate.compare(value) {
+                // Definitely this member: nothing left to decide.
+                Compared::Equal => return,
+                // It might be this member; keep looking for a definite
+                // one before saying so.
+                Compared::Unknown if uncertain.is_none() => uncertain = Some(candidate),
+                _ => {}
             }
         }
-        match matched {
-            Some(candidate) if candidate.is_approximate() || value.is_approximate() => {
-                self.unchecked(format!(
-                    "{value} and the `enum` member {candidate} are beyond the range a 64-bit \
-                     float represents exactly, so whether they are the same number could NOT be \
-                     established",
-                ));
-            }
-            Some(_) => {}
+        match uncertain {
+            Some(candidate) => self.unchecked(format!(
+                "whether {value} is the `enum` member {candidate} could NOT be established: one \
+                 of them lost digits to floating point",
+            )),
+            // Two numbers that differ as floats differed as written, so
+            // a definite mismatch is safe to state.
             None => self.fail(format!("{value} is not one of: {}", names.join(", "))),
         }
     }
@@ -437,38 +440,32 @@ impl<'s> Checker<'s> {
         multiple_of: Option<f64>,
     ) {
         for (limit, ordering, name, inclusive) in [
-            (minimum, Ordering::Less, "minimum", true),
-            (maximum, Ordering::Greater, "maximum", true),
-            (exclusive_minimum, Ordering::Less, "exclusiveMinimum", false),
+            (minimum, Compared::Less, "minimum", true),
+            (maximum, Compared::Greater, "maximum", true),
+            (exclusive_minimum, Compared::Less, "exclusiveMinimum", false),
             (
                 exclusive_maximum,
-                Ordering::Greater,
+                Compared::Greater,
                 "exclusiveMaximum",
                 false,
             ),
         ] {
             let Some(limit) = limit else { continue };
-            // Compared exactly whenever both sides are whole and fit, so
-            // `9007199254740993` against `maximum: 9007199254740992` is
-            // decided rather than rounded into a tie.
-            let relation = value.cmp(limit);
-            // A tie against a bound (or a value) that floating point may
-            // already have rounded is not a decision — it is the one
-            // case where the lost digits would have settled it.
-            if relation == Ordering::Equal && (limit.is_approximate() || value.is_approximate()) {
+            let relation = value.compare(limit);
+            if relation == Compared::Unknown {
                 self.unchecked(format!(
-                    "{name} {limit} is beyond the range a 64-bit float represents exactly, so \
-                     {value} could NOT be checked against it",
+                    "whether {value} satisfies {name} {limit} could NOT be established: one of \
+                     them lost digits to floating point",
                 ));
                 continue;
             }
-            let breached = relation == ordering || (!inclusive && relation == Ordering::Equal);
+            let breached = relation == ordering || (!inclusive && relation == Compared::Equal);
             if breached {
                 let verb = match (ordering, inclusive) {
-                    (Ordering::Less, true) => "is below",
-                    (Ordering::Greater, true) => "is above",
-                    (Ordering::Less, _) => "is not above",
-                    (Ordering::Greater, _) => "is not below",
+                    (Compared::Less, true) => "is below",
+                    (Compared::Greater, true) => "is above",
+                    (Compared::Less, _) => "is not above",
+                    (Compared::Greater, _) => "is not below",
                     _ => unreachable!("only Less and Greater are used"),
                 };
                 self.fail(format!("{value} {verb} {name} {limit}"));
@@ -478,8 +475,21 @@ impl<'s> Checker<'s> {
         if let Some(step) = multiple_of
             && step != 0.0
         {
-            // A whole value and a whole step: an integer remainder, no
-            // float anywhere in it, at any magnitude.
+            // An operand that lost digits cannot be divided into
+            // anything: `multipleOf: 9007199254740993.5` is stored as
+            // `…994`, and so is a value written `…993.5`, so a clean
+            // remainder between them would prove nothing.
+            if value.is_approximate() || Num::Real(step).is_approximate() {
+                self.unchecked(format!(
+                    "whether {value} is a multiple of {step} could NOT be established: one of \
+                     them lost digits to floating point",
+                ));
+                return;
+            }
+
+            // A whole value and a whole step: an integer remainder, with
+            // no float anywhere in it — so this comes before any
+            // question of what survives an `f64`, which it never enters.
             if let (Num::Exact(value), Some(step)) = (value, whole_step(step)) {
                 if value % step != 0 {
                     self.fail(format!("{value} is not a multiple of {step}"));
@@ -487,17 +497,21 @@ impl<'s> Checker<'s> {
                 return;
             }
 
-            // Everything else goes through a division, and a division
-            // is only evidence while its remainder survives it.
-            //
-            // `9007199254740993 / 4503599627370496` is `2.0000...` with
-            // a remainder of 1 — but the numerator does not fit an
-            // `f64`, so it arrives as `9007199254740992` and the
-            // quotient comes out exactly `2`. `9007199254740992 / 1.5`
-            // loses its remainder the other way, in a quotient too
-            // large to hold one. Neither can be called divisible.
+            // Everything past here divides, and dividing a value the
+            // conversion has already changed proves nothing about the
+            // value that arrived.
+            if !value.survives_f64() {
+                self.unchecked(format!(
+                    "whether {value} is a multiple of {step} could NOT be established: it does \
+                     not survive conversion to a 64-bit float",
+                ));
+                return;
+            }
+
             let quotient = value.as_f64() / step;
-            if !value.survives_f64() || quotient.abs() >= EXACT_WHOLE_LIMIT {
+            // A quotient too large to carry a fraction has lost the
+            // remainder before it could be weighed.
+            if quotient.abs() >= EXACT_WHOLE_LIMIT {
                 self.unchecked(format!(
                     "whether {value} is a multiple of {step} could NOT be established: the \
                      division loses its remainder to floating point",
@@ -505,14 +519,24 @@ impl<'s> Checker<'s> {
                 return;
             }
 
-            // Relative, not absolute: the error to allow for is the
-            // representation error of the quotient itself. A fixed
-            // `1e-9` would wave through `1.0000000005` against a step
-            // of `1`, which is not a rounding artefact but a different
-            // number.
+            let residual = (quotient - quotient.round()).abs();
+            if residual == 0.0 {
+                return;
+            }
+            // Relative to the quotient, since that is the scale its own
+            // representation error lives at.
             let tolerance = f64::EPSILON * quotient.abs().max(1.0) * 4.0;
-            if (quotient - quotient.round()).abs() > tolerance {
+            if residual > tolerance {
                 self.fail(format!("{value} is not a multiple of {step}"));
+            } else {
+                // Within the rounding allowance is not the same as
+                // divisible: `1.0000000000000002` is one ULP from `1`,
+                // and no tolerance can tell that from an artefact of the
+                // division. Deciding it needs exact decimal arithmetic.
+                self.unchecked(format!(
+                    "whether {value} is a multiple of {step} could NOT be established: the \
+                     remainder is within floating-point rounding of zero",
+                ));
             }
         }
     }
@@ -814,18 +838,60 @@ impl Num {
         }
     }
 
-    /// Exact whenever either side is.
+    /// The range of values that could have been written and stored as
+    /// this number.
     ///
-    /// An exact integer is never rounded to compare it with a float:
-    /// the float's `floor` and `ceil` are themselves exact, so the
-    /// integer can be placed against them instead.
-    fn cmp(self, other: Self) -> Ordering {
+    /// A number that lost digits is not a point: `9007199254740992.0`
+    /// stands for a value somewhere between its neighbours. Comparing
+    /// it as though it were the midpoint is what turns an unknown into
+    /// a false verdict.
+    ///
+    /// The bounds are the neighbouring representable values rather than
+    /// the half-way points, because a half-way point often is not
+    /// representable — `9007199254740992.0 + 1.0` rounds straight back
+    /// to itself, which would collapse the interval to nothing. Using
+    /// the neighbours is a little wider than the truth, and wider only
+    /// ever turns a verdict into "unknown".
+    fn interval(self) -> (f64, f64) {
+        match self {
+            Num::Real(number) if self.is_approximate() => (number.next_down(), number.next_up()),
+            // Everything else is taken at the value it holds.
+            _ => {
+                let number = self.as_f64();
+                (number, number)
+            }
+        }
+    }
+
+    /// Compare, admitting that the answer may not be knowable.
+    ///
+    /// Exact wherever both sides are: two integers are compared as
+    /// integers, and an integer against an ordinary float is placed
+    /// against that float's `floor` and `ceil` rather than rounded.
+    /// Where an operand has lost digits, its whole interval is used,
+    /// and an overlap is [`Compared::Unknown`] rather than a guess.
+    fn compare(self, other: Self) -> Compared {
         match (self, other) {
-            (Num::Exact(mine), Num::Exact(theirs)) => mine.cmp(&theirs),
-            (Num::Exact(mine), Num::Real(theirs)) => cmp_exact_to_float(mine, theirs),
-            (Num::Real(mine), Num::Exact(theirs)) => cmp_exact_to_float(theirs, mine).reverse(),
+            (Num::Exact(mine), Num::Exact(theirs)) => mine.cmp(&theirs).into(),
+            (Num::Exact(mine), theirs @ Num::Real(_)) => compare_exact_to(mine, theirs),
+            (mine @ Num::Real(_), Num::Exact(theirs)) => compare_exact_to(theirs, mine).reverse(),
             (Num::Real(mine), Num::Real(theirs)) => {
-                mine.partial_cmp(&theirs).unwrap_or(Ordering::Equal)
+                if !self.is_approximate() && !other.is_approximate() {
+                    return mine
+                        .partial_cmp(&theirs)
+                        .map_or(Compared::Unknown, Into::into);
+                }
+                // `<=` rather than `<`, because each bound is a value
+                // the true number is strictly inside of.
+                let (low_mine, high_mine) = self.interval();
+                let (low_theirs, high_theirs) = other.interval();
+                if high_mine <= low_theirs {
+                    Compared::Less
+                } else if low_mine >= high_theirs {
+                    Compared::Greater
+                } else {
+                    Compared::Unknown
+                }
             }
         }
     }
@@ -837,6 +903,54 @@ impl Display for Num {
             Num::Exact(number) => write!(f, "{number}"),
             Num::Real(number) => write!(f, "{number}"),
         }
+    }
+}
+
+/// What comparing two numbers established, if anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Compared {
+    Less,
+    Equal,
+    Greater,
+    /// The operands' uncertainty overlaps, so no order can be claimed.
+    Unknown,
+}
+
+impl Compared {
+    fn reverse(self) -> Self {
+        match self {
+            Compared::Less => Compared::Greater,
+            Compared::Greater => Compared::Less,
+            other => other,
+        }
+    }
+}
+
+impl From<Ordering> for Compared {
+    fn from(ordering: Ordering) -> Self {
+        match ordering {
+            Ordering::Less => Compared::Less,
+            Ordering::Equal => Compared::Equal,
+            Ordering::Greater => Compared::Greater,
+        }
+    }
+}
+
+/// Place an exact integer against a number that may have lost digits.
+fn compare_exact_to(exact: i128, real: Num) -> Compared {
+    let (low, high) = real.interval();
+    if !real.is_approximate() {
+        return cmp_exact_to_float(exact, high).into();
+    }
+    // The true number lies strictly between `low` and `high`, so the
+    // integer is definitely above it only once it reaches `high`, and
+    // definitely below only once it reaches `low`.
+    if cmp_exact_to_float(exact, high) != Ordering::Less {
+        Compared::Greater
+    } else if cmp_exact_to_float(exact, low) != Ordering::Greater {
+        Compared::Less
+    } else {
+        Compared::Unknown
     }
 }
 
@@ -1054,15 +1168,24 @@ mod tests {
     }
 
     #[test]
-    fn multiple_of_tolerates_floating_point() {
-        assert!(passes(
-            &json!(0.3),
-            json!({ "type": "number", "multipleOf": 0.1 })
-        ));
+    fn a_multiple_of_that_only_rounds_to_zero_is_not_proven() {
+        // 0.3 / 0.1 is 2.9999999999999996 in binary floating point. The
+        // remainder is within rounding of zero, which is not the same as
+        // being zero — deciding it needs exact decimal arithmetic.
+        let found = failures(&json!(0.3), json!({ "type": "number", "multipleOf": 0.1 }));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("could NOT be established"), "{found:?}");
+
+        // A remainder well clear of zero is still a definite failure.
         assert_eq!(
             failures(&json!(0.35), json!({ "type": "number", "multipleOf": 0.1 })),
             ["0.35 is not a multiple of 0.1"],
         );
+        // And a step that divides exactly in binary is exact.
+        assert!(passes(
+            &json!(2.5),
+            json!({ "type": "number", "multipleOf": 0.5 })
+        ));
     }
 
     #[test]

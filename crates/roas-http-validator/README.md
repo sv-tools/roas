@@ -115,7 +115,9 @@ A parameter whose schema this crate cannot read structurally — a composition, 
 
 Numbers are compared exactly wherever they fit an `i128`, and a number is called an **integer** only when it can be proven to be one — that is, when `serde_json` parsed it as one. A value that arrived as a float and merely *looks* whole is reported as unchecked instead: `1.0000000000000001` is stored as `1.0`, and a fraction can round away at any magnitude, so no threshold can stand in for the lexeme. `multipleOf` divides exactly when both sides are whole, and reports rather than guesses when the division would round its own remainder away; its tolerance is relative to the quotient, so it allows for `0.3 / 0.1` without waving through `1.0000000005`.
 
-Bound comparisons keep the ecosystem's ordinary floating-point behaviour — everyone compares `0.1` with the `f64` nearest `0.1` — except where whole digits are lost, past 2^52, at which point a tie is reported rather than decided. Full decimal exactness would need `serde_json`'s `arbitrary_precision`, which is a workspace-wide choice rather than this crate's.
+A number that lost digits is treated as the **interval** it stands for rather than the point it happens to hold, so a comparison is `Less`, `Equal`, `Greater` or *unknown*. That cuts both ways: `maximum: 9007199254740993` is stored as `…992`, and a request carrying `…993` is neither accepted nor rejected against it, where comparing the stored values would have produced a confident and wrong violation. Below 2^52 the ecosystem's ordinary floating-point behaviour is kept — everyone compares `0.1` with the `f64` nearest `0.1`.
+
+Full decimal exactness would need `serde_json`'s `arbitrary_precision`, which is a workspace-wide choice rather than this crate's. Without it, the crate's position is narrow and stated: it decides what a double can decide, and reports everything else rather than guessing in either direction.
 
 ## Versions
 

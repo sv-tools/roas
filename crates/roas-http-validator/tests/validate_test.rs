@@ -1623,13 +1623,16 @@ fn a_multiple_of_is_not_proved_by_a_quotient_that_rounded_its_input() {
         "type": "integer",
         "multipleOf": 4_503_599_627_370_496_i64
     }));
-    // The step is whole, so this one is decided exactly rather than
-    // divided at all.
-    assert_eq!(
-        errors(&validator, &posted(b"9007199254740993")),
-        ["body: 9007199254740993 is not a multiple of 4503599627370496"],
-    );
-    assert!(errors(&validator, &posted(b"9007199254740992")).is_empty());
+    // The step is 2^52, where a stored double no longer pins down the
+    // number written, so neither instance can be decided against it.
+    for spelling in [
+        b"9007199254740993".as_slice(),
+        b"9007199254740992".as_slice(),
+    ] {
+        let found = errors(&validator, &posted(spelling));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("could NOT be established"), "{found:?}");
+    }
 
     // With a fractional step there is no exact path, and the value no
     // longer survives the conversion — so it reports rather than guesses.
@@ -1650,12 +1653,102 @@ fn the_multiple_of_tolerance_allows_for_rounding_and_nothing_more() {
     );
     assert!(errors(&validator, &posted(b"2")).is_empty());
 
-    // Real rounding artefacts are still allowed for: 0.3 / 0.1 is
-    // 2.9999999999999996 in binary floating point.
+    // One ULP away from 1: inside any tolerance, and still a different
+    // number. Neither accepted nor rejected.
+    let found = errors(&validator, &posted(b"1.0000000000000002"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
+
+    // 0.3 / 0.1 is 2.9999999999999996: within rounding of a whole
+    // quotient, which is not the same as being one.
     let tenths = body_schema(json!({ "type": "number", "multipleOf": 0.1 }));
-    assert!(errors(&tenths, &posted(b"0.3")).is_empty());
+    let found = errors(&tenths, &posted(b"0.3"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
     assert_eq!(
         errors(&tenths, &posted(b"0.35")),
         ["body: 0.35 is not a multiple of 0.1"],
+    );
+}
+
+// ── the review of 22f5b8b ────────────────────────────────────────────
+
+#[test]
+fn an_enum_member_that_lost_digits_does_not_produce_a_false_violation() {
+    // `roas` holds a `number` enum as `f64`, so `9007199254740993`
+    // arrives here as `9007199254740992`. The request value is exact
+    // and unequal to it — but the two could have been the same number,
+    // so a rejection would be a claim this crate cannot make.
+    let validator = body_schema(json!({
+        "type": "number",
+        "enum": [9_007_199_254_740_993_i64]
+    }));
+    let found = errors(&validator, &posted(b"9007199254740993"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
+
+    // A number outside that uncertainty is still a definite mismatch.
+    assert_eq!(
+        errors(&validator, &posted(b"1")),
+        ["body: 1 is not one of: 9007199254740992"],
+    );
+}
+
+#[test]
+fn a_bound_that_lost_digits_does_not_produce_a_false_violation_either() {
+    let validator = body_schema(json!({
+        "type": "number",
+        "maximum": 9_007_199_254_740_993_i64
+    }));
+    // Inside the stored bound's uncertainty: unknowable, not a failure.
+    let found = errors(&validator, &posted(b"9007199254740993"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
+
+    // Clear of it in either direction, the answer is definite.
+    assert!(errors(&validator, &posted(b"1")).is_empty());
+    assert_eq!(
+        errors(&validator, &posted(b"1e300")).len(),
+        1,
+        "a value far above the maximum is a plain failure",
+    );
+}
+
+#[test]
+fn a_multiple_of_operand_that_lost_digits_decides_nothing() {
+    // The step is stored as 9007199254740994, so a clean remainder
+    // against it would prove nothing about the 9007199254740993.5 that
+    // was written.
+    let step = body_schema(json!({ "type": "number", "multipleOf": 9_007_199_254_740_993.5_f64 }));
+    let found = errors(&step, &posted(b"9007199254740994"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
+
+    // And the same the other way round: a value that lost digits
+    // cannot be divided by anything either.
+    let value = body_schema(json!({ "type": "number", "multipleOf": 9_007_199_254_740_994_i64 }));
+    let found = errors(&value, &posted(b"9007199254740993.5"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
+}
+
+#[test]
+fn exact_integers_are_still_decided_exactly_on_both_sides() {
+    // The guard is about numbers that lost digits, not about size:
+    // `integer` bounds come through `serde_json::Number`, which keeps
+    // integers as integers, so these stay definite.
+    let validator = body_schema(json!({
+        "type": "integer",
+        "minimum": 9_007_199_254_740_993_i64,
+        "maximum": 9_007_199_254_740_995_i64
+    }));
+    assert!(errors(&validator, &posted(b"9007199254740994")).is_empty());
+    assert_eq!(
+        errors(&validator, &posted(b"9007199254740992")),
+        ["body: 9007199254740992 is below minimum 9007199254740993"],
+    );
+    assert_eq!(
+        errors(&validator, &posted(b"9007199254740996")),
+        ["body: 9007199254740996 is above maximum 9007199254740995"],
     );
 }
