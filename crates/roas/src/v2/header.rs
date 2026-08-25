@@ -262,11 +262,15 @@ impl ValidateWithContext<Spec> for StringHeader {
 }
 
 impl ValidateWithContext<Spec> for IntegerHeader {
-    fn validate_with_context(&self, _ctx: &mut Context<Spec>, _path: String) {}
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
+    }
 }
 
 impl ValidateWithContext<Spec> for NumberHeader {
-    fn validate_with_context(&self, _ctx: &mut Context<Spec>, _path: String) {}
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
+    }
 }
 
 impl ValidateWithContext<Spec> for BooleanHeader {

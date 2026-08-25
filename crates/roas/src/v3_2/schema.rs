@@ -1345,11 +1345,7 @@ impl ValidateWithContext<Spec> for IntegerSchema {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
         // Spec: multipleOf MUST be > 0 (JSON Schema 2020-12 §6.2.1).
-        if let Some(m) = &self.multiple_of
-            && !crate::common::helpers::is_positive(m)
-        {
-            ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
-        }
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path.clone());
     }
 }
 
@@ -1361,11 +1357,7 @@ impl ValidateWithContext<Spec> for NumberSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
-        if let Some(m) = &self.multiple_of
-            && !crate::common::helpers::is_positive(m)
-        {
-            ctx.error(path.clone(), format_args!("`multipleOf` ({m}) must be > 0"));
-        }
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path.clone());
     }
 }
 

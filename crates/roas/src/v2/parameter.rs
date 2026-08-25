@@ -643,12 +643,14 @@ impl ValidateWithContext<Spec> for StringParameter {
 impl ValidateWithContext<Spec> for IntegerParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
 }
 
 impl ValidateWithContext<Spec> for NumberParameter {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         validate_required_string(&self.name, ctx, format!("{path}.name"));
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path);
     }
 }
 

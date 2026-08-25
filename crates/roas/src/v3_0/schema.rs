@@ -1099,6 +1099,7 @@ impl ValidateWithContext<Spec> for IntegerSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path.clone());
     }
 }
 
@@ -1110,6 +1111,7 @@ impl ValidateWithContext<Spec> for NumberSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path.clone());
     }
 }
 
@@ -1968,5 +1970,54 @@ mod tests {
         let mut ctx = Context::new(&spec, crate::validation::Options::new());
         parsed.validate_with_context(&mut ctx, "s".into());
         assert!(ctx.errors.is_empty(), "unexpected errors: {:?}", ctx.errors);
+    }
+}
+
+#[cfg(test)]
+mod multiple_of_validation_tests {
+    use super::{IntegerSchema, NumberSchema};
+    use crate::validation::{Context, Options, ValidateWithContext};
+
+    /// v3.0's own schema requires `multipleOf` to be above zero
+    /// (`{"minimum": 0, "exclusiveMinimum": true}`), which it inherits
+    /// from JSON Schema draft-04.
+    fn errors_for(schema: &impl ValidateWithContext<crate::v3_0::spec::Spec>) -> Vec<String> {
+        let spec = crate::v3_0::spec::Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        schema.validate_with_context(&mut ctx, "s".to_owned());
+        ctx.errors.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_zero_or_negative_multiple_of_is_rejected() {
+        for step in [0, -1] {
+            let integer = IntegerSchema {
+                multiple_of: Some(step.into()),
+                ..Default::default()
+            };
+            assert!(
+                errors_for(&integer)
+                    .iter()
+                    .any(|e| e.contains("multipleOf")),
+                "integer multipleOf {step}",
+            );
+            let number = NumberSchema {
+                multiple_of: Some(step.into()),
+                ..Default::default()
+            };
+            assert!(
+                errors_for(&number).iter().any(|e| e.contains("multipleOf")),
+                "number multipleOf {step}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_positive_multiple_of_is_accepted() {
+        let integer = IntegerSchema {
+            multiple_of: Some(2.into()),
+            ..Default::default()
+        };
+        assert!(errors_for(&integer).is_empty());
     }
 }

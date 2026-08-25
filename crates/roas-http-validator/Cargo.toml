@@ -1,6 +1,6 @@
 [package]
 name = "roas-http-validator"
-version = "0.2.0"
+version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -38,7 +38,7 @@ salvo = ["dep:salvo_core"]
 rocket = ["dep:rocket"]
 
 [dependencies]
-roas = { version = ">=0.18", path = "../roas", features = ["v3_2"] }
+roas = { version = "0.18", path = "../roas", features = ["v3_2"] }
 percent-encoding.workspace = true
 regex.workspace = true
 serde_json.workspace = true
