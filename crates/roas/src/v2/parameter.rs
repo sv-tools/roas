@@ -584,18 +584,22 @@ impl ValidateWithContext<Spec> for InPath {
     fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
         match self {
             InPath::String(p) => {
+                p.validate_with_context(ctx, path.clone());
                 must_be_required(&p.required, ctx, path.clone(), p.name.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
             }
             InPath::Integer(p) => {
+                p.validate_with_context(ctx, path.clone());
                 must_be_required(&p.required, ctx, path.clone(), p.name.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
             }
             InPath::Number(p) => {
+                p.validate_with_context(ctx, path.clone());
                 must_be_required(&p.required, ctx, path.clone(), p.name.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
             }
             InPath::Boolean(p) => {
+                p.validate_with_context(ctx, path.clone());
                 must_be_required(&p.required, ctx, path.clone(), p.name.clone());
                 must_not_allow_empty_value(&p.allow_empty_value, ctx, path.clone(), p.name.clone());
             }
@@ -1192,5 +1196,68 @@ mod tests {
             "errors: {:?}",
             c.errors
         );
+    }
+}
+
+#[cfg(test)]
+mod in_path_delegation_tests {
+    use super::{InPath, IntegerParameter, NumberParameter, StringParameter};
+    use crate::validation::{Context, Options, ValidateWithContext};
+
+    fn errors_for(parameter: &InPath) -> Vec<String> {
+        let spec = crate::v2::spec::Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        parameter.validate_with_context(&mut ctx, "s".to_owned());
+        ctx.errors.iter().map(ToString::to_string).collect()
+    }
+
+    /// `InPath`'s scalar branches used to check `required` and
+    /// `allowEmptyValue` and stop there, so everything the parameter's
+    /// own validator does — `multipleOf` included — went unrun. Only
+    /// `InPath::Array` delegated.
+    #[test]
+    fn a_path_parameters_own_validator_runs() {
+        let integer = InPath::Integer(IntegerParameter {
+            name: "id".to_owned(),
+            required: Some(true),
+            multiple_of: Some(0.into()),
+            ..Default::default()
+        });
+        let found = errors_for(&integer);
+        assert!(found.iter().any(|e| e.contains("multipleOf")), "{found:?}");
+
+        let number = InPath::Number(NumberParameter {
+            name: "ratio".to_owned(),
+            required: Some(true),
+            multiple_of: Some((-1).into()),
+            ..Default::default()
+        });
+        let found = errors_for(&number);
+        assert!(found.iter().any(|e| e.contains("multipleOf")), "{found:?}");
+    }
+
+    #[test]
+    fn a_nameless_path_parameter_is_reported_too() {
+        // The same delegation carries the `name` check, which was being
+        // skipped for exactly the same reason.
+        let unnamed = InPath::String(StringParameter {
+            name: String::new(),
+            required: Some(true),
+            ..Default::default()
+        });
+        let found = errors_for(&unnamed);
+        assert!(found.iter().any(|e| e.contains("name")), "{found:?}");
+    }
+
+    #[test]
+    fn a_sound_path_parameter_passes() {
+        let integer = InPath::Integer(IntegerParameter {
+            name: "id".to_owned(),
+            required: Some(true),
+            multiple_of: Some(2.into()),
+            ..Default::default()
+        });
+        let found = errors_for(&integer);
+        assert!(found.is_empty(), "{found:?}");
     }
 }
