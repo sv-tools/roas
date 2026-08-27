@@ -160,9 +160,25 @@ let validator = Validator::from_v2(swagger, Options::new());
 # fn main() {}
 ```
 
+## Media types it does not read itself
+
+JSON, `application/x-www-form-urlencoded` and `text/*` are built in. Anything else — `multipart/form-data`, XML, whatever your service actually speaks — is reported as unchecked rather than guessed at, and `Options::decoder` is the way in:
+
+```rust
+# use roas_http_validator::Options;
+let options = Options::new().decoder("application/xml", |bytes, _media_type| {
+    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "raw": text }))  // whatever mapping your clients use
+});
+```
+
+The bytes become a value and the Schema Object judges it like any other, JSON Pointers and all. Lookup follows Media Type Object precedence — exact, then `type/*`, then `*/*` — and a registration beats the built-in for the same media type.
+
+These two are a hook rather than more built-ins on purpose, for reasons that differ by format. **Multipart** would mean owning a boundary parser and buffering file uploads, which is precisely where this crate's "the caller decides what to buffer" posture earns its keep. **XML** has no specified mapping onto a JSON Schema instance at all — OpenAPI's XML Object is serialization metadata for code generators, so any translation is a choice and implementations make different ones. Taking yours beats inventing one and reporting violations against it.
+
 ## What it does not check yet
 
-Response validation, security requirements, `multipart/form-data` bodies, and XML. Anything a check could not judge is reported as `ErrorKind::Unsupported` rather than passed over, so a request never looks valid because nothing looked at it.
+Response validation and security requirements. Anything a check could not judge is reported as `ErrorKind::Unsupported` rather than passed over, so a request never looks valid because nothing looked at it.
 
 ## License
 

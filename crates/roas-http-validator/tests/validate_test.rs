@@ -1670,3 +1670,141 @@ fn a_decimal_parameter_keeps_its_digits() {
         ["query parameter \"price\": cannot be read: \"cheap\" is not a number"],
     );
 }
+
+// ── decoders for media types the crate does not read itself ──────────
+
+/// The same body schema, plus one registered decoder.
+fn body_schema_with(schema: serde_json::Value, options: Options) -> Validator {
+    let spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/x": { "post": { "requestBody": { "content": {
+            "application/xml": { "schema": schema.clone() },
+            "multipart/form-data": { "schema": schema.clone() },
+            "text/csv": { "schema": schema },
+        } } } } },
+    }))
+    .expect("the description must parse");
+    Validator::with_options(spec, options)
+}
+
+fn posted_as(media_type: &'static str, body: &'static [u8]) -> RequestView<'static> {
+    RequestView::new("POST", "/x")
+        .with_header("content-type", media_type)
+        .with_body(body)
+}
+
+#[test]
+fn an_unreadable_media_type_is_reported_when_no_decoder_is_given() {
+    let validator = body_schema_with(json!({ "type": "object" }), Options::new());
+    let found = errors(&validator, &posted_as("application/xml", b"<pet/>"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+}
+
+#[test]
+fn a_decoder_lets_the_schema_judge_a_body_the_crate_cannot_read() {
+    // A stand-in for whatever XML mapping a caller's clients use — the
+    // point is that the choice is theirs, not this crate's.
+    let options = Options::new().decoder("application/xml", |bytes, _media_type| {
+        let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+        let name = text
+            .strip_prefix("<pet><name>")
+            .and_then(|rest| rest.strip_suffix("</name></pet>"))
+            .ok_or_else(|| "not a <pet>".to_owned())?;
+        Ok(json!({ "name": name }))
+    });
+    let validator = body_schema_with(
+        json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": { "name": { "type": "string", "minLength": 2 } }
+        }),
+        options,
+    );
+
+    assert!(
+        errors(
+            &validator,
+            &posted_as("application/xml", b"<pet><name>Rex</name></pet>")
+        )
+        .is_empty()
+    );
+
+    // The decoded value is judged like any other, pointer and all.
+    assert_eq!(
+        errors(
+            &validator,
+            &posted_as("application/xml", b"<pet><name>R</name></pet>")
+        ),
+        ["body at /name: is shorter than minLength 2 (1 characters)"],
+    );
+
+    // And a decoder that cannot read the bytes reports why.
+    assert_eq!(
+        errors(&validator, &posted_as("application/xml", b"<dog/>")),
+        ["body: cannot be read: not a <pet>"],
+    );
+}
+
+#[test]
+fn a_decoder_can_handle_multipart_without_this_crate_owning_a_parser() {
+    // Deliberately crude: real multipart is the caller's business, and
+    // this is what "the caller's business" looks like from here.
+    let options = Options::new().decoder("multipart/form-data", |bytes, _media_type| {
+        let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+        let mut parts = serde_json::Map::new();
+        for part in text.split("--boundary").filter(|part| part.contains('=')) {
+            if let Some((name, value)) = part.trim().split_once('=') {
+                parts.insert(name.to_owned(), value.into());
+            }
+        }
+        Ok(serde_json::Value::Object(parts))
+    });
+    let validator = body_schema_with(
+        json!({
+            "type": "object",
+            "required": ["title"],
+            "properties": { "title": { "type": "string" } }
+        }),
+        options,
+    );
+
+    assert!(
+        errors(
+            &validator,
+            &posted_as(
+                "multipart/form-data; boundary=boundary",
+                b"--boundary\ntitle=hello\n"
+            )
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        errors(
+            &validator,
+            &posted_as(
+                "multipart/form-data; boundary=boundary",
+                b"--boundary\nother=hello\n"
+            )
+        ),
+        ["body at /title: is required and was not sent"],
+    );
+}
+
+#[test]
+fn a_decoder_is_reached_through_a_range_too() {
+    let options = Options::new().decoder("text/*", |bytes, media_type| {
+        Ok(json!({ "read_as": media_type, "length": bytes.len() }))
+    });
+    let validator = body_schema_with(
+        json!({
+            "type": "object",
+            "properties": { "read_as": { "type": "string", "enum": ["text/csv"] } }
+        }),
+        options,
+    );
+    // `text/*` would otherwise have been read by the built-in text
+    // decoder as a plain string; the registration takes precedence.
+    assert!(errors(&validator, &posted_as("text/csv", b"a,b\n")).is_empty());
+}

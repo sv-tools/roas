@@ -19,6 +19,7 @@ use roas::v3_2::schema::{Schema, SingleSchema};
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
 
+use crate::decoder::Decoders;
 use crate::parameter::is_json;
 use crate::report::{ErrorKind, Location, ValidationError};
 use crate::request::RequestView;
@@ -29,6 +30,7 @@ pub(crate) fn validate(
     request_body: &RequestBody,
     request: &RequestView<'_>,
     spec: &Spec,
+    decoders: &Decoders,
     errors: &mut Vec<ValidationError>,
 ) {
     let mut push = |pointer: String, kind: ErrorKind| {
@@ -84,7 +86,14 @@ pub(crate) fn validate(
         return;
     };
 
-    let value = match decode(bytes, &media_type, declared, entry.encoding.as_ref(), spec) {
+    let value = match decode(
+        bytes,
+        &media_type,
+        declared,
+        entry.encoding.as_ref(),
+        spec,
+        decoders,
+    ) {
         Ok(value) => value,
         Err(Decoded::Malformed(why)) => {
             push(String::new(), ErrorKind::Malformed(why));
@@ -157,7 +166,15 @@ pub(crate) fn decode(
     declared: &RefOr<Schema>,
     encoding: Option<&BTreeMap<String, Encoding>>,
     spec: &Spec,
+    decoders: &Decoders,
 ) -> Result<Value, Decoded> {
+    // A registered decoder comes first, so a caller who asked for one
+    // gets it — including for a media type this crate would otherwise
+    // have read itself.
+    if let Some(decoder) = decoders.find(media_type) {
+        return decoder(bytes, media_type).map_err(Decoded::Malformed);
+    }
+
     if is_json(media_type) {
         return serde_json::from_slice(bytes)
             .map_err(|error| Decoded::Malformed(format!("invalid JSON: {error}")));

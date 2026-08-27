@@ -31,6 +31,7 @@ use serde_json::Value;
 
 use crate::body;
 use crate::decimal::Decimal;
+use crate::decoder::Decoders;
 use crate::report::{ErrorKind, Location, ValidationError};
 use crate::request::{RequestView, decode_form, decode_path_segment, split_query};
 use crate::schema;
@@ -167,6 +168,7 @@ pub(crate) fn validate(
     request: &RequestView<'_>,
     extracted: &Extracted<'_>,
     spec: &Spec,
+    decoders: &Decoders,
     errors: &mut Vec<ValidationError>,
 ) {
     let described = Described::of(parameter);
@@ -187,7 +189,7 @@ pub(crate) fn validate(
             }
             return;
         };
-        validate_as_content(&raw, content, spec, &mut push);
+        validate_as_content(&raw, content, spec, decoders, &mut push);
         return;
     }
 
@@ -223,6 +225,7 @@ fn validate_as_content(
     raw: &str,
     content: &BTreeMap<String, RefOr<MediaType>>,
     spec: &Spec,
+    decoders: &Decoders,
     push: &mut impl FnMut(String, ErrorKind),
 ) {
     // The specification requires exactly one entry here.
@@ -248,6 +251,7 @@ fn validate_as_content(
         declared,
         entry.encoding.as_ref(),
         spec,
+        decoders,
     ) {
         Ok(value) => value,
         Err(body::Decoded::Malformed(why)) => {
