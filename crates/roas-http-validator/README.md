@@ -131,11 +131,19 @@ A parameter whose schema this crate cannot read structurally — a composition, 
 
 "Wrong" includes "could not be judged". A subschema that cannot be applied — a `pattern` that will not compile, a number whose digits floating point already lost — yields no verdict rather than a failing one, and `not`, `anyOf` and `oneOf` all carry that third state instead of reading it as a mismatch. Otherwise `{ "not": { "pattern": "(" } }` would accept anything at all, on the strength of a check that never ran. The logic is properly three-valued, so a constraint the value *definitely* broke still settles the schema: `minLength: 2` rejects `"x"` whether or not the `pattern` beside it compiles.
 
-Numbers are compared exactly wherever they fit an `i128`, and a number is called an **integer** only when it can be proven to be one — that is, when `serde_json` parsed it as one. A value that arrived as a float and merely *looks* whole is reported as unchecked instead: `1.0000000000000001` is stored as `1.0`, and a fraction can round away at any magnitude, so no threshold can stand in for the lexeme. `multipleOf` gets stricter treatment than the rest, because it is the one keyword a rounding error flips outright: every other numeric keyword is an inequality with slack either side, while divisibility is true on a set of measure zero. An operand whose written form is gone therefore stands for the range between its neighbours rather than for itself. A step written as an *integer* still is one — `roas` keeps `multipleOf` as a `serde_json::Number` — so `multipleOf: 2` decides `4` and `5` exactly, at any magnitude. A step written `1.5`, or `1.0000000000000001` which is the same `f64` as `1`, is only ever disprovable.
+Numbers are compared as the decimals they were written as. `serde_json` is built here with `arbitrary_precision`, so a parsed number keeps its literal, and every numeric keyword is integer arithmetic on `mantissa × 10^scale` rather than a judgement about what an `f64` made of it:
 
-A number that lost digits is treated as the **interval** it stands for rather than the point it happens to hold, so a comparison is `Less`, `Equal`, `Greater` or *unknown*. That cuts both ways: `maximum: 9007199254740993` is stored as `…992`, and a request carrying `…993` is neither accepted nor rejected against it, where comparing the stored values would have produced a confident and wrong violation. Below 2^52 the ecosystem's ordinary floating-point behaviour is kept — everyone compares `0.1` with the `f64` nearest `0.1`.
+| written | the double says | the literal says |
+|---|---|---|
+| `1.0` against `type: integer` | might have had a fraction | it is an integer |
+| `1.0000000000000001` against `type: integer` | same value as `1.0` | it is not |
+| `9007199254740993` against `maximum: 9007199254740992` | equal | above it |
+| `0.3` against `multipleOf: 0.1` | `2.9999999999999996`, unprovable | a multiple |
+| `1.23` against `multipleOf: 0.01` | unprovable | a multiple |
 
-Full decimal exactness would need `serde_json`'s `arbitrary_precision`, which is a workspace-wide choice rather than this crate's. Without it, the crate's position is narrow and stated: it decides what a double can decide, and reports everything else rather than guessing in either direction.
+Parameters go the same way — a query value is parsed as a decimal rather than through an `f64` — so `?n=9007199254740993` is that number and not the nearest double.
+
+What is left unchecked is only what will not fit: a literal past `i128`'s range is reported rather than approximated. One gap remains on the schema side, and it is `roas`'s rather than this crate's — `NumberSchema`'s bounds and both `enum` lists are still modelled as `f64`, so a `maximum: 9007199254740993` on a `type: number` schema loses its literal before it arrives. `IntegerSchema`'s bounds and every `multipleOf` are `serde_json::Number` and keep theirs.
 
 ## Versions
 

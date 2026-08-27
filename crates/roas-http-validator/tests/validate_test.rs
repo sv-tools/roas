@@ -1173,63 +1173,23 @@ fn a_malformed_deep_object_name_is_reported_rather_than_ignored() {
     );
 }
 
-#[test]
-fn an_integer_enum_is_compared_by_value_not_by_representation() {
-    let validator = validator(json!({
-        "/x": { "post": { "requestBody": { "content": {
-            "application/json": { "schema": {
-                "type": "object",
-                "properties": { "n": { "type": "integer", "enum": [9_007_199_254_740_994_i64] } }
-            } }
-        } } } }
-    }));
-    let matching = RequestView::new("POST", "/x")
-        .with_header("content-type", "application/json")
-        .with_body(br#"{"n":9007199254740994}"#.as_slice());
-    assert!(errors(&validator, &matching).is_empty());
-
-    // Written with an exponent, the same value reaches `serde_json` as
-    // an `f64` — indistinguishable from `9007199254740993.5`. It is not
-    // rejected and it is not accepted: it is reported as unchecked.
-    let exponent = RequestView::new("POST", "/x")
-        .with_header("content-type", "application/json")
-        .with_body(br#"{"n":9.007199254740994e15}"#.as_slice());
-    let found = errors(&validator, &exponent);
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(
-        found[0].starts_with("body at /n: was NOT checked"),
-        "{found:?}"
-    );
-}
-
-#[test]
-fn a_bound_whose_digits_were_lost_reports_that_it_could_not_check() {
-    // `serde_json` parses 9007199254740993.5 as 9007199254740994.0 long
-    // before this crate sees it, so the tie cannot be settled — and an
-    // unsettled tie must not read as valid.
-    let validator = validator(json!({
-        "/x": { "post": { "requestBody": { "content": {
-            "application/json": { "schema": {
-                "type": "object",
-                "properties": { "n": { "type": "integer", "maximum": 9_007_199_254_740_993.5_f64 } }
-            } }
-        } } } }
-    }));
-    let request = RequestView::new("POST", "/x")
-        .with_header("content-type", "application/json")
-        .with_body(br#"{"n":9007199254740994}"#.as_slice());
-    let found = errors(&validator, &request);
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-
-    // A value clear of the boundary is still decided normally.
-    let clear = RequestView::new("POST", "/x")
-        .with_header("content-type", "application/json")
-        .with_body(br#"{"n":1}"#.as_slice());
-    assert!(errors(&validator, &clear).is_empty());
-}
-
 // ── the review of f28be6c ────────────────────────────────────────────
+
+/// A body validated against a schema written as JSON *text*.
+///
+/// `json!` with an `f64` literal rounds the number before `serde_json`
+/// ever sees one, so a schema built that way cannot carry
+/// `9007199254740993.5` no matter what the crate does with it. Text
+/// keeps the literal, which is the whole point of the exercise.
+fn body_schema_text(schema: &str) -> Validator {
+    let spec = serde_json::from_str(&format!(
+        r#"{{"openapi":"3.2.0","info":{{"title":"t","version":"1"}},
+            "paths":{{"/x":{{"post":{{"requestBody":{{"content":{{
+              "application/json":{{"schema":{schema}}}}}}}}}}}}}}}"#
+    ))
+    .expect("the description must parse");
+    Validator::new(spec)
+}
 
 /// A body validated against one inline schema.
 fn body_schema(schema: serde_json::Value) -> Validator {
@@ -1305,36 +1265,6 @@ fn a_one_of_with_an_unapplied_branch_cannot_count_its_matches() {
 }
 
 #[test]
-fn a_number_past_the_exact_range_is_not_declared_an_integer() {
-    let validator = body_schema(json!({ "type": "integer" }));
-    // `9007199254740993.5` and `9007199254740994` are the same `f64`,
-    // so "has no fractional part" cannot be established of either.
-    let found = errors(&validator, &posted(b"9007199254740993.5"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-
-    // A plain integer literal is parsed exactly and decided normally.
-    assert!(errors(&validator, &posted(b"9007199254740994")).is_empty());
-    // And a small fractional value is still simply the wrong type.
-    assert_eq!(
-        errors(&validator, &posted(b"1.5")),
-        ["body: expected integer, got number"],
-    );
-}
-
-#[test]
-fn a_multi_typed_schema_inherits_the_same_caution() {
-    let integer_only = body_schema(json!({ "type": ["integer", "null"] }));
-    let found = errors(&integer_only, &posted(b"9007199254740993.5"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-
-    // `number` accepts it outright, so nothing is in doubt.
-    let with_number = body_schema(json!({ "type": ["integer", "number"] }));
-    assert!(errors(&with_number, &posted(b"9007199254740993.5")).is_empty());
-}
-
-#[test]
 fn an_unchecked_error_still_says_where_in_the_body_it_happened() {
     let validator = body_schema(json!({
         "type": "object",
@@ -1398,50 +1328,6 @@ fn a_path_item_reference_that_cannot_be_followed_is_reported() {
 }
 
 // ── the review of 7ce9d3d ────────────────────────────────────────────
-
-#[test]
-fn a_number_bound_past_the_exact_range_is_not_silently_applied() {
-    // `maximum: 9007199254740993.5` reaches this crate as
-    // `9007199254740994.0`, so a value that lands on it cannot be
-    // decided — `type: number` gets the same caution as `type: integer`.
-    let validator =
-        body_schema(json!({ "type": "number", "maximum": 9_007_199_254_740_993.5_f64 }));
-    let found = errors(&validator, &posted(b"9007199254740994"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-
-    // Clear of the boundary, it is decided as usual, both ways.
-    assert!(errors(&validator, &posted(b"1.5")).is_empty());
-    assert_eq!(
-        errors(&validator, &posted(b"1e300")).len(),
-        1,
-        "a value far above the maximum is still a plain failure",
-    );
-}
-
-#[test]
-fn ordinary_decimal_bounds_are_left_alone() {
-    // Below 2^53 the usual floating-point caveats apply and are not
-    // worth flagging: every implementation compares `0.1` with the
-    // `f64` nearest `0.1`.
-    let validator = body_schema(json!({ "type": "number", "maximum": 0.1, "minimum": 0.1 }));
-    assert!(errors(&validator, &posted(b"0.1")).is_empty());
-}
-
-#[test]
-fn a_number_enum_past_the_exact_range_reports_rather_than_guesses() {
-    let validator = body_schema(json!({
-        "type": "number",
-        "enum": [9_007_199_254_740_994.0_f64]
-    }));
-    let found = errors(&validator, &posted(b"9007199254740994"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-
-    // Two numbers that differ as floats differed as written, so a
-    // definite mismatch is still definite.
-    assert_eq!(errors(&validator, &posted(b"1")).len(), 1);
-}
 
 #[test]
 fn a_definite_failure_settles_a_schema_whatever_else_could_not_be_applied() {
@@ -1517,228 +1403,15 @@ fn an_unreadable_path_item_does_not_claim_a_method_is_unavailable() {
 
 // ── the review of d3b7d97 ────────────────────────────────────────────
 
-#[test]
-fn a_fraction_that_rounded_into_a_whole_number_is_not_called_an_integer() {
-    // `9007199254740991.5` is stored as `9007199254740992.0`: from 2^52
-    // up, consecutive floats are 1 apart, so the `.5` is gone. It looks
-    // whole and never was.
-    let validator = body_schema(json!({ "type": "integer" }));
-    let found = errors(&validator, &posted(b"9007199254740991.5"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-
-    // An integer `serde_json` kept as an integer is exact at any
-    // magnitude, and still decided normally.
-    assert!(errors(&validator, &posted(b"9007199254740992")).is_empty());
-    assert!(errors(&validator, &posted(b"9007199254740993")).is_empty());
-}
-
-#[test]
-fn a_bound_that_rounded_into_a_whole_number_cannot_settle_a_tie() {
-    let validator = body_schema(json!({
-        "type": "integer",
-        "maximum": 4_503_599_627_370_496.5_f64
-    }));
-    // The bound is stored as 4503599627370496.0, so a value that lands
-    // on it is the undecidable case: it is below the maximum as
-    // written, and equal to it as stored.
-    let found = errors(&validator, &posted(b"4503599627370496"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("was NOT checked"), "{found:?}");
-
-    // The guard stays narrow — anything not on the tie is still
-    // decided, in both directions.
-    assert!(errors(&validator, &posted(b"1")).is_empty());
-    assert_eq!(
-        errors(&validator, &posted(b"4503599627370497")),
-        ["body: 4503599627370497 is above maximum 4503599627370496"],
-    );
-}
-
 // ── the review of b5c686f ────────────────────────────────────────────
 
-#[test]
-fn a_small_fraction_that_rounded_away_is_not_called_an_integer_either() {
-    // A fraction can round away at *any* magnitude — `1.0000000000000001`
-    // is `1.0` — which is why the rule cannot be a magnitude cutoff.
-    // Nothing distinguishes such a value from one written `1.0`, or from
-    // one written `1`, except the lexeme, and that is gone.
-    let validator = body_schema(json!({ "type": "integer" }));
-    for spelling in [b"1.0000000000000001".as_slice(), b"1.0".as_slice()] {
-        let found = errors(&validator, &posted(spelling));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(
-            found[0].contains("could NOT be established"),
-            "{}: {found:?}",
-            String::from_utf8_lossy(spelling),
-        );
-    }
-    // An integer that was written as one is still simply an integer.
-    assert!(errors(&validator, &posted(b"2251799813685248")).is_empty());
-
-    // And a fraction `serde_json` did keep is still a definite type
-    // failure rather than an undecidable one.
-    assert_eq!(
-        errors(&validator, &posted(b"2251799813685248.25")),
-        ["body: expected integer, got number"],
-    );
-}
-
 // ── the review of 22f5b8b ────────────────────────────────────────────
-
-#[test]
-fn an_enum_member_that_lost_digits_does_not_produce_a_false_violation() {
-    // `roas` holds a `number` enum as `f64`, so `9007199254740993`
-    // arrives here as `9007199254740992`. The request value is exact
-    // and unequal to it — but the two could have been the same number,
-    // so a rejection would be a claim this crate cannot make.
-    let validator = body_schema(json!({
-        "type": "number",
-        "enum": [9_007_199_254_740_993_i64]
-    }));
-    let found = errors(&validator, &posted(b"9007199254740993"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
-
-    // A number outside that uncertainty is still a definite mismatch.
-    assert_eq!(
-        errors(&validator, &posted(b"1")),
-        ["body: 1 is not one of: 9007199254740992"],
-    );
-}
-
-#[test]
-fn a_bound_that_lost_digits_does_not_produce_a_false_violation_either() {
-    let validator = body_schema(json!({
-        "type": "number",
-        "maximum": 9_007_199_254_740_993_i64
-    }));
-    // Inside the stored bound's uncertainty: unknowable, not a failure.
-    let found = errors(&validator, &posted(b"9007199254740993"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
-
-    // Clear of it in either direction, the answer is definite.
-    assert!(errors(&validator, &posted(b"1")).is_empty());
-    assert_eq!(
-        errors(&validator, &posted(b"1e300")).len(),
-        1,
-        "a value far above the maximum is a plain failure",
-    );
-}
-
-#[test]
-fn exact_integers_are_still_decided_exactly_on_both_sides() {
-    // The guard is about numbers that lost digits, not about size:
-    // `integer` bounds come through `serde_json::Number`, which keeps
-    // integers as integers, so these stay definite.
-    let validator = body_schema(json!({
-        "type": "integer",
-        "minimum": 9_007_199_254_740_993_i64,
-        "maximum": 9_007_199_254_740_995_i64
-    }));
-    assert!(errors(&validator, &posted(b"9007199254740994")).is_empty());
-    assert_eq!(
-        errors(&validator, &posted(b"9007199254740992")),
-        ["body: 9007199254740992 is below minimum 9007199254740993"],
-    );
-    assert_eq!(
-        errors(&validator, &posted(b"9007199254740996")),
-        ["body: 9007199254740996 is above maximum 9007199254740995"],
-    );
-}
 
 // ── the review of 6de60cd ────────────────────────────────────────────
 
 // ── the review of 0586160 ────────────────────────────────────────────
 
-#[test]
-fn a_step_that_lost_its_written_form_cannot_prove_a_multiple() {
-    // `multipleOf: 1.0000000000000001` is stored as `1.0`, and `1` is a
-    // multiple of `1.0` but not of what was written. The step stands for
-    // every decimal that rounds to it, so a value that looks like a
-    // multiple is reported rather than accepted.
-    let validator =
-        body_schema(json!({ "type": "integer", "multipleOf": 1.000_000_000_000_000_1_f64 }));
-    let found = errors(&validator, &posted(b"1"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
-
-    // Nothing in that range divides 3 either way but two — and two is
-    // not in it — so this one is definite.
-    let halves = body_schema(json!({ "type": "number", "multipleOf": 2 }));
-    assert_eq!(
-        errors(&halves, &posted(b"5")),
-        ["body: 5 is not a multiple of 2"],
-    );
-}
-
-#[test]
-fn a_value_that_lost_its_written_form_cannot_be_a_proven_multiple_either() {
-    // `2.5000000000000001` is stored as `2.5`, which is a multiple of
-    // `0.5` — but the number written was not.
-    let validator = body_schema(json!({ "type": "number", "multipleOf": 0.5 }));
-    let found = errors(&validator, &posted(b"2.5000000000000001"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
-
-    // A value no candidate step divides is still definitely wrong.
-    assert_eq!(
-        errors(&validator, &posted(b"2.25")),
-        ["body: 2.25 is not a multiple of 0.5"],
-    );
-}
-
-#[test]
-fn zero_is_a_multiple_of_whatever_the_step_turns_out_to_have_been() {
-    let validator = body_schema(json!({ "type": "integer", "multipleOf": 1.5 }));
-    assert!(errors(&validator, &posted(b"0")).is_empty());
-}
-
-#[test]
-fn a_caller_can_tell_a_violation_from_something_that_was_not_checked() {
-    // Both kinds in one report: `limit` is definitely too large, and
-    // divisibility against a step whose written form is gone is not
-    // knowable. (An *integer* step would be — see the test below.)
-    let validator = validator(json!({
-        "/x": { "get": { "parameters": [
-            { "name": "limit", "in": "query",
-              "schema": { "type": "integer", "maximum": 10, "multipleOf": 2.5 } }
-        ] } }
-    }));
-    let report = validator
-        .validate(&RequestView::new("GET", "/x").with_query("limit=100"))
-        .expect("the description describes GET /x");
-
-    assert!(!report.is_valid());
-    assert_eq!(report.violations().count(), 1);
-    assert_eq!(report.unchecked().count(), 1);
-    assert!(
-        report.violations().all(|error| !error.kind.is_unchecked()),
-        "{report}",
-    );
-}
-
 // ── the review of 77b89d6 ────────────────────────────────────────────
-
-#[test]
-fn only_a_provable_zero_is_a_multiple_of_everything() {
-    let validator = body_schema(json!({ "type": "number", "multipleOf": 2 }));
-    // Written as an integer, so it is provably zero.
-    assert!(errors(&validator, &posted(b"0")).is_empty());
-
-    // `1e-324` underflows to `0.0` — it is not zero, and it is not a
-    // multiple of two.
-    for spelling in [b"1e-324".as_slice(), b"0.0".as_slice()] {
-        let found = errors(&validator, &posted(spelling));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(
-            found[0].contains("could NOT be established"),
-            "{}: {found:?}",
-            String::from_utf8_lossy(spelling),
-        );
-    }
-}
 
 #[test]
 fn an_unresolvable_reference_is_not_the_requests_fault() {
@@ -1759,11 +1432,108 @@ fn an_unresolvable_reference_is_not_the_requests_fault() {
 
 // ── an integer `multipleOf` is exact again ───────────────────────────
 
+// ── exact decimals ───────────────────────────────────────────────────
+//
+// `serde_json` is built with `arbitrary_precision`, so a number keeps
+// the literal it was written as and every question below has an answer
+// rather than a caveat.
+
 #[test]
-fn an_integer_step_is_decided_exactly_because_it_stayed_an_integer() {
-    // `roas` keeps `multipleOf` as a `serde_json::Number`, so a step
-    // written as an integer still is one — and divisibility against it
-    // has an exact answer rather than only a disprovable one.
+fn integer_ness_is_read_from_the_literal() {
+    let validator = body_schema(json!({ "type": "integer" }));
+
+    // Whole however it was spelled.
+    for spelling in [
+        b"1".as_slice(),
+        b"1.0".as_slice(),
+        b"100e-2".as_slice(),
+        b"2e3".as_slice(),
+    ] {
+        assert!(
+            errors(&validator, &posted(spelling)).is_empty(),
+            "{} is an integer",
+            String::from_utf8_lossy(spelling),
+        );
+    }
+
+    // And definitely not whole — including the fractions a double eats.
+    for spelling in [
+        b"1.5".as_slice(),
+        b"1.0000000000000001".as_slice(),
+        b"2251799813685248.25".as_slice(),
+        b"9007199254740991.5".as_slice(),
+    ] {
+        assert_eq!(
+            errors(&validator, &posted(spelling)),
+            ["body: expected integer, got number"],
+            "{} is not an integer",
+            String::from_utf8_lossy(spelling),
+        );
+    }
+}
+
+#[test]
+fn bounds_are_compared_exactly_past_what_a_double_holds() {
+    let validator = body_schema(json!({
+        "type": "integer",
+        "maximum": 9_007_199_254_740_992_i64
+    }));
+    assert!(errors(&validator, &posted(b"9007199254740992")).is_empty());
+    // The pair a double makes equal.
+    assert_eq!(
+        errors(&validator, &posted(b"9007199254740993")),
+        ["body: 9007199254740993 is above maximum 9007199254740992"],
+    );
+}
+
+#[test]
+fn a_fractional_bound_decides_the_value_that_used_to_tie_with_it() {
+    // `maximum: 9007199254740993.5` and `9007199254740994` are one
+    // double; as decimals the value is plainly above the bound.
+    let validator = body_schema_text(r#"{"type":"integer","maximum":9007199254740993.5}"#);
+    assert!(errors(&validator, &posted(b"9007199254740993")).is_empty());
+    assert_eq!(errors(&validator, &posted(b"9007199254740994")).len(), 1);
+}
+
+#[test]
+fn an_enum_matches_by_value_rather_than_by_spelling() {
+    let validator = body_schema(json!({
+        "type": "integer",
+        "enum": [9_007_199_254_740_993_i64]
+    }));
+    for spelling in [
+        b"9007199254740993".as_slice(),
+        b"9007199254740993.0".as_slice(),
+    ] {
+        assert!(
+            errors(&validator, &posted(spelling)).is_empty(),
+            "{} is the member",
+            String::from_utf8_lossy(spelling),
+        );
+    }
+    // And the neighbour a double could not tell apart from it.
+    assert_eq!(errors(&validator, &posted(b"9007199254740992")).len(), 1);
+}
+
+#[test]
+fn divisibility_is_decided_for_decimal_steps() {
+    // The case no amount of floating point could settle: 0.3 / 0.1 is
+    // 2.9999999999999996 as doubles and exactly 3 as decimals.
+    let tenths = body_schema(json!({ "type": "number", "multipleOf": 0.1 }));
+    assert!(errors(&tenths, &posted(b"0.3")).is_empty());
+    assert_eq!(
+        errors(&tenths, &posted(b"0.35")),
+        ["body: 0.35 is not a multiple of 0.1"],
+    );
+
+    // Prices, which is what `multipleOf` is usually for.
+    let pennies = body_schema(json!({ "type": "number", "multipleOf": 0.01 }));
+    assert!(errors(&pennies, &posted(b"1.23")).is_empty());
+    assert_eq!(errors(&pennies, &posted(b"1.234")).len(), 1);
+}
+
+#[test]
+fn divisibility_is_decided_for_integer_steps_at_any_size() {
     let validator = body_schema(json!({ "type": "integer", "multipleOf": 2 }));
     assert!(errors(&validator, &posted(b"4")).is_empty());
     assert_eq!(
@@ -1771,22 +1541,132 @@ fn an_integer_step_is_decided_exactly_because_it_stayed_an_integer() {
         ["body: 5 is not a multiple of 2"],
     );
 
-    // Exact at any magnitude, since no float is involved on either side.
     let big = body_schema(json!({ "type": "integer", "multipleOf": 4_503_599_627_370_496_i64 }));
     assert!(errors(&big, &posted(b"9007199254740992")).is_empty());
-    assert_eq!(
-        errors(&big, &posted(b"9007199254740993")),
-        ["body: 9007199254740993 is not a multiple of 4503599627370496"],
-    );
+    assert_eq!(errors(&big, &posted(b"9007199254740993")).len(), 1);
+}
 
-    // A step written as a float is still only disprovable: `2.0` and
-    // `2.0000000000000001` are the same number by the time it arrives.
-    let float_step = body_schema(json!({ "type": "integer", "multipleOf": 2.0 }));
-    let found = errors(&float_step, &posted(b"4"));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("could NOT be established"), "{found:?}");
+#[test]
+fn a_step_written_with_extra_digits_is_no_longer_the_same_step() {
+    // `1.0000000000000001` and `1` are one double and two decimals.
+    let validator = body_schema_text(r#"{"type":"integer","multipleOf":1.0000000000000001}"#);
+    assert_eq!(errors(&validator, &posted(b"1")).len(), 1);
+
+    let plain = body_schema(json!({ "type": "integer", "multipleOf": 1 }));
+    assert!(errors(&plain, &posted(b"1")).is_empty());
+}
+
+#[test]
+fn a_quotient_that_would_have_rounded_is_decided_anyway() {
+    // 2814749767106564 / 1.25 is 2251799813685251.2, which a double
+    // stores as a whole number and calls divisible.
+    let validator = body_schema(json!({ "type": "integer", "multipleOf": 1.25 }));
     assert_eq!(
-        errors(&float_step, &posted(b"5")),
-        ["body: 5 is not a multiple of 2"],
+        errors(&validator, &posted(b"2814749767106564")),
+        ["body: 2814749767106564 is not a multiple of 1.25"],
+    );
+    assert!(errors(&validator, &posted(b"2814749767106565")).is_empty());
+}
+
+#[test]
+fn zero_is_a_multiple_of_anything_however_it_was_written() {
+    let validator = body_schema(json!({ "type": "number", "multipleOf": 1.5 }));
+    for spelling in [b"0".as_slice(), b"0.0".as_slice(), b"-0.0".as_slice()] {
+        assert!(
+            errors(&validator, &posted(spelling)).is_empty(),
+            "{} is zero",
+            String::from_utf8_lossy(spelling),
+        );
+    }
+    // And a number that merely underflows a double is not zero.
+    assert_eq!(errors(&validator, &posted(b"1e-324")).len(), 1);
+}
+
+#[test]
+fn a_literal_too_large_to_hold_is_reported_rather_than_approximated() {
+    // Past `i128`: the one thing left that cannot be decided, and it
+    // says so rather than guessing.
+    let validator = body_schema(json!({ "type": "integer", "maximum": 10 }));
+    let enormous: &[u8] = b"99999999999999999999999999999999999999999999";
+    let found = errors(&validator, &posted(enormous));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be checked"), "{found:?}");
+}
+
+#[test]
+fn a_caller_can_still_tell_a_violation_from_something_unchecked() {
+    // A `pattern` this crate's regex engine will not compile leaves the
+    // value unjudged, beside a bound that definitely failed.
+    let validator = body_schema(json!({
+        "type": "object",
+        "properties": {
+            "limit": { "type": "integer", "maximum": 10 },
+            "code": { "type": "string", "pattern": "(?=a)" }
+        }
+    }));
+    let report = validator
+        .validate(&posted(br#"{"limit":100,"code":"x"}"#))
+        .expect("the description describes POST /x");
+
+    assert!(!report.is_valid());
+    assert_eq!(report.violations().count(), 1, "{report}");
+    assert_eq!(report.unchecked().count(), 1, "{report}");
+}
+
+#[test]
+fn a_parameter_is_no_less_exact_than_a_body() {
+    // Query values are text, and used to reach the schema by way of an
+    // `f64`. `9007199254740993` is not representable as one.
+    let validator = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "n", "in": "query",
+              "schema": { "type": "integer", "maximum": 9_007_199_254_740_992_i64 } }
+        ] } }
+    }));
+    assert!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("n=9007199254740992")
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("n=9007199254740993")
+        ),
+        ["query parameter \"n\": 9007199254740993 is above maximum 9007199254740992"],
+    );
+}
+
+#[test]
+fn a_decimal_parameter_keeps_its_digits() {
+    let validator = validator(json!({
+        "/x": { "get": { "parameters": [
+            { "name": "price", "in": "query",
+              "schema": { "type": "number", "multipleOf": 0.01 } }
+        ] } }
+    }));
+    assert!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("price=1.23")
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("price=1.234")
+        ),
+        ["query parameter \"price\": 1.234 is not a multiple of 0.01"],
+    );
+    // And a value that is not a number at all is still refused.
+    assert_eq!(
+        errors(
+            &validator,
+            &RequestView::new("GET", "/x").with_query("price=cheap")
+        ),
+        ["query parameter \"price\": cannot be read: \"cheap\" is not a number"],
     );
 }

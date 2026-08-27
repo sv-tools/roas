@@ -78,11 +78,11 @@
 //! ## What it does not do yet
 //!
 //! Response validation, security requirements, `multipart/form-data`
-//! bodies, and XML — and exact decimal arithmetic, which would need
-//! `serde_json`'s `arbitrary_precision`: numbers are compared as the
-//! IEEE-754 doubles they arrive as, and anything that would over-claim
-//! on top of one is reported rather than assumed. Anything a check
-//! could not judge is reported — split out by
+//! bodies, and XML. Numbers *are* exact — `serde_json` is built with
+//! `arbitrary_precision`, so a number keeps the literal it was written
+//! as and every numeric keyword is decimal arithmetic rather than a
+//! judgement about a double. Anything a check could not judge is
+//! reported — split out by
 //! [`ValidationReport::unchecked`] from what the request definitely got
 //! wrong —
 //! [`ErrorKind::Unsupported`] for what is not implemented yet,
@@ -91,6 +91,7 @@
 //! never looks valid because nothing looked at it.
 
 mod body;
+mod decimal;
 mod method;
 mod parameter;
 mod paths;
