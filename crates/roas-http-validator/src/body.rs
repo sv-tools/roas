@@ -86,9 +86,15 @@ pub(crate) fn validate(
         return;
     };
 
+    // Matching uses the media type without its parameters; a decoder
+    // gets the header as it arrived, because the parameters are where
+    // `multipart/form-data`'s `boundary` lives and it cannot be parsed
+    // without one (RFC 7578 §4.1).
+    let sent_header = request.header("content-type").unwrap_or(&media_type);
     let value = match decode(
         bytes,
         &media_type,
+        sent_header,
         declared,
         entry.encoding.as_ref(),
         spec,
@@ -163,6 +169,7 @@ fn select<'c>(
 pub(crate) fn decode(
     bytes: &[u8],
     media_type: &str,
+    content_type: &str,
     declared: &RefOr<Schema>,
     encoding: Option<&BTreeMap<String, Encoding>>,
     spec: &Spec,
@@ -170,9 +177,10 @@ pub(crate) fn decode(
 ) -> Result<Value, Decoded> {
     // A registered decoder comes first, so a caller who asked for one
     // gets it — including for a media type this crate would otherwise
-    // have read itself.
+    // have read itself. It is handed `content_type`, parameters and
+    // all, since that is where a `boundary` or a `charset` lives.
     if let Some(decoder) = decoders.find(media_type) {
-        return decoder(bytes, media_type).map_err(Decoded::Malformed);
+        return decoder(bytes, content_type).map_err(Decoded::Malformed);
     }
 
     if is_json(media_type) {

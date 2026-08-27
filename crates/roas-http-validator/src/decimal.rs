@@ -78,26 +78,27 @@ impl Decimal {
         }
         let scale = exponent.checked_sub(i32::try_from(fraction.len()).ok()?)?;
 
-        Some(Self::new(
-            if negative { -mantissa } else { mantissa },
-            scale,
-        ))
+        Self::new(if negative { -mantissa } else { mantissa }, scale)
     }
 
     /// Normalized on the way in: trailing zeros move into the scale, so
     /// equal values are equal structs.
-    fn new(mut mantissa: i128, mut scale: i32) -> Self {
+    ///
+    /// `None` when normalizing would run the scale past `i32` — as
+    /// `10e2147483647` does, a literal JSON accepts and nothing here can
+    /// hold.
+    fn new(mut mantissa: i128, mut scale: i32) -> Option<Self> {
         if mantissa == 0 {
-            return Self {
+            return Some(Self {
                 mantissa: 0,
                 scale: 0,
-            };
+            });
         }
         while mantissa % 10 == 0 {
             mantissa /= 10;
-            scale += 1;
+            scale = scale.checked_add(1)?;
         }
-        Self { mantissa, scale }
+        Some(Self { mantissa, scale })
     }
 
     /// Whether this is a whole number.
@@ -161,7 +162,9 @@ impl Decimal {
                 step.mantissa,
             )
         } else {
-            let steps = u32::try_from(-shift).ok()?;
+            // `shift.unsigned_abs()` rather than `-shift`, which
+            // overflows for `i32::MIN` — reachable from `1e-2147483648`.
+            let steps = shift.unsigned_abs();
             if steps > MAX_DIGITS {
                 return None;
             }
@@ -315,6 +318,26 @@ mod tests {
         // 40 digits: past `i128`.
         assert_eq!(Decimal::parse(&"9".repeat(40)), None);
         assert_eq!(Decimal::parse("1e999999999999"), None);
+    }
+
+    #[test]
+    fn an_extreme_exponent_is_refused_rather_than_overflowing() {
+        // Valid JSON, and every one of these used to run a scale past
+        // `i32` — a panic in a checked build and a wrapped scale in a
+        // release one.
+        assert_eq!(Decimal::parse("10e2147483647"), None);
+        assert_eq!(Decimal::parse("100e2147483646"), None);
+        // The extreme that does fit is still read.
+        assert!(Decimal::parse("1e2147483647").is_some());
+        assert!(Decimal::parse("1e-2147483648").is_some());
+    }
+
+    #[test]
+    fn divisibility_at_an_extreme_scale_does_not_overflow() {
+        // `shift` reaches `i32::MIN` here, which cannot be negated.
+        let tiny = decimal("1e-2147483648");
+        assert_eq!(tiny.is_multiple_of(decimal("1")), None);
+        assert_eq!(decimal("1").is_multiple_of(tiny), None);
     }
 
     #[test]

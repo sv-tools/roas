@@ -248,6 +248,9 @@ fn validate_as_content(
     let value = match body::decode(
         raw.as_bytes(),
         media_type,
+        // A `content` parameter has no header of its own, so the Media
+        // Type Object's key is the whole of what was said about it.
+        media_type,
         declared,
         entry.encoding.as_ref(),
         spec,

@@ -239,20 +239,30 @@ impl<'s> Checker<'s> {
                 }
             },
             Schema::Multi(multi) => {
-                let actual = type_name(value);
-                let allowed = multi
+                let verdicts: Vec<Accepts> = multi
                     .schema_types
                     .iter()
-                    .any(|schema_type| accepts_type(schema_type, value));
-                if !allowed {
+                    .map(|schema_type| accepts_type(schema_type, value))
+                    .collect();
+                if verdicts.contains(&Accepts::Yes) {
+                    // One of the listed types really does accept it.
+                } else if verdicts.contains(&Accepts::Undecidable) {
+                    // Nothing else matched, and the type that might have
+                    // is the one that cannot be told — the same answer a
+                    // single `type: integer` gives.
+                    self.unchecked(
+                        "has more digits than this crate can hold, so it could NOT be checked",
+                    );
+                } else {
                     let names: Vec<String> = multi
                         .schema_types
                         .iter()
                         .map(std::string::ToString::to_string)
                         .collect();
                     self.fail(format!(
-                        "expected one of [{}], got {actual}",
+                        "expected one of [{}], got {}",
                         names.join(", "),
+                        type_name(value),
                     ));
                 }
             }
@@ -505,7 +515,10 @@ impl<'s> Checker<'s> {
         }
         if schema.unique_items == Some(true) {
             for (index, value) in values.iter().enumerate() {
-                if values[..index].contains(value) {
+                if values[..index]
+                    .iter()
+                    .any(|earlier| same_value(earlier, value))
+                {
                     self.nested(&index.to_string(), |checker| {
                         checker.fail("repeats an earlier item, but uniqueItems is set");
                     });
@@ -653,6 +666,41 @@ enum Verdict {
     Unchecked,
 }
 
+/// Whether two values are the same *value*, which is not the same
+/// question as whether they are the same JSON.
+///
+/// With `arbitrary_precision` a number carries its literal, so
+/// `Value`'s own equality compares spellings: `1.0` and `1.00` are
+/// different values to it and the same number to JSON Schema. That
+/// matters wherever equality decides something — `uniqueItems` is the
+/// one place, and it would otherwise call `[1.0, 1.00]` unique.
+fn same_value(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(_), Value::Number(_)) => match (read(left), read(right)) {
+            (Reading::Exact(left), Reading::Exact(right)) => {
+                left.compare(right) == Some(Ordering::Equal)
+            }
+            // Two literals nothing can read are the same only if they
+            // were written the same.
+            _ => left == right,
+        },
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| same_value(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .all(|(key, left)| right.get(key).is_some_and(|right| same_value(left, right)))
+        }
+        _ => left == right,
+    }
+}
+
 /// The JSON Schema type name of a value, for error messages.
 fn type_name(value: &Value) -> &'static str {
     match value {
@@ -670,17 +718,36 @@ fn type_name(value: &Value) -> &'static str {
 /// An unrecognized custom type accepts nothing — the alternative is
 /// accepting everything, which would make an unreadable description
 /// look like a passing request.
-fn accepts_type(schema_type: &SchemaType, value: &Value) -> bool {
+fn accepts_type(schema_type: &SchemaType, value: &Value) -> Accepts {
+    let yes_no = |accepted: bool| {
+        if accepted { Accepts::Yes } else { Accepts::No }
+    };
     match schema_type {
-        SchemaType::String => value.is_string(),
-        SchemaType::Number => value.is_number(),
-        SchemaType::Integer => matches!(read(value), Reading::Exact(number) if number.is_integer()),
-        SchemaType::Object => value.is_object(),
-        SchemaType::Array => value.is_array(),
-        SchemaType::Boolean => value.is_boolean(),
-        SchemaType::Null => value.is_null(),
-        SchemaType::Custom(_) => false,
+        SchemaType::String => yes_no(value.is_string()),
+        SchemaType::Number => yes_no(value.is_number()),
+        // The one type whose answer can be unknown: a literal too large
+        // to read is certainly a number and may or may not be whole.
+        SchemaType::Integer => match read(value) {
+            Reading::Exact(number) => yes_no(number.is_integer()),
+            Reading::TooLarge => Accepts::Undecidable,
+            Reading::NotANumber => Accepts::No,
+        },
+        SchemaType::Object => yes_no(value.is_object()),
+        SchemaType::Array => yes_no(value.is_array()),
+        SchemaType::Boolean => yes_no(value.is_boolean()),
+        SchemaType::Null => yes_no(value.is_null()),
+        SchemaType::Custom(_) => Accepts::No,
     }
+}
+
+/// What one entry of a multi-typed schema makes of a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Accepts {
+    Yes,
+    No,
+    /// The type cannot be told, so neither accepting nor rejecting on
+    /// its account would be honest.
+    Undecidable,
 }
 
 /// A JSON value read as an exact number.

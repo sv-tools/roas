@@ -1749,12 +1749,18 @@ fn a_decoder_lets_the_schema_judge_a_body_the_crate_cannot_read() {
 
 #[test]
 fn a_decoder_can_handle_multipart_without_this_crate_owning_a_parser() {
-    // Deliberately crude: real multipart is the caller's business, and
-    // this is what "the caller's business" looks like from here.
-    let options = Options::new().decoder("multipart/form-data", |bytes, _media_type| {
+    // The decoder is handed the header as it arrived, `boundary` and
+    // all — without it there is no way to split a multipart body, which
+    // is why RFC 7578 makes the parameter required.
+    let options = Options::new().decoder("multipart/form-data", |bytes, content_type| {
+        let boundary = content_type
+            .split(';')
+            .filter_map(|parameter| parameter.trim().strip_prefix("boundary="))
+            .next()
+            .ok_or_else(|| "no boundary in the content type".to_owned())?;
         let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
         let mut parts = serde_json::Map::new();
-        for part in text.split("--boundary").filter(|part| part.contains('=')) {
+        for part in text.split(&format!("--{boundary}")) {
             if let Some((name, value)) = part.trim().split_once('=') {
                 parts.insert(name.to_owned(), value.into());
             }
@@ -1770,25 +1776,22 @@ fn a_decoder_can_handle_multipart_without_this_crate_owning_a_parser() {
         options,
     );
 
-    assert!(
-        errors(
-            &validator,
-            &posted_as(
-                "multipart/form-data; boundary=boundary",
-                b"--boundary\ntitle=hello\n"
-            )
-        )
-        .is_empty()
+    // A boundary the decoder could not have guessed.
+    let sent = "multipart/form-data; boundary=xY7zQ";
+    assert!(errors(&validator, &posted_as(sent, b"--xY7zQ\ntitle=hello\n")).is_empty(),);
+    assert_eq!(
+        errors(&validator, &posted_as(sent, b"--xY7zQ\nother=hello\n")),
+        ["body at /title: is required and was not sent"],
     );
+
+    // And without the parameter the decoder says so, rather than this
+    // crate having quietly dropped it.
     assert_eq!(
         errors(
             &validator,
-            &posted_as(
-                "multipart/form-data; boundary=boundary",
-                b"--boundary\nother=hello\n"
-            )
+            &posted_as("multipart/form-data", b"title=hello")
         ),
-        ["body at /title: is required and was not sent"],
+        ["body: cannot be read: no boundary in the content type"],
     );
 }
 
@@ -1807,4 +1810,83 @@ fn a_decoder_is_reached_through_a_range_too() {
     // `text/*` would otherwise have been read by the built-in text
     // decoder as a plain string; the registration takes precedence.
     assert!(errors(&validator, &posted_as("text/csv", b"a,b\n")).is_empty());
+}
+
+// ── the review of 0fd58e8 ────────────────────────────────────────────
+
+#[test]
+fn an_extreme_exponent_is_reported_rather_than_overflowing() {
+    // Valid JSON literals, every one of which used to run the scale
+    // past `i32` — a panic in a checked build.
+    let validator = body_schema(json!({ "type": "number", "multipleOf": 1 }));
+    for spelling in [b"10e2147483647".as_slice(), b"1e-2147483648".as_slice()] {
+        let found = errors(&validator, &posted(spelling));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("could NOT be checked")
+                || found[0].contains("could NOT be established"),
+            "{}: {found:?}",
+            String::from_utf8_lossy(spelling),
+        );
+    }
+}
+
+#[test]
+fn a_multi_typed_schema_gives_the_same_answer_as_a_single_one() {
+    // A literal past `i128` is undecidable against `integer`, and that
+    // has to survive being listed beside another type rather than
+    // becoming a violation.
+    let enormous: &[u8] = b"99999999999999999999999999999999999999999999";
+
+    let single = body_schema(json!({ "type": "integer" }));
+    let found = errors(&single, &posted(enormous));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be checked"), "{found:?}");
+
+    let multi = body_schema(json!({ "type": ["integer", "null"] }));
+    let found = errors(&multi, &posted(enormous));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be checked"), "{found:?}");
+
+    // But a type that really does accept it settles the question.
+    let with_number = body_schema(json!({ "type": ["integer", "number"] }));
+    assert!(errors(&with_number, &posted(enormous)).is_empty());
+
+    // And a plain mismatch is still a plain failure.
+    let strings = body_schema(json!({ "type": ["string", "null"] }));
+    assert_eq!(
+        errors(&strings, &posted(b"1")),
+        ["body: expected one of [string, null], got integer"],
+    );
+}
+
+#[test]
+fn unique_items_compares_numbers_by_value_not_by_spelling() {
+    let validator = body_schema(json!({
+        "type": "array",
+        "items": { "type": "number" },
+        "uniqueItems": true
+    }));
+    // The same number written three ways is one item, not three.
+    assert_eq!(
+        errors(&validator, &posted(b"[1.0, 1.00, 1]")).len(),
+        2,
+        "each repeat is reported",
+    );
+    assert!(errors(&validator, &posted(b"[1, 2, 3]")).is_empty());
+    assert!(errors(&validator, &posted(b"[1.0, 1.5]")).is_empty());
+}
+
+#[test]
+fn unique_items_reaches_numbers_nested_inside_items() {
+    let validator = body_schema(json!({
+        "type": "array",
+        "items": { "type": "object" },
+        "uniqueItems": true
+    }));
+    assert_eq!(
+        errors(&validator, &posted(br#"[{"n":1.0},{"n":1.00}]"#)),
+        ["body at /1: repeats an earlier item, but uniqueItems is set"],
+    );
+    assert!(errors(&validator, &posted(br#"[{"n":1},{"n":2}]"#)).is_empty());
 }
