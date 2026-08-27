@@ -356,7 +356,7 @@ pub struct IntegerSchema {
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple_of: Option<f64>,
+    pub multiple_of: Option<serde_json::Number>,
 
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
@@ -447,7 +447,7 @@ pub struct NumberSchema {
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple_of: Option<f64>,
+    pub multiple_of: Option<serde_json::Number>,
 
     /// Relevant only for Schema "properties" definitions.
     /// Declares the property as "read only".
@@ -826,6 +826,7 @@ impl ValidateWithContext<Spec> for IntegerSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path.clone());
     }
 }
 
@@ -837,6 +838,7 @@ impl ValidateWithContext<Spec> for NumberSchema {
         if let Some(xml) = &self.xml {
             xml.validate_with_context(ctx, format!("{path}.xml"));
         }
+        crate::common::helpers::validate_multiple_of(&self.multiple_of, ctx, path.clone());
     }
 }
 
@@ -1865,5 +1867,53 @@ mod tests {
             result.is_err(),
             "expected parse error for invalid allOf element"
         );
+    }
+}
+
+#[cfg(test)]
+mod multiple_of_validation_tests {
+    use super::{IntegerSchema, NumberSchema};
+    use crate::validation::{Context, Options, ValidateWithContext};
+
+    /// Swagger 2.0 defers `multipleOf` to JSON Schema draft-04, which
+    /// requires it to be strictly greater than zero.
+    fn errors_for(schema: &impl ValidateWithContext<crate::v2::spec::Spec>) -> Vec<String> {
+        let spec = crate::v2::spec::Spec::default();
+        let mut ctx = Context::new(&spec, Options::new());
+        schema.validate_with_context(&mut ctx, "s".to_owned());
+        ctx.errors.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_zero_or_negative_multiple_of_is_rejected() {
+        for step in [0, -1] {
+            let integer = IntegerSchema {
+                multiple_of: Some(step.into()),
+                ..Default::default()
+            };
+            assert!(
+                errors_for(&integer)
+                    .iter()
+                    .any(|e| e.contains("multipleOf")),
+                "integer multipleOf {step}",
+            );
+            let number = NumberSchema {
+                multiple_of: Some(step.into()),
+                ..Default::default()
+            };
+            assert!(
+                errors_for(&number).iter().any(|e| e.contains("multipleOf")),
+                "number multipleOf {step}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_positive_multiple_of_is_accepted() {
+        let integer = IntegerSchema {
+            multiple_of: Some(2.into()),
+            ..Default::default()
+        };
+        assert!(errors_for(&integer).is_empty());
     }
 }

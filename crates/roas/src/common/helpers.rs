@@ -315,3 +315,77 @@ mod tests {
         assert!(ctx.errors.is_empty(), "no errors: {:?}", ctx.errors);
     }
 }
+
+/// Records an error unless `multipleOf` is the positive number every
+/// version requires it to be.
+///
+/// [JSON Schema 2020-12 §6.2.1](https://json-schema.org/draft/2020-12/json-schema-validation#section-6.2.1)
+/// for v3.1 and v3.2, and
+/// [draft-04 §5.1.1](https://datatracker.ietf.org/doc/html/draft-fge-json-schema-validation-00#section-5.1.1)
+/// for v2 and v3.0 — the wording differs, the rule does not.
+///
+/// Judged on the widest form the number offers rather than always
+/// through `f64`: `multipleOf` is kept as a `serde_json::Number` so that
+/// an integer step stays an integer, and asking this question should not
+/// be the one place that throws that away.
+pub fn validate_multiple_of<T>(
+    multiple_of: &Option<serde_json::Number>,
+    ctx: &mut Context<T>,
+    path: String,
+) {
+    let Some(multiple_of) = multiple_of else {
+        return;
+    };
+    let positive = if let Some(number) = multiple_of.as_u64() {
+        number > 0
+    } else if let Some(number) = multiple_of.as_i64() {
+        number > 0
+    } else {
+        multiple_of.as_f64().is_some_and(|number| number > 0.0)
+    };
+    if !positive {
+        ctx.error(
+            path,
+            format_args!("`multipleOf` ({multiple_of}) must be > 0"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod multiple_of_tests {
+    use super::validate_multiple_of;
+    use crate::validation::{Context, Options};
+
+    /// The errors `multipleOf` produced, judged on its own.
+    fn errors_for(json: &str) -> Vec<String> {
+        let multiple_of = Some(serde_json::from_str(json).expect("the number must parse"));
+        let spec = ();
+        let mut ctx = Context::new(&spec, Options::new());
+        validate_multiple_of(&multiple_of, &mut ctx, "s".to_owned());
+        ctx.errors.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_positive_multiple_of_is_accepted_however_it_was_written() {
+        for json in ["1", "0.5", "1e-3", "9007199254740993"] {
+            assert!(errors_for(json).is_empty(), "{json} is positive");
+        }
+    }
+
+    #[test]
+    fn zero_and_negatives_are_rejected() {
+        for json in ["0", "0.0", "-1", "-0.5"] {
+            let found = errors_for(json);
+            assert_eq!(found.len(), 1, "{json} is not positive: {found:?}");
+            assert!(found[0].contains("multipleOf"), "{found:?}");
+        }
+    }
+
+    #[test]
+    fn an_absent_multiple_of_says_nothing() {
+        let spec = ();
+        let mut ctx = Context::new(&spec, Options::new());
+        validate_multiple_of(&None, &mut ctx, "s".to_owned());
+        assert!(ctx.errors.is_empty());
+    }
+}

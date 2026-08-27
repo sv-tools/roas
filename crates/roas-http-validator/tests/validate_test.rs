@@ -1698,11 +1698,12 @@ fn zero_is_a_multiple_of_whatever_the_step_turns_out_to_have_been() {
 #[test]
 fn a_caller_can_tell_a_violation_from_something_that_was_not_checked() {
     // Both kinds in one report: `limit` is definitely too large, and
-    // divisibility against a float step is not knowable.
+    // divisibility against a step whose written form is gone is not
+    // knowable. (An *integer* step would be — see the test below.)
     let validator = validator(json!({
         "/x": { "get": { "parameters": [
             { "name": "limit", "in": "query",
-              "schema": { "type": "integer", "maximum": 10, "multipleOf": 2 } }
+              "schema": { "type": "integer", "maximum": 10, "multipleOf": 2.5 } }
         ] } }
     }));
     let report = validator
@@ -1754,4 +1755,38 @@ fn an_unresolvable_reference_is_not_the_requests_fault() {
     assert!(!report.is_valid());
     assert_eq!(report.violations().count(), 0, "{report}");
     assert_eq!(report.unchecked().count(), 1, "{report}");
+}
+
+// ── an integer `multipleOf` is exact again ───────────────────────────
+
+#[test]
+fn an_integer_step_is_decided_exactly_because_it_stayed_an_integer() {
+    // `roas` keeps `multipleOf` as a `serde_json::Number`, so a step
+    // written as an integer still is one — and divisibility against it
+    // has an exact answer rather than only a disprovable one.
+    let validator = body_schema(json!({ "type": "integer", "multipleOf": 2 }));
+    assert!(errors(&validator, &posted(b"4")).is_empty());
+    assert_eq!(
+        errors(&validator, &posted(b"5")),
+        ["body: 5 is not a multiple of 2"],
+    );
+
+    // Exact at any magnitude, since no float is involved on either side.
+    let big = body_schema(json!({ "type": "integer", "multipleOf": 4_503_599_627_370_496_i64 }));
+    assert!(errors(&big, &posted(b"9007199254740992")).is_empty());
+    assert_eq!(
+        errors(&big, &posted(b"9007199254740993")),
+        ["body: 9007199254740993 is not a multiple of 4503599627370496"],
+    );
+
+    // A step written as a float is still only disprovable: `2.0` and
+    // `2.0000000000000001` are the same number by the time it arrives.
+    let float_step = body_schema(json!({ "type": "integer", "multipleOf": 2.0 }));
+    let found = errors(&float_step, &posted(b"4"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be established"), "{found:?}");
+    assert_eq!(
+        errors(&float_step, &posted(b"5")),
+        ["body: 5 is not a multiple of 2"],
+    );
 }
