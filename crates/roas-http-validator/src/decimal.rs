@@ -70,15 +70,24 @@ impl Decimal {
         // The digits are read as one integer and the decimal point
         // becomes part of the scale, which is what makes `1.5` and
         // `15e-1` the same number here.
+        //
+        // A negative number accumulates downwards rather than being
+        // built positive and negated: `i128::MIN`'s magnitude is one
+        // larger than `i128::MAX`, so negating it at the end would
+        // refuse the very number it is trying to read.
         let mut mantissa: i128 = 0;
         for digit in whole.bytes().chain(fraction.bytes()) {
-            mantissa = mantissa
-                .checked_mul(10)?
-                .checked_add(i128::from(digit - b'0'))?;
+            let digit = i128::from(digit - b'0');
+            mantissa = mantissa.checked_mul(10)?;
+            mantissa = if negative {
+                mantissa.checked_sub(digit)?
+            } else {
+                mantissa.checked_add(digit)?
+            };
         }
         let scale = exponent.checked_sub(i32::try_from(fraction.len()).ok()?)?;
 
-        Self::new(if negative { -mantissa } else { mantissa }, scale)
+        Self::new(mantissa, scale)
     }
 
     /// Normalized on the way in: trailing zeros move into the scale, so
@@ -173,7 +182,13 @@ impl Decimal {
                 step.mantissa.checked_mul(10_i128.checked_pow(steps)?)?,
             )
         };
-        Some(numerator % denominator == 0)
+        // `i128::MIN % -1` overflows, though the remainder is plainly
+        // zero; every other pair divides normally.
+        Some(
+            numerator
+                .checked_rem(denominator)
+                .is_none_or(|remainder| remainder == 0),
+        )
     }
 
     /// This number as a JSON value, keeping its exact literal.
@@ -314,10 +329,42 @@ mod tests {
     }
 
     #[test]
-    fn a_literal_too_large_to_hold_is_reported_rather_than_approximated() {
-        // 40 digits: past `i128`.
-        assert_eq!(Decimal::parse(&"9".repeat(40)), None);
+    fn the_range_that_can_be_held_is_exactly_i128s() {
+        // Both ends, which are not symmetric: `i128::MIN`'s magnitude is
+        // one larger than `i128::MAX`, so building it positive and
+        // negating would refuse it.
+        let max = i128::MAX.to_string();
+        let min = i128::MIN.to_string();
+        assert!(Decimal::parse(&max).is_some(), "{max}");
+        assert!(Decimal::parse(&min).is_some(), "{min}");
+
+        // And one past each end.
+        assert_eq!(Decimal::parse(&(i128::MAX as u128 + 1).to_string()), None);
+        assert_eq!(
+            Decimal::parse(&format!("-{}", i128::MIN.unsigned_abs() + 1)),
+            None
+        );
+
+        // Both ends have 39 digits, so "39 digits" is not the boundary —
+        // the range is.
+        assert_eq!(max.len(), 39);
+        assert!(Decimal::parse(&"9".repeat(38)).is_some());
+        assert_eq!(Decimal::parse(&"9".repeat(39)), None);
+
         assert_eq!(Decimal::parse("1e999999999999"), None);
+    }
+
+    #[test]
+    fn the_most_negative_number_behaves_like_any_other() {
+        let min = decimal(&i128::MIN.to_string());
+        assert_eq!(min.compare(decimal("0")), Some(Ordering::Less));
+        assert_eq!(min.compare(min), Some(Ordering::Equal));
+        assert!(min.is_integer());
+        // `i128::MIN % -1` overflows though the answer is plainly zero.
+        assert_eq!(min.is_multiple_of(decimal("-1")), Some(true));
+        assert_eq!(min.is_multiple_of(decimal("1")), Some(true));
+        assert_eq!(min.is_multiple_of(decimal("2")), Some(true));
+        assert_eq!(min.to_string(), i128::MIN.to_string());
     }
 
     #[test]

@@ -2001,11 +2001,38 @@ fn a_yaml_description_keeps_integer_bounds_well_past_a_double() {
     assert!(errors(&past_i64, &posted(b"9223372036854775808")).is_empty());
     assert_eq!(errors(&past_i64, &posted(b"9223372036854775809")).len(), 1);
 
-    // The limit is `i128`, and it is the validator's own: 38 digits
-    // survive, and this crate could not have held more anyway.
-    let widest = format!("{{ type: integer, maximum: {} }}", "9".repeat(38));
-    let widest = body_schema_yaml(&widest);
-    assert!(errors(&widest, &posted(b"1")).is_empty());
+    // The limit is `i128`'s range, and it is the validator's own — both
+    // stop in the same place, so a bound YAML cannot carry is one this
+    // crate could not have decided either way.
+    let at_the_edge = body_schema_yaml(&format!("{{ type: integer, maximum: {} }}", i128::MAX));
+    assert!(errors(&at_the_edge, &posted(b"1")).is_empty());
+    let widest = i128::MAX.to_string();
+    assert!(
+        errors(
+            &at_the_edge,
+            &RequestView::new("POST", "/x")
+                .with_header("content-type", "application/json")
+                .with_body(widest.as_bytes())
+        )
+        .is_empty(),
+        "the bound survived YAML at its widest",
+    );
+
+    // And past it, reported rather than decided — by either route,
+    // though for different reasons. YAML turns 39 nines into `1e39`,
+    // which is holdable but cannot be scaled against a small number;
+    // JSON keeps the digits, which are more than can be held. Both say
+    // so rather than comparing against something else.
+    let from_yaml = body_schema_yaml(&format!("{{ type: integer, maximum: {} }}", "9".repeat(39)));
+    let from_json = body_schema_text(&format!(
+        r#"{{"type":"integer","maximum":{}}}"#,
+        "9".repeat(39)
+    ));
+    for validator in [&from_yaml, &from_json] {
+        let found = errors(validator, &posted(b"1"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("was NOT checked"), "{found:?}");
+    }
 }
 
 #[test]
