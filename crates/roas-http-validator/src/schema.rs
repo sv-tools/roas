@@ -378,17 +378,15 @@ impl<'s> Checker<'s> {
 
     fn number(&mut self, value: Decimal, schema: &NumberSchema) {
         if let Some(allowed) = &schema.enum_values {
-            let candidates = allowed.iter().copied().map(bound_of_f64);
+            let candidates = allowed.iter().map(bound_of);
             self.enumerated(value, candidates);
         }
         self.bounds(
             value,
-            schema.minimum.map(bound_of_f64),
-            schema.maximum.map(bound_of_f64),
-            schema.exclusive_minimum.map(bound_of_f64),
-            schema.exclusive_maximum.map(bound_of_f64),
-            // `multipleOf` is a `serde_json::Number` even here, so this
-            // one keeps its literal.
+            schema.minimum.as_ref().map(bound_of),
+            schema.maximum.as_ref().map(bound_of),
+            schema.exclusive_minimum.as_ref().map(bound_of),
+            schema.exclusive_maximum.as_ref().map(bound_of),
             schema.multiple_of.as_ref().map(bound_of),
         );
     }
@@ -778,22 +776,10 @@ fn read(value: &Value) -> Reading {
     }
 }
 
-/// A schema bound `roas` keeps as a `serde_json::Number`, which means
-/// it keeps its literal too.
+/// A schema bound, which `roas` keeps as a `serde_json::Number` — so it
+/// keeps its literal, exactly as an instance value does.
 fn bound_of(number: &serde_json::Number) -> Option<Decimal> {
     Decimal::parse(number.as_str())
-}
-
-/// A schema bound `roas` models as an `f64`.
-///
-/// `NumberSchema`'s bounds and both `enum` lists are still `f64` in the
-/// model, so their literals are gone before this crate is handed them —
-/// `maximum: 9007199254740993` arrives as `9007199254740992`. The
-/// shortest representation of the `f64` is the best available reading
-/// of what was meant, and it is exactly what every other implementation
-/// compares against. Only the *instance* side is exact for these.
-fn bound_of_f64(number: f64) -> Option<Decimal> {
-    Decimal::parse(&number.to_string())
 }
 
 #[cfg(test)]

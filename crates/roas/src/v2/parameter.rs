@@ -320,16 +320,16 @@ pub struct NumberParameter {
     ///
     /// **Note**: "default" has no meaning for required parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<f64>,
+    pub default: Option<serde_json::Number>,
 
     /// The list of strings that defines the possible values of this parameter.
     #[serde(rename = "enum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub enum_values: Option<Vec<f64>>,
+    pub enum_values: Option<Vec<serde_json::Number>>,
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<f64>,
+    pub minimum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly greater than the value of `minimum`
     #[serde(rename = "exclusiveMinimum")]
@@ -338,7 +338,7 @@ pub struct NumberParameter {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<f64>,
+    pub maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly less than the value of `maximum`
     #[serde(rename = "exclusiveMaximum")]

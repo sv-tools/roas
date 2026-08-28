@@ -1890,3 +1890,38 @@ fn unique_items_reaches_numbers_nested_inside_items() {
     );
     assert!(errors(&validator, &posted(br#"[{"n":1},{"n":2}]"#)).is_empty());
 }
+
+#[test]
+fn a_number_schemas_bounds_are_exact_too() {
+    // The gap this closed: `NumberSchema`'s bounds were `f64` in
+    // `roas`, so `maximum: 9007199254740993` arrived as `…992` and the
+    // value that equals it was reported as a violation. The same bound
+    // on a `type: integer` schema was already exact, so one word in the
+    // description changed the verdict.
+    let as_number = body_schema_text(r#"{"type":"number","maximum":9007199254740993}"#);
+    let as_integer = body_schema_text(r#"{"type":"integer","maximum":9007199254740993}"#);
+
+    for validator in [&as_number, &as_integer] {
+        assert!(errors(validator, &posted(b"9007199254740993")).is_empty());
+        assert_eq!(errors(validator, &posted(b"9007199254740994")).len(), 1);
+    }
+}
+
+#[test]
+fn a_number_schemas_enum_is_exact_too() {
+    let validator = body_schema_text(r#"{"type":"number","enum":[9007199254740993]}"#);
+    assert!(errors(&validator, &posted(b"9007199254740993")).is_empty());
+    // The neighbour a double could not tell apart from it.
+    assert_eq!(errors(&validator, &posted(b"9007199254740992")).len(), 1);
+}
+
+#[test]
+fn a_fractional_bound_on_a_number_schema_keeps_its_fraction() {
+    let validator = body_schema_text(r#"{"type":"number","minimum":0.1,"maximum":0.3}"#);
+    assert!(errors(&validator, &posted(b"0.2")).is_empty());
+    assert!(errors(&validator, &posted(b"0.1")).is_empty());
+    assert_eq!(
+        errors(&validator, &posted(b"0.05")),
+        ["body: 0.05 is below minimum 0.1"],
+    );
+}

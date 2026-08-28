@@ -38,7 +38,7 @@ salvo = ["dep:salvo_core"]
 rocket = ["dep:rocket"]
 
 [dependencies]
-roas = { version = "0.18", path = "../roas", features = ["v3_2"] }
+roas = { version = "0.19", path = "../roas", features = ["v3_2"] }
 percent-encoding.workspace = true
 regex.workspace = true
 # The whole point of `decimal.rs`: this keeps a parsed number's
