@@ -1986,12 +1986,26 @@ fn body_schema_yaml(schema: &str) -> Validator {
 }
 
 #[test]
-fn a_yaml_description_keeps_every_integer_bound() {
-    // Integers survive YAML, including past `i64` — the loss below is
-    // narrower than "YAML is lossy".
-    let validator = body_schema_yaml("{ type: integer, maximum: 9007199254740993 }");
-    assert!(errors(&validator, &posted(b"9007199254740993")).is_empty());
-    assert_eq!(errors(&validator, &posted(b"9007199254740994")).len(), 1);
+fn a_yaml_description_keeps_integer_bounds_well_past_a_double() {
+    // 2^53 + 1: the first integer a double cannot hold, and the reason
+    // this crate stopped using one.
+    let past_a_double = body_schema_yaml("{ type: integer, maximum: 9007199254740993 }");
+    assert!(errors(&past_a_double, &posted(b"9007199254740993")).is_empty());
+    assert_eq!(
+        errors(&past_a_double, &posted(b"9007199254740994")).len(),
+        1
+    );
+
+    // 2^63: past `i64::MAX`, which YAML also carries intact.
+    let past_i64 = body_schema_yaml("{ type: integer, maximum: 9223372036854775808 }");
+    assert!(errors(&past_i64, &posted(b"9223372036854775808")).is_empty());
+    assert_eq!(errors(&past_i64, &posted(b"9223372036854775809")).len(), 1);
+
+    // The limit is `i128`, and it is the validator's own: 38 digits
+    // survive, and this crate could not have held more anyway.
+    let widest = format!("{{ type: integer, maximum: {} }}", "9".repeat(38));
+    let widest = body_schema_yaml(&widest);
+    assert!(errors(&widest, &posted(b"1")).is_empty());
 }
 
 #[test]

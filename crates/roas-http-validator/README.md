@@ -147,9 +147,9 @@ What is left unchecked is only what will not fit: a literal past `i128`'s range 
 
 The *instance* side is always exact: a request body is JSON and this crate parses it itself.
 
-The *schema* side is exact as far as the format it was parsed from allows. `roas`'s numeric fields are `serde_json::Number` and this crate turns on its `exact-numbers` feature, which is what makes a `Number` keep its literal — so a **JSON** description is exact throughout. A **YAML** one is exact for every integer, including past `i64`, but not for a fractional literal carrying more precision than an `f64`: `serde_yaml_ng` reads scalars through `f64` before `serde_json` is involved, so `maximum: 9007199254740993.5` in YAML arrives as `9007199254740994`, and a request of `9007199254740994` is accepted against it. The same description in JSON rejects it. That loss happens in the YAML parser, upstream of anything this crate or `roas` can reach.
+The *schema* side is exact as far as the format it was parsed from allows. `roas`'s numeric fields are `serde_json::Number` and this crate turns on its `exact-numbers` feature, which is what makes a `Number` keep its literal — so a **JSON** description is exact throughout. A **YAML** one is exact for every integer this crate can hold — up to `i128`'s 38 digits, past which the validator reports rather than decides in any format — but not for a fractional literal carrying more precision than an `f64`: `serde_yaml_ng` reads scalars through `f64` before `serde_json` is involved, so `maximum: 9007199254740993.5` in YAML arrives as `9007199254740994`, and a request of `9007199254740994` is accepted against it. The same description in JSON rejects it. That loss happens in the YAML parser, upstream of anything this crate or `roas` can reach.
 
-In practice this needs a bound written with 17-plus significant digits *and* a fractional part, in YAML. Ordinary decimals (`0.1`, `1.25`, `2.5`) round-trip YAML unchanged, and so does every integer.
+In practice this needs a bound written with 17-plus significant digits *and* a fractional part, in YAML. Ordinary decimals (`0.1`, `1.25`, `2.5`) round-trip YAML unchanged, and so do integers well past a double — `2^53`, `i64::MAX` and `u64::MAX` all survive.
 
 ## Versions
 
