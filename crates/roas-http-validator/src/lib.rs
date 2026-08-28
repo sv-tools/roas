@@ -75,6 +75,13 @@
 //! `roas`'s own migrations first, so there is one interpreter rather
 //! than four.
 //!
+//! Numbers are compared as the decimals they were written as, on both
+//! sides. The one limit is the format a
+//! *description* is parsed from: JSON is exact throughout, while YAML
+//! reads scalars through an `f64` before `serde_json` is involved, so a
+//! fractional bound carrying more precision than a double is already
+//! rounded when it arrives. Every integer survives either way.
+//!
 //! ## Media types it does not read itself
 //!
 //! JSON, `application/x-www-form-urlencoded` and `text/*` are built in.

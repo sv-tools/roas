@@ -1965,3 +1965,63 @@ fn a_definite_difference_settles_a_comparison_an_unreadable_number_cannot() {
     ]"#;
     assert!(errors(&validator, &posted(body)).is_empty());
 }
+
+// ── where exactness stops, and why ───────────────────────────────────
+
+/// The same body schema, written as YAML rather than JSON.
+fn body_schema_yaml(schema: &str) -> Validator {
+    let spec = serde_yaml_ng::from_str(&format!(
+        "openapi: 3.2.0\n\
+         info: {{ title: t, version: '1' }}\n\
+         paths:\n  \
+           /x:\n    \
+             post:\n      \
+               requestBody:\n        \
+                 content:\n          \
+                   application/json:\n            \
+                     schema: {schema}\n"
+    ))
+    .expect("the description must parse");
+    Validator::new(spec)
+}
+
+#[test]
+fn a_yaml_description_keeps_every_integer_bound() {
+    // Integers survive YAML, including past `i64` — the loss below is
+    // narrower than "YAML is lossy".
+    let validator = body_schema_yaml("{ type: integer, maximum: 9007199254740993 }");
+    assert!(errors(&validator, &posted(b"9007199254740993")).is_empty());
+    assert_eq!(errors(&validator, &posted(b"9007199254740994")).len(), 1);
+}
+
+#[test]
+fn a_yaml_description_keeps_ordinary_decimal_bounds() {
+    let validator = body_schema_yaml("{ type: number, multipleOf: 0.01 }");
+    assert!(errors(&validator, &posted(b"1.23")).is_empty());
+    assert_eq!(errors(&validator, &posted(b"1.234")).len(), 1);
+}
+
+/// Characterization, not aspiration.
+///
+/// `serde_yaml_ng` reads a scalar through an `f64` before `serde_json`
+/// is involved, so a fractional literal carrying more precision than a
+/// double is already rounded when `roas` builds the `Spec` — upstream
+/// of anything this crate or `exact-numbers` can reach. This pins where
+/// that boundary is, and will fail if the YAML parser ever stops losing
+/// it, which is the point.
+#[test]
+fn a_yaml_fractional_bound_past_a_double_is_rounded_before_the_crate_sees_it() {
+    let from_yaml = body_schema_yaml("{ type: integer, maximum: 9007199254740993.5 }");
+    let from_json = body_schema_text(r#"{"type":"integer","maximum":9007199254740993.5}"#);
+
+    // Both agree below the boundary.
+    assert!(errors(&from_yaml, &posted(b"9007199254740993")).is_empty());
+    assert!(errors(&from_json, &posted(b"9007199254740993")).is_empty());
+
+    // And disagree on it: JSON kept the `.5`, YAML rounded to `…994`.
+    assert_eq!(errors(&from_json, &posted(b"9007199254740994")).len(), 1);
+    assert!(
+        errors(&from_yaml, &posted(b"9007199254740994")).is_empty(),
+        "known limit: the YAML parser rounded the bound",
+    );
+}
