@@ -27,6 +27,21 @@ v3_1 = []
 # Support for OpenAPI v3.2.x
 v3_2 = []
 
+# Keep every number exactly as it was written.
+#
+# The numeric fields are `serde_json::Number`, which on its own holds an
+# integer within `i64`/`u64` exactly and rounds everything else through
+# an `f64`: `9007199254740993.5` is read back as `9007199254740994.0`
+# and `99999999999999999999999999` as `1e+26`, so such a description
+# does not round-trip. This turns on `serde_json`'s `arbitrary_precision`,
+# which keeps each number's literal instead.
+#
+# Off by default because it is a global toggle — Cargo unifies features,
+# so enabling it here enables it for everything else in the build — and
+# because it changes how `serde_json::Value` compares numbers: with it
+# on, `1.0` and `1.00` are different `Value`s.
+exact-numbers = ["serde_json/arbitrary_precision"]
+
 # `clap::ValueEnum` impl for `validation::Options`, for downstream CLIs that
 # want to surface each `Ignore*` flag as a value-enum choice.
 clap = ["dep:clap"]

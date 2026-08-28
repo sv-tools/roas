@@ -1925,3 +1925,43 @@ fn a_fractional_bound_on_a_number_schema_keeps_its_fraction() {
         ["body: 0.05 is below minimum 0.1"],
     );
 }
+
+#[test]
+fn unique_items_says_when_it_cannot_compare_rather_than_assuming() {
+    // Both literals are past `i128`, so neither can be read — and they
+    // are not written identically, so whether they are the same number
+    // is exactly what cannot be established. Calling the array unique
+    // would be asserting it.
+    let validator = body_schema(json!({
+        "type": "array",
+        "items": true,
+        "uniqueItems": true
+    }));
+    let unreadable: &[u8] = b"[99999999999999999999999999999999999999999999, 99999999999999999999999999999999999999999999.0]";
+    let found = errors(&validator, &posted(unreadable));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("could NOT be compared"), "{found:?}");
+
+    // The same literal twice is the same number, unreadable or not.
+    let identical: &[u8] = b"[99999999999999999999999999999999999999999999, 99999999999999999999999999999999999999999999]";
+    assert_eq!(
+        errors(&validator, &posted(identical)),
+        ["body at /1: repeats an earlier item, but uniqueItems is set"],
+    );
+}
+
+#[test]
+fn a_definite_difference_settles_a_comparison_an_unreadable_number_cannot() {
+    // The `tag`s differ and anyone can see it, so the objects differ —
+    // whatever the unreadable `n`s would have said.
+    let validator = body_schema(json!({
+        "type": "array",
+        "items": true,
+        "uniqueItems": true
+    }));
+    let body: &[u8] = br#"[
+        {"tag":"a","n":99999999999999999999999999999999999999999999},
+        {"tag":"b","n":99999999999999999999999999999999999999999999.0}
+    ]"#;
+    assert!(errors(&validator, &posted(body)).is_empty());
+}

@@ -143,7 +143,9 @@ Numbers are compared as the decimals they were written as. `serde_json` is built
 
 Parameters go the same way — a query value is parsed as a decimal rather than through an `f64` — so `?n=9007199254740993` is that number and not the nearest double.
 
-What is left unchecked is only what will not fit: a literal past `i128`'s range is reported rather than approximated. One gap remains on the schema side, and it is `roas`'s rather than this crate's — `NumberSchema`'s bounds and both `enum` lists are still modelled as `f64`, so a `maximum: 9007199254740993` on a `type: number` schema loses its literal before it arrives. `IntegerSchema`'s bounds and every `multipleOf` are `serde_json::Number` and keep theirs.
+What is left unchecked is only what will not fit: a literal past `i128`'s range is reported rather than approximated, and so is a comparison it makes undecidable — two such literals that are not written identically cannot be told apart, which `uniqueItems` says rather than assumes.
+
+Both sides of every comparison are exact. `roas`'s numeric fields are `serde_json::Number`, and this crate turns on its `exact-numbers` feature, which is what makes a `Number` keep its literal rather than round through an `f64`.
 
 ## Versions
 

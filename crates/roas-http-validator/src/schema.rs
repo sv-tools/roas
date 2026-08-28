@@ -513,12 +513,31 @@ impl<'s> Checker<'s> {
         }
         if schema.unique_items == Some(true) {
             for (index, value) in values.iter().enumerate() {
-                if values[..index]
-                    .iter()
-                    .any(|earlier| same_value(earlier, value))
-                {
+                let mut undetermined = false;
+                let mut repeats = false;
+                for earlier in &values[..index] {
+                    match same_value(earlier, value) {
+                        Some(true) => {
+                            repeats = true;
+                            break;
+                        }
+                        None => undetermined = true,
+                        Some(false) => {}
+                    }
+                }
+                if repeats {
                     self.nested(&index.to_string(), |checker| {
                         checker.fail("repeats an earlier item, but uniqueItems is set");
+                    });
+                } else if undetermined {
+                    // Nothing here is definitely a repeat, and something
+                    // could not be compared — saying the array is unique
+                    // would be asserting what was never established.
+                    self.nested(&index.to_string(), |checker| {
+                        checker.unchecked(
+                            "could NOT be compared with an earlier item: a number in one of them \
+                             has more digits than this crate can hold",
+                        );
                     });
                 }
             }
@@ -672,31 +691,56 @@ enum Verdict {
 /// different values to it and the same number to JSON Schema. That
 /// matters wherever equality decides something — `uniqueItems` is the
 /// one place, and it would otherwise call `[1.0, 1.00]` unique.
-fn same_value(left: &Value, right: &Value) -> bool {
+fn same_value(left: &Value, right: &Value) -> Option<bool> {
     match (left, right) {
         (Value::Number(_), Value::Number(_)) => match (read(left), read(right)) {
             (Reading::Exact(left), Reading::Exact(right)) => {
-                left.compare(right) == Some(Ordering::Equal)
+                Some(left.compare(right) == Some(Ordering::Equal))
             }
-            // Two literals nothing can read are the same only if they
-            // were written the same.
-            _ => left == right,
+            // Two literals nothing can read are the same number when
+            // they are the same literal. When they are not, whether
+            // they are the same number is exactly what cannot be told.
+            _ => (left == right).then_some(true),
         },
         (Value::Array(left), Value::Array(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
+            if left.len() != right.len() {
+                return Some(false);
+            }
+            fold(
+                left.iter()
                     .zip(right)
-                    .all(|(left, right)| same_value(left, right))
+                    .map(|(left, right)| same_value(left, right)),
+            )
         }
         (Value::Object(left), Value::Object(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .all(|(key, left)| right.get(key).is_some_and(|right| same_value(left, right)))
+            if left.len() != right.len() {
+                return Some(false);
+            }
+            fold(left.iter().map(|(key, left)| match right.get(key) {
+                Some(right) => same_value(left, right),
+                None => Some(false),
+            }))
         }
-        _ => left == right,
+        _ => Some(left == right),
     }
+}
+
+/// Combine the members' verdicts into the container's.
+///
+/// Three-valued, and a definite difference dominates: two objects
+/// differing in a field anyone can read are different whatever else
+/// they hold. Only when nothing differs and something is unreadable is
+/// the answer unknown.
+fn fold(members: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let mut unknown = false;
+    for member in members {
+        match member {
+            Some(false) => return Some(false),
+            None => unknown = true,
+            Some(true) => {}
+        }
+    }
+    if unknown { None } else { Some(true) }
 }
 
 /// The JSON Schema type name of a value, for error messages.
