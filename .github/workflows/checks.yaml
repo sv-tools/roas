@@ -290,7 +290,29 @@ jobs:
           echo "flags=$flags" >> "$GITHUB_OUTPUT"
           echo "batch: $flags"
       - name: Dry run publish
-        run: cargo publish --all-features ${{ steps.packages.outputs.flags }} --dry-run --verbose
+        run: |
+          set -euo pipefail
+          cargo publish --all-features ${{ steps.packages.outputs.flags }} \
+            --dry-run --verbose 2>&1 | tee "$RUNNER_TEMP/publish-dry-run.log"
+      # Cargo ordered the batch by dependency to verify it, and prints
+      # one `Uploading <crate> v<version>` line per crate in that order.
+      # `publish.yaml` ships one crate per tag and resolves siblings from
+      # crates.io, so this is exactly the order the tags have to be
+      # pushed in — state it here rather than leaving it to be worked out
+      # by hand at release time.
+      - name: Report the release order
+        run: |
+          set -euo pipefail
+          {
+            echo "### Release order"
+            echo
+            echo "One crate per tag, resolved from crates.io — push in this order:"
+            echo
+            echo '```sh'
+            sed -n 's|^ *Uploading \([^ ]*\) v\([^ ]*\) .*|git push origin \1/v\2|p' \
+              "$RUNNER_TEMP/publish-dry-run.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Create packages
         run: cargo package --all-features ${{ steps.packages.outputs.flags }} --verbose
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
