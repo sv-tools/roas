@@ -47,10 +47,23 @@ impl Decimal {
             None => (false, text.strip_prefix('+').unwrap_or(text)),
         };
 
-        let (significand, exponent) = match rest.find(['e', 'E']) {
-            Some(at) => (&rest[..at], rest[at + 1..].parse::<i32>().ok()?),
-            None => (rest, 0),
+        // The exponent is kept as text for now. It has to be *well
+        // formed* before anything else is believed, but it does not have
+        // to fit: `0e9223372036854775808` is exactly zero however large
+        // the exponent, and parsing it early would refuse the number on
+        // account of a digit that never mattered.
+        let (significand, exponent_text) = match rest.find(['e', 'E']) {
+            Some(at) => (&rest[..at], Some(&rest[at + 1..])),
+            None => (rest, None),
         };
+        // `Some("")` is `1e`, which is malformed; `None` is no exponent
+        // at all, which is fine. Conflating the two lets `1e` through.
+        if let Some(text) = exponent_text {
+            let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+        }
 
         let (whole, fraction) = match significand.split_once('.') {
             Some((whole, fraction)) => (whole, fraction),
@@ -66,8 +79,6 @@ impl Decimal {
         {
             return None;
         }
-
-        let scale = exponent.checked_sub(i32::try_from(fraction.len()).ok()?)?;
 
         // The digits are read as one integer and the decimal point
         // becomes part of the scale, which is what makes `1.5` and
@@ -91,12 +102,29 @@ impl Decimal {
             trailing += 1;
         }
         if significant == 0 {
+            // Zero, whatever the exponent says — and the exponent has
+            // already been checked for shape, so this is not a shortcut
+            // past a malformed number.
             return Some(Self {
                 mantissa: 0,
                 scale: 0,
             });
         }
-        let scale = scale.checked_add(i32::try_from(trailing).ok()?)?;
+
+        let exponent: i64 = match exponent_text {
+            Some(text) => text.parse().ok()?,
+            None => 0,
+        };
+
+        // Worked out in `i64` and narrowed once at the end. The pieces
+        // can each reach `i32`'s edge while the number they describe sits
+        // comfortably inside it: `1.0e-2147483648` subtracts one for the
+        // fraction and adds it back for the trailing zero, and computing
+        // that in `i32` would overflow on the way to a scale that fits.
+        let scale = exponent
+            .checked_sub(i64::try_from(fraction.len()).ok()?)?
+            .checked_add(i64::try_from(trailing).ok()?)?;
+        let scale = i32::try_from(scale).ok()?;
 
         // A negative number accumulates downwards rather than being
         // built positive and negated: `i128::MIN`'s magnitude is one
@@ -352,6 +380,43 @@ mod tests {
         assert_eq!(decimal("0").is_multiple_of(decimal("7")), Some(true));
         assert_eq!(decimal("0.0").is_multiple_of(decimal("1.5")), Some(true));
         assert_eq!(decimal("7").is_multiple_of(decimal("0")), None);
+    }
+
+    #[test]
+    fn zero_is_zero_whatever_exponent_follows_it() {
+        // Valid JSON, and exactly zero however large the exponent — the
+        // exponent never has to fit for the answer to be known.
+        for text in [
+            "0e9223372036854775808",
+            "0.0e-9223372036854775809",
+            "0e999999999999999999999999999999",
+            "-0.000e123456789012345678901234567890",
+        ] {
+            assert_eq!(Decimal::parse(text), Decimal::parse("0"), "{text}");
+        }
+
+        // Shape is still checked, so this is not a way past a number
+        // that is not one.
+        for text in ["0e", "0eabc", "0e+", "0e1.5", "0e--1"] {
+            assert_eq!(Decimal::parse(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_scale_is_worked_out_before_it_is_narrowed() {
+        // Each piece reaches `i32`'s edge while the number they describe
+        // does not: the fraction subtracts one and the trailing zero
+        // adds it back.
+        assert_eq!(
+            Decimal::parse("1.0e-2147483648"),
+            Decimal::parse("1e-2147483648"),
+        );
+        assert!(Decimal::parse("1000e-2147483650").is_some());
+        // Zero reaches its shortcut rather than tripping on the way.
+        assert_eq!(Decimal::parse("0.0e-2147483648"), Decimal::parse("0"));
+        // And a scale that genuinely does not fit is still refused.
+        assert_eq!(Decimal::parse("1e-2147483649"), None);
+        assert_eq!(Decimal::parse("1e2147483648"), None);
     }
 
     #[test]
