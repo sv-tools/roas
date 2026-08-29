@@ -67,17 +67,44 @@ impl Decimal {
             return None;
         }
 
+        let scale = exponent.checked_sub(i32::try_from(fraction.len()).ok()?)?;
+
         // The digits are read as one integer and the decimal point
         // becomes part of the scale, which is what makes `1.5` and
         // `15e-1` the same number here.
         //
+        // Trailing zeros go into the scale *before* the mantissa is
+        // built, not after: `1000000000000000000000000000000000000000e-39`
+        // is one, and accumulating its forty digits to discover that
+        // would overflow a number that fits comfortably.
+        let digit_at = |index: usize| {
+            if index < whole.len() {
+                whole.as_bytes()[index]
+            } else {
+                fraction.as_bytes()[index - whole.len()]
+            }
+        };
+        let mut significant = whole.len() + fraction.len();
+        let mut trailing = 0_usize;
+        while significant > 0 && digit_at(significant - 1) == b'0' {
+            significant -= 1;
+            trailing += 1;
+        }
+        if significant == 0 {
+            return Some(Self {
+                mantissa: 0,
+                scale: 0,
+            });
+        }
+        let scale = scale.checked_add(i32::try_from(trailing).ok()?)?;
+
         // A negative number accumulates downwards rather than being
         // built positive and negated: `i128::MIN`'s magnitude is one
         // larger than `i128::MAX`, so negating it at the end would
         // refuse the very number it is trying to read.
         let mut mantissa: i128 = 0;
-        for digit in whole.bytes().chain(fraction.bytes()) {
-            let digit = i128::from(digit - b'0');
+        for index in 0..significant {
+            let digit = i128::from(digit_at(index) - b'0');
             mantissa = mantissa.checked_mul(10)?;
             mantissa = if negative {
                 mantissa.checked_sub(digit)?
@@ -85,7 +112,6 @@ impl Decimal {
                 mantissa.checked_add(digit)?
             };
         }
-        let scale = exponent.checked_sub(i32::try_from(fraction.len()).ok()?)?;
 
         Self::new(mantissa, scale)
     }
@@ -326,6 +352,23 @@ mod tests {
         assert_eq!(decimal("0").is_multiple_of(decimal("7")), Some(true));
         assert_eq!(decimal("0.0").is_multiple_of(decimal("1.5")), Some(true));
         assert_eq!(decimal("7").is_multiple_of(decimal("0")), None);
+    }
+
+    #[test]
+    fn trailing_zeros_are_scale_rather_than_digits() {
+        // Forty digits, thirty-nine of them zeros, and the value is one.
+        // Accumulating them all to find that out would overflow.
+        let one = format!("{}e-39", "1".to_owned() + &"0".repeat(39));
+        assert_eq!(Decimal::parse(&one), Decimal::parse("1"));
+        assert_eq!(decimal(&one).to_string(), "1");
+
+        // The same trick at the other end.
+        assert_eq!(Decimal::parse(&format!("-{one}")), Decimal::parse("-1"));
+        assert_eq!(Decimal::parse(&"0".repeat(45)), Decimal::parse("0"));
+        assert_eq!(
+            Decimal::parse("1.000000000000000000000000000000000000000"),
+            Decimal::parse("1")
+        );
     }
 
     #[test]

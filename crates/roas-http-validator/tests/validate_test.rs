@@ -2036,6 +2036,28 @@ fn a_yaml_description_keeps_integer_bounds_well_past_a_double() {
 }
 
 #[test]
+fn a_yaml_exponent_loses_its_digits_even_without_a_fraction() {
+    // It is the decimal point *or the exponent* that sends a YAML
+    // scalar through an `f64` — not the fraction. `9007199254740993e0`
+    // is a whole number and still arrives as `…992`, and because the
+    // rounded value fits, the wrong verdict that follows is definite
+    // rather than reported.
+    let from_yaml = body_schema_yaml("{ type: integer, maximum: 9007199254740993e0 }");
+    let from_json = body_schema_text(r#"{"type":"integer","maximum":9007199254740993e0}"#);
+
+    assert!(errors(&from_json, &posted(b"9007199254740993")).is_empty());
+    assert_eq!(
+        errors(&from_yaml, &posted(b"9007199254740993")).len(),
+        1,
+        "known limit: the YAML parser rounded the bound down",
+    );
+
+    // A plain integer never goes near a double, so it is unharmed.
+    let plain = body_schema_yaml("{ type: integer, maximum: 9007199254740993 }");
+    assert!(errors(&plain, &posted(b"9007199254740993")).is_empty());
+}
+
+#[test]
 fn a_yaml_description_keeps_ordinary_decimal_bounds() {
     let validator = body_schema_yaml("{ type: number, multipleOf: 0.01 }");
     assert!(errors(&validator, &posted(b"1.23")).is_empty());
