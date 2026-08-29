@@ -26,7 +26,7 @@ v1_0 = ["roas-arazzo/v1_0"]
 reqwest = ["dep:reqwest", "dep:tokio"]
 
 [dependencies]
-roas-arazzo = { version = ">=0.3", path = "../roas-arazzo", features = ["v1_1"] }
+roas-arazzo = { version = "0.3", path = "../roas-arazzo", features = ["v1_1"] }
 regex.workspace = true
 reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["time"] }
