@@ -3,16 +3,16 @@
 //!
 //! All of the heavy lifting (dedup, naming, the generic `lift_ref_or`
 //! routine, the `LiftableBag` trait, the `Bag<T>` storage) lives in
-//! [`crate::common::collapse`]. This module just provides the v3.1
+//! `crate::common::collapse`. This module just provides the v3.1
 //! pieces:
 //!
-//! * The concrete [`Collapser`] struct (one `Bag<T>` field per
+//! * The concrete `Collapser` struct (one `Bag<T>` field per
 //!   component type plus the loader handle).
-//! * A [`LiftableBag`] impl per component type, with the per-type
-//!   [`tree-walk`](LiftableBag::walk) that calls
-//!   [`lift_ref_or`](crate::common::collapse::lift_ref_or) on every
+//! * A `LiftableBag` impl per component type, with the per-type
+//!   `tree-walk` (`LiftableBag::walk`) that calls
+//!   `lift_ref_or` on every
 //!   nested component slot.
-//! * A small [`collapse_spec`] entrypoint that owns the Collapser,
+//! * A small `collapse_spec` entrypoint that owns the Collapser,
 //!   runs phase 1 (seed bags) + phase 2a (recurse into pre-existing
 //!   `components.<bag>` entries) + phase 2b (walk paths / webhooks),
 //!   then writes each bag back.
@@ -25,7 +25,7 @@
 //! the dedup map and their nested children are lifted.
 //!
 //! v3.1 has no `components.mediaTypes` bag (that's a v3.2 addition),
-//! so `MediaType` instances stay inline at their content[mime] slots;
+//! so `MediaType` instances stay inline at their `content[mime]` slots;
 //! their nested `schema` / `examples` still lift via the walkers.
 
 use std::collections::BTreeMap;

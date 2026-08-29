@@ -987,7 +987,7 @@ pub struct ObjectSchema {
     /// a schema used to validate that property.
     /// Any property that doesn't match any of the property names in the properties keyword is ignored by this keyword.
     ///
-    /// https://json-schema.org/understanding-json-schema/reference/object.html#properties
+    /// <https://json-schema.org/understanding-json-schema/reference/object.html#properties>
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<BTreeMap<String, RefOr<Schema>>>,
 
@@ -995,7 +995,7 @@ pub struct ObjectSchema {
     /// That’s where patternProperties comes in: it maps regular expressions to schemas.
     /// If a property name matches the given regular expression, the property value must validate against the corresponding schema.
     ///
-    /// https://json-schema.org/understanding-json-schema/reference/object.html#pattern-properties
+    /// <https://json-schema.org/understanding-json-schema/reference/object.html#pattern-properties>
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern_properties: Option<BTreeMap<String, RefOr<Schema>>>,
 
@@ -1020,14 +1020,14 @@ pub struct ObjectSchema {
     /// that are not matched by properties or patternProperties.
     /// Setting the additionalProperties schema to false means no additional properties will be allowed.
     ///
-    /// https://json-schema.org/understanding-json-schema/reference/object.html#additional-properties
+    /// <https://json-schema.org/understanding-json-schema/reference/object.html#additional-properties>
     #[serde(skip_serializing_if = "Option::is_none")]
     pub additional_properties: Option<BoolOr<RefOr<Schema>>>,
 
     /// The unevaluatedProperties keyword is similar to additionalProperties except that it can recognize properties declared in subschemas.
     /// So, the example from the previous section can be rewritten without the need to redeclare properties.
     ///
-    /// https://json-schema.org/understanding-json-schema/reference/object.html#unevaluated-properties
+    /// <https://json-schema.org/understanding-json-schema/reference/object.html#unevaluated-properties>
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unevaluated_properties: Option<BoolOr<RefOr<Schema>>>,
 
@@ -1037,7 +1037,7 @@ pub struct ObjectSchema {
     /// You might, for example, want to enforce that all names are valid ASCII tokens so they can be used
     /// as attributes in a particular programming language.
     ///
-    /// https://json-schema.org/understanding-json-schema/reference/object.html#property-names
+    /// <https://json-schema.org/understanding-json-schema/reference/object.html#property-names>
     #[serde(skip_serializing_if = "Option::is_none")]
     pub property_names: Option<RefOr<Schema>>,
 
@@ -1190,7 +1190,7 @@ pub struct NullSchema {
 ///   - string
 /// ```
 ///
-/// Fo more details see: https://json-schema.org/understanding-json-schema/reference/type#type-specific-keywords
+/// Fo more details see: <https://json-schema.org/understanding-json-schema/reference/type#type-specific-keywords>
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct MultiSchema {
     #[serde(rename = "type")]

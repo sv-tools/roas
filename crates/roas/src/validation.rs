@@ -527,7 +527,7 @@ pub fn check_component_name(name: &str) -> Result<(), InvalidComponentName> {
     }
 }
 
-/// Trait for validating an object with a [`Context`].
+/// Trait for validating an object with a `Context`.
 ///
 /// Crate-internal: implemented by every component type that participates
 /// in spec validation. Implementors push errors into the context via
@@ -559,12 +559,12 @@ pub(crate) struct Context<'a, T> {
     pub options: EnumSet<Options>,
 }
 
-/// Generic "push an error message into a [`Context`]" trait. The blanket
+/// Generic "push an error message into a `Context`" trait. The blanket
 /// impls accept `&str`, `String`, and `fmt::Arguments`, so callers can
 /// `ctx.error(path, "literal")`, `ctx.error(path, format!(...))`, or
 /// `ctx.error(path, format_args!(...))` interchangeably.
 ///
-/// Crate-internal — paired with [`Context`].
+/// Crate-internal — paired with `Context`.
 pub(crate) trait PushError<T> {
     fn error(&mut self, path: String, args: T);
 }

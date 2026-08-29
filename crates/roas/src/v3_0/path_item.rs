@@ -78,7 +78,8 @@ pub struct PathItem {
     /// The list MUST NOT include duplicated parameters.
     /// A unique parameter is defined by a combination of a name and location.
     /// The list can use the [Reference Object](crate::common::reference::Ref) to link to parameters
-    /// that are defined at the [Swagger Object's](crate::v3_0::spec::Spec::parameters) parameters.
+    /// that are defined at the [Components Object's](crate::v3_0::components::Components::parameters)
+    /// parameters.
     pub parameters: Option<Vec<RefOr<Parameter>>>,
 
     /// Allows extensions to the Swagger Schema.

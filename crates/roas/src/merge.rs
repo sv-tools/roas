@@ -3,11 +3,11 @@
 //! Sits parallel to [`crate::validation`]:
 //!
 //! * The public [`Merge`] trait is what callers reach for — `base.merge(incoming, opts)`.
-//! * [`MergeWithContext`] is the crate-internal recursive trait every
+//! * `MergeWithContext` is the crate-internal recursive trait every
 //!   component type implements. Implementors mutate `self` in place,
-//!   record [`MergeConflict`]s into [`MergeContext::conflicts`], and
+//!   record [`MergeConflict`]s into `MergeContext::conflicts`, and
 //!   recurse into children via each child's `merge_with_context`. The
-//!   shape mirrors [`crate::validation::ValidateWithContext`] one-for-one.
+//!   shape mirrors `crate::validation::ValidateWithContext` one-for-one.
 //! * [`MergeOptions`] is an `EnumSet`-compatible flag enum. The default
 //!   set is `EnumSet::empty()` (incoming wins, refs replace silently,
 //!   schemas are leaves, info is preserved from base).
@@ -169,8 +169,8 @@ impl Display for ConflictKind {
     }
 }
 
-/// One recorded resolution. Built by [`MergeContext::should_take_incoming`]
-/// and the helpers in [`crate::common::merge`].
+/// One recorded resolution. Built by `MergeContext::should_take_incoming`
+/// and the helpers in `crate::common::merge`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MergeConflict {
     pub path: String,
@@ -239,7 +239,7 @@ pub trait Merge: Sized {
 }
 
 /// Crate-internal recursive merge trait. Mirrors
-/// [`crate::validation::ValidateWithContext`], except the JSONPath
+/// `crate::validation::ValidateWithContext`, except the JSONPath
 /// locator is a `&mut String` push/truncate stack rather than an
 /// owned `String` rebuilt at every recursion level. Implementors
 /// push their child segments before recursing and truncate back
@@ -252,7 +252,7 @@ pub trait Merge: Sized {
 /// path.truncate(len);
 /// ```
 ///
-/// The helpers in [`crate::common::merge`] do this internally so
+/// The helpers in `crate::common::merge` do this internally so
 /// most call sites don't have to. This turns the previous
 /// O(nodes × fields) `format!` allocations into O(conflicts) —
 /// only the conflict-recording path materialises an owned `String`.
