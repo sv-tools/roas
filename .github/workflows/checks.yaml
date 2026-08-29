@@ -262,29 +262,47 @@ jobs:
       security-events: write  # SARIF upload to the Security tab
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
   PublishCrateJob:
-    name: Test publishing per crate
+    name: Test publishing bumped crates
     needs: RustMeta
     # `RustMeta.outputs.publish` is `'[]'` on commits that don't bump
-    # any crate version (i.e. most PRs and main pushes). GitHub treats
-    # an empty matrix vector as a fatal "does not contain any values"
-    # error rather than silently skipping, so gate the whole job
-    # instead of relying on the matrix expanding to nothing.
+    # any crate version (i.e. most PRs and main pushes), so gate the
+    # whole job rather than letting an empty package list through.
     if: ${{ needs.RustMeta.outputs.publish != '[]' }}
-    strategy:
-      matrix:
-        package: ${{ fromJSON(needs.RustMeta.outputs.publish) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      # Every bumped crate goes into ONE cargo invocation, rather than a
+      # job per crate. A packaged crate has its `path` dependencies
+      # stripped, so a per-crate run resolves siblings from crates.io and
+      # a batch containing both a crate and a dependency of it that isn't
+      # on the registry yet can never pass: the dependent's dry run asks
+      # the index for a version that only exists in this checkout.
+      # Splitting the batch by hand (`publish-exclude`) was the previous
+      # workaround. Passing the whole set to one command instead lets
+      # cargo stage the siblings into a temporary local registry under
+      # `target/package/` and resolve them from there, and it orders the
+      # uploads by dependency itself. Needs cargo 1.90+ for multi-package
+      # publish.
+      - name: Build the package flag list
+        id: packages
+        env:
+          PUBLISH: ${{ needs.RustMeta.outputs.publish }}
+        run: |
+          set -euo pipefail
+          flags="$(jq -j '.[] | "--package \(.) "' <<<"$PUBLISH")"
+          echo "flags=$flags" >> "$GITHUB_OUTPUT"
+          echo "batch: $flags"
       - name: Dry run publish
-        run: cargo publish --all-features --package ${{ matrix.package }} --dry-run --verbose
-      - name: Create package
-        run: cargo package --all-features --package ${{ matrix.package }} --verbose
+        run: cargo publish --all-features ${{ steps.packages.outputs.flags }} --dry-run --verbose
+      - name: Create packages
+        run: cargo package --all-features ${{ steps.packages.outputs.flags }} --verbose
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ matrix.package }}-crate
-          path: target/package/${{ matrix.package }}-*.crate
+          # One artifact for the batch: the crates are verified together,
+          # so they are only meaningful together.
+          name: packaged-crates
+          path: target/package/*.crate
   Publish:
     name: Wait for publishing jobs to finish
     needs:
