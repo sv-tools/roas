@@ -251,11 +251,7 @@ jobs:
     # Flat scan of the current tree. Runs on push (post-merge to
     # main), workflow_call (publish flow), and schedule. The PR
     # variant above handles `pull_request`.
-    #
-    # TEMPORARILY DISABLED — same upstream unpinned-action issue as
-    # `OsvScannerPR` above. Re-enable by restoring the original
-    # `if: github.event_name != 'pull_request'`.
-    if: false
+    if: github.event_name != 'pull_request'
     permissions:
       actions: read
       contents: read
