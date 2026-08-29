@@ -115,6 +115,22 @@ jobs:
       - run: cargo clippy --all-features --all-targets --verbose -- --deny warnings
       - run: cargo clippy --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
         if: failure()
+  Docs:
+    name: Check rustdoc
+    runs-on: ubuntu-latest
+    env:
+      # Broken intra-doc links, bare URLs and malformed HTML in doc
+      # comments are warnings by default; docs.rs renders them wrong
+      # rather than failing, so make them fatal here instead.
+      RUSTDOCFLAGS: --deny warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      # Split by target kind: `roas-cli`'s binary is also named `roas`,
+      # so documenting it alongside the `roas` library in one pass makes
+      # both write `target/doc/roas/index.html` (rust-lang/cargo#6313).
+      - run: cargo doc --workspace --all-features --no-deps --lib --verbose
+      - run: cargo doc --package roas-cli --all-features --no-deps --bins --verbose
   TestJob:
     name: Test per Package and Feature
     needs: RustMeta
@@ -286,6 +302,7 @@ jobs:
       - Build
       - Format
       - Clippy
+      - Docs
       - Tests
       - Deps
       - OsvScannerPR

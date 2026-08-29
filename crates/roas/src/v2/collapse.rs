@@ -4,16 +4,16 @@
 //!
 //! All of the heavy lifting (dedup, naming, the generic `lift_ref_or`
 //! routine, the `LiftableBag` trait, the `Bag<T>` storage) lives in
-//! [`crate::common::collapse`]. This module just provides the v2
+//! `crate::common::collapse`. This module just provides the v2
 //! pieces:
 //!
-//! * The concrete [`Collapser`] struct (one `Bag<T>` field per
+//! * The concrete `Collapser` struct (one `Bag<T>` field per
 //!   component type plus the loader handle).
-//! * A [`LiftableBag`] impl per component type, with the per-type
-//!   [`tree-walk`](LiftableBag::walk) that calls
-//!   [`lift_ref_or`](crate::common::collapse::lift_ref_or) on every
+//! * A `LiftableBag` impl per component type, with the per-type
+//!   `tree-walk` (`LiftableBag::walk`) that calls
+//!   `lift_ref_or` on every
 //!   nested component slot.
-//! * A small [`collapse_spec`] entrypoint that owns the Collapser,
+//! * A small `collapse_spec` entrypoint that owns the Collapser,
 //!   runs phase 1 (seed bags) + phase 2a (recurse into pre-existing
 //!   bag entries) + phase 2b (walk paths), then writes each bag back.
 //!
@@ -24,7 +24,7 @@
 //!   `components`.
 //! * They hold *bare* values (`BTreeMap<String, T>`) rather than
 //!   `BTreeMap<String, RefOr<T>>` — a bag entry can't itself be a
-//!   `$ref`. [`Bag<T>`] still stores entries as `RefOr<T>`
+//!   `$ref`. `Bag<T>` still stores entries as `RefOr<T>`
 //!   internally, so this module wraps in/out of `RefOr::new_item`
 //!   at the bag boundary.
 //!

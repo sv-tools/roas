@@ -5,7 +5,7 @@
 //! gets a `merge_with_context` whose shape mirrors its
 //! `validate_with_context` neighbor: walk the fields, recurse into
 //! nested objects, dispatch through `RefOr` / `BoolOr`. Helpers from
-//! [`crate::common::merge`] do the structural plumbing
+//! `crate::common::merge` do the structural plumbing
 //! (`merge_opt_scalar`, `merge_opt_map`, `merge_vec_by_key`,
 //! `merge_extensions`, ...) so each impl reads as a flat list of
 //! "field → rule" lines.
@@ -13,7 +13,7 @@
 //! Conflict policy modes (incoming-wins / base-wins / error-on-conflict),
 //! the `DeepMergeObjectSchemas` opt-in, and the `MergeInfo`
 //! /`ReplaceListsWhenEmpty` toggles all flow through
-//! [`crate::merge::MergeContext`] — the impls themselves stay
+//! `crate::merge::MergeContext` — the impls themselves stay
 //! policy-free.
 
 use enumset::EnumSet;

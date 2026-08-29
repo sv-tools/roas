@@ -1,6 +1,6 @@
 //! The root document object of the OpenAPI v3.1.X specification.
 //!
-//! https://spec.openapis.org/oas/v3.1.2
+//! <https://spec.openapis.org/oas/v3.1.2>
 
 use crate::common::helpers::{validate_not_visited, validate_required_string};
 use crate::common::reference::{RefOr, ResolveReference, resolve_in_map};
