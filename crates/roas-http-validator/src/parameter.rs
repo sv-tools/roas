@@ -30,6 +30,8 @@ use roas::v3_2::spec::Spec;
 use serde_json::Value;
 
 use crate::body;
+use crate::decimal::Decimal;
+use crate::decoder::Decoders;
 use crate::report::{ErrorKind, Location, ValidationError};
 use crate::request::{RequestView, decode_form, decode_path_segment, split_query};
 use crate::schema;
@@ -166,6 +168,7 @@ pub(crate) fn validate(
     request: &RequestView<'_>,
     extracted: &Extracted<'_>,
     spec: &Spec,
+    decoders: &Decoders,
     errors: &mut Vec<ValidationError>,
 ) {
     let described = Described::of(parameter);
@@ -186,7 +189,7 @@ pub(crate) fn validate(
             }
             return;
         };
-        validate_as_content(&raw, content, spec, &mut push);
+        validate_as_content(&raw, content, spec, decoders, &mut push);
         return;
     }
 
@@ -222,6 +225,7 @@ fn validate_as_content(
     raw: &str,
     content: &BTreeMap<String, RefOr<MediaType>>,
     spec: &Spec,
+    decoders: &Decoders,
     push: &mut impl FnMut(String, ErrorKind),
 ) {
     // The specification requires exactly one entry here.
@@ -244,9 +248,13 @@ fn validate_as_content(
     let value = match body::decode(
         raw.as_bytes(),
         media_type,
+        // A `content` parameter has no header of its own, so the Media
+        // Type Object's key is the whole of what was said about it.
+        media_type,
         declared,
         entry.encoding.as_ref(),
         spec,
+        decoders,
     ) {
         Ok(value) => value,
         Err(body::Decoded::Malformed(why)) => {
@@ -719,15 +727,19 @@ pub(crate) fn coerce(
 fn coerce_primitive(raw: &str, primitive: Primitive) -> Result<Value, String> {
     match primitive {
         Primitive::String => Ok(Value::String(raw.to_owned())),
-        Primitive::Integer => raw
-            .parse::<i64>()
-            .map(Value::from)
-            .map_err(|_| format!("{raw:?} is not an integer")),
-        Primitive::Number => raw
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(Value::Number)
+        // Parsed as a decimal and carried as its own literal, so a
+        // parameter is no less exact than a body: `?n=9007199254740993`
+        // stays that number rather than becoming the nearest double.
+        Primitive::Integer => {
+            let decimal =
+                Decimal::parse(raw).ok_or_else(|| format!("{raw:?} is not an integer"))?;
+            if !decimal.is_integer() {
+                return Err(format!("{raw:?} is not an integer"));
+            }
+            Ok(decimal.into_value())
+        }
+        Primitive::Number => Decimal::parse(raw)
+            .map(Decimal::into_value)
             .ok_or_else(|| format!("{raw:?} is not a number")),
         // The specification's own encoding of a boolean, and only it —
         // accepting `1` or `yes` would be inventing a dialect.

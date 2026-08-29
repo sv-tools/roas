@@ -131,11 +131,25 @@ A parameter whose schema this crate cannot read structurally — a composition, 
 
 "Wrong" includes "could not be judged". A subschema that cannot be applied — a `pattern` that will not compile, a number whose digits floating point already lost — yields no verdict rather than a failing one, and `not`, `anyOf` and `oneOf` all carry that third state instead of reading it as a mismatch. Otherwise `{ "not": { "pattern": "(" } }` would accept anything at all, on the strength of a check that never ran. The logic is properly three-valued, so a constraint the value *definitely* broke still settles the schema: `minLength: 2` rejects `"x"` whether or not the `pattern` beside it compiles.
 
-Numbers are compared exactly wherever they fit an `i128`, and a number is called an **integer** only when it can be proven to be one — that is, when `serde_json` parsed it as one. A value that arrived as a float and merely *looks* whole is reported as unchecked instead: `1.0000000000000001` is stored as `1.0`, and a fraction can round away at any magnitude, so no threshold can stand in for the lexeme. `multipleOf` gets stricter treatment than the rest, because it is the one keyword a rounding error flips outright: every other numeric keyword is an inequality with slack either side, while divisibility is true on a set of measure zero. An operand whose written form is gone therefore stands for the range between its neighbours rather than for itself. A step written as an *integer* still is one — `roas` keeps `multipleOf` as a `serde_json::Number` — so `multipleOf: 2` decides `4` and `5` exactly, at any magnitude. A step written `1.5`, or `1.0000000000000001` which is the same `f64` as `1`, is only ever disprovable.
+Numbers are compared as the decimals they were written as. `serde_json` is built here with `arbitrary_precision`, so a parsed number keeps its literal, and every numeric keyword is integer arithmetic on `mantissa × 10^scale` rather than a judgement about what an `f64` made of it:
 
-A number that lost digits is treated as the **interval** it stands for rather than the point it happens to hold, so a comparison is `Less`, `Equal`, `Greater` or *unknown*. That cuts both ways: `maximum: 9007199254740993` is stored as `…992`, and a request carrying `…993` is neither accepted nor rejected against it, where comparing the stored values would have produced a confident and wrong violation. Below 2^52 the ecosystem's ordinary floating-point behaviour is kept — everyone compares `0.1` with the `f64` nearest `0.1`.
+| written | the double says | the literal says |
+|---|---|---|
+| `1.0` against `type: integer` | might have had a fraction | it is an integer |
+| `1.0000000000000001` against `type: integer` | same value as `1.0` | it is not |
+| `9007199254740993` against `maximum: 9007199254740992` | equal | above it |
+| `0.3` against `multipleOf: 0.1` | `2.9999999999999996`, unprovable | a multiple |
+| `1.23` against `multipleOf: 0.01` | unprovable | a multiple |
 
-Full decimal exactness would need `serde_json`'s `arbitrary_precision`, which is a workspace-wide choice rather than this crate's. Without it, the crate's position is narrow and stated: it decides what a double can decide, and reports everything else rather than guessing in either direction.
+Parameters go the same way — a query value is parsed as a decimal rather than through an `f64` — so `?n=9007199254740993` is that number and not the nearest double.
+
+What is left unchecked is only what will not fit: a literal past `i128`'s range is reported rather than approximated, and so is a comparison it makes undecidable — two such literals that are not written identically cannot be told apart, which `uniqueItems` says rather than assumes.
+
+The *instance* side is always exact: a request body is JSON and this crate parses it itself.
+
+The *schema* side is exact as far as the format it was parsed from allows. `roas`'s numeric fields are `serde_json::Number` and this crate turns on its `exact-numbers` feature, which is what makes a `Number` keep its literal — so a **JSON** description is exact throughout. A **YAML** one is exact for every integer this crate can hold — both stop at exactly `i128`'s range, so nothing YAML loses would have been decidable in any format — but not for a literal written with a decimal point or an exponent: `serde_yaml_ng` reads those through an `f64` before `serde_json` is involved, so `maximum: 9007199254740993.5` arrives as `9007199254740994` and `maximum: 9007199254740993e0` arrives as `9007199254740992`. The rounded value still fits, so the verdict that follows is definite and wrong rather than reported — a request of `9007199254740994` is accepted against the first, and one of `9007199254740993` is rejected by the second. The same descriptions in JSON decide both correctly. That loss happens in the YAML parser, upstream of anything this crate or `roas` can reach.
+
+In practice this needs a bound written in YAML with more significant digits than a double carries — 17-plus — *and* a decimal point or exponent, since a plain integer never goes near an `f64`. Ordinary decimals (`0.1`, `1.25`, `2.5`) round-trip YAML unchanged, and so does every integer in range — `2^53`, `i64::MAX`, `u64::MAX` and both ends of `i128` all survive. Past that range a number is reported as unchecked rather than compared, whatever it was parsed from.
 
 ## Versions
 
@@ -152,9 +166,25 @@ let validator = Validator::from_v2(swagger, Options::new());
 # fn main() {}
 ```
 
+## Media types it does not read itself
+
+JSON, `application/x-www-form-urlencoded` and `text/*` are built in. Anything else — `multipart/form-data`, XML, whatever your service actually speaks — is reported as unchecked rather than guessed at, and `Options::decoder` is the way in:
+
+```rust
+# use roas_http_validator::Options;
+let options = Options::new().decoder("application/xml", |bytes, _media_type| {
+    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "raw": text }))  // whatever mapping your clients use
+});
+```
+
+The bytes become a value and the Schema Object judges it like any other, JSON Pointers and all. Lookup follows Media Type Object precedence — exact, then `type/*`, then `*/*` — and a registration beats the built-in for the same media type.
+
+These two are a hook rather than more built-ins on purpose, for reasons that differ by format. **Multipart** would mean owning a boundary parser and buffering file uploads, which is precisely where this crate's "the caller decides what to buffer" posture earns its keep. **XML** has no specified mapping onto a JSON Schema instance at all — OpenAPI's XML Object is serialization metadata for code generators, so any translation is a choice and implementations make different ones. Taking yours beats inventing one and reporting violations against it.
+
 ## What it does not check yet
 
-Response validation, security requirements, `multipart/form-data` bodies, and XML. Anything a check could not judge is reported as `ErrorKind::Unsupported` rather than passed over, so a request never looks valid because nothing looked at it.
+Response validation and security requirements. Anything a check could not judge is reported as `ErrorKind::Unsupported` rather than passed over, so a request never looks valid because nothing looked at it.
 
 ## License
 

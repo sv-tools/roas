@@ -19,6 +19,7 @@ use roas::v3_2::schema::{Schema, SingleSchema};
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
 
+use crate::decoder::Decoders;
 use crate::parameter::is_json;
 use crate::report::{ErrorKind, Location, ValidationError};
 use crate::request::RequestView;
@@ -29,6 +30,7 @@ pub(crate) fn validate(
     request_body: &RequestBody,
     request: &RequestView<'_>,
     spec: &Spec,
+    decoders: &Decoders,
     errors: &mut Vec<ValidationError>,
 ) {
     let mut push = |pointer: String, kind: ErrorKind| {
@@ -84,7 +86,20 @@ pub(crate) fn validate(
         return;
     };
 
-    let value = match decode(bytes, &media_type, declared, entry.encoding.as_ref(), spec) {
+    // Matching uses the media type without its parameters; a decoder
+    // gets the header as it arrived, because the parameters are where
+    // `multipart/form-data`'s `boundary` lives and it cannot be parsed
+    // without one (RFC 7578 §4.1).
+    let sent_header = request.header("content-type").unwrap_or(&media_type);
+    let value = match decode(
+        bytes,
+        &media_type,
+        sent_header,
+        declared,
+        entry.encoding.as_ref(),
+        spec,
+        decoders,
+    ) {
         Ok(value) => value,
         Err(Decoded::Malformed(why)) => {
             push(String::new(), ErrorKind::Malformed(why));
@@ -154,10 +169,20 @@ fn select<'c>(
 pub(crate) fn decode(
     bytes: &[u8],
     media_type: &str,
+    content_type: &str,
     declared: &RefOr<Schema>,
     encoding: Option<&BTreeMap<String, Encoding>>,
     spec: &Spec,
+    decoders: &Decoders,
 ) -> Result<Value, Decoded> {
+    // A registered decoder comes first, so a caller who asked for one
+    // gets it — including for a media type this crate would otherwise
+    // have read itself. It is handed `content_type`, parameters and
+    // all, since that is where a `boundary` or a `charset` lives.
+    if let Some(decoder) = decoders.find(media_type) {
+        return decoder(bytes, content_type).map_err(Decoded::Malformed);
+    }
+
     if is_json(media_type) {
         return serde_json::from_slice(bytes)
             .map_err(|error| Decoded::Malformed(format!("invalid JSON: {error}")));

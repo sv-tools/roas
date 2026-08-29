@@ -75,22 +75,42 @@
 //! `roas`'s own migrations first, so there is one interpreter rather
 //! than four.
 //!
-//! ## What it does not do yet
+//! Numbers are compared as the decimals they were written as, on both
+//! sides. The one limit is the format a
+//! *description* is parsed from: JSON is exact throughout, while YAML
+//! reads scalars through an `f64` before `serde_json` is involved, so a
+//! fractional bound carrying more precision than a double is already
+//! rounded when it arrives. Every integer survives either way.
 //!
-//! Response validation, security requirements, `multipart/form-data`
-//! bodies, and XML — and exact decimal arithmetic, which would need
-//! `serde_json`'s `arbitrary_precision`: numbers are compared as the
-//! IEEE-754 doubles they arrive as, and anything that would over-claim
-//! on top of one is reported rather than assumed. Anything a check
-//! could not judge is reported — split out by
-//! [`ValidationReport::unchecked`] from what the request definitely got
-//! wrong —
-//! [`ErrorKind::Unsupported`] for what is not implemented yet,
+//! ## Media types it does not read itself
+//!
+//! JSON, `application/x-www-form-urlencoded` and `text/*` are built in.
+//! Anything else — `multipart/form-data`, XML — is reported rather than
+//! guessed at, and [`Options::decoder`] is the way in: the bytes become
+//! a value and the Schema Object judges it like any other.
+//!
+//! Those two are a hook rather than more built-ins on purpose.
+//! Multipart would mean owning a boundary parser and buffering file
+//! uploads, which is exactly where this crate leaves buffering to the
+//! caller. XML has no specified mapping onto a schema instance at all —
+//! OpenAPI's XML Object is serialization metadata for code generators —
+//! so any translation is a choice, and taking the caller's beats
+//! inventing one.
+//!
+//! ## What it does not check yet
+//!
+//! Response validation and security requirements.
+//!
+//! Everything a check could not judge is reported rather than passed
+//! over, so a request never looks valid because nothing looked at it:
+//! [`ErrorKind::Unsupported`] for what is not implemented,
 //! [`ErrorKind::Unchecked`] for a description this crate can read but
-//! cannot apply faithfully — rather than passed over, so a request
-//! never looks valid because nothing looked at it.
+//! cannot apply faithfully. [`ValidationReport::unchecked`] separates
+//! both from what the request definitely got wrong.
 
 mod body;
+mod decimal;
+mod decoder;
 mod method;
 mod parameter;
 mod paths;
@@ -102,6 +122,7 @@ mod validator;
 
 mod adapters;
 
+pub use decoder::Decoder;
 pub use report::{ErrorKind, Location, RoutingError, ValidationError, ValidationReport};
 pub use request::{RequestView, ToRequestView};
 pub use validator::{Options, Validator};

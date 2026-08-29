@@ -161,16 +161,16 @@ pub struct NumberItem {
     ///
     /// **Note**: "default" has no meaning for required headers.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<f64>,
+    pub default: Option<serde_json::Number>,
 
     /// The list of strings that defines the possible values of this parameter.
     #[serde(rename = "enum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub enum_values: Option<Vec<f64>>,
+    pub enum_values: Option<Vec<serde_json::Number>>,
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<f64>,
+    pub minimum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly greater than the value of `minimum`
     #[serde(rename = "exclusiveMinimum")]
@@ -179,7 +179,7 @@ pub struct NumberItem {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<f64>,
+    pub maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly less than the value of `maximum`
     #[serde(rename = "exclusiveMaximum")]
@@ -463,11 +463,14 @@ mod tests {
             .unwrap(),
             Items::Number(Box::new(NumberItem {
                 format: Some(NumberFormat::Double),
-                default: Some(42.0),
-                enum_values: Some(vec![42.0, 105.0]),
-                minimum: Some(1.0),
+                default: Some("42.0".parse().expect("a valid number")),
+                enum_values: Some(vec![
+                    "42.0".parse().expect("a valid number"),
+                    "105.0".parse().expect("a valid number")
+                ]),
+                minimum: Some("1.0".parse().expect("a valid number")),
                 exclusive_minimum: Some(true),
-                maximum: Some(10.0),
+                maximum: Some("10.0".parse().expect("a valid number")),
                 exclusive_maximum: Some(true),
                 multiple_of: Some(serde_json::Number::from_f64(2.0).expect("2.0 is finite"),),
                 extensions: Some({
@@ -485,11 +488,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Items::Number(Box::new(NumberItem {
                 format: Some(NumberFormat::Double),
-                default: Some(42.0),
-                enum_values: Some(vec![42.0, 105.0]),
-                minimum: Some(1.0),
+                default: Some("42.0".parse().expect("a valid number")),
+                enum_values: Some(vec![
+                    "42.0".parse().expect("a valid number"),
+                    "105.0".parse().expect("a valid number")
+                ]),
+                minimum: Some("1.0".parse().expect("a valid number")),
                 exclusive_minimum: Some(true),
-                maximum: Some(10.0),
+                maximum: Some("10.0".parse().expect("a valid number")),
                 exclusive_maximum: Some(true),
                 multiple_of: Some(serde_json::Number::from_f64(2.0).expect("2.0 is finite"),),
                 extensions: Some({

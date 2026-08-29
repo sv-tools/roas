@@ -2,6 +2,7 @@
 //! requests.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use roas::v3_2::operation::Operation;
 use roas::v3_2::parameter::Parameter;
@@ -9,6 +10,7 @@ use roas::v3_2::path_item::PathItem;
 use roas::v3_2::spec::Spec;
 
 use crate::body;
+use crate::decoder::Decoders;
 use crate::parameter;
 use crate::paths;
 use crate::report::{ErrorKind, Location, RoutingError, ValidationError, ValidationReport};
@@ -22,12 +24,30 @@ use crate::router::Router;
 ///
 /// let options = Options::new().base_path("/api/v1").reject_undescribed_query_parameters();
 /// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct Options {
     base_path: Option<String>,
     skip_body: bool,
     reject_undescribed_query_parameters: bool,
+    pub(crate) decoders: Decoders,
+}
+
+/// Written out by hand because a decoder is a function, and a function
+/// has nothing useful to print. The media types it was registered for
+/// do.
+impl fmt::Debug for Options {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Options")
+            .field("base_path", &self.base_path)
+            .field("skip_body", &self.skip_body)
+            .field(
+                "reject_undescribed_query_parameters",
+                &self.reject_undescribed_query_parameters,
+            )
+            .field("decoders", &self.decoders.media_types().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl Options {
@@ -51,6 +71,43 @@ impl Options {
     #[must_use]
     pub fn skip_body(mut self) -> Self {
         self.skip_body = true;
+        self
+    }
+
+    /// Read a media type this crate does not know how to read.
+    ///
+    /// The built-in decoders cover JSON,
+    /// `application/x-www-form-urlencoded` and `text/*`; anything else
+    /// is reported as unchecked rather than guessed at. Register a
+    /// decoder and its media type joins them — the bytes become a
+    /// value, and the Schema Object judges it like any other.
+    ///
+    /// This is how `multipart/form-data` and XML are meant to be
+    /// handled: see [`crate::Decoder`] for why they are a hook rather
+    /// than more built-ins.
+    ///
+    /// Looked up the way a Media Type Object is — exact match, then a
+    /// `type/*` range, then `*/*` — and a registration takes precedence
+    /// over the built-in for the same media type, so a caller who wants
+    /// their own JSON reader can have one.
+    ///
+    /// ```
+    /// use roas_http_validator::Options;
+    ///
+    /// let options = Options::new().decoder("text/csv", |bytes, _media_type| {
+    ///     let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    ///     Ok(serde_json::Value::Array(
+    ///         text.lines().map(|line| line.into()).collect(),
+    ///     ))
+    /// });
+    /// ```
+    #[must_use]
+    pub fn decoder<F>(mut self, media_type: &str, decoder: F) -> Self
+    where
+        F: Fn(&[u8], &str) -> Result<serde_json::Value, String> + Send + Sync + 'static,
+    {
+        self.decoders
+            .insert(media_type, std::sync::Arc::new(decoder));
         self
     }
 
@@ -206,7 +263,14 @@ impl Validator {
         let extracted = parameter::Extracted::new(request, &path_parameters);
 
         for parameter in &parameters {
-            parameter::validate(parameter, request, &extracted, &self.spec, &mut errors);
+            parameter::validate(
+                parameter,
+                request,
+                &extracted,
+                &self.spec,
+                &self.options.decoders,
+                &mut errors,
+            );
         }
 
         if self.options.reject_undescribed_query_parameters {
@@ -218,7 +282,13 @@ impl Validator {
         {
             match request_body.get_item(&self.spec) {
                 Ok(request_body) => {
-                    body::validate(request_body, request, &self.spec, &mut errors);
+                    body::validate(
+                        request_body,
+                        request,
+                        &self.spec,
+                        &self.options.decoders,
+                        &mut errors,
+                    );
                 }
                 Err(error) => errors.push(ValidationError {
                     location: Location::Body,

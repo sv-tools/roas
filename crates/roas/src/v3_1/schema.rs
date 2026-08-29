@@ -712,12 +712,12 @@ pub struct NumberSchema {
     ///
     /// **Note**: "default" has no meaning for required headers.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<f64>,
+    pub default: Option<serde_json::Number>,
 
     /// The list of strings that defines the possible values of this parameter.
     #[serde(rename = "enum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub enum_values: Option<Vec<f64>>,
+    pub enum_values: Option<Vec<serde_json::Number>>,
 
     /// Documentation/codegen extension with descriptions for enum values.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -726,23 +726,23 @@ pub struct NumberSchema {
 
     /// Declares the minimum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<f64>,
+    pub minimum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly greater than this value.
     /// In OpenAPI 3.1 / JSON Schema 2020-12 this is a numeric bound, not a boolean modifier.
     #[serde(rename = "exclusiveMinimum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_minimum: Option<f64>,
+    pub exclusive_minimum: Option<serde_json::Number>,
 
     /// Declares the maximum value of the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<f64>,
+    pub maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter is strictly less than this value.
     /// In OpenAPI 3.1 / JSON Schema 2020-12 this is a numeric bound, not a boolean modifier.
     #[serde(rename = "exclusiveMaximum")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclusive_maximum: Option<f64>,
+    pub exclusive_maximum: Option<serde_json::Number>,
 
     /// Declares that the value of the parameter can be restricted to a multiple of a given number
     #[serde(rename = "multipleOf")]
@@ -1975,8 +1975,14 @@ mod tests {
         match &parsed {
             Schema::Single(s) => match s.as_ref() {
                 SingleSchema::Number(n) => {
-                    assert_eq!(n.exclusive_minimum, Some(0.5));
-                    assert_eq!(n.exclusive_maximum, Some(1.5));
+                    assert_eq!(
+                        n.exclusive_minimum,
+                        Some("0.5".parse().expect("a valid number"))
+                    );
+                    assert_eq!(
+                        n.exclusive_maximum,
+                        Some("1.5".parse().expect("a valid number"))
+                    );
                 }
                 _ => panic!("expected Number schema"),
             },
@@ -1990,10 +1996,14 @@ mod tests {
         let spec = Schema::Single(Box::new(SingleSchema::Number(NumberSchema {
             title: Some("foo".to_string()),
             format: Some(NumberFormat::Float),
-            default: Some(42.0),
-            enum_values: Some(vec![1.0, 42.0, 105.0]),
-            minimum: Some(1.0),
-            maximum: Some(105.0),
+            default: Some("42.0".parse().expect("a valid number")),
+            enum_values: Some(vec![
+                "1.0".parse().expect("a valid number"),
+                "42.0".parse().expect("a valid number"),
+                "105.0".parse().expect("a valid number"),
+            ]),
+            minimum: Some("1.0".parse().expect("a valid number")),
+            maximum: Some("105.0".parse().expect("a valid number")),
             examples: Some(vec![serde_json::json!(1.0), serde_json::json!(42.0)]),
             ..Default::default()
         })));
