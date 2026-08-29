@@ -43,21 +43,6 @@ jobs:
         id: rustmeta
         with:
           matrix-exclude-features: roas:default
-          # TEMPORARY, and it has to come back out — same staging as
-          # #264, for the same reason.
-          #
-          # `roas-http-validator` 0.2.0 is newer than the 0.1.0 on the
-          # registry, so it is in the `publish` output and gets
-          # dry-run-published. It requires `roas` 0.19, which this run is
-          # releasing: resolving it from crates.io finds nothing, and
-          # `release-stage` reuses this workflow, so the failure would
-          # block the release that fixes it.
-          #
-          # Remove this line in the follow-up that releases
-          # `roas-http-validator`, once `roas` 0.19.0 is on crates.io.
-          # Until then the crate is built, tested and linted like every
-          # other — only its dry-run publish is skipped.
-          publish-exclude: roas-http-validator
   BuildJob:
     name: Build per Package and Feature
     needs: RustMeta
