@@ -32,6 +32,18 @@ docker run --rm -v "$PWD:/specs" -w /specs ghcr.io/sv-tools/roas:latest openapi 
 
 Pinned versions: `ghcr.io/sv-tools/roas:<version>` — see the [GitHub Releases](https://github.com/sv-tools/roas/releases). The image's entrypoint is the `roas` binary, so any subcommand and flags follow `docker run ... ghcr.io/sv-tools/roas:<tag>`.
 
+## Stability
+
+From 1.0 the command-line surface follows semver: the commands, their flags, and
+the meaning of exit codes do not change incompatibly without a major bump. A new
+subcommand, a new optional flag, or a new value for an existing flag is a minor
+release.
+
+Not covered: the wording of diagnostics and reports, which is written for people
+and may be reworded in any release, and the versions of the `roas*` libraries the
+binary is built against, which are an implementation detail — parse the output
+only where a flag documents a machine-readable format.
+
 ## Usage
 
 ```shell
