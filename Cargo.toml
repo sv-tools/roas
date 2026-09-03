@@ -33,7 +33,7 @@ notify = "8.2"
 percent-encoding = "2.3.2"
 poem = { version = "3.1", default-features = false }
 rocket = { version = "0.5.1", default-features = false }
-salvo_core = { version = "0.95", default-features = false }
+salvo_core = { version = "0.96", default-features = false }
 notify-debouncer-mini = "0.7"
 tokio = { version = "1.52", default-features = false }
 tokio-stream = { version = "0.1", default-features = false }
