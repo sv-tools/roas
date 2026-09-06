@@ -17,6 +17,12 @@
 //! specify what *changes* — the concrete bag type, its ref prefix,
 //! its tree-walking function, and an optional human-readable name
 //! hint.
+//!
+//! Which inline schemas are *worth* lifting is decided here too, in
+//! [`schema_lift_decision`], and applies to every version at once:
+//! a bare `{"type": "string"}` gains nothing from a machine-derived
+//! name and a `$ref`, so it stays where it is. See
+//! [`LiftDecision`] for the rule.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -321,11 +327,176 @@ pub fn is_internal_ref(reference: &str) -> bool {
     reference.starts_with('#')
 }
 
+/// What [`lift_ref_or`] should do with one inline schema.
+///
+/// Collapse exists to give reusable structures a name and a `$ref`.
+/// A schema that is nothing but its type earns neither: replacing
+/// `{"type": "string"}` with a `$ref` to a generated
+/// `components_schemas_Order_properties.quantity` makes the document
+/// bigger and harder to read. So inline schemas are sorted into
+/// three classes, uniformly for v2 / v3.0 / v3.1 / v3.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiftDecision {
+    /// Structural shapes — objects, `allOf` / `anyOf` / `oneOf` /
+    /// `not`, and anything carrying `enum` values. These are what a
+    /// name and a `$ref` genuinely serve, so they always lift.
+    ///
+    /// A `title` counts as structural too, for a different reason:
+    /// it is the one annotation collapse turns into the component
+    /// name (see `LiftableBag::name_hint`). A titled schema gets the
+    /// author's own name rather than a generated one, so lifting it
+    /// produces `components.schemas.EmailAddress`, not
+    /// `components_schemas_User_properties.email`.
+    Always,
+
+    /// A schema carrying nothing beyond its type plus pure
+    /// annotations (`description`, `example`, `examples`,
+    /// `deprecated`, `readOnly`, `writeOnly`), plus the boolean and
+    /// empty schemas. Never lifted — inline *is* the readable form.
+    Never,
+
+    /// Everything in between: constrained scalars (`format`,
+    /// `pattern`, `maxLength`, `default`, `xml`, …) and thin array
+    /// wrappers. More than a bare type, but a generated name for a
+    /// single-use one is still noise — so these lift only when the
+    /// identical schema occurs more than once in the document, where
+    /// dedup pays for the name.
+    IfRepeated,
+}
+
+/// Keys that make a schema structural: worth a name of its own.
+const STRUCTURAL_KEYS: &[&str] = &[
+    // Not structure, but an author-given name: see `LiftDecision`.
+    "title",
+    "properties",
+    "patternProperties",
+    "additionalProperties",
+    "unevaluatedProperties",
+    "propertyNames",
+    "required",
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "not",
+    "enum",
+    "discriminator",
+];
+
+/// Keys that describe a schema without constraining it. A schema
+/// built only from `type` plus these is a bare type with prose
+/// attached.
+const ANNOTATION_KEYS: &[&str] = &[
+    "description",
+    "example",
+    "examples",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+];
+
+/// Sort one schema, in its serialized form, into a [`LiftDecision`].
+///
+/// Works on JSON rather than on a version's `Schema` enum so the
+/// rule is written once and every version inherits it — the four
+/// type trees differ, the JSON keys they emit do not.
+pub fn schema_lift_decision(value: &serde_json::Value) -> LiftDecision {
+    // A boolean schema (`true` / `false`) or the empty schema `{}`
+    // has nothing to name.
+    let Some(map) = value.as_object() else {
+        return LiftDecision::Never;
+    };
+    if map.is_empty() {
+        return LiftDecision::Never;
+    }
+    if map.keys().any(|k| STRUCTURAL_KEYS.contains(&k.as_str())) {
+        return LiftDecision::Always;
+    }
+    if map
+        .keys()
+        .all(|k| k == "type" || ANNOTATION_KEYS.contains(&k.as_str()))
+    {
+        return LiftDecision::Never;
+    }
+    LiftDecision::IfRepeated
+}
+
+/// How many document slots hold each [`LiftDecision::IfRepeated`]
+/// shape.
+///
+/// Collapse runs twice: a census pass over a throwaway clone of the
+/// spec fills this in, then the real pass consults it. Both passes
+/// are the *same* walk, so a shape is counted at exactly the slots
+/// that could lift it — no separate notion of "where a schema might
+/// live", and nothing counted from an `example` payload or an
+/// extension that merely resembles a schema. Two slots that never
+/// lift are counted anyway, because an inline schema matching
+/// either of them can collapse onto an already-named component: a
+/// schema reached through an external `$ref`, and a pre-existing
+/// `components.<bag>` entry.
+///
+/// Slots are keyed by a 64-bit digest of the schema's canonical JSON
+/// *before* its children are walked — the form both passes see at
+/// that slot, since a subtree is only rewritten after its own slot
+/// has been weighed. A digest collision can only make a single-use
+/// schema lift, which is what this crate did for every schema until
+/// 0.20, so the digest is trusted here without a confirmation pass
+/// (unlike [`Bag::seen`], where a collision would merge two
+/// components).
+#[derive(Default)]
+pub struct SchemaRepeats {
+    counts: HashMap<u64, u32>,
+    /// True during the census pass: [`Self::weigh`] records a slot
+    /// and reports "not repeated" so the census walk rewrites the
+    /// clone exactly as the real pass will rewrite the spec.
+    counting: bool,
+}
+
+impl SchemaRepeats {
+    /// Start a census pass. Feed the result of [`Self::finish`] to
+    /// the real pass.
+    pub fn census() -> Self {
+        Self {
+            counts: HashMap::new(),
+            counting: true,
+        }
+    }
+
+    /// Close the census and return the counts for the real pass.
+    pub fn finish(self) -> Self {
+        Self {
+            counts: self.counts,
+            counting: false,
+        }
+    }
+
+    /// Weigh one repeat-eligible slot: during the census, record it
+    /// and answer "not repeated"; afterwards, answer whether more
+    /// than one slot held this shape.
+    fn weigh(&mut self, shape: u64) -> bool {
+        if self.counting {
+            self.note(shape);
+            return false;
+        }
+        self.counts.get(&shape).is_some_and(|n| *n > 1)
+    }
+
+    /// Record a slot without asking about it — used for schemas
+    /// pulled in through an external `$ref`, which lift either way
+    /// but still make an identical inline schema worth lifting onto.
+    fn note(&mut self, shape: u64) {
+        if self.counting {
+            *self.counts.entry(shape).or_default() += 1;
+        }
+    }
+}
+
 /// Hook for the [`lift_ref_or`] generic to reach the
-/// version-specific `Collapser`'s loader. Versions implement this
-/// with a one-liner — `self.loader.as_deref_mut()`.
-pub trait HasLoader {
+/// version-specific `Collapser`'s loader and its slot counts.
+/// Versions implement this with two one-liners.
+pub trait CollapseState {
     fn loader_mut(&mut self) -> Option<&mut Loader>;
+
+    fn schema_repeats(&mut self) -> &mut SchemaRepeats;
 }
 
 /// A component type that participates in collapse. Each version
@@ -335,6 +506,7 @@ pub trait HasLoader {
 /// to spell out what's *different* per type:
 ///
 /// * `PREFIX`: the `#/components/<bag>/` prefix used to build refs.
+/// * `IS_SCHEMA`: whether the triviality filter applies to this bag.
 /// * `bag`: how to reach this type's bag inside the Collapser.
 /// * `walk`: the per-type tree recursion (call [`lift_ref_or`] on
 ///   every nested component slot).
@@ -348,6 +520,13 @@ pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
     /// The `#/components/<bag>/` prefix. Used to build internal
     /// `$ref` targets.
     const PREFIX: &'static str;
+
+    /// Whether this bag holds schemas. Only schemas go through the
+    /// [`schema_lift_decision`] filter — every other component type
+    /// (parameters, responses, headers, …) is named in the document
+    /// already or has no trivial form worth keeping inline, so it
+    /// always lifts.
+    const IS_SCHEMA: bool = false;
 
     /// Borrow this type's bag mutably out of the Collapser.
     fn bag(c: &mut C) -> &mut Bag<Self>;
@@ -371,11 +550,14 @@ pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
 ///
 /// Handles:
 /// * `RefOr::Ref` with an internal ref (`#/...`): no-op.
-/// * `RefOr::Ref` with an external ref and a loader: fetch + recurse
-///   + intern + rewrite the slot to a local ref.
+/// * `RefOr::Ref` with an external ref and a loader: fetch, recurse,
+///   intern, rewrite the slot to a local ref. A schema written as a
+///   `$ref` was already named by its author, so the triviality
+///   filter doesn't apply to it.
 /// * `RefOr::Ref` with an external ref and no loader: no-op.
-/// * `RefOr::Item`: recurse + intern + rewrite the slot to a local
-///   ref.
+/// * `RefOr::Item`: recurse, then — for schemas — consult
+///   [`schema_lift_decision`]: lift (intern + rewrite the slot to a
+///   local ref) or leave the (now child-lifted) schema inline.
 pub fn lift_ref_or<T, C>(
     slot: &mut RefOr<T>,
     ctx: NameContext,
@@ -387,7 +569,7 @@ where
     // the call site rather than on the trait so the trait surface
     // stays minimal.
     T: LiftableBag<C> + Clone,
-    C: HasLoader,
+    C: CollapseState,
 {
     match slot {
         RefOr::Ref(r) => {
@@ -405,6 +587,12 @@ where
                 }
             })?;
             let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+            if T::IS_SCHEMA {
+                // An external schema always lifts, but note its shape
+                // so an identical inline one collapses onto it rather
+                // than staying inline beside it.
+                note_schema_shape(&fetched, c)?;
+            }
             T::walk(&mut fetched, &derived_ctx, c)?;
             let name = intern(c, fetched, &derived_ctx)?;
             *slot = RefOr::new_ref(format!("{}{name}", T::PREFIX));
@@ -418,12 +606,74 @@ where
             let RefOr::Item(mut item) = owned else {
                 unreachable!("matched RefOr::Item above");
             };
+            // Weigh the pre-walk form: walking rewrites this schema's
+            // children into `$ref`s, and the census pass weighed the
+            // same slot before walking it too.
+            let lift = if T::IS_SCHEMA {
+                should_lift_schema(&item, c)?
+            } else {
+                true
+            };
             T::walk(&mut item, &ctx, c)?;
+            if !lift {
+                *slot = RefOr::new_item(item);
+                return Ok(());
+            }
             let name = intern(c, item, &ctx)?;
             *slot = RefOr::new_ref(format!("{}{name}", T::PREFIX));
             Ok(())
         }
     }
+}
+
+/// Apply [`schema_lift_decision`] to one not-yet-walked schema,
+/// weighing the [`LiftDecision::IfRepeated`] case against the census.
+fn should_lift_schema<T: Serialize, C: CollapseState>(
+    item: &T,
+    c: &mut C,
+) -> Result<bool, CollapseError> {
+    let value = serde_json::to_value(item)?;
+    Ok(match schema_lift_decision(&value) {
+        LiftDecision::Always => true,
+        LiftDecision::Never => false,
+        LiftDecision::IfRepeated => c.schema_repeats().weigh(shape_digest(&value)),
+    })
+}
+
+/// Note a pre-existing `components.<bag>` entry in the census.
+///
+/// Such an entry keeps its own name and is never lifted, but it is
+/// still a slot holding a shape: an inline schema that matches it
+/// should collapse onto it, which costs no generated name at all
+/// because the author already named this one. Counting the entry is
+/// what lets the repeat rule see that. A no-op for bags that don't
+/// hold schemas.
+pub fn note_existing_component<T, C>(item: &T, c: &mut C) -> Result<(), CollapseError>
+where
+    T: LiftableBag<C>,
+    C: CollapseState,
+{
+    if T::IS_SCHEMA {
+        note_schema_shape(item, c)?;
+    }
+    Ok(())
+}
+
+/// Record a schema slot in the census without weighing it.
+fn note_schema_shape<T: Serialize, C: CollapseState>(
+    item: &T,
+    c: &mut C,
+) -> Result<(), CollapseError> {
+    let value = serde_json::to_value(item)?;
+    if schema_lift_decision(&value) == LiftDecision::IfRepeated {
+        c.schema_repeats().note(shape_digest(&value));
+    }
+    Ok(())
+}
+
+/// Digest of a schema's canonical JSON, the census key.
+fn shape_digest(value: &serde_json::Value) -> u64 {
+    digest(&value.to_string())
 }
 
 fn intern<T, C>(c: &mut C, item: T, ctx: &NameContext) -> Result<String, CollapseError>
@@ -481,6 +731,103 @@ mod tests {
         assert_eq!(ctx.derive_name(), "fallback");
         let ctx = NameContext::from_external_ref("external.json#/", &fallback);
         assert_eq!(ctx.derive_name(), "fallback");
+    }
+
+    #[test]
+    fn schema_lift_decision_sorts_schemas_by_shape() {
+        use serde_json::json;
+        for value in [
+            json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+            json!({"type": "object", "required": ["a"]}),
+            json!({"type": "object", "additionalProperties": false}),
+            json!({"allOf": [{"type": "object"}]}),
+            json!({"anyOf": [{"type": "string"}]}),
+            json!({"oneOf": [{"type": "string"}]}),
+            json!({"not": {"type": "string"}}),
+            json!({"type": "string", "enum": ["a", "b"]}),
+            json!({"title": "Email", "type": "string"}),
+        ] {
+            assert_eq!(
+                schema_lift_decision(&value),
+                LiftDecision::Always,
+                "expected a lift for {value}",
+            );
+        }
+
+        for value in [
+            json!(true),
+            json!(false),
+            json!({}),
+            json!({"type": "string"}),
+            json!({"type": "object"}),
+            json!({
+                "type": "string",
+                "description": "d",
+                "example": "e",
+                "examples": ["e"],
+                "deprecated": true,
+                "readOnly": true,
+                "writeOnly": false,
+            }),
+        ] {
+            assert_eq!(
+                schema_lift_decision(&value),
+                LiftDecision::Never,
+                "expected no lift for {value}",
+            );
+        }
+
+        for value in [
+            json!({"type": "string", "format": "date-time"}),
+            json!({"type": "string", "pattern": "^a$", "maxLength": 8}),
+            json!({"type": "array", "items": {"type": "string"}}),
+            json!({"type": "string", "xml": {"name": "photoUrl"}}),
+        ] {
+            assert_eq!(
+                schema_lift_decision(&value),
+                LiftDecision::IfRepeated,
+                "expected a dedup-dependent lift for {value}",
+            );
+        }
+    }
+
+    #[test]
+    fn schema_repeats_counts_slots_across_the_census_pass() {
+        let uuid = serde_json::json!({"type": "string", "format": "uuid"});
+        let date = serde_json::json!({"type": "string", "format": "date-time"});
+
+        let mut census = SchemaRepeats::census();
+        // The census answers "not repeated" for every slot, so its
+        // walk rewrites the clone exactly as the real pass will.
+        assert!(!census.weigh(shape_digest(&uuid)));
+        assert!(!census.weigh(shape_digest(&uuid)));
+        assert!(!census.weigh(shape_digest(&date)));
+
+        let mut repeats = census.finish();
+        assert!(repeats.weigh(shape_digest(&uuid)), "two slots held it");
+        assert!(!repeats.weigh(shape_digest(&date)), "one slot held it");
+        // Weighing after the census never changes a count.
+        assert!(!repeats.weigh(shape_digest(&date)));
+        // Nor does a late `note`.
+        repeats.note(shape_digest(&date));
+        assert!(!repeats.weigh(shape_digest(&date)));
+    }
+
+    #[test]
+    fn schema_repeats_notes_external_shapes_alongside_inline_slots() {
+        let uuid = shape_digest(&serde_json::json!({"type": "string", "format": "uuid"}));
+        let mut census = SchemaRepeats::census();
+        // One inline slot plus one schema pulled in through an
+        // external `$ref` is two slots holding the same shape.
+        assert!(!census.weigh(uuid));
+        census.note(uuid);
+        assert!(census.finish().weigh(uuid));
+    }
+
+    #[test]
+    fn schema_repeats_default_reports_nothing_repeated() {
+        let mut repeats = SchemaRepeats::default();
+        assert!(!repeats.weigh(shape_digest(&serde_json::json!({"type": "string"}))));
     }
 
     #[test]

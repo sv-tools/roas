@@ -1,5 +1,10 @@
-//! `Spec::collapse` for OAS 3.0 — lift every inline component into
-//! `components.<bag>`.
+//! `Spec::collapse` for OAS 3.0 — lift the reusable inline
+//! components into `components.<bag>`.
+//!
+//! Which inline schemas are worth lifting is decided in
+//! `crate::common::collapse::schema_lift_decision`, once for every
+//! version: bare scalars stay inline, structural shapes always lift,
+//! and the shapes in between lift only when they repeat.
 //!
 //! All of the heavy lifting (dedup, naming, the generic `lift_ref_or`
 //! routine, the `LiftableBag` trait, the `Bag<T>` storage) lives in
@@ -33,7 +38,10 @@
 use std::collections::BTreeMap;
 
 use crate::common::bool_or::BoolOr;
-use crate::common::collapse::{Bag, HasLoader, LiftableBag, NameContext, lift_ref_or};
+use crate::common::collapse::{
+    Bag, CollapseState, LiftableBag, NameContext, SchemaRepeats, lift_ref_or,
+    note_existing_component,
+};
 use crate::common::reference::RefOr;
 use crate::loader::Loader;
 use crate::v3_0::callback::Callback;
@@ -68,11 +76,19 @@ pub(crate) struct Collapser<'a> {
     // is only walked in place at every `paths.<path>` slot (and
     // inside `Callback.paths`).
     loader: Option<&'a mut Loader>,
+    /// Slot counts for the "lift only when it repeats" rule. The
+    /// census pass fills these in over a throwaway clone; the real
+    /// pass reads them back.
+    repeats: &'a mut SchemaRepeats,
 }
 
-impl HasLoader for Collapser<'_> {
+impl CollapseState for Collapser<'_> {
     fn loader_mut(&mut self) -> Option<&mut Loader> {
         self.loader.as_deref_mut()
+    }
+
+    fn schema_repeats(&mut self) -> &mut SchemaRepeats {
+        self.repeats
     }
 }
 
@@ -85,6 +101,7 @@ impl HasLoader for Collapser<'_> {
 
 impl<'a> LiftableBag<Collapser<'a>> for Schema {
     const PREFIX: &'static str = "#/components/schemas/";
+    const IS_SCHEMA: bool = true;
 
     fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
         &mut c.schemas
@@ -548,7 +565,25 @@ fn walk_paths(
 
 pub(crate) fn collapse_spec(
     spec: &mut Spec,
+    mut loader: Option<&mut Loader>,
+) -> Result<(), CollapseError> {
+    // Whether a constrained scalar or a thin array wrapper is worth
+    // a name depends on how many slots hold it, which no single
+    // top-down pass can know in time. So run the walk twice: once
+    // over a throwaway clone to count the slots (the census pass,
+    // which lifts nothing on the strength of a count), then once for
+    // real. The loader caches what the census fetched, so external
+    // refs are resolved once and counted like any other slot.
+    let mut repeats = SchemaRepeats::census();
+    collapse_pass(&mut spec.clone(), loader.as_deref_mut(), &mut repeats)?;
+    let mut repeats = repeats.finish();
+    collapse_pass(spec, loader, &mut repeats)
+}
+
+fn collapse_pass(
+    spec: &mut Spec,
     loader: Option<&mut Loader>,
+    repeats: &mut SchemaRepeats,
 ) -> Result<(), CollapseError> {
     // Phase 0: take each existing components bag out of the spec.
     let initial_schemas = spec
@@ -602,6 +637,7 @@ pub(crate) fn collapse_spec(
         links: Bag::default(),
         callbacks: Bag::default(),
         loader,
+        repeats,
     };
 
     // Phase 1: seed every bag from its existing entries. The dedup
@@ -686,6 +722,10 @@ where
         let Some(mut item) = T::bag(c).take_inline(&name) else {
             continue;
         };
+        // This entry keeps its name, but it is a slot like any
+        // other: an inline schema of the same shape collapses onto
+        // it rather than staying inline.
+        note_existing_component(&item, c)?;
         let mut parts: Vec<String> = ctx_root.iter().map(|s| (*s).to_owned()).collect();
         parts.push(name.clone());
         let ctx = NameContext::new(parts);
@@ -3094,5 +3134,180 @@ mod tests {
             names.contains(&"ThingId".to_owned()),
             "path-level parameter schema must be lifted; got {names:?}"
         );
+    }
+
+    #[test]
+    fn trivial_property_schemas_stay_inline_while_objects_lift() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.3",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Pet": {
+                        "type": "object",
+                        "properties": {
+                            "tag": {"type": "string"},
+                            "name": {"type": "string", "description": "the pet's name"},
+                            "category": {
+                                "type": "object",
+                                "properties": {"id": {"type": "integer"}}
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let pet = schema_at(&spec, "Pet");
+        assert_eq!(
+            pet["properties"]["tag"],
+            serde_json::json!({"type": "string"}),
+            "a bare scalar gains nothing from a generated name",
+        );
+        assert_eq!(
+            pet["properties"]["name"],
+            serde_json::json!({"type": "string", "description": "the pet's name"}),
+            "annotations alone don't make a scalar worth lifting",
+        );
+        let category = pet["properties"]["category"]["$ref"]
+            .as_str()
+            .expect("an object property is worth a name and must lift");
+        assert!(
+            category.starts_with("#/components/schemas/"),
+            "got {category}"
+        );
+        // …and the lifted object's own scalar property stays inline too.
+        let lifted = schema_at(&spec, category.trim_start_matches("#/components/schemas/"));
+        assert_eq!(
+            lifted["properties"]["id"],
+            serde_json::json!({"type": "integer"})
+        );
+    }
+
+    #[test]
+    fn constrained_scalars_lift_only_when_repeated() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.3",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Order": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "format": "int64"},
+                            "created": {"type": "string", "format": "date-time"},
+                            "lines": {"type": "array", "items": {"type": "string"}}
+                        }
+                    },
+                    "Invoice": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "format": "int64"},
+                            "lines": {"type": "array", "items": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let order = schema_at(&spec, "Order");
+        let invoice = schema_at(&spec, "Invoice");
+        // The `int64` id occurs twice: one component, shared by both
+        // call sites — that dedup is what pays for the generated name.
+        let id_ref = order["properties"]["id"]["$ref"]
+            .as_str()
+            .expect("a repeated constrained scalar lifts");
+        assert_eq!(invoice["properties"]["id"]["$ref"], id_ref);
+        // Same for the array wrapper.
+        let lines_ref = order["properties"]["lines"]["$ref"]
+            .as_str()
+            .expect("a repeated array wrapper lifts");
+        assert_eq!(invoice["properties"]["lines"]["$ref"], lines_ref);
+        // The `date-time` field occurs once, so a name would buy nothing.
+        assert_eq!(
+            order["properties"]["created"],
+            serde_json::json!({"type": "string", "format": "date-time"}),
+        );
+        let names = lifted_schema_names(&spec);
+        assert_eq!(names.len(), 4, "got {names:?}");
+    }
+
+    #[test]
+    fn inline_schema_dedupes_onto_an_identical_external_one() {
+        // A constrained scalar filling a single slot would stay
+        // inline, but here the same shape also arrives through an
+        // external `$ref`, which lifts either way. Two slots hold the
+        // shape, so the inline one collapses onto the same component
+        // instead of sitting beside it — the census pass counts
+        // external slots for exactly this reason.
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({"Uuid": {"type": "string", "format": "uuid"}}),
+            )
+            .expect("preload");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.3",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Order": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "format": "uuid"},
+                            "shipment": {"$ref": "shared.json#/Uuid"}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let order = schema_at(&spec, "Order");
+        let id = order["properties"]["id"]["$ref"]
+            .as_str()
+            .expect("the inline copy lifts onto the external component");
+        assert_eq!(
+            order["properties"]["shipment"]["$ref"], id,
+            "both slots must share one component",
+        );
+        let names = lifted_schema_names(&spec);
+        assert_eq!(names.len(), 2, "one Order plus one shared uuid: {names:?}");
+        let shared = schema_at(&spec, id.rsplit('/').next().unwrap());
+        assert_eq!(
+            shared,
+            serde_json::json!({"type": "string", "format": "uuid"})
+        );
+    }
+
+    #[test]
+    fn inline_schema_dedupes_onto_an_identical_existing_component() {
+        // The author already named this shape, so lifting the inline
+        // copy invents no name at all — it just points at `Uuid`.
+        // The census counts pre-existing entries as slots for this.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.3",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Uuid": {"type": "string", "format": "uuid"},
+                    "Order": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string", "format": "uuid"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+        assert_eq!(
+            schema_at(&spec, "Order")["properties"]["id"]["$ref"],
+            "#/components/schemas/Uuid",
+        );
+        let names = lifted_schema_names(&spec);
+        assert_eq!(names.len(), 2, "no second uuid component: {names:?}");
     }
 }

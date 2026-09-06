@@ -622,11 +622,12 @@ impl Spec {
         })
     }
 
-    /// Lift every inline component in the document into its matching
-    /// `components.<bag>`, replacing each inline location with a
-    /// `RefOr::Ref` to the new component. This covers `schemas`,
-    /// `parameters`, `responses`, `requestBodies`, `headers`,
-    /// `mediaTypes`, `examples`, `links`, and `callbacks`.
+    /// Lift the reusable inline components in the document into
+    /// their matching `components.<bag>`, replacing each inline
+    /// location with a `RefOr::Ref` to the new component. This
+    /// covers `schemas`, `parameters`, `responses`,
+    /// `requestBodies`, `headers`, `mediaTypes`, `examples`,
+    /// `links`, and `callbacks`.
     ///
     /// `pathItems` is *not* lifted out of its primary locations
     /// (`paths.<path>`, `webhooks.<name>`, `callback.paths.<expr>`)
@@ -635,6 +636,22 @@ impl Spec {
     /// `components.pathItems` entries are still seeded into the
     /// dedup map and their nested inline children (schemas,
     /// parameters, etc.) are lifted as usual.
+    ///
+    /// Not every inline schema is worth a name. A schema carrying
+    /// nothing beyond its type plus annotations (`description`,
+    /// `example`, `examples`, `deprecated`, `readOnly`, `writeOnly`)
+    /// stays inline: a `$ref` to a generated name for
+    /// `{"type": "string"}` only makes the document longer to read.
+    /// Objects, `allOf` / `anyOf` / `oneOf` / `not`, anything
+    /// carrying `enum` values, and anything with a `title` (the
+    /// author's own name for the schema, which collapse reuses as
+    /// the component name) always lift — those are what a name and a
+    /// `$ref` genuinely serve. In between sit constrained
+    /// scalars (`format`, `pattern`, `maxLength`, `default`, …) and
+    /// thin array wrappers; they lift only when the identical schema
+    /// occurs more than once in the document, where dedup pays for
+    /// the generated name. Schemas already written as a `$ref` are
+    /// unaffected.
     ///
     /// Naming: a `Schema` uses its `title` when present; a
     /// `Parameter` uses a `<name><In>` hint (e.g., `limitQuery`,
