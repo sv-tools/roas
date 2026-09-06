@@ -456,16 +456,32 @@ impl Spec {
         Ok(RefOr::new_ref(reference))
     }
 
-    /// Lift every inline component in the document into its matching
-    /// root-level bag (`definitions`, `parameters`, `responses`),
-    /// replacing each inline location with a `RefOr::Ref` to the new
-    /// component.
+    /// Lift the reusable inline components in the document into
+    /// their matching root-level bag (`definitions`, `parameters`,
+    /// `responses`), replacing each inline location with a
+    /// `RefOr::Ref` to the new component.
     ///
     /// v2 has no `components` wrapper — bags live at the spec root
     /// and hold bare values (`BTreeMap<String, T>`, not `RefOr<T>`).
     /// There are no v3-style `headers` / `examples` / `links` /
     /// `callbacks` bags. `Header` / `Items` slots inside parameters
     /// and responses are walked in place but never lifted.
+    ///
+    /// Not every inline schema is worth a name. A schema carrying
+    /// nothing beyond its type plus annotations (`description`,
+    /// `example`, `examples`, `deprecated`, `readOnly`, `writeOnly`)
+    /// stays inline: a `$ref` to a generated name for
+    /// `{"type": "string"}` only makes the document longer to read.
+    /// Objects, `allOf` / `anyOf` / `oneOf` / `not`, anything
+    /// carrying `enum` values, and anything with a `title` (the
+    /// author's own name for the schema, which collapse reuses as
+    /// the component name) always lift — those are what a name and a
+    /// `$ref` genuinely serve. In between sit constrained
+    /// scalars (`format`, `pattern`, `maxLength`, `default`, …) and
+    /// thin array wrappers; they lift only when the identical schema
+    /// occurs more than once in the document, where dedup pays for
+    /// the generated name. Schemas already written as a `$ref` are
+    /// unaffected.
     ///
     /// Naming: a `Schema` uses its `title` when present; a
     /// `Parameter` uses a `<name><In>` hint (e.g., `limitQuery`,

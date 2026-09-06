@@ -1,5 +1,10 @@
-//! `Spec::collapse` for OAS 3.1 — lift every inline component into
-//! `components.<bag>`.
+//! `Spec::collapse` for OAS 3.1 — lift the reusable inline
+//! components into `components.<bag>`.
+//!
+//! Which inline schemas are worth lifting is decided in
+//! `crate::common::collapse::schema_lift_decision`, once for every
+//! version: bare scalars stay inline, structural shapes always lift,
+//! and the shapes in between lift only when they repeat.
 //!
 //! All of the heavy lifting (dedup, naming, the generic `lift_ref_or`
 //! routine, the `LiftableBag` trait, the `Bag<T>` storage) lives in
@@ -31,7 +36,9 @@
 use std::collections::BTreeMap;
 
 use crate::common::bool_or::BoolOr;
-use crate::common::collapse::{Bag, HasLoader, LiftableBag, NameContext, lift_ref_or};
+use crate::common::collapse::{
+    Bag, CollapseState, LiftableBag, NameContext, SchemaRepeats, lift_ref_or,
+};
 use crate::common::reference::RefOr;
 use crate::loader::Loader;
 use crate::v3_1::callback::Callback;
@@ -70,11 +77,20 @@ pub(crate) struct Collapser<'a> {
     /// children, then put the (now child-lifted) PathItem back.
     path_items: BTreeMap<String, PathItem>,
     loader: Option<&'a mut Loader>,
+    /// How often each repeatable schema shape occurs in the
+    /// document, counted once before any rewriting so the
+    /// "lift only when it repeats" rule can see shapes the walk
+    /// has not reached yet.
+    repeats: SchemaRepeats,
 }
 
-impl HasLoader for Collapser<'_> {
+impl CollapseState for Collapser<'_> {
     fn loader_mut(&mut self) -> Option<&mut Loader> {
         self.loader.as_deref_mut()
+    }
+
+    fn schema_repeats(&self) -> &SchemaRepeats {
+        &self.repeats
     }
 }
 
@@ -87,6 +103,7 @@ impl HasLoader for Collapser<'_> {
 
 impl<'a> LiftableBag<Collapser<'a>> for Schema {
     const PREFIX: &'static str = "#/components/schemas/";
+    const IS_SCHEMA: bool = true;
 
     fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
         &mut c.schemas
@@ -566,6 +583,12 @@ pub(crate) fn collapse_spec(
     spec: &mut Spec,
     loader: Option<&mut Loader>,
 ) -> Result<(), CollapseError> {
+    // Phase 0a: count repeatable schema shapes over the
+    // untouched document. Whether a constrained scalar or a thin
+    // array wrapper is worth a name depends on whether it occurs
+    // more than once, which only a whole-document pass can say.
+    let repeats = SchemaRepeats::from_spec(&*spec)?;
+
     // Phase 0: take each existing components bag out of the spec.
     let initial_schemas = spec
         .components
@@ -624,6 +647,7 @@ pub(crate) fn collapse_spec(
         callbacks: Bag::default(),
         path_items: BTreeMap::new(),
         loader,
+        repeats,
     };
 
     // Phase 1: seed every bag from its existing entries. The dedup
@@ -3077,5 +3101,103 @@ mod tests {
             v["paths"]["/a"]["get"]["responses"]["200"]["$ref"],
             "#/components/responses/Existing"
         );
+    }
+
+    #[test]
+    fn trivial_property_schemas_stay_inline_while_objects_lift() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Pet": {
+                        "type": "object",
+                        "properties": {
+                            "tag": {"type": "string"},
+                            "name": {"type": "string", "description": "the pet's name"},
+                            "category": {
+                                "type": "object",
+                                "properties": {"id": {"type": "integer"}}
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let pet = schema_at(&spec, "Pet");
+        assert_eq!(
+            pet["properties"]["tag"],
+            serde_json::json!({"type": "string"}),
+            "a bare scalar gains nothing from a generated name",
+        );
+        assert_eq!(
+            pet["properties"]["name"],
+            serde_json::json!({"type": "string", "description": "the pet's name"}),
+            "annotations alone don't make a scalar worth lifting",
+        );
+        let category = pet["properties"]["category"]["$ref"]
+            .as_str()
+            .expect("an object property is worth a name and must lift");
+        assert!(
+            category.starts_with("#/components/schemas/"),
+            "got {category}"
+        );
+        // …and the lifted object's own scalar property stays inline too.
+        let lifted = schema_at(&spec, category.trim_start_matches("#/components/schemas/"));
+        assert_eq!(
+            lifted["properties"]["id"],
+            serde_json::json!({"type": "integer"})
+        );
+    }
+
+    #[test]
+    fn constrained_scalars_lift_only_when_repeated() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Order": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "format": "int64"},
+                            "created": {"type": "string", "format": "date-time"},
+                            "lines": {"type": "array", "items": {"type": "string"}}
+                        }
+                    },
+                    "Invoice": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "format": "int64"},
+                            "lines": {"type": "array", "items": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).unwrap();
+        let order = schema_at(&spec, "Order");
+        let invoice = schema_at(&spec, "Invoice");
+        // The `int64` id occurs twice: one component, shared by both
+        // call sites — that dedup is what pays for the generated name.
+        let id_ref = order["properties"]["id"]["$ref"]
+            .as_str()
+            .expect("a repeated constrained scalar lifts");
+        assert_eq!(invoice["properties"]["id"]["$ref"], id_ref);
+        // Same for the array wrapper.
+        let lines_ref = order["properties"]["lines"]["$ref"]
+            .as_str()
+            .expect("a repeated array wrapper lifts");
+        assert_eq!(invoice["properties"]["lines"]["$ref"], lines_ref);
+        // The `date-time` field occurs once, so a name would buy nothing.
+        assert_eq!(
+            order["properties"]["created"],
+            serde_json::json!({"type": "string", "format": "date-time"}),
+        );
+        let names = lifted_schema_names(&spec);
+        assert_eq!(names.len(), 4, "got {names:?}");
     }
 }

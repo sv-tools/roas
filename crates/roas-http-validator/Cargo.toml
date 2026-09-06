@@ -42,7 +42,7 @@ rocket = ["dep:rocket"]
 # were written as; the `serde_json` feature below is the same toggle
 # for the request bodies this crate parses itself. Both are named
 # because they are two different reasons to want it.
-roas = { version = "0.19", path = "../roas", features = ["v3_2", "exact-numbers"] }
+roas = { version = "0.20", path = "../roas", features = ["v3_2", "exact-numbers"] }
 percent-encoding.workspace = true
 regex.workspace = true
 # The whole point of `decimal.rs`: this keeps a parsed number's
