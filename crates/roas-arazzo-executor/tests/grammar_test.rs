@@ -484,7 +484,7 @@ fn a_workflow_call_applies_overrides_before_reading_inherited_arguments() {
 }
 
 #[test]
-fn inherited_action_criteria_contribute_dependencies_and_syntax_errors() {
+fn shared_action_syntax_is_checked_without_reordering_steps() {
     for field in ["successActions", "failureActions"] {
         let mut value = document(json!([
             { "stepId": "consume", "operationId": "check" },
@@ -498,7 +498,7 @@ fn inherited_action_criteria_contribute_dependencies_and_syntax_errors() {
             &mut Fake::new().reply(200, &json!({})).reply(200, &json!({})),
         )
         .unwrap();
-        assert_eq!(report.steps[0].step_id, "produce");
+        assert_eq!(report.steps[0].step_id, "consume");
         value["workflows"][0][field][0]["criteria"][0]["condition"] =
             json!("true || $statusCode ==");
         let description = serde_json::from_value(value).unwrap();
@@ -506,5 +506,178 @@ fn inherited_action_criteria_contribute_dependencies_and_syntax_errors() {
             Run::start(&description, &options()),
             Err(ExecutionError::Criterion(CriterionError::Syntax { .. }))
         ));
+    }
+}
+
+#[test]
+fn shared_actions_naming_multiple_steps_do_not_create_cycles() {
+    for field in ["successActions", "failureActions"] {
+        for reusable in [false, true] {
+            let mut value = document(json!([
+                { "stepId": "a", "operationId": "check", "outputs": { "ready": true } },
+                { "stepId": "b", "operationId": "check", "outputs": { "ready": true } }
+            ]));
+            let action = json!({
+                "name": "never", "type": "end",
+                "criteria": [{ "condition": "false && $steps.a.outputs.ready && $steps.b.outputs.ready" }],
+                "parameters": [{ "name": "ignored", "value": "$steps.b.outputs.ready" }]
+            });
+            value["workflows"][0][field] = if reusable {
+                value["components"] = json!({ field: { "shared": action } });
+                json!([{ "reference": format!("$components.{field}.shared") }])
+            } else {
+                json!([action])
+            };
+            let description = serde_json::from_value(value).unwrap();
+            let report = execute(
+                &description,
+                &options(),
+                &mut Fake::new().reply(200, &json!({})).reply(200, &json!({})),
+            )
+            .unwrap();
+            assert_eq!(
+                report
+                    .steps
+                    .iter()
+                    .map(|step| step.step_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["a", "b"],
+                "{field}, reusable={reusable}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unresolved_actions_are_reported_only_when_their_branch_is_considered() {
+    for (step_field, workflow_field, inactive_status, active_status) in [
+        ("onFailure", "failureActions", 200, 500),
+        ("onSuccess", "successActions", 500, 200),
+    ] {
+        for shared in [false, true] {
+            let mut value = document(json!([{ "stepId": "a", "operationId": "check" }]));
+            let entry = json!([{ "reference": format!("$components.{workflow_field}.missing") }]);
+            if shared {
+                value["workflows"][0][workflow_field] = entry;
+            } else {
+                value["workflows"][0]["steps"][0][step_field] = entry;
+            }
+            let description = serde_json::from_value(value).unwrap();
+            let mut client = Fake::new().reply(inactive_status, &json!({}));
+            execute(&description, &options(), &mut client)
+                .expect("an unused action is not resolved eagerly");
+            assert_eq!(client.sent().len(), 1);
+            let mut client = Fake::new().reply(active_status, &json!({}));
+            let error = execute(&description, &options(), &mut client).unwrap_err();
+            assert!(matches!(error, ExecutionError::Unsupported(_)), "{error}");
+            assert_eq!(
+                client.sent().len(),
+                1,
+                "the reached action still reports its missing component"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_action_parameter_is_not_resolved_when_its_criterion_is_false() {
+    for (step_field, status) in [("onSuccess", 200), ("onFailure", 500)] {
+        for enabled in [false, true] {
+            let mut value = document(json!([{ "stepId": "a", "operationId": "check" }]));
+            value["workflows"][0]["steps"][0][step_field] = json!([{
+                "name": "call", "type": "goto", "workflowId": "child",
+                "criteria": [{ "condition": enabled.to_string() }],
+                "parameters": [{ "reference": "$components.parameters.missing" }]
+            }]);
+            value["workflows"].as_array_mut().unwrap().push(json!({ "workflowId": "child", "steps": [{ "stepId": "c", "operationId": "check" }] }));
+            let description = serde_json::from_value(value).unwrap();
+            let mut client = Fake::new().reply(status, &json!({}));
+            let result = execute(&description, &options(), &mut client);
+            if enabled {
+                assert!(matches!(result, Err(ExecutionError::Unsupported(_))));
+            } else {
+                result.expect("unselected arguments need not resolve");
+            }
+            assert_eq!(
+                client.sent().len(),
+                1,
+                "arguments resolve only after selecting the action"
+            );
+        }
+    }
+}
+
+#[test]
+fn unresolved_action_arguments_do_not_erase_other_step_local_dependencies() {
+    for field in ["onSuccess", "onFailure"] {
+        let mut value = document(json!([
+            { "stepId": "consume", "operationId": "check" },
+            { "stepId": "produce", "operationId": "check", "outputs": { "ready": true } }
+        ]));
+        value["workflows"][0]["steps"][0][field] = json!([{
+            "name": "never", "type": "end", "criteria": [{ "condition": "false" }],
+            "parameters": [
+                { "reference": "$components.parameters.missing" },
+                { "name": "ready", "value": "$steps.produce.outputs.ready" }
+            ]
+        }]);
+        let description = serde_json::from_value(value).unwrap();
+        let report = execute(
+            &description,
+            &options(),
+            &mut Fake::new().reply(200, &json!({})).reply(200, &json!({})),
+        )
+        .unwrap();
+        assert_eq!(report.steps[0].step_id, "produce");
+    }
+}
+
+#[test]
+fn resolved_step_action_syntax_errors_are_still_reported_before_io() {
+    for (field, collection) in [
+        ("onSuccess", "successActions"),
+        ("onFailure", "failureActions"),
+    ] {
+        let mut value = document(json!([{ "stepId": "a", "operationId": "check" }]));
+        value["workflows"][0]["steps"][0][field] =
+            json!([{ "reference": format!("$components.{collection}.broken") }]);
+        value["components"] = json!({ collection: { "broken": {
+            "name": "broken", "type": "end", "criteria": [{ "condition": "false && $response.body[" }]
+        } } });
+        let description = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            Run::start(&description, &options()),
+            Err(ExecutionError::Criterion(CriterionError::Syntax { .. }))
+        ));
+    }
+}
+
+#[test]
+fn an_earlier_selected_action_can_make_a_dangling_action_unreachable() {
+    for (field, collection, status) in [
+        ("onSuccess", "successActions", 200),
+        ("onFailure", "failureActions", 500),
+    ] {
+        for shared in [false, true] {
+            let mut value = document(json!([{ "stepId": "a", "operationId": "check" }]));
+            value["workflows"][0]["steps"][0][field] = json!([{ "name": "stop", "type": "end" }]);
+            let missing = json!({ "reference": format!("$components.{collection}.missing") });
+            if shared {
+                value["workflows"][0][collection] = json!([missing]);
+            } else {
+                value["workflows"][0]["steps"][0][field]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(missing);
+            }
+            let description = serde_json::from_value(value).unwrap();
+            let report = execute(
+                &description,
+                &options(),
+                &mut Fake::new().reply(status, &json!({})),
+            )
+            .unwrap();
+            assert_eq!(report.steps.len(), 1);
+        }
     }
 }

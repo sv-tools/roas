@@ -135,9 +135,22 @@ not an arbitrary-precision numeric evaluator. Numeric strings compare numericall
 against numbers, but two strings retain case-insensitive lexical ordering.
 
 Syntax checking during step ordering does not replace full document preparation.
+Known workflow-wide action criteria are syntax-checked once, but their reads do
+not add prerequisites to every step: they use the state available when an action
+is considered. Step-local expression dependencies still affect ordering. Missing
+reusable actions and action-argument components are diagnosed only when dispatch
+reaches them; they do not prevent an unrelated outcome from running.
 Runtime missing-value errors still abort execution; criterion-failure recovery
-and a full preflight API are separate planned improvements. New
-`ExpressionError` variants require downstream exhaustive matches to be updated.
+and a full preflight API are separate planned improvements.
+
+### Migrating from 0.1.x
+
+The grammar and diagnostic changes are released on the **0.2** line, not as a
+0.1.x patch. `ExpressionError` adds `Syntax` and `Navigation` and is now
+`#[non_exhaustive]`; downstream matches must include a fallback arm. Adding the
+attribute does not retroactively make the new variants compatible with 0.1.x.
+Also review the dotted-name, short-circuit, and numeric-literal changes described
+above when migrating workflow documents. No public variants are removed.
 
 ## What it does not run
 

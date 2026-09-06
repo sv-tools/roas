@@ -15,8 +15,8 @@ use crate::report::{
 use crate::select;
 use crate::select::SelectError;
 use roas_arazzo::v1_1::{
-    Criterion, CriterionKind, CriterionType, Description, FailureActionType, Parameter,
-    ParameterLocation, ReusableOr, SourceType, Step, SuccessActionType, ValueOrSelector, Workflow,
+    Criterion, Description, FailureActionType, Parameter, ParameterLocation, ReusableOr,
+    SourceType, Step, SuccessActionType, ValueOrSelector, Workflow,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1488,29 +1488,6 @@ fn steps_named_by(
         Ok(())
     }
 
-    fn read_condition(
-        criterion: &Criterion,
-        found: &mut BTreeSet<String>,
-    ) -> Result<(), ExecutionError> {
-        let simple = matches!(
-            criterion.type_,
-            None | Some(CriterionType::Simple(CriterionKind::Simple))
-        );
-        if simple {
-            for parsed in criterion::expressions_in(&criterion.condition)? {
-                if let Some(id) = parsed.step_id() {
-                    found.insert(id.to_owned());
-                }
-            }
-        } else {
-            // Regex anchors and JSONPath roots are not runtime expressions.
-            for reference in expression::interpolations(&criterion.condition) {
-                read_expression(reference, found)?;
-            }
-        }
-        Ok(())
-    }
-
     fn read_value(
         value: &ValueOrSelector,
         found: &mut BTreeSet<String>,
@@ -1557,10 +1534,27 @@ fn steps_named_by(
         found: &mut BTreeSet<String>,
     ) -> Result<(), ExecutionError> {
         for criterion in list {
-            if let Some(context) = &criterion.context {
-                read_expression(context, found)?;
+            for parsed in criterion::references(criterion)? {
+                if let Some(id) = parsed.step_id() {
+                    found.insert(id.to_owned());
+                }
             }
-            read_condition(criterion, found)?;
+        }
+        Ok(())
+    }
+
+    fn read_action_parameters(
+        list: &[ReusableOr<Parameter>],
+        description: &Description,
+        found: &mut BTreeSet<String>,
+    ) -> Result<(), ExecutionError> {
+        for entry in list {
+            // An action's arguments are only resolved when it is selected.
+            // Still discover all available dependencies, even when another
+            // argument cannot be resolved until dispatch reports its error.
+            if let Ok(parameters) = parameter_templates(std::slice::from_ref(entry), description) {
+                read_parameters(parameters, found)?;
+            }
         }
         Ok(())
     }
@@ -1581,21 +1575,20 @@ fn steps_named_by(
             read_value(&replacement.value, &mut found)?;
         }
     }
-    for entry in step.on_success.iter().chain(&workflow.success_actions) {
-        let action = success_action(entry, description)?;
-        read_criteria(&action.criteria, &mut found)?;
-        read_parameters(
-            parameter_templates(&action.parameters, description)?,
-            &mut found,
-        )?;
+    for entry in &step.on_success {
+        // Keep reference-resolution failures lazy: the other outcome, or an
+        // earlier action, may make this action unreachable. Syntax failures in
+        // an available action remain errors rather than erased dependencies.
+        if let Ok(action) = success_action(entry, description) {
+            read_criteria(&action.criteria, &mut found)?;
+            read_action_parameters(&action.parameters, description, &mut found)?;
+        }
     }
-    for entry in step.on_failure.iter().chain(&workflow.failure_actions) {
-        let action = failure_action(entry, description)?;
-        read_criteria(&action.criteria, &mut found)?;
-        read_parameters(
-            parameter_templates(&action.parameters, description)?,
-            &mut found,
-        )?;
+    for entry in &step.on_failure {
+        if let Ok(action) = failure_action(entry, description) {
+            read_criteria(&action.criteria, &mut found)?;
+            read_action_parameters(&action.parameters, description, &mut found)?;
+        }
     }
 
     found.remove(&step.step_id);
@@ -1609,6 +1602,24 @@ fn ordered_steps(
     workflow: &Workflow,
     description: &Description,
 ) -> Result<Vec<usize>, ExecutionError> {
+    // Shared actions run against the state available at dispatch. Attaching
+    // their reads to every step manufactures edges (and even mutual cycles).
+    // Validate known criteria once, without turning them into prerequisites.
+    // An unresolved reusable action is still diagnosed if dispatch reaches it.
+    for entry in &workflow.success_actions {
+        if let Ok(action) = success_action(entry, description) {
+            for criterion in &action.criteria {
+                criterion::references(criterion)?;
+            }
+        }
+    }
+    for entry in &workflow.failure_actions {
+        if let Ok(action) = failure_action(entry, description) {
+            for criterion in &action.criteria {
+                criterion::references(criterion)?;
+            }
+        }
+    }
     let index: BTreeMap<&str, usize> = workflow
         .steps
         .iter()

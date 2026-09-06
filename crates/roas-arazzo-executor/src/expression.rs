@@ -76,7 +76,37 @@ pub(crate) struct Scope<'a> {
 }
 
 /// Why an expression could not be turned into a value.
+///
+/// Downstream matches must include a fallback for future diagnostics:
+///
+/// ```
+/// use roas_arazzo_executor::ExpressionError;
+/// fn location(error: &ExpressionError) -> Option<usize> {
+///     match error {
+///         ExpressionError::Syntax { offset, .. }
+///         | ExpressionError::Navigation { offset, .. } => Some(*offset),
+///         _ => None,
+///     }
+/// }
+/// ```
+///
+/// Matching all currently known variants without a fallback is not supported:
+///
+/// ```compile_fail,E0004
+/// use roas_arazzo_executor::ExpressionError;
+/// fn exhaustive(error: ExpressionError) {
+///     match error {
+///         ExpressionError::Syntax { .. }
+///         | ExpressionError::Navigation { .. }
+///         | ExpressionError::Unknown(_)
+///         | ExpressionError::Missing { .. }
+///         | ExpressionError::NotRun { .. }
+///         | ExpressionError::Unsupported(_) => {}
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExpressionError {
     /// The expression is malformed, independently of runtime values.
     #[error("`{expression}` is not a valid runtime expression at byte {offset}: {message}")]

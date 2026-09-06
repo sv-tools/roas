@@ -202,6 +202,30 @@ pub(crate) fn expressions_in(
     Ok(found)
 }
 
+/// Parse the expression-bearing parts of a criterion without evaluating them.
+/// Callers decide whether these reads describe a step dependency or only need
+/// syntax validation (for example, a workflow-wide action).
+pub(crate) fn references(
+    criterion: &Criterion,
+) -> Result<Vec<crate::runtime_syntax::Expression<'_>>, CriterionError> {
+    let mut found = Vec::new();
+    if let Some(context) = &criterion.context {
+        found.push(crate::runtime_syntax::parse(context)?);
+    }
+    if matches!(
+        criterion.type_,
+        None | Some(CriterionType::Simple(CriterionKind::Simple))
+    ) {
+        found.extend(expressions_in(&criterion.condition)?);
+    } else {
+        // Regex anchors and JSONPath roots are not runtime expressions.
+        for reference in expression::interpolations(&criterion.condition) {
+            found.push(crate::runtime_syntax::parse(reference)?);
+        }
+    }
+    Ok(found)
+}
+
 impl<'a> Condition<'a> {
     fn expressions(&self, found: &mut Vec<crate::runtime_syntax::Expression<'a>>) {
         match self {
