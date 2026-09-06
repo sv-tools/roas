@@ -11,6 +11,7 @@
 //! later.
 
 use crate::http::{HttpRequest, HttpResponse};
+use crate::runtime_syntax::{self, Expression, Root};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -75,8 +76,58 @@ pub(crate) struct Scope<'a> {
 }
 
 /// Why an expression could not be turned into a value.
+///
+/// Downstream matches must include a fallback for future diagnostics:
+///
+/// ```
+/// use roas_arazzo_executor::ExpressionError;
+/// fn location(error: &ExpressionError) -> Option<usize> {
+///     match error {
+///         ExpressionError::Syntax { offset, .. }
+///         | ExpressionError::Navigation { offset, .. } => Some(*offset),
+///         _ => None,
+///     }
+/// }
+/// ```
+///
+/// Matching all currently known variants without a fallback is not supported:
+///
+/// ```compile_fail,E0004
+/// use roas_arazzo_executor::ExpressionError;
+/// fn exhaustive(error: ExpressionError) {
+///     match error {
+///         ExpressionError::Syntax { .. }
+///         | ExpressionError::Navigation { .. }
+///         | ExpressionError::Unknown(_)
+///         | ExpressionError::Missing { .. }
+///         | ExpressionError::NotRun { .. }
+///         | ExpressionError::Unsupported(_) => {}
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExpressionError {
+    /// The expression is malformed, independently of runtime values.
+    #[error("`{expression}` is not a valid runtime expression at byte {offset}: {message}")]
+    Syntax {
+        /// The expression as written.
+        expression: String,
+        /// Zero-based UTF-8 byte offset into the expression.
+        offset: usize,
+        /// What the parser objected to.
+        message: String,
+    },
+    /// Condition navigation applied a member/index operator to the wrong type.
+    #[error("`{expression}` cannot be navigated at byte {offset}: {message}")]
+    Navigation {
+        /// The condition operand as written.
+        expression: String,
+        /// Zero-based UTF-8 byte offset into the operand.
+        offset: usize,
+        /// Why navigation was invalid.
+        message: String,
+    },
     /// The expression does not start with a name this crate knows.
     #[error("`{0}` is not a runtime expression")]
     Unknown(String),
@@ -128,29 +179,61 @@ pub(crate) fn is_expression(text: &str) -> bool {
 
 /// Evaluate one whole expression, e.g. `$response.body#/id`.
 pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, ExpressionError> {
-    // A `#` starts the JSON Pointer half; everything before it is the
-    // dotted name half.
-    let (name, pointer) = match expression.split_once('#') {
-        Some((name, pointer)) => (name, Some(pointer)),
-        None => (expression, None),
-    };
-    let mut parts = name.split('.');
-    let root = parts.next().unwrap_or_default();
-    let rest: Vec<&str> = parts.collect();
+    evaluate_parsed(&runtime_syntax::parse(expression)?, scope)
+}
 
-    let value = match root {
-        "$inputs" => walk(scope.inputs, &rest, expression, "an input")?,
-        "$outputs" => from_map(scope.outputs, &rest, expression, "an output")?,
-        "$components" => walk(scope.components, &rest, expression, "a component")?,
-        "$sourceDescriptions" => walk(scope.sources, &rest, expression, "a source description")?,
-        "$self" => Value::String(
+/// Check declarations without requiring a step to have run or a value to exist.
+/// Conditions do this even for branches whose evaluation is short-circuited.
+pub(crate) fn check_reference(
+    parsed: &Expression<'_>,
+    scope: &Scope<'_>,
+) -> Result<(), ExpressionError> {
+    match parsed.root {
+        Root::Steps if !scope.declared_steps.contains(parsed.parts[0]) => Err(missing(
+            parsed.text,
+            format!(
+                "step `{}`, which this workflow has not got",
+                parsed.parts[0]
+            ),
+        )),
+        Root::Workflows if !scope.declared_workflows.contains(parsed.parts[0]) => Err(missing(
+            parsed.text,
+            format!(
+                "workflow `{}`, which this description has not got",
+                parsed.parts[0]
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn evaluate_parsed(
+    parsed: &Expression<'_>,
+    scope: &Scope<'_>,
+) -> Result<Value, ExpressionError> {
+    let expression = parsed.text;
+    let rest = &parsed.parts;
+
+    let value = match parsed.root {
+        Root::Inputs => walk(scope.inputs, rest, expression, "an input")?,
+        Root::Outputs if rest.is_empty() => Value::Object(
+            scope
+                .outputs
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        Root::Outputs => from_map(scope.outputs, rest, expression, "an output")?,
+        Root::Components => walk(scope.components, rest, expression, "a component")?,
+        Root::Sources => walk(scope.sources, rest, expression, "a source description")?,
+        Root::Self_ => Value::String(
             scope
                 .self_
                 .ok_or_else(|| missing(expression, "`$self`, which the description does not set"))?
                 .to_owned(),
         ),
-        "$workflows" => {
-            let (id, rest) = split_first(&rest, expression, "a workflow id")?;
+        Root::Workflows => {
+            let (id, rest) = split_first(rest, expression, "a workflow id")?;
             let Some(workflow) = scope.workflows.get(id) else {
                 return Err(if scope.declared_workflows.contains(id) {
                     not_run(expression, format!("workflow `{id}`"))
@@ -167,14 +250,21 @@ pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, Exp
                 Some((field, rest)) if *field == "inputs" => {
                     walk(&workflow.inputs, rest, expression, "an input")?
                 }
+                Some((field, rest)) if *field == "outputs" && rest.is_empty() => Value::Object(
+                    workflow
+                        .outputs
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
                 Some((field, rest)) if *field == "outputs" => {
                     from_map(&workflow.outputs, rest, expression, "an output")?
                 }
                 _ => from_map(&workflow.outputs, rest, expression, "an output")?,
             }
         }
-        "$steps" => {
-            let (id, rest) = split_first(&rest, expression, "a step id")?;
+        Root::Steps => {
+            let (id, rest) = split_first(rest, expression, "a step id")?;
             let Some(step) = scope.steps.get(id) else {
                 return Err(if scope.declared_steps.contains(id) {
                     not_run(expression, format!("step `{id}`"))
@@ -208,25 +298,30 @@ pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, Exp
                 within(exchange, rest, expression)?
             }
         }
-        "$message" => return Err(ExpressionError::Unsupported(expression.to_owned())),
+        Root::Message => return Err(ExpressionError::Unsupported(expression.to_owned())),
         // The rest read the step being evaluated. A name that is none of
         // them is not an expression at all, which is worth saying before
         // asking whether the step has sent anything.
-        "$url" | "$method" | "$statusCode" | "$request" | "$response" => {
+        root @ (Root::Url | Root::Method | Root::StatusCode | Root::Request | Root::Response) => {
             let exchange = scope.here.ok_or_else(|| {
                 missing(
                     expression,
                     "the current step, which has not sent anything yet",
                 )
             })?;
-            let mut whole = vec![root];
-            whole.extend_from_slice(&rest);
+            let mut whole = vec![match root {
+                Root::Url => "url",
+                Root::Method => "method",
+                Root::StatusCode => "statusCode",
+                Root::Request => "request",
+                _ => "response",
+            }];
+            whole.extend_from_slice(rest);
             within(exchange, &whole, expression)?
         }
-        other => return Err(ExpressionError::Unknown(other.to_owned())),
     };
 
-    match pointer {
+    match parsed.pointer {
         None => Ok(value),
         Some(pointer) => value
             .pointer(pointer)
@@ -484,13 +579,13 @@ pub(crate) mod tests {
     fn the_document_and_its_inputs_are_readable() {
         let fixture = Fixture::default();
         assert_eq!(eval("$inputs.petId", &fixture), Ok(json!("7")));
-        assert_eq!(eval("$inputs.auth.token", &fixture), Ok(json!("abc")));
+        assert_eq!(eval("$inputs.auth#/token", &fixture), Ok(json!("abc")));
         assert_eq!(
             eval("$sourceDescriptions.petStore.url", &fixture),
             Ok(json!("https://api.example.com/openapi.json"))
         );
         assert_eq!(
-            eval("$components.parameters.locale.name", &fixture),
+            eval("$components.parameters.locale#/name", &fixture),
             Ok(json!("locale"))
         );
     }
@@ -653,6 +748,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn whole_collections_and_dotted_workflow_outputs_keep_their_types() {
+        let fixture = Fixture {
+            outputs: BTreeMap::from([("org.token".to_owned(), json!("abc"))]),
+            workflows: BTreeMap::from([(
+                "authenticate".to_owned(),
+                WorkflowState {
+                    inputs: json!({ "org.user": "ada" }),
+                    outputs: BTreeMap::from([("org.token".to_owned(), json!("abc"))]),
+                },
+            )]),
+            ..Fixture::default()
+        };
+        assert_eq!(
+            eval("$outputs", &fixture),
+            Ok(json!({ "org.token": "abc" }))
+        );
+        assert_eq!(eval("$outputs.org.token", &fixture), Ok(json!("abc")));
+        assert_eq!(
+            eval("$workflows.authenticate.outputs.org.token", &fixture),
+            Ok(json!("abc"))
+        );
+        assert_eq!(
+            eval("$workflows.authenticate.org.token", &fixture),
+            Ok(json!("abc"))
+        );
+        assert_eq!(
+            eval("$workflows.authenticate.inputs.org.user", &fixture),
+            Ok(json!("ada"))
+        );
+        assert_eq!(
+            eval("$components", &fixture),
+            Ok(fixture.components.clone())
+        );
+        assert_eq!(
+            eval("$components.parameters", &fixture),
+            Ok(fixture.components["parameters"].clone())
+        );
+    }
+
+    #[test]
     fn what_is_not_there_says_so_rather_than_reading_as_null() {
         let fixture = Fixture::default();
         assert_eq!(
@@ -740,7 +875,7 @@ pub(crate) mod tests {
         };
         let scope = fixture.scope();
         assert_eq!(
-            interpolate("Bearer {$inputs.auth.token}", &scope),
+            interpolate("Bearer {$inputs.auth#/token}", &scope),
             Ok("Bearer abc".to_owned())
         );
         assert_eq!(

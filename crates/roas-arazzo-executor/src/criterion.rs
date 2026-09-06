@@ -20,7 +20,37 @@ use std::cmp::Ordering;
 ///
 /// A criterion that is simply *false* is not an error — it is the
 /// answer.
+///
+/// Downstream matches must include a fallback for future diagnostics:
+///
+/// ```
+/// use roas_arazzo_executor::CriterionError;
+/// fn condition(error: &CriterionError) -> Option<&str> {
+///     match error {
+///         CriterionError::Syntax { condition, .. }
+///         | CriterionError::Regex { condition, .. } => Some(condition),
+///         _ => None,
+///     }
+/// }
+/// ```
+///
+/// Matching all currently known variants without a fallback is not supported:
+///
+/// ```compile_fail,E0004
+/// use roas_arazzo_executor::CriterionError;
+/// fn exhaustive(error: CriterionError) {
+///     match error {
+///         CriterionError::Expression(_)
+///         | CriterionError::Select(_)
+///         | CriterionError::Syntax { .. }
+///         | CriterionError::Regex { .. }
+///         | CriterionError::MissingContext(_)
+///         | CriterionError::Unsupported(_) => {}
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CriterionError {
     /// A runtime expression in the criterion could not be evaluated.
     #[error(transparent)]
@@ -130,16 +160,55 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
-// ---- the `simple` condition language --------------------------------
+// ---- the simple condition language --------------------------------
 
-#[derive(Clone, Debug, PartialEq)]
-enum Token {
+// Parsing borrows syntax, never runtime values.
+#[derive(Clone, Debug)]
+enum Condition<'a> {
+    Operand(Operand<'a>),
+    Not(Box<Condition<'a>>),
+    Compare(Comparison, Box<Condition<'a>>, Box<Condition<'a>>),
+    And(Vec<Condition<'a>>),
+    Or(Vec<Condition<'a>>),
+}
+
+#[derive(Clone, Debug)]
+enum Operand<'a> {
+    Runtime {
+        base: crate::runtime_syntax::Expression<'a>,
+        navigation: Vec<Access<'a>>,
+        text: &'a str,
+    },
+    Literal(Value),
+}
+
+#[derive(Clone, Debug)]
+struct Access<'a> {
+    offset: usize,
+    kind: AccessKind<'a>,
+}
+
+#[derive(Clone, Debug)]
+enum AccessKind<'a> {
+    Member(&'a str),
+    Index(usize),
+}
+
+#[derive(Clone, Debug)]
+struct Token<'a> {
+    kind: TokenKind<'a>,
+    offset: usize,
+}
+
+#[derive(Clone, Debug)]
+enum TokenKind<'a> {
     Open,
     Close,
+    Not,
     And,
     Or,
     Compare(Comparison),
-    Value(Operand),
+    Value(Operand<'a>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,227 +221,461 @@ enum Comparison {
     GreaterOrEqual,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum Operand {
-    /// A runtime expression, evaluated where the condition is decided.
-    Expression(String),
-    /// A literal written into the condition.
-    Literal(Value),
+/// Visit dependencies even in a branch whose value will be short-circuited.
+/// A syntax error is an error here too, never an empty list of dependencies.
+pub(crate) fn expressions_in(
+    condition: &str,
+) -> Result<Vec<crate::runtime_syntax::Expression<'_>>, CriterionError> {
+    let tree = parse(condition)?;
+    let mut found = Vec::new();
+    tree.expressions(&mut found);
+    Ok(found)
 }
 
-/// The runtime expressions a `simple` condition reads, found the way
-/// the condition itself is read.
-///
-/// Working this out by splitting on spaces misses
-/// `$statusCode==200&&$steps.b.outputs.ready`, where nothing separates
-/// the operands but the operators — and would find one inside a quoted
-/// literal, where there is none. The tokenizer already knows the
-/// difference, so it answers. A condition that does not tokenize names
-/// nothing; it will say so when it is evaluated.
-pub(crate) fn expressions_in(condition: &str) -> Vec<String> {
-    tokenize(condition).map_or_else(
-        |_| Vec::new(),
-        |tokens| {
-            tokens
-                .into_iter()
-                .filter_map(|token| match token {
-                    Token::Value(Operand::Expression(expression)) => Some(expression),
-                    _ => None,
-                })
-                .collect()
-        },
-    )
+/// Parse the expression-bearing parts of a criterion without evaluating them.
+/// Callers decide whether these reads describe a step dependency or only need
+/// syntax validation (for example, a workflow-wide action).
+pub(crate) fn references(
+    criterion: &Criterion,
+) -> Result<Vec<crate::runtime_syntax::Expression<'_>>, CriterionError> {
+    let mut found = Vec::new();
+    if let Some(context) = &criterion.context {
+        found.push(crate::runtime_syntax::parse(context)?);
+    }
+    if matches!(
+        criterion.type_,
+        None | Some(CriterionType::Simple(CriterionKind::Simple))
+    ) {
+        found.extend(expressions_in(&criterion.condition)?);
+    } else {
+        // Regex anchors and JSONPath roots are not runtime expressions.
+        for reference in expression::interpolations(&criterion.condition) {
+            found.push(crate::runtime_syntax::parse(reference)?);
+        }
+    }
+    Ok(found)
+}
+
+impl<'a> Condition<'a> {
+    fn expressions(&self, found: &mut Vec<crate::runtime_syntax::Expression<'a>>) {
+        match self {
+            Self::Operand(Operand::Runtime { base, .. }) => found.push(base.clone()),
+            Self::Operand(Operand::Literal(_)) => {}
+            Self::Not(inner) => inner.expressions(found),
+            Self::Compare(_, left, right) => {
+                left.expressions(found);
+                right.expressions(found);
+            }
+            Self::And(items) | Self::Or(items) => {
+                for item in items {
+                    item.expressions(found);
+                }
+            }
+        }
+    }
+
+    fn evaluate(&self, scope: &Scope<'_>) -> Result<Value, CriterionError> {
+        Ok(match self {
+            Self::Operand(operand) => operand.evaluate(scope)?,
+            Self::Not(inner) => Value::Bool(!truthy(&inner.evaluate(scope)?)),
+            Self::Compare(comparison, left, right) => Value::Bool(holds(
+                *comparison,
+                &left.evaluate(scope)?,
+                &right.evaluate(scope)?,
+            )),
+            Self::And(items) => {
+                for item in items {
+                    if !truthy(&item.evaluate(scope)?) {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Value::Bool(true)
+            }
+            Self::Or(items) => {
+                for item in items {
+                    if truthy(&item.evaluate(scope)?) {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Value::Bool(false)
+            }
+        })
+    }
+}
+
+impl Operand<'_> {
+    fn evaluate(&self, scope: &Scope<'_>) -> Result<Value, CriterionError> {
+        let (base, navigation, text) = match self {
+            Self::Literal(value) => return Ok(value.clone()),
+            Self::Runtime {
+                base,
+                navigation,
+                text,
+            } => (base, navigation, text),
+        };
+        let value = expression::evaluate_parsed(base, scope)?;
+        let mut current = &value;
+        for access in navigation {
+            let invalid = |message: &str| ExpressionError::Navigation {
+                expression: (*text).to_owned(),
+                offset: access.offset,
+                message: message.to_owned(),
+            };
+            let (next, name) = match access.kind {
+                AccessKind::Member(name) => {
+                    let object = current
+                        .as_object()
+                        .ok_or_else(|| invalid("property access requires an object"))?;
+                    (object.get(name), format!("property `{name}`"))
+                }
+                AccessKind::Index(index) => {
+                    let array = current
+                        .as_array()
+                        .ok_or_else(|| invalid("index access requires an array"))?;
+                    (array.get(index), format!("array index `{index}`"))
+                }
+            };
+            current = next.ok_or_else(|| ExpressionError::Missing {
+                expression: (*text).to_owned(),
+                what: format!("{name} at byte {}, which is absent", access.offset),
+            })?;
+        }
+        Ok(current.clone())
+    }
+}
+
+fn syntax(condition: &str, offset: usize, message: &str) -> CriterionError {
+    CriterionError::Syntax {
+        condition: condition.to_owned(),
+        message: format!("at byte {offset}: {message}"),
+    }
 }
 
 fn simple(condition: &str, scope: &Scope<'_>) -> Result<bool, CriterionError> {
-    let tokens = tokenize(condition)?;
-    let mut parser = Parser {
-        tokens: &tokens,
-        at: 0,
-        condition,
-        scope,
-    };
-    let holds = parser.disjunction()?;
-    if parser.at < parser.tokens.len() {
-        return Err(parser.error("unexpected trailing input"));
+    let tree = parse(condition)?;
+    let mut expressions = Vec::new();
+    tree.expressions(&mut expressions);
+    for expression in expressions {
+        expression::check_reference(&expression, scope)?;
     }
-    Ok(holds)
+    Ok(truthy(&tree.evaluate(scope)?))
 }
 
-fn tokenize(condition: &str) -> Result<Vec<Token>, CriterionError> {
-    let syntax = |message: &str| CriterionError::Syntax {
-        condition: condition.to_owned(),
-        message: message.to_owned(),
+fn parse(condition: &str) -> Result<Condition<'_>, CriterionError> {
+    let tokens = tokenize(condition)?;
+    let mut parser = Parser {
+        tokens: tokens.into_iter().peekable(),
+        condition,
+        depth: 0,
     };
-    let bytes: Vec<char> = condition.chars().collect();
+    let tree = parser.disjunction()?;
+    if parser.tokens.peek().is_some() {
+        return Err(
+            parser.error("unexpected trailing input (chained comparisons are not supported)")
+        );
+    }
+    Ok(tree)
+}
+
+fn tokenize(condition: &str) -> Result<Vec<Token<'_>>, CriterionError> {
     let mut tokens = Vec::new();
     let mut at = 0;
-    while at < bytes.len() {
-        let char = bytes[at];
-        match char {
-            char if char.is_whitespace() => at += 1,
+    while let Some(c) = condition[at..].chars().next() {
+        let offset = at;
+        let kind = match c {
+            c if c.is_whitespace() => {
+                at += c.len_utf8();
+                continue;
+            }
             '(' => {
-                tokens.push(Token::Open);
                 at += 1;
+                TokenKind::Open
             }
             ')' => {
-                tokens.push(Token::Close);
                 at += 1;
+                TokenKind::Close
             }
             '&' | '|' => {
-                let next = bytes.get(at + 1).copied();
-                if next != Some(char) {
-                    return Err(syntax(&format!("`{char}` must be doubled")));
+                if condition.as_bytes().get(at + 1) != Some(&(c as u8)) {
+                    return Err(syntax(
+                        condition,
+                        at,
+                        &format!(
+                            "`{c}` must be doubled; operator characters delimit runtime operands"
+                        ),
+                    ));
                 }
-                tokens.push(if char == '&' { Token::And } else { Token::Or });
                 at += 2;
+                if c == '&' {
+                    TokenKind::And
+                } else {
+                    TokenKind::Or
+                }
+            }
+            '!' if condition.as_bytes().get(at + 1) != Some(&b'=') => {
+                at += 1;
+                TokenKind::Not
             }
             '=' | '!' | '<' | '>' => {
-                let doubled = bytes.get(at + 1) == Some(&'=');
-                let comparison = match (char, doubled) {
+                let doubled = condition.as_bytes().get(at + 1) == Some(&b'=');
+                let comparison = match (c, doubled) {
                     ('=', true) => Comparison::Equal,
                     ('!', true) => Comparison::NotEqual,
                     ('<', true) => Comparison::LessOrEqual,
                     ('>', true) => Comparison::GreaterOrEqual,
                     ('<', false) => Comparison::Less,
                     ('>', false) => Comparison::Greater,
-                    (char, _) => return Err(syntax(&format!("`{char}` must be followed by `=`"))),
+                    _ => {
+                        return Err(syntax(
+                            condition,
+                            at,
+                            "`=` must be followed by `=`; an operator inside a runtime name or pointer is not supported in a simple operand",
+                        ));
+                    }
                 };
                 at += if doubled { 2 } else { 1 };
-                tokens.push(Token::Compare(comparison));
+                TokenKind::Compare(comparison)
             }
             '\'' | '"' => {
-                let quote = char;
-                let start = at + 1;
-                let mut end = start;
-                while end < bytes.len() && bytes[end] != quote {
-                    end += 1;
+                let quote = c;
+                at += 1;
+                let mut value = String::new();
+                loop {
+                    let Some(c) = condition[at..].chars().next() else {
+                        return Err(syntax(
+                            condition,
+                            offset,
+                            "a string is missing its closing quote",
+                        ));
+                    };
+                    at += c.len_utf8();
+                    if c == quote {
+                        if condition[at..].starts_with(quote) {
+                            at += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    value.push(c);
                 }
-                if end >= bytes.len() {
-                    return Err(syntax("a string is missing its closing quote"));
-                }
-                let text: String = bytes[start..end].iter().collect();
-                tokens.push(Token::Value(Operand::Literal(Value::String(text))));
-                at = end + 1;
+                TokenKind::Value(Operand::Literal(Value::String(value)))
             }
             _ => {
-                // A word: a runtime expression, a number, a keyword, or
-                // an unquoted string. It runs until whitespace, a
-                // bracket, or the start of an operator.
-                let start = at;
-                while at < bytes.len()
-                    && !bytes[at].is_whitespace()
-                    && !matches!(bytes[at], '(' | ')' | '&' | '|' | '=' | '!' | '<' | '>')
-                {
-                    at += 1;
-                }
-                let word: String = bytes[start..at].iter().collect();
-                if word.is_empty() {
-                    return Err(syntax("expected a value"));
-                }
-                tokens.push(Token::Value(operand(&word)));
+                at += condition[at..]
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, '(' | ')' | '&' | '|' | '=' | '!' | '<' | '>')
+                    })
+                    .unwrap_or(condition.len() - at);
+                TokenKind::Value(operand(&condition[offset..at], condition, offset)?)
             }
-        }
+        };
+        tokens.push(Token { kind, offset });
     }
     if tokens.is_empty() {
-        return Err(syntax("the condition is empty"));
+        return Err(syntax(condition, 0, "the condition is empty"));
     }
     Ok(tokens)
 }
 
-fn operand(word: &str) -> Operand {
+fn operand<'a>(
+    word: &'a str,
+    condition: &str,
+    offset: usize,
+) -> Result<Operand<'a>, CriterionError> {
     if expression::is_expression(word) {
-        return Operand::Expression(word.to_owned());
-    }
-    match word {
-        "true" => Operand::Literal(Value::Bool(true)),
-        "false" => Operand::Literal(Value::Bool(false)),
-        "null" => Operand::Literal(Value::Null),
-        _ => match word.parse::<f64>() {
-            Ok(number) => Operand::Literal(
-                serde_json::Number::from_f64(number).map_or(Value::Null, Value::Number),
-            ),
-            // The spec quotes its strings, but an unquoted word can only
-            // be one, so read it as written rather than refusing.
-            Err(_) => Operand::Literal(Value::String(word.to_owned())),
-        },
-    }
-}
-
-struct Parser<'p> {
-    tokens: &'p [Token],
-    at: usize,
-    condition: &'p str,
-    scope: &'p Scope<'p>,
-}
-
-impl Parser<'_> {
-    fn error(&self, message: &str) -> CriterionError {
-        CriterionError::Syntax {
-            condition: self.condition.to_owned(),
-            message: message.to_owned(),
-        }
-    }
-
-    fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.at)
-    }
-
-    /// `a || b` — the loosest binding, so the outermost.
-    fn disjunction(&mut self) -> Result<bool, CriterionError> {
-        let mut holds = self.conjunction()?;
-        while self.peek() == Some(&Token::Or) {
-            self.at += 1;
-            // Both sides are evaluated: a condition naming something
-            // absent should say so rather than depend on the order.
-            holds = self.conjunction()? || holds;
-        }
-        Ok(holds)
-    }
-
-    /// `a && b`.
-    fn conjunction(&mut self) -> Result<bool, CriterionError> {
-        let mut holds = self.comparison()?;
-        while self.peek() == Some(&Token::And) {
-            self.at += 1;
-            holds = self.comparison()? && holds;
-        }
-        Ok(holds)
-    }
-
-    /// `a == b`, or a lone operand read for its truth.
-    fn comparison(&mut self) -> Result<bool, CriterionError> {
-        if self.peek() == Some(&Token::Open) {
-            self.at += 1;
-            let holds = self.disjunction()?;
-            if self.peek() != Some(&Token::Close) {
-                return Err(self.error("a `(` is missing its `)`"));
-            }
-            self.at += 1;
-            return Ok(holds);
-        }
-        let left = self.operand()?;
-        let Some(&Token::Compare(comparison)) = self.peek() else {
-            return Ok(truthy(&left));
-        };
-        self.at += 1;
-        let right = self.operand()?;
-        Ok(holds(comparison, &left, &right))
-    }
-
-    fn operand(&mut self) -> Result<Value, CriterionError> {
-        match self.tokens.get(self.at) {
-            Some(Token::Value(operand)) => {
-                self.at += 1;
-                match operand {
-                    Operand::Literal(literal) => Ok(literal.clone()),
-                    Operand::Expression(expression) => {
-                        Ok(expression::evaluate(expression, self.scope)?)
+        let (base, mut at) = crate::runtime_syntax::prefix(word).map_err(|error| {
+            let relative = match &error {
+                ExpressionError::Syntax { offset, .. } => *offset,
+                _ => 0,
+            };
+            syntax(condition, offset + relative, &error.to_string())
+        })?;
+        let mut navigation = Vec::new();
+        while at < word.len() {
+            let start = at;
+            let kind = match word.as_bytes()[at] {
+                b'.' => {
+                    at += 1;
+                    let name = at;
+                    at += word[at..]
+                        .bytes()
+                        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                        .count();
+                    if name == at {
+                        return Err(syntax(condition, offset + at, "expected a property name"));
                     }
+                    AccessKind::Member(&word[name..at])
                 }
-            }
-            _ => Err(self.error("expected a value")),
+                b'[' => {
+                    at += 1;
+                    let index = at;
+                    at += word[at..].bytes().take_while(u8::is_ascii_digit).count();
+                    let digits = &word[index..at];
+                    if digits.is_empty()
+                        || (digits.len() > 1 && digits.starts_with('0'))
+                        || word.as_bytes().get(at) != Some(&b']')
+                    {
+                        return Err(syntax(
+                            condition,
+                            offset + start,
+                            "expected a zero-based integer index `[0]`",
+                        ));
+                    }
+                    let index = digits.parse().map_err(|_| {
+                        syntax(condition, offset + start, "array index is too large")
+                    })?;
+                    at += 1;
+                    AccessKind::Index(index)
+                }
+                _ => {
+                    return Err(syntax(
+                        condition,
+                        offset + at,
+                        "unexpected runtime operand suffix",
+                    ));
+                }
+            };
+            navigation.push(Access {
+                offset: start,
+                kind,
+            });
         }
+        return Ok(Operand::Runtime {
+            base,
+            navigation,
+            text: word,
+        });
+    }
+    let literal = match word {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" => Value::Null,
+        _ if word.starts_with(|c: char| c.is_ascii_digit() || matches!(c, '-' | '+' | '.'))
+            || matches!(word, "NaN" | "inf" | "Infinity") =>
+        {
+            let number = serde_json::from_str::<serde_json::Number>(word).map_err(|_| {
+                syntax(
+                    condition,
+                    offset,
+                    "expected a finite JSON number; quote numeric-looking strings",
+                )
+            })?;
+            // Cargo feature unification can enable serde_json's arbitrary
+            // precision, which also accepts numbers outside finite f64 range.
+            if !number.as_f64().is_some_and(f64::is_finite) {
+                return Err(syntax(condition, offset, "expected a finite JSON number"));
+            }
+            Value::Number(number)
+        }
+        // Compatibility extension: non-numeric unquoted words are strings.
+        _ => Value::String(word.to_owned()),
+    };
+    Ok(Operand::Literal(literal))
+}
+
+struct Parser<'a> {
+    tokens: std::iter::Peekable<std::vec::IntoIter<Token<'a>>>,
+    condition: &'a str,
+    depth: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn error(&mut self, message: &str) -> CriterionError {
+        syntax(
+            self.condition,
+            self.tokens
+                .peek()
+                .map_or(self.condition.len(), |token| token.offset),
+            message,
+        )
+    }
+
+    fn disjunction(&mut self) -> Result<Condition<'a>, CriterionError> {
+        let first = self.conjunction()?;
+        if !matches!(self.tokens.peek().map(|t| &t.kind), Some(TokenKind::Or)) {
+            return Ok(first);
+        }
+        let mut items = vec![first];
+        while matches!(self.tokens.peek().map(|t| &t.kind), Some(TokenKind::Or)) {
+            self.tokens.next();
+            items.push(self.conjunction()?);
+        }
+        Ok(Condition::Or(items))
+    }
+
+    fn conjunction(&mut self) -> Result<Condition<'a>, CriterionError> {
+        let first = self.comparison()?;
+        if !matches!(self.tokens.peek().map(|t| &t.kind), Some(TokenKind::And)) {
+            return Ok(first);
+        }
+        let mut items = vec![first];
+        while matches!(self.tokens.peek().map(|t| &t.kind), Some(TokenKind::And)) {
+            self.tokens.next();
+            items.push(self.comparison()?);
+        }
+        Ok(Condition::And(items))
+    }
+
+    fn comparison(&mut self) -> Result<Condition<'a>, CriterionError> {
+        let left = self.unary()?;
+        let Some(Token {
+            kind: TokenKind::Compare(comparison),
+            ..
+        }) = self.tokens.peek()
+        else {
+            return Ok(left);
+        };
+        let comparison = *comparison;
+        self.tokens.next();
+        Ok(Condition::Compare(
+            comparison,
+            Box::new(left),
+            Box::new(self.unary()?),
+        ))
+    }
+
+    fn unary(&mut self) -> Result<Condition<'a>, CriterionError> {
+        let mut negate = false;
+        let mut has_negation = false;
+        while matches!(self.tokens.peek().map(|t| &t.kind), Some(TokenKind::Not)) {
+            self.tokens.next();
+            negate = !negate;
+            has_negation = true;
+        }
+        let value = match self.tokens.next() {
+            Some(Token {
+                kind: TokenKind::Value(value),
+                ..
+            }) => Condition::Operand(value),
+            Some(Token {
+                kind: TokenKind::Open,
+                ..
+            }) => {
+                // Bound recursion for untrusted documents, including evaluation
+                // and destruction of the tree. Logical chains remain flat.
+                if self.depth >= 64 {
+                    return Err(self.error("condition nesting exceeds 64 groups"));
+                }
+                self.depth += 1;
+                let value = self.disjunction()?;
+                self.depth -= 1;
+                if !matches!(self.tokens.peek().map(|t| &t.kind), Some(TokenKind::Close)) {
+                    return Err(self.error("a `(` is missing its `)`"));
+                }
+                self.tokens.next();
+                value
+            }
+            Some(token) => return Err(syntax(self.condition, token.offset, "expected a value")),
+            None => return Err(self.error("expected a value")),
+        };
+        Ok(if negate {
+            Condition::Not(Box::new(value))
+        } else if has_negation {
+            Condition::Not(Box::new(Condition::Not(Box::new(value))))
+        } else {
+            value
+        })
     }
 }
 
@@ -395,7 +698,7 @@ fn holds(comparison: Comparison, left: &Value, right: &Value) -> bool {
 /// condition means the same thing by both.
 fn compare(left: &Value, right: &Value) -> Option<Ordering> {
     match (left, right) {
-        (Value::Number(left), Value::Number(right)) => left.as_f64()?.partial_cmp(&right.as_f64()?),
+        (Value::Number(left), Value::Number(right)) => compare_numbers(left, right),
         // "String comparisons MUST be case insensitive" — so `PLACED`
         // and `placed` are the same word to a condition.
         (Value::String(left), Value::String(right)) => {
@@ -404,16 +707,34 @@ fn compare(left: &Value, right: &Value) -> Option<Ordering> {
         (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
         (Value::Number(number), Value::String(text))
         | (Value::String(text), Value::Number(number)) => {
-            let text: f64 = text.parse().ok()?;
-            let number = number.as_f64()?;
+            let text = text
+                .parse::<serde_json::Number>()
+                .ok()
+                .or_else(|| serde_json::Number::from_f64(text.parse().ok()?))?;
             if matches!(left, Value::Number(_)) {
-                number.partial_cmp(&text)
+                compare_numbers(number, &text)
             } else {
-                text.partial_cmp(&number)
+                compare_numbers(&text, number)
             }
         }
         _ => None,
     }
+}
+
+fn compare_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Option<Ordering> {
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+        return Some(left.cmp(&right));
+    }
+    if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
+        return Some(left.cmp(&right));
+    }
+    if left.is_i64() && right.is_u64() {
+        return Some(Ordering::Less);
+    }
+    if left.is_u64() && right.is_i64() {
+        return Some(Ordering::Greater);
+    }
+    left.as_f64()?.partial_cmp(&right.as_f64()?)
 }
 
 #[cfg(test)]
@@ -523,12 +844,9 @@ mod tests {
             decide("$inputs.nope == 1"),
             Err(CriterionError::Expression(_))
         ));
-        // Both sides of `||` are evaluated, so a broken name is not
-        // hidden by a true on its left.
-        assert!(matches!(
-            decide("$statusCode == 200 || $inputs.nope == 1"),
-            Err(CriterionError::Expression(_))
-        ));
+        // Parsing is unconditional, but a guarded missing runtime value
+        // need not be resolved.
+        assert_eq!(decide("$statusCode == 200 || $inputs.nope == 1"), Ok(true));
     }
 
     #[test]

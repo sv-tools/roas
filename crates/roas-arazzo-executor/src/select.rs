@@ -14,7 +14,35 @@ use serde_json::Value;
 use serde_json_path::JsonPath;
 
 /// Why a value could not be produced.
+///
+/// Downstream matches must include a fallback for future diagnostics:
+///
+/// ```
+/// use roas_arazzo_executor::SelectError;
+/// fn selector(error: &SelectError) -> Option<&str> {
+///     match error {
+///         SelectError::Malformed { selector, .. }
+///         | SelectError::Empty { selector, .. } => Some(selector),
+///         _ => None,
+///     }
+/// }
+/// ```
+///
+/// Matching all currently known variants without a fallback is not supported:
+///
+/// ```compile_fail,E0004
+/// use roas_arazzo_executor::SelectError;
+/// fn exhaustive(error: SelectError) {
+///     match error {
+///         SelectError::Expression(_)
+///         | SelectError::Malformed { .. }
+///         | SelectError::Empty { .. }
+///         | SelectError::Unsupported(_) => {}
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SelectError {
     /// A runtime expression in the value could not be evaluated.
     #[error(transparent)]

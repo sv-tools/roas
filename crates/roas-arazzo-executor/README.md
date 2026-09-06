@@ -78,7 +78,7 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 - **Steps** that name an operation by `operationId` (bare, or `$sourceDescriptions.<name>.<id>`) or by `operationPath`, and steps that call another `workflowId`.
 - **Parameters** in `path`, `query`, `querystring`, `header` and `cookie`, from the workflow and the step, with `$components.parameters` references and their `value` overrides.
 - **Request bodies**, with runtime expressions anywhere inside the payload and `replacements` by JSON Pointer or JSONPath.
-- **Criteria** — `simple` conditions (comparisons, `&&`, `||`, parentheses; string comparisons are case-insensitive and numeric strings coerce, as the specification requires), `regex`, and `jsonpath`, each with `{$expressions}` filled in before the engine that reads them sees them. A `jsonpath` condition passes on a non-empty nodelist, whatever the node holds.
+- **Criteria** — `simple` conditions (comparisons, `!`, `&&`, `||`, parentheses, property access and indexing), `regex`, and `jsonpath`. Pattern conditions interpolate `{$expressions}` before evaluation; simple conditions parse runtime expressions directly. A `jsonpath` condition passes on a non-empty nodelist, whatever the node holds.
 - **Actions** — `end`, `goto` a step or a workflow, and `retry`, which honours `retryAfter`, defaults to a single attempt when `retryLimit` is absent, may send the run through another step or workflow before trying again, and gives way to the next failure action once its limit is spent.
 - **Outputs** at step and workflow level, including [`Selector`](https://spec.openapis.org/arazzo/v1.1.0.html#selector-object)s, readable by later steps as `$steps.<id>.outputs.<name>`.
 - **Runtime expressions** — `$url`, `$method`, `$statusCode`, `$request.*`, `$response.*`, `$inputs`, `$outputs`, `$steps`, `$workflows.<id>.inputs` / `.outputs`, `$sourceDescriptions`, `$components`, and `$self`.
@@ -87,6 +87,79 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 A step that calls a workflow is a step like any other: what it called becomes its outputs, its own `outputs` are named on top, its `successCriteria` are judged, its `timeout` covers the whole call, and its `onSuccess` / `onFailure` decide where the workflow goes next. It gets a record of its own in the report — `Performed::Workflow` rather than `Performed::Request`.
 
 Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0` feature), which upconverts first so there is one interpreter.
+
+## Condition profile
+
+The same profile applies to v1.0 and v1.1. Arazzo specifies the operators but does
+not yet fully specify their grammar or bare-value truthiness (upstream issues
+[#518](https://github.com/OAI/Arazzo-Specification/issues/518) and
+[#517](https://github.com/OAI/Arazzo-Specification/issues/517)). These are explicit
+executor policies, not a claim that every evaluator behaves identically.
+
+| Behavior | Rule | Status |
+| --- | --- | --- |
+| Navigation | `.member` accesses an object; `[0]` indexes an array | Specified operators; identifier and index syntax is executor policy |
+| Strings | Single quotes; a doubled quote escapes itself: `'Rex''s'` | Specified |
+| Comparisons | Case-insensitive strings, numeric-string coercion against a number, structural collection equality | String comparison specified; coercion recommended; collection equality retained policy |
+| Null / missing | `null == null` passes; null differs from other values; a missing value is an error, not null | Null equality specified; inequality and missing-value handling explicit policy |
+| Bare values | `false`, `null`, zero, `''`, empty arrays and objects fail; other values pass | Boolean/null behavior specified; remaining truthiness retained policy |
+| Evaluation order | Parse everything and check referenced step/workflow declarations first; `&&` and `||` short-circuit runtime value lookup; dependency analysis visits both sides | Executor policy; changed from eager evaluation |
+| Precedence | Navigation, unary `!`, one comparison, `&&`, then `||`; parentheses group conditions | Executor policy; chained comparisons rejected |
+| Numbers | JSON number syntax; finite values only; integral comparisons retain integer precision | Executor policy |
+| Extensions | Double-quoted strings (doubled quote escaping), unquoted non-numeric words, whole `$inputs`/component collections, workflow-output shorthand, step exchange access | Compatibility extensions; whole `$outputs` and `$workflows.<id>.outputs` collections also supported |
+
+Standalone runtime expressions must consume their entire field. In a simple
+condition, whitespace and `()&|=!<>` delimit an operand. This supports both
+`$request.query.limit == 10` and `$statusCode==200`. Names containing these
+characters may be valid standalone but cannot always be expressed in a simple
+condition. A lone `=` receives a boundary diagnostic; the parser never guesses a
+name from live data. Quoted strings are literals, not an expression escape hatch.
+
+Runtime-expression identifiers take precedence over condition navigation:
+`$inputs.auth.token` names the single input `auth.token`, while
+`$response.body.pets[0].name` navigates the body. Use `$inputs.auth#/token` to read
+a nested input. Likewise, component/output names and header names retain dots.
+This corrects the old nested-object interpretation of dotted input/output names.
+Query/path names and source-reference names consume their entire bounded token.
+
+Whole `$workflows.<id>.outputs` reads return an object, just like `$outputs`.
+An empty output collection is a value (false as a bare simple condition), not a
+missing output. Named reads such as `$workflows.inner.outputs.code` and pointers
+such as `$workflows.inner.outputs#/code` still work. An unknown workflow remains
+a missing-reference error; a declared workflow that has not run remains a
+not-run error, rather than yielding an empty object.
+
+JSON Pointers are distinct from navigation: in `$response.body#/data.name[0]`,
+`data.name[0]` is a literal property name. `#/` is not a closing delimiter, so
+`$response.body#/a=b == 1` is not supported. Use the standalone
+`context: $response.body#/a=b` with a typed criterion, or a Selector. Invalid
+pointer escapes and ignored suffixes now produce diagnostics with byte offsets.
+No URI-percent decoding is performed on runtime JSON Pointers.
+
+Integer-to-integer comparisons are exact within signed/unsigned 64-bit range.
+Floating-point or mixed comparisons still use binary64 and can round; this is
+not an arbitrary-precision numeric evaluator. Numeric strings compare numerically
+against numbers, but two strings retain case-insensitive lexical ordering.
+
+Syntax checking during step ordering does not replace full document preparation.
+Known workflow-wide action criteria and parameter expressions are syntax-checked
+once, using effective parameter overrides, but their reads do not add prerequisites
+to every step: they use the state available when an action is considered.
+Step-local expression dependencies still affect ordering. Missing
+reusable actions and action-argument components are diagnosed only when dispatch
+reaches them; they do not prevent an unrelated outcome from running.
+Runtime missing-value errors still abort execution; criterion-failure recovery
+and a full preflight API are separate planned improvements.
+
+### Migrating from 0.1.x
+
+The grammar and diagnostic changes are released on the **0.2** line, not as a
+0.1.x patch. `ExpressionError` adds `Syntax` and `Navigation`. `ExpressionError`,
+`CriterionError`, and `SelectError` are now `#[non_exhaustive]`; downstream matches
+on these enums must include a fallback arm. Adding the attribute is itself a
+breaking change and does not make the new variants compatible with 0.1.x.
+Also review the dotted-name, short-circuit, and numeric-literal changes described
+above when migrating workflow documents. No public variants are removed.
 
 ## What it does not run
 
