@@ -420,66 +420,81 @@ pub fn schema_lift_decision(value: &serde_json::Value) -> LiftDecision {
     LiftDecision::IfRepeated
 }
 
-/// How often each [`LiftDecision::IfRepeated`] shape occurs in the
-/// document, counted once up front over the whole spec.
+/// How many document slots hold each [`LiftDecision::IfRepeated`]
+/// shape.
 ///
-/// The count has to be taken *before* collapse starts rewriting the
-/// tree, because the decision for a given slot depends on shapes
-/// that may live anywhere else in the document — including ones the
-/// walk has not reached yet. Keys are the canonical JSON of the
-/// pre-collapse form, which is exactly what [`lift_ref_or`] looks up
-/// (it snapshots each inline schema before walking into it).
+/// Collapse runs twice: a census pass over a throwaway clone of the
+/// spec fills this in, then the real pass consults it. Both passes
+/// are the *same* walk, so a shape is counted at exactly the slots
+/// that could lift it — no separate notion of "where a schema might
+/// live", and nothing counted from an `example` payload or an
+/// extension that merely resembles a schema. Shapes reached through
+/// an external `$ref` are counted too, so an inline schema
+/// identical to an external one still collapses onto it.
+///
+/// Slots are keyed by a 64-bit digest of the schema's canonical JSON
+/// *before* its children are walked — the form both passes see at
+/// that slot, since a subtree is only rewritten after its own slot
+/// has been weighed. A digest collision can only make a single-use
+/// schema lift, which is what this crate did for every schema until
+/// 0.20, so the digest is trusted here without a confirmation pass
+/// (unlike [`Bag::seen`], where a collision would merge two
+/// components).
 #[derive(Default)]
 pub struct SchemaRepeats {
-    counts: HashMap<String, u32>,
+    counts: HashMap<u64, u32>,
+    /// True during the census pass: [`Self::weigh`] records a slot
+    /// and reports "not repeated" so the census walk rewrites the
+    /// clone exactly as the real pass will rewrite the spec.
+    counting: bool,
 }
 
 impl SchemaRepeats {
-    /// Count every repeatable shape in `spec`.
-    ///
-    /// Non-schema objects that happen to match the shape are counted
-    /// too — nothing in the serialized document says "this object is
-    /// a schema". The cost of a stray count is at worst lifting a
-    /// schema that occurs once, i.e. today's behaviour.
-    pub fn from_spec<S: Serialize>(spec: &S) -> Result<Self, CollapseError> {
-        let mut counts = HashMap::new();
-        count_shapes(&serde_json::to_value(spec)?, &mut counts);
-        Ok(Self { counts })
+    /// Start a census pass. Feed the result of [`Self::finish`] to
+    /// the real pass.
+    pub fn census() -> Self {
+        Self {
+            counts: HashMap::new(),
+            counting: true,
+        }
     }
 
-    /// True when `canonical` — the canonical JSON of a schema's
-    /// pre-collapse form — occurs more than once in the document.
-    pub fn is_repeated(&self, canonical: &str) -> bool {
-        self.counts.get(canonical).is_some_and(|n| *n > 1)
+    /// Close the census and return the counts for the real pass.
+    pub fn finish(self) -> Self {
+        Self {
+            counts: self.counts,
+            counting: false,
+        }
     }
-}
 
-fn count_shapes(value: &serde_json::Value, counts: &mut HashMap<String, u32>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if schema_lift_decision(value) == LiftDecision::IfRepeated {
-                *counts.entry(value.to_string()).or_default() += 1;
-            }
-            for child in map.values() {
-                count_shapes(child, counts);
-            }
+    /// Weigh one repeat-eligible slot: during the census, record it
+    /// and answer "not repeated"; afterwards, answer whether more
+    /// than one slot held this shape.
+    fn weigh(&mut self, shape: u64) -> bool {
+        if self.counting {
+            self.note(shape);
+            return false;
         }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                count_shapes(child, counts);
-            }
+        self.counts.get(&shape).is_some_and(|n| *n > 1)
+    }
+
+    /// Record a slot without asking about it — used for schemas
+    /// pulled in through an external `$ref`, which lift either way
+    /// but still make an identical inline schema worth lifting onto.
+    fn note(&mut self, shape: u64) {
+        if self.counting {
+            *self.counts.entry(shape).or_default() += 1;
         }
-        _ => {}
     }
 }
 
 /// Hook for the [`lift_ref_or`] generic to reach the
-/// version-specific `Collapser`'s loader and its repeat counts.
+/// version-specific `Collapser`'s loader and its slot counts.
 /// Versions implement this with two one-liners.
 pub trait CollapseState {
     fn loader_mut(&mut self) -> Option<&mut Loader>;
 
-    fn schema_repeats(&self) -> &SchemaRepeats;
+    fn schema_repeats(&mut self) -> &mut SchemaRepeats;
 }
 
 /// A component type that participates in collapse. Each version
@@ -570,6 +585,12 @@ where
                 }
             })?;
             let derived_ctx = NameContext::from_external_ref(&reference, &ctx);
+            if T::IS_SCHEMA {
+                // An external schema always lifts, but note its shape
+                // so an identical inline one collapses onto it rather
+                // than staying inline beside it.
+                note_schema_shape(&fetched, c)?;
+            }
             T::walk(&mut fetched, &derived_ctx, c)?;
             let name = intern(c, fetched, &derived_ctx)?;
             *slot = RefOr::new_ref(format!("{}{name}", T::PREFIX));
@@ -583,11 +604,11 @@ where
             let RefOr::Item(mut item) = owned else {
                 unreachable!("matched RefOr::Item above");
             };
-            // Decide from the pre-walk form: walking rewrites this
-            // schema's children into `$ref`s, while the repeat counts
-            // were taken over the untouched document.
+            // Weigh the pre-walk form: walking rewrites this schema's
+            // children into `$ref`s, and the census pass weighed the
+            // same slot before walking it too.
             let lift = if T::IS_SCHEMA {
-                should_lift_schema(&item, c.schema_repeats())?
+                should_lift_schema(&item, c)?
             } else {
                 true
             };
@@ -603,17 +624,35 @@ where
     }
 }
 
-/// Apply [`schema_lift_decision`] to one not-yet-walked schema.
-fn should_lift_schema<T: Serialize>(
+/// Apply [`schema_lift_decision`] to one not-yet-walked schema,
+/// weighing the [`LiftDecision::IfRepeated`] case against the census.
+fn should_lift_schema<T: Serialize, C: CollapseState>(
     item: &T,
-    repeats: &SchemaRepeats,
+    c: &mut C,
 ) -> Result<bool, CollapseError> {
     let value = serde_json::to_value(item)?;
     Ok(match schema_lift_decision(&value) {
         LiftDecision::Always => true,
         LiftDecision::Never => false,
-        LiftDecision::IfRepeated => repeats.is_repeated(&value.to_string()),
+        LiftDecision::IfRepeated => c.schema_repeats().weigh(shape_digest(&value)),
     })
+}
+
+/// Record a schema slot in the census without weighing it.
+fn note_schema_shape<T: Serialize, C: CollapseState>(
+    item: &T,
+    c: &mut C,
+) -> Result<(), CollapseError> {
+    let value = serde_json::to_value(item)?;
+    if schema_lift_decision(&value) == LiftDecision::IfRepeated {
+        c.schema_repeats().note(shape_digest(&value));
+    }
+    Ok(())
+}
+
+/// Digest of a schema's canonical JSON, the census key.
+fn shape_digest(value: &serde_json::Value) -> u64 {
+    digest(&value.to_string())
 }
 
 fn intern<T, C>(c: &mut C, item: T, ctx: &NameContext) -> Result<String, CollapseError>
@@ -732,35 +771,42 @@ mod tests {
     }
 
     #[test]
-    fn schema_repeats_counts_identical_shapes_anywhere_in_the_document() {
-        let doc = serde_json::json!({
-            "components": {"schemas": {
-                "Order": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "integer", "format": "int64"},
-                        "at": {"type": "string", "format": "date-time"},
-                    },
-                },
-                "Invoice": {
-                    "type": "object",
-                    "properties": {"id": {"type": "integer", "format": "int64"}},
-                },
-            }},
-        });
-        let repeats = SchemaRepeats::from_spec(&doc).unwrap();
-        let key = |value: serde_json::Value| value.to_string();
-        assert!(repeats.is_repeated(&key(
-            serde_json::json!({"type": "integer", "format": "int64"})
-        )));
-        assert!(!repeats.is_repeated(&key(
-            serde_json::json!({"type": "string", "format": "date-time"})
-        )));
-        // Shapes that never reach the repeat rule aren't counted at all.
-        assert!(!repeats.is_repeated(&key(serde_json::json!({"type": "string"}))));
-        assert!(!SchemaRepeats::default().is_repeated(&key(
-            serde_json::json!({"type": "integer", "format": "int64"})
-        )));
+    fn schema_repeats_counts_slots_across_the_census_pass() {
+        let uuid = serde_json::json!({"type": "string", "format": "uuid"});
+        let date = serde_json::json!({"type": "string", "format": "date-time"});
+
+        let mut census = SchemaRepeats::census();
+        // The census answers "not repeated" for every slot, so its
+        // walk rewrites the clone exactly as the real pass will.
+        assert!(!census.weigh(shape_digest(&uuid)));
+        assert!(!census.weigh(shape_digest(&uuid)));
+        assert!(!census.weigh(shape_digest(&date)));
+
+        let mut repeats = census.finish();
+        assert!(repeats.weigh(shape_digest(&uuid)), "two slots held it");
+        assert!(!repeats.weigh(shape_digest(&date)), "one slot held it");
+        // Weighing after the census never changes a count.
+        assert!(!repeats.weigh(shape_digest(&date)));
+        // Nor does a late `note`.
+        repeats.note(shape_digest(&date));
+        assert!(!repeats.weigh(shape_digest(&date)));
+    }
+
+    #[test]
+    fn schema_repeats_notes_external_shapes_alongside_inline_slots() {
+        let uuid = shape_digest(&serde_json::json!({"type": "string", "format": "uuid"}));
+        let mut census = SchemaRepeats::census();
+        // One inline slot plus one schema pulled in through an
+        // external `$ref` is two slots holding the same shape.
+        assert!(!census.weigh(uuid));
+        census.note(uuid);
+        assert!(census.finish().weigh(uuid));
+    }
+
+    #[test]
+    fn schema_repeats_default_reports_nothing_repeated() {
+        let mut repeats = SchemaRepeats::default();
+        assert!(!repeats.weigh(shape_digest(&serde_json::json!({"type": "string"}))));
     }
 
     #[test]

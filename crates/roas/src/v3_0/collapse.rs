@@ -75,11 +75,10 @@ pub(crate) struct Collapser<'a> {
     // is only walked in place at every `paths.<path>` slot (and
     // inside `Callback.paths`).
     loader: Option<&'a mut Loader>,
-    /// How often each repeatable schema shape occurs in the
-    /// document, counted once before any rewriting so the
-    /// "lift only when it repeats" rule can see shapes the walk
-    /// has not reached yet.
-    repeats: SchemaRepeats,
+    /// Slot counts for the "lift only when it repeats" rule. The
+    /// census pass fills these in over a throwaway clone; the real
+    /// pass reads them back.
+    repeats: &'a mut SchemaRepeats,
 }
 
 impl CollapseState for Collapser<'_> {
@@ -87,8 +86,8 @@ impl CollapseState for Collapser<'_> {
         self.loader.as_deref_mut()
     }
 
-    fn schema_repeats(&self) -> &SchemaRepeats {
-        &self.repeats
+    fn schema_repeats(&mut self) -> &mut SchemaRepeats {
+        self.repeats
     }
 }
 
@@ -565,14 +564,26 @@ fn walk_paths(
 
 pub(crate) fn collapse_spec(
     spec: &mut Spec,
-    loader: Option<&mut Loader>,
+    mut loader: Option<&mut Loader>,
 ) -> Result<(), CollapseError> {
-    // Phase 0a: count repeatable schema shapes over the
-    // untouched document. Whether a constrained scalar or a thin
-    // array wrapper is worth a name depends on whether it occurs
-    // more than once, which only a whole-document pass can say.
-    let repeats = SchemaRepeats::from_spec(&*spec)?;
+    // Whether a constrained scalar or a thin array wrapper is worth
+    // a name depends on how many slots hold it, which no single
+    // top-down pass can know in time. So run the walk twice: once
+    // over a throwaway clone to count the slots (the census pass,
+    // which lifts nothing on the strength of a count), then once for
+    // real. The loader caches what the census fetched, so external
+    // refs are resolved once and counted like any other slot.
+    let mut repeats = SchemaRepeats::census();
+    collapse_pass(&mut spec.clone(), loader.as_deref_mut(), &mut repeats)?;
+    let mut repeats = repeats.finish();
+    collapse_pass(spec, loader, &mut repeats)
+}
 
+fn collapse_pass(
+    spec: &mut Spec,
+    loader: Option<&mut Loader>,
+    repeats: &mut SchemaRepeats,
+) -> Result<(), CollapseError> {
     // Phase 0: take each existing components bag out of the spec.
     let initial_schemas = spec
         .components
@@ -3216,5 +3227,54 @@ mod tests {
         );
         let names = lifted_schema_names(&spec);
         assert_eq!(names.len(), 4, "got {names:?}");
+    }
+
+    #[test]
+    fn inline_schema_dedupes_onto_an_identical_external_one() {
+        // A constrained scalar filling a single slot would stay
+        // inline, but here the same shape also arrives through an
+        // external `$ref`, which lifts either way. Two slots hold the
+        // shape, so the inline one collapses onto the same component
+        // instead of sitting beside it — the census pass counts
+        // external slots for exactly this reason.
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "shared.json",
+                serde_json::json!({"Uuid": {"type": "string", "format": "uuid"}}),
+            )
+            .expect("preload");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.0.3",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Order": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "format": "uuid"},
+                            "shipment": {"$ref": "shared.json#/Uuid"}
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let order = schema_at(&spec, "Order");
+        let id = order["properties"]["id"]["$ref"]
+            .as_str()
+            .expect("the inline copy lifts onto the external component");
+        assert_eq!(
+            order["properties"]["shipment"]["$ref"], id,
+            "both slots must share one component",
+        );
+        let names = lifted_schema_names(&spec);
+        assert_eq!(names.len(), 2, "one Order plus one shared uuid: {names:?}");
+        let shared = schema_at(&spec, id.rsplit('/').next().unwrap());
+        assert_eq!(
+            shared,
+            serde_json::json!({"type": "string", "format": "uuid"})
+        );
     }
 }
