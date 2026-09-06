@@ -1,6 +1,6 @@
 [package]
 name = "roas-cli"
-version = "1.0.0"
+version = "1.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -25,8 +25,8 @@ roas-arazzo = { version = "0.3", path = "../roas-arazzo", features = ["clap", "v
 # knowing whether every source description was supplied.
 roas-arazzo-executor = { version = "0.1.1", path = "../roas-arazzo-executor", features = ["reqwest"] }
 roas-asyncapi = { version = "0.4", path = "../roas-asyncapi", features = ["clap", "v2_6", "v3_0", "v3_1"] }
-roas-file-fetcher = { version = "0.1.2", path = "../roas-file-fetcher", features = ["yaml"] }
-roas-http-fetcher = { version = "0.2.2", path = "../roas-http-fetcher", features = ["yaml"] }
+roas-file-fetcher = { version = "0.1.4", path = "../roas-file-fetcher", features = ["yaml"] }
+roas-http-fetcher = { version = "0.2.4", path = "../roas-http-fetcher", features = ["yaml"] }
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
