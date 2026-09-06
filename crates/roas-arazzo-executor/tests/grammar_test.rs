@@ -681,3 +681,198 @@ fn an_earlier_selected_action_can_make_a_dangling_action_unreachable() {
         }
     }
 }
+
+#[test]
+fn shared_action_parameter_syntax_errors_are_reported_before_io() {
+    for field in ["successActions", "failureActions"] {
+        for reusable in [false, true] {
+            for parameter in [
+                json!({ "name": "bad", "value": "$statusCode.extra" }),
+                json!({ "name": "bad", "value": { "nested": ["code={$statusCode.extra}"] } }),
+                json!({ "name": "bad", "value": { "context": "$statusCode.extra", "selector": "/code", "type": "jsonpointer" } }),
+                json!({ "reference": "$components.parameters.bad" }),
+                json!({ "reference": "$components.parameters.good", "value": "$statusCode.extra" }),
+            ] {
+                let mut value = document(json!([{ "stepId": "a", "operationId": "check" }]));
+                value["components"] = json!({ "parameters": {
+                    "bad": { "name": "bad", "value": "$statusCode.extra" },
+                    "good": { "name": "good", "value": 200 }
+                } });
+                let action = json!({
+                    "name": "never", "type": "end", "criteria": [{ "condition": "false" }],
+                    "parameters": [
+                        { "reference": "$components.parameters.missing" },
+                        parameter
+                    ]
+                });
+                value["workflows"][0][field] = if reusable {
+                    value["components"][field] = json!({ "shared": action });
+                    json!([{ "reference": format!("$components.{field}.shared") }])
+                } else {
+                    json!([action])
+                };
+                let description = serde_json::from_value(value).unwrap();
+                let mut client = Fake::new();
+                let error = execute(&description, &options(), &mut client).unwrap_err();
+                assert!(
+                    matches!(&error, ExecutionError::Expression(ExpressionError::Syntax { expression, .. }) if expression == "$statusCode.extra"),
+                    "{field}, reusable={reusable}: {error}"
+                );
+                assert!(client.sent().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_action_parameters_do_not_add_dependencies_or_look_up_values() {
+    for field in ["successActions", "failureActions"] {
+        let mut value = document(json!([
+            { "stepId": "a", "operationId": "check", "outputs": { "ready": true } },
+            { "stepId": "b", "operationId": "check", "outputs": { "ready": true } }
+        ]));
+        value["components"] = json!({ "parameters": {
+            "overridden": { "name": "overridden", "value": "$statusCode.extra" }
+        } });
+        value["workflows"][0][field] = json!([{
+            "name": "never", "type": "end", "criteria": [{ "condition": "false" }],
+            "parameters": [
+                { "reference": "$components.parameters.missing" },
+                { "reference": "$components.parameters.overridden", "value": "$steps.b.outputs.ready" },
+                { "name": "first", "value": "$steps.a.outputs.ready" },
+                { "name": "unknown", "value": "$steps.undeclared.outputs.ready" },
+                { "name": "absent", "value": { "nested": ["input={$inputs.absent}", false, 0, null] } },
+                { "name": "selector", "value": { "context": "$steps.b.outputs.ready", "selector": "", "type": "jsonpointer" } }
+            ]
+        }]);
+        let description = serde_json::from_value(value).unwrap();
+        let report = execute(
+            &description,
+            &options(),
+            &mut Fake::new().reply(200, &json!({})).reply(200, &json!({})),
+        )
+        .unwrap();
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .map(|step| step.step_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"],
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn shared_action_arguments_resolve_only_when_the_action_is_selected() {
+    for (field, status) in [("successActions", 200), ("failureActions", 500)] {
+        for enabled in [false, true] {
+            let mut value = document(json!([{ "stepId": "a", "operationId": "check" }]));
+            value["workflows"][0][field] = json!([{
+                "name": "call", "type": "goto", "workflowId": "child",
+                "criteria": [{ "condition": enabled.to_string() }],
+                "parameters": [{ "reference": "$components.parameters.missing" }]
+            }]);
+            value["workflows"].as_array_mut().unwrap().push(json!({
+                "workflowId": "child", "steps": [{ "stepId": "c", "operationId": "check" }]
+            }));
+            let description = serde_json::from_value(value).unwrap();
+            let mut client = Fake::new().reply(status, &json!({}));
+            let result = execute(&description, &options(), &mut client);
+            if enabled {
+                assert!(matches!(result, Err(ExecutionError::Unsupported(_))));
+            } else {
+                result.expect("unselected shared arguments need not resolve");
+            }
+            assert_eq!(client.sent().len(), 1);
+        }
+    }
+}
+
+fn workflow_collection_document(outputs: Value, condition: &str) -> Description {
+    let mut value = document(json!([
+        { "stepId": "call", "workflowId": "inner" },
+        {
+            "stepId": "read", "operationId": "check",
+            "requestBody": { "payload": "$workflows.inner.outputs" },
+            "successCriteria": [{ "condition": condition }],
+            "outputs": { "whole": "$workflows.inner.outputs" }
+        }
+    ]));
+    value["workflows"].as_array_mut().unwrap().push(json!({
+        "workflowId": "inner", "steps": [{ "stepId": "produce", "operationId": "check" }],
+        "outputs": outputs
+    }));
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn an_empty_workflow_output_collection_is_a_value_and_a_false_condition() {
+    let description = workflow_collection_document(json!({}), "$workflows.inner.outputs");
+    let mut client = Fake::new().reply(200, &json!({})).reply(200, &json!({}));
+    let report = execute(&description, &options(), &mut client).unwrap();
+    assert!(!report.is_success());
+    assert_eq!(client.sent().len(), 2);
+    assert_eq!(
+        serde_json::from_slice::<Value>(client.sent()[1].body.as_deref().unwrap()).unwrap(),
+        json!({})
+    );
+}
+
+#[test]
+fn a_populated_workflow_output_collection_supports_whole_named_and_pointer_reads() {
+    let outputs = json!({ "code": 200, "meta": { "ok": true } });
+    let description = workflow_collection_document(
+        outputs.clone(),
+        "$workflows.inner.outputs && $workflows.inner.outputs.code == 200 && $workflows.inner.outputs#/code == 200 && $workflows.inner.code == 200",
+    );
+    let mut client = Fake::new().reply(200, &json!({})).reply(200, &json!({}));
+    let report = execute(&description, &options(), &mut client).unwrap();
+    assert!(report.is_success());
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .find(|step| step.step_id == "read")
+            .unwrap()
+            .outputs["whole"],
+        outputs
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(client.sent()[1].body.as_deref().unwrap()).unwrap(),
+        outputs
+    );
+}
+
+#[test]
+fn workflow_output_collections_preserve_not_run_and_unknown_workflow_errors() {
+    for declared in [false, true] {
+        let mut value = document(json!([{
+            "stepId": "read", "operationId": "check",
+            "successCriteria": [{ "condition": "$workflows.inner.outputs" }]
+        }]));
+        if declared {
+            value["workflows"].as_array_mut().unwrap().push(json!({
+                "workflowId": "inner", "steps": [{ "stepId": "produce", "operationId": "check" }]
+            }));
+        }
+        let description = serde_json::from_value(value).unwrap();
+        let mut client = Fake::new().reply(200, &json!({}));
+        let error = execute(&description, &options(), &mut client).unwrap_err();
+        if declared {
+            assert!(matches!(
+                error,
+                ExecutionError::Criterion(CriterionError::Expression(ExpressionError::NotRun { expression, .. }))
+                    if expression == "$workflows.inner.outputs"
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                ExecutionError::Criterion(CriterionError::Expression(ExpressionError::Missing { expression, .. }))
+                    if expression == "$workflows.inner.outputs"
+            ));
+        }
+        assert_eq!(client.sent().len(), 1);
+    }
+}

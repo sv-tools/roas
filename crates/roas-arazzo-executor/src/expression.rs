@@ -250,6 +250,13 @@ pub(crate) fn evaluate_parsed(
                 Some((field, rest)) if *field == "inputs" => {
                     walk(&workflow.inputs, rest, expression, "an input")?
                 }
+                Some((field, rest)) if *field == "outputs" && rest.is_empty() => Value::Object(
+                    workflow
+                        .outputs
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
                 Some((field, rest)) if *field == "outputs" => {
                     from_map(&workflow.outputs, rest, expression, "an output")?
                 }

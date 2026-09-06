@@ -20,7 +20,37 @@ use std::cmp::Ordering;
 ///
 /// A criterion that is simply *false* is not an error — it is the
 /// answer.
+///
+/// Downstream matches must include a fallback for future diagnostics:
+///
+/// ```
+/// use roas_arazzo_executor::CriterionError;
+/// fn condition(error: &CriterionError) -> Option<&str> {
+///     match error {
+///         CriterionError::Syntax { condition, .. }
+///         | CriterionError::Regex { condition, .. } => Some(condition),
+///         _ => None,
+///     }
+/// }
+/// ```
+///
+/// Matching all currently known variants without a fallback is not supported:
+///
+/// ```compile_fail,E0004
+/// use roas_arazzo_executor::CriterionError;
+/// fn exhaustive(error: CriterionError) {
+///     match error {
+///         CriterionError::Expression(_)
+///         | CriterionError::Select(_)
+///         | CriterionError::Syntax { .. }
+///         | CriterionError::Regex { .. }
+///         | CriterionError::MissingContext(_)
+///         | CriterionError::Unsupported(_) => {}
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CriterionError {
     /// A runtime expression in the criterion could not be evaluated.
     #[error(transparent)]

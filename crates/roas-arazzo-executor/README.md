@@ -106,7 +106,7 @@ executor policies, not a claim that every evaluator behaves identically.
 | Evaluation order | Parse everything and check referenced step/workflow declarations first; `&&` and `||` short-circuit runtime value lookup; dependency analysis visits both sides | Executor policy; changed from eager evaluation |
 | Precedence | Navigation, unary `!`, one comparison, `&&`, then `||`; parentheses group conditions | Executor policy; chained comparisons rejected |
 | Numbers | JSON number syntax; finite values only; integral comparisons retain integer precision | Executor policy |
-| Extensions | Double-quoted strings (doubled quote escaping), unquoted non-numeric words, whole `$inputs`/component collections, workflow-output shorthand, step exchange access | Compatibility extensions; whole `$outputs` now also supported |
+| Extensions | Double-quoted strings (doubled quote escaping), unquoted non-numeric words, whole `$inputs`/component collections, workflow-output shorthand, step exchange access | Compatibility extensions; whole `$outputs` and `$workflows.<id>.outputs` collections also supported |
 
 Standalone runtime expressions must consume their entire field. In a simple
 condition, whitespace and `()&|=!<>` delimit an operand. This supports both
@@ -122,6 +122,13 @@ a nested input. Likewise, component/output names and header names retain dots.
 This corrects the old nested-object interpretation of dotted input/output names.
 Query/path names and source-reference names consume their entire bounded token.
 
+Whole `$workflows.<id>.outputs` reads return an object, just like `$outputs`.
+An empty output collection is a value (false as a bare simple condition), not a
+missing output. Named reads such as `$workflows.inner.outputs.code` and pointers
+such as `$workflows.inner.outputs#/code` still work. An unknown workflow remains
+a missing-reference error; a declared workflow that has not run remains a
+not-run error, rather than yielding an empty object.
+
 JSON Pointers are distinct from navigation: in `$response.body#/data.name[0]`,
 `data.name[0]` is a literal property name. `#/` is not a closing delimiter, so
 `$response.body#/a=b == 1` is not supported. Use the standalone
@@ -135,9 +142,10 @@ not an arbitrary-precision numeric evaluator. Numeric strings compare numericall
 against numbers, but two strings retain case-insensitive lexical ordering.
 
 Syntax checking during step ordering does not replace full document preparation.
-Known workflow-wide action criteria are syntax-checked once, but their reads do
-not add prerequisites to every step: they use the state available when an action
-is considered. Step-local expression dependencies still affect ordering. Missing
+Known workflow-wide action criteria and parameter expressions are syntax-checked
+once, using effective parameter overrides, but their reads do not add prerequisites
+to every step: they use the state available when an action is considered.
+Step-local expression dependencies still affect ordering. Missing
 reusable actions and action-argument components are diagnosed only when dispatch
 reaches them; they do not prevent an unrelated outcome from running.
 Runtime missing-value errors still abort execution; criterion-failure recovery
@@ -146,9 +154,10 @@ and a full preflight API are separate planned improvements.
 ### Migrating from 0.1.x
 
 The grammar and diagnostic changes are released on the **0.2** line, not as a
-0.1.x patch. `ExpressionError` adds `Syntax` and `Navigation` and is now
-`#[non_exhaustive]`; downstream matches must include a fallback arm. Adding the
-attribute does not retroactively make the new variants compatible with 0.1.x.
+0.1.x patch. `ExpressionError` adds `Syntax` and `Navigation`. `ExpressionError`,
+`CriterionError`, and `SelectError` are now `#[non_exhaustive]`; downstream matches
+on these enums must include a fallback arm. Adding the attribute is itself a
+breaking change and does not make the new variants compatible with 0.1.x.
 Also review the dotted-name, short-circuit, and numeric-literal changes described
 above when migrating workflow documents. No public variants are removed.
 

@@ -12,6 +12,7 @@ use crate::operation::{self, Source};
 use crate::report::{
     CriterionOutcome, ExecutionError, ExecutionReport, Outcome, Performed, StepRecord,
 };
+use crate::runtime_syntax::{self, Expression};
 use crate::select;
 use crate::select::SelectError;
 use roas_arazzo::v1_1::{
@@ -1453,6 +1454,75 @@ fn visit<'d>(
     Ok(())
 }
 
+/// Parse the expressions a value evaluates, with no runtime value lookups.
+/// The visitor may collect dependencies or just leave syntax checked.
+fn visit_value_expressions(
+    value: &ValueOrSelector,
+    visitor: &mut impl FnMut(Expression<'_>),
+) -> Result<(), ExecutionError> {
+    match value {
+        ValueOrSelector::Literal(literal) => visit_literal_expressions(literal, visitor),
+        ValueOrSelector::Selector(selector) => {
+            visitor(runtime_syntax::parse(&selector.context)?);
+            Ok(())
+        }
+    }
+}
+
+fn visit_literal_expressions(
+    value: &Value,
+    visitor: &mut impl FnMut(Expression<'_>),
+) -> Result<(), ExecutionError> {
+    match value {
+        Value::String(text) => {
+            for reference in expression::references(text) {
+                visitor(runtime_syntax::parse(reference)?);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                visit_literal_expressions(item, visitor)?;
+            }
+        }
+        Value::Object(members) => {
+            for member in members.values() {
+                visit_literal_expressions(member, visitor)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn visit_parameter_expressions(
+    parameters: Vec<ParameterTemplate<'_>>,
+    visitor: &mut impl FnMut(Expression<'_>),
+) -> Result<(), ExecutionError> {
+    for template in parameters {
+        match template.overridden {
+            Some(value) => visit_literal_expressions(value, visitor)?,
+            None => visit_value_expressions(&template.parameter.value, visitor)?,
+        }
+    }
+    Ok(())
+}
+
+fn visit_action_parameter_expressions(
+    list: &[ReusableOr<Parameter>],
+    description: &Description,
+    visitor: &mut impl FnMut(Expression<'_>),
+) -> Result<(), ExecutionError> {
+    for entry in list {
+        // An action's arguments are only resolved when it is selected.
+        // Still inspect available expressions independently, even when another
+        // argument cannot be resolved until dispatch reports its error.
+        if let Ok(parameters) = parameter_templates(std::slice::from_ref(entry), description) {
+            visit_parameter_expressions(parameters, visitor)?;
+        }
+    }
+    Ok(())
+}
+
 /// Every step id a step's *expressions* read, which is a dependency
 /// whether or not `dependsOn` says so.
 ///
@@ -1472,107 +1542,38 @@ fn steps_named_by(
     description: &Description,
 ) -> Result<BTreeSet<String>, ExecutionError> {
     let mut found = BTreeSet::new();
-
-    fn read_expression(text: &str, found: &mut BTreeSet<String>) -> Result<(), ExecutionError> {
-        let parsed = crate::runtime_syntax::parse(text)?;
+    let mut collect = |parsed: Expression<'_>| {
         if let Some(id) = parsed.step_id() {
             found.insert(id.to_owned());
         }
-        Ok(())
-    }
-
-    fn read(text: &str, found: &mut BTreeSet<String>) -> Result<(), ExecutionError> {
-        for reference in expression::references(text) {
-            read_expression(reference, found)?;
-        }
-        Ok(())
-    }
-
-    fn read_value(
-        value: &ValueOrSelector,
-        found: &mut BTreeSet<String>,
-    ) -> Result<(), ExecutionError> {
-        match value {
-            ValueOrSelector::Literal(literal) => read_literal(literal, found),
-            ValueOrSelector::Selector(selector) => read_expression(&selector.context, found),
-        }
-    }
-
-    fn read_literal(value: &Value, found: &mut BTreeSet<String>) -> Result<(), ExecutionError> {
-        match value {
-            Value::String(text) => read(text, found)?,
-            Value::Array(items) => {
-                for item in items {
-                    read_literal(item, found)?;
-                }
-            }
-            Value::Object(members) => {
-                for member in members.values() {
-                    read_literal(member, found)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn read_parameters(
-        parameters: Vec<ParameterTemplate<'_>>,
-        found: &mut BTreeSet<String>,
-    ) -> Result<(), ExecutionError> {
-        for template in parameters {
-            match template.overridden {
-                Some(value) => read_literal(value, found)?,
-                None => read_value(&template.parameter.value, found)?,
-            }
-        }
-        Ok(())
-    }
+    };
 
     fn read_criteria(
         list: &[Criterion],
-        found: &mut BTreeSet<String>,
+        visitor: &mut impl FnMut(Expression<'_>),
     ) -> Result<(), ExecutionError> {
         for criterion in list {
             for parsed in criterion::references(criterion)? {
-                if let Some(id) = parsed.step_id() {
-                    found.insert(id.to_owned());
-                }
+                visitor(parsed);
             }
         }
         Ok(())
     }
 
-    fn read_action_parameters(
-        list: &[ReusableOr<Parameter>],
-        description: &Description,
-        found: &mut BTreeSet<String>,
-    ) -> Result<(), ExecutionError> {
-        for entry in list {
-            // An action's arguments are only resolved when it is selected.
-            // Still discover all available dependencies, even when another
-            // argument cannot be resolved until dispatch reports its error.
-            if let Ok(parameters) = parameter_templates(std::slice::from_ref(entry), description) {
-                read_parameters(parameters, found)?;
-            }
-        }
-        Ok(())
-    }
-
-    read_parameters(
+    visit_parameter_expressions(
         effective_parameters(workflow, step, description)?,
-        &mut found,
+        &mut collect,
     )?;
-    read_criteria(&step.success_criteria, &mut found)?;
+    read_criteria(&step.success_criteria, &mut collect)?;
     for output in step.outputs.values() {
-        read_value(output, &mut found)?;
+        visit_value_expressions(output, &mut collect)?;
     }
     if let Some(body) = &step.request_body {
         if let Some(payload) = &body.payload {
-            read_literal(payload, &mut found)?;
+            visit_literal_expressions(payload, &mut collect)?;
         }
         for replacement in &body.replacements {
-            read_value(&replacement.value, &mut found)?;
+            visit_value_expressions(&replacement.value, &mut collect)?;
         }
     }
     for entry in &step.on_success {
@@ -1580,14 +1581,14 @@ fn steps_named_by(
         // earlier action, may make this action unreachable. Syntax failures in
         // an available action remain errors rather than erased dependencies.
         if let Ok(action) = success_action(entry, description) {
-            read_criteria(&action.criteria, &mut found)?;
-            read_action_parameters(&action.parameters, description, &mut found)?;
+            read_criteria(&action.criteria, &mut collect)?;
+            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
         }
     }
     for entry in &step.on_failure {
         if let Ok(action) = failure_action(entry, description) {
-            read_criteria(&action.criteria, &mut found)?;
-            read_action_parameters(&action.parameters, description, &mut found)?;
+            read_criteria(&action.criteria, &mut collect)?;
+            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
         }
     }
 
@@ -1604,13 +1605,14 @@ fn ordered_steps(
 ) -> Result<Vec<usize>, ExecutionError> {
     // Shared actions run against the state available at dispatch. Attaching
     // their reads to every step manufactures edges (and even mutual cycles).
-    // Validate known criteria once, without turning them into prerequisites.
+    // Validate known criteria and parameters once, without collecting reads.
     // An unresolved reusable action is still diagnosed if dispatch reaches it.
     for entry in &workflow.success_actions {
         if let Ok(action) = success_action(entry, description) {
             for criterion in &action.criteria {
                 criterion::references(criterion)?;
             }
+            visit_action_parameter_expressions(&action.parameters, description, &mut |_| {})?;
         }
     }
     for entry in &workflow.failure_actions {
@@ -1618,6 +1620,7 @@ fn ordered_steps(
             for criterion in &action.criteria {
                 criterion::references(criterion)?;
             }
+            visit_action_parameter_expressions(&action.parameters, description, &mut |_| {})?;
         }
     }
     let index: BTreeMap<&str, usize> = workflow
