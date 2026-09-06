@@ -42,6 +42,7 @@ mod http;
 mod operation;
 mod report;
 mod run;
+mod runtime_syntax;
 mod select;
 
 pub mod testing;

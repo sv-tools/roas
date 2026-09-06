@@ -708,9 +708,13 @@ impl<'d> Run<'d> {
         // parameters are "applicable for all steps described under this
         // workflow... can be overridden at the step level but cannot be
         // removed there" — so both lists go, the step's last.
-        let mut arguments = frame.workflow.parameters.clone();
-        arguments.extend(step.parameters.iter().cloned());
-        let inputs = self.arguments(&arguments)?;
+        let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
+        let mut inputs = Map::new();
+        for parameter in effective_parameters(frame.workflow, step, self.description)? {
+            let parameter = parameter.resolve(&scope)?;
+            inputs.insert(parameter.name, parameter.value);
+        }
+        let inputs = Value::Object(inputs);
         self.enter(workflow, inputs, Some((step_id, Then::Advance)))
     }
 
@@ -743,13 +747,10 @@ impl<'d> Run<'d> {
         let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
 
         // The workflow's parameters first, so a step's own override them.
-        let mut resolved = parameters(&frame.workflow.parameters, self.description, &scope)?;
-        for parameter in parameters(&step.parameters, self.description, &scope)? {
-            resolved.retain(|existing| {
-                !(existing.name == parameter.name && existing.location == parameter.location)
-            });
-            resolved.push(parameter);
-        }
+        let resolved = effective_parameters(frame.workflow, step, self.description)?
+            .into_iter()
+            .map(|parameter| parameter.resolve(&scope))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut path = BTreeMap::new();
         let mut query = BTreeMap::new();
@@ -1114,10 +1115,43 @@ fn parameters(
     description: &Description,
     scope: &Scope<'_>,
 ) -> Result<Vec<Resolved>, ExecutionError> {
-    let mut resolved = Vec::with_capacity(list.len());
+    parameter_templates(list, description)?
+        .into_iter()
+        .map(|parameter| parameter.resolve(scope))
+        .collect()
+}
+
+struct ParameterTemplate<'a> {
+    parameter: &'a Parameter,
+    overridden: Option<&'a Value>,
+}
+
+impl ParameterTemplate<'_> {
+    fn location(&self) -> ParameterLocation {
+        self.parameter.in_.unwrap_or(ParameterLocation::Query)
+    }
+
+    fn resolve(&self, scope: &Scope<'_>) -> Result<Resolved, ExecutionError> {
+        let value = match self.overridden {
+            Some(value) => select::resolve(value, scope)?,
+            None => select::value_of(&self.parameter.value, scope)?,
+        };
+        Ok(Resolved {
+            name: self.parameter.name.clone(),
+            location: self.location(),
+            value,
+        })
+    }
+}
+
+fn parameter_templates<'a>(
+    list: &'a [ReusableOr<Parameter>],
+    description: &'a Description,
+) -> Result<Vec<ParameterTemplate<'a>>, ExecutionError> {
+    let mut templates = Vec::with_capacity(list.len());
     for entry in list {
         let (parameter, overridden) = match entry {
-            ReusableOr::Item(parameter) => (parameter.clone(), None),
+            ReusableOr::Item(parameter) => (parameter, None),
             ReusableOr::Reusable(reusable) => {
                 let name = reusable
                     .reference
@@ -1138,20 +1172,33 @@ fn parameters(
                             reusable.reference
                         ))
                     })?;
-                (parameter.clone(), reusable.value.clone())
+                (parameter, reusable.value.as_ref())
             }
         };
-        let value = match overridden {
-            Some(value) => select::resolve(&value, scope)?,
-            None => select::value_of(&parameter.value, scope)?,
-        };
-        resolved.push(Resolved {
-            name: parameter.name,
-            location: parameter.in_.unwrap_or(ParameterLocation::Query),
-            value,
+        templates.push(ParameterTemplate {
+            parameter,
+            overridden,
         });
     }
-    Ok(resolved)
+    Ok(templates)
+}
+
+/// Apply overrides before inspecting or evaluating their values. Dependency
+/// discovery and request assembly must agree about which expressions survive.
+fn effective_parameters<'a>(
+    workflow: &'a Workflow,
+    step: &'a Step,
+    description: &'a Description,
+) -> Result<Vec<ParameterTemplate<'a>>, ExecutionError> {
+    let mut templates = parameter_templates(&workflow.parameters, description)?;
+    for parameter in parameter_templates(&step.parameters, description)? {
+        templates.retain(|existing| {
+            !(existing.parameter.name == parameter.parameter.name
+                && (step.workflow_id.is_some() || existing.location() == parameter.location()))
+        });
+        templates.push(parameter);
+    }
+    Ok(templates)
 }
 
 /// A success action, following a `Reusable` into the components.
@@ -1419,133 +1466,140 @@ fn visit<'d>(
 ///
 /// A `Reusable` is followed into the components: where a parameter or
 /// an action is written makes no difference to what it reads.
-fn steps_named_by(step: &Step, description: &Description) -> BTreeSet<String> {
+fn steps_named_by(
+    step: &Step,
+    workflow: &Workflow,
+    description: &Description,
+) -> Result<BTreeSet<String>, ExecutionError> {
     let mut found = BTreeSet::new();
 
-    /// The step id an expression names, if it names one.
-    fn named_in(expression: &str) -> Option<String> {
-        let rest = expression.strip_prefix("$steps.")?;
-        let (id, _) = rest.split_once('.')?;
-        Some(id.to_owned())
+    fn read_expression(text: &str, found: &mut BTreeSet<String>) -> Result<(), ExecutionError> {
+        let parsed = crate::runtime_syntax::parse(text)?;
+        if let Some(id) = parsed.step_id() {
+            found.insert(id.to_owned());
+        }
+        Ok(())
     }
-    fn read(text: &str, found: &mut BTreeSet<String>) {
-        found.extend(
-            expression::references(text)
-                .into_iter()
-                .filter_map(named_in),
-        );
+
+    fn read(text: &str, found: &mut BTreeSet<String>) -> Result<(), ExecutionError> {
+        for reference in expression::references(text) {
+            read_expression(reference, found)?;
+        }
+        Ok(())
     }
-    /// A condition is read the way its own type reads it: a `simple`
-    /// one through the parser that evaluates it, anything else through
-    /// the `{$…}` its engine has filled in first.
-    fn read_condition(criterion: &Criterion, found: &mut BTreeSet<String>) {
+
+    fn read_condition(
+        criterion: &Criterion,
+        found: &mut BTreeSet<String>,
+    ) -> Result<(), ExecutionError> {
         let simple = matches!(
             criterion.type_,
             None | Some(CriterionType::Simple(CriterionKind::Simple))
         );
         if simple {
-            found.extend(
-                criterion::expressions_in(&criterion.condition)
-                    .iter()
-                    .filter_map(|expression| named_in(expression)),
-            );
-        } else {
-            // Only the `{$…}` — a pattern or a path is not evaluated as
-            // an expression even when the whole of it starts with `$`,
-            // which in a regex is an anchor.
-            found.extend(
-                expression::interpolations(&criterion.condition)
-                    .into_iter()
-                    .filter_map(named_in),
-            );
-        }
-    }
-    fn read_value(value: &ValueOrSelector, found: &mut BTreeSet<String>) {
-        match value {
-            ValueOrSelector::Literal(literal) => read_literal(literal, found),
-            // A selector's context is an expression; its selector is a
-            // JSONPath or a pointer, which the runtime does not
-            // evaluate as one.
-            ValueOrSelector::Selector(selector) => read(&selector.context, found),
-        }
-    }
-    fn read_literal(value: &Value, found: &mut BTreeSet<String>) {
-        match value {
-            Value::String(text) => read(text, found),
-            Value::Array(items) => items.iter().for_each(|item| read_literal(item, found)),
-            Value::Object(members) => members
-                .values()
-                .for_each(|member| read_literal(member, found)),
-            _ => {}
-        }
-    }
-    fn read_parameters(
-        list: &[ReusableOr<Parameter>],
-        description: &Description,
-        found: &mut BTreeSet<String>,
-    ) {
-        for entry in list {
-            match entry {
-                ReusableOr::Item(parameter) => read_value(&parameter.value, found),
-                ReusableOr::Reusable(reusable) => {
-                    // An override *replaces* the component's value, so
-                    // it replaces what that value read too: the
-                    // component's own dependency is not one here.
-                    if let Some(overridden) = &reusable.value {
-                        read_literal(overridden, found);
-                    } else if let Some(parameter) = reusable
-                        .reference
-                        .strip_prefix("$components.parameters.")
-                        .and_then(|name| {
-                            description
-                                .components
-                                .as_ref()
-                                .and_then(|components| components.parameters.get(name))
-                        })
-                    {
-                        read_value(&parameter.value, found);
-                    }
+            for parsed in criterion::expressions_in(&criterion.condition)? {
+                if let Some(id) = parsed.step_id() {
+                    found.insert(id.to_owned());
                 }
             }
-        }
-    }
-    fn read_criteria(list: &[Criterion], found: &mut BTreeSet<String>) {
-        for criterion in list {
-            if let Some(context) = &criterion.context {
-                read(context, found);
+        } else {
+            // Regex anchors and JSONPath roots are not runtime expressions.
+            for reference in expression::interpolations(&criterion.condition) {
+                read_expression(reference, found)?;
             }
-            read_condition(criterion, found);
+        }
+        Ok(())
+    }
+
+    fn read_value(
+        value: &ValueOrSelector,
+        found: &mut BTreeSet<String>,
+    ) -> Result<(), ExecutionError> {
+        match value {
+            ValueOrSelector::Literal(literal) => read_literal(literal, found),
+            ValueOrSelector::Selector(selector) => read_expression(&selector.context, found),
         }
     }
 
-    read_parameters(&step.parameters, description, &mut found);
-    read_criteria(&step.success_criteria, &mut found);
+    fn read_literal(value: &Value, found: &mut BTreeSet<String>) -> Result<(), ExecutionError> {
+        match value {
+            Value::String(text) => read(text, found)?,
+            Value::Array(items) => {
+                for item in items {
+                    read_literal(item, found)?;
+                }
+            }
+            Value::Object(members) => {
+                for member in members.values() {
+                    read_literal(member, found)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn read_parameters(
+        parameters: Vec<ParameterTemplate<'_>>,
+        found: &mut BTreeSet<String>,
+    ) -> Result<(), ExecutionError> {
+        for template in parameters {
+            match template.overridden {
+                Some(value) => read_literal(value, found)?,
+                None => read_value(&template.parameter.value, found)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn read_criteria(
+        list: &[Criterion],
+        found: &mut BTreeSet<String>,
+    ) -> Result<(), ExecutionError> {
+        for criterion in list {
+            if let Some(context) = &criterion.context {
+                read_expression(context, found)?;
+            }
+            read_condition(criterion, found)?;
+        }
+        Ok(())
+    }
+
+    read_parameters(
+        effective_parameters(workflow, step, description)?,
+        &mut found,
+    )?;
+    read_criteria(&step.success_criteria, &mut found)?;
     for output in step.outputs.values() {
-        read_value(output, &mut found);
+        read_value(output, &mut found)?;
     }
     if let Some(body) = &step.request_body {
         if let Some(payload) = &body.payload {
-            read_literal(payload, &mut found);
+            read_literal(payload, &mut found)?;
         }
         for replacement in &body.replacements {
-            read_value(&replacement.value, &mut found);
+            read_value(&replacement.value, &mut found)?;
         }
     }
-    for entry in &step.on_success {
-        if let Ok(action) = success_action(entry, description) {
-            read_criteria(&action.criteria, &mut found);
-            read_parameters(&action.parameters, description, &mut found);
-        }
+    for entry in step.on_success.iter().chain(&workflow.success_actions) {
+        let action = success_action(entry, description)?;
+        read_criteria(&action.criteria, &mut found)?;
+        read_parameters(
+            parameter_templates(&action.parameters, description)?,
+            &mut found,
+        )?;
     }
-    for entry in &step.on_failure {
-        if let Ok(action) = failure_action(entry, description) {
-            read_criteria(&action.criteria, &mut found);
-            read_parameters(&action.parameters, description, &mut found);
-        }
+    for entry in step.on_failure.iter().chain(&workflow.failure_actions) {
+        let action = failure_action(entry, description)?;
+        read_criteria(&action.criteria, &mut found)?;
+        read_parameters(
+            parameter_templates(&action.parameters, description)?,
+            &mut found,
+        )?;
     }
 
     found.remove(&step.step_id);
-    found
+    Ok(found)
 }
 
 /// Step indices in an order that respects `dependsOn` and the steps an
@@ -1613,7 +1667,7 @@ fn visit_step(
     // The same for the steps this one reads. A name that is not a step
     // of this workflow is left alone: an expression may be wrong, and
     // saying so belongs where it is evaluated, with the whole context.
-    for id in steps_named_by(step, description) {
+    for id in steps_named_by(step, workflow, description)? {
         let Some(at) = index.get(id.as_str()) else {
             continue;
         };
