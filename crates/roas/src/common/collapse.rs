@@ -428,9 +428,11 @@ pub fn schema_lift_decision(value: &serde_json::Value) -> LiftDecision {
 /// are the *same* walk, so a shape is counted at exactly the slots
 /// that could lift it — no separate notion of "where a schema might
 /// live", and nothing counted from an `example` payload or an
-/// extension that merely resembles a schema. Shapes reached through
-/// an external `$ref` are counted too, so an inline schema
-/// identical to an external one still collapses onto it.
+/// extension that merely resembles a schema. Two slots that never
+/// lift are counted anyway, because an inline schema matching
+/// either of them can collapse onto an already-named component: a
+/// schema reached through an external `$ref`, and a pre-existing
+/// `components.<bag>` entry.
 ///
 /// Slots are keyed by a 64-bit digest of the schema's canonical JSON
 /// *before* its children are walked — the form both passes see at
@@ -636,6 +638,25 @@ fn should_lift_schema<T: Serialize, C: CollapseState>(
         LiftDecision::Never => false,
         LiftDecision::IfRepeated => c.schema_repeats().weigh(shape_digest(&value)),
     })
+}
+
+/// Note a pre-existing `components.<bag>` entry in the census.
+///
+/// Such an entry keeps its own name and is never lifted, but it is
+/// still a slot holding a shape: an inline schema that matches it
+/// should collapse onto it, which costs no generated name at all
+/// because the author already named this one. Counting the entry is
+/// what lets the repeat rule see that. A no-op for bags that don't
+/// hold schemas.
+pub fn note_existing_component<T, C>(item: &T, c: &mut C) -> Result<(), CollapseError>
+where
+    T: LiftableBag<C>,
+    C: CollapseState,
+{
+    if T::IS_SCHEMA {
+        note_schema_shape(item, c)?;
+    }
+    Ok(())
 }
 
 /// Record a schema slot in the census without weighing it.

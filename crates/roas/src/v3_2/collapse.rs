@@ -35,6 +35,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::common::bool_or::BoolOr;
 use crate::common::collapse::{
     Bag, CollapseState, LiftableBag, NameContext, SchemaRepeats, lift_ref_or,
+    note_existing_component,
 };
 use crate::common::reference::RefOr;
 use crate::loader::Loader;
@@ -856,6 +857,10 @@ where
         let Some(mut item) = T::bag(c).take_inline(&name) else {
             continue;
         };
+        // This entry keeps its name, but it is a slot like any
+        // other: an inline schema of the same shape collapses onto
+        // it rather than staying inline.
+        note_existing_component(&item, c)?;
         let mut parts: Vec<String> = ctx_root.iter().map(|s| (*s).to_owned()).collect();
         parts.push(name.clone());
         let ctx = NameContext::new(parts);
@@ -3775,5 +3780,33 @@ mod tests {
             shared,
             serde_json::json!({"type": "string", "format": "uuid"})
         );
+    }
+
+    #[test]
+    fn inline_schema_dedupes_onto_an_identical_existing_component() {
+        // The author already named this shape, so lifting the inline
+        // copy invents no name at all — it just points at `Uuid`.
+        // The census counts pre-existing entries as slots for this.
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Uuid": {"type": "string", "format": "uuid"},
+                    "Order": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string", "format": "uuid"}}
+                    }
+                }
+            }
+        }));
+        spec.collapse(None).expect("collapse ok");
+        assert_eq!(
+            schema_at(&spec, "Order")["properties"]["id"]["$ref"],
+            "#/components/schemas/Uuid",
+        );
+        let names = lifted_schema_names(&spec);
+        assert_eq!(names.len(), 2, "no second uuid component: {names:?}");
     }
 }
