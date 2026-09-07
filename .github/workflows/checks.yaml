@@ -39,7 +39,7 @@ jobs:
       publish: ${{ steps.rustmeta.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: sv-tools/rust-metadata-action@43e1de297f9236c81ae389dbc9d9e3b8c3451203 # v1.2.2
+      - uses: sv-tools/rust-metadata-action@56f5f4f6a41e50d5f5f440bd81c0ed041f9b8dfb # v1.2.3
         id: rustmeta
         with:
           matrix-exclude-features: roas:default

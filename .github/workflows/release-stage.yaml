@@ -50,7 +50,7 @@ jobs:
       # triggered this run. For `roas-cli`, `AttachRoasCliBinaries`
       # below appends the prebuilt tarballs to this same draft.
       - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
           # The repo carries multiple crates with their own tags; don't
@@ -321,7 +321,7 @@ jobs:
             artifacts/roas-${{ steps.v.outputs.version }}-*.tar.gz
 
       - name: Attach prebuilt binaries to draft Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           # The cosign bundle rides along with the tarballs so consumers
           # don't have to fetch it from a separate location. SLSA
