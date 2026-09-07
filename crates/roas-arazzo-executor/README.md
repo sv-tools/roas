@@ -148,8 +148,49 @@ to every step: they use the state available when an action is considered.
 Step-local expression dependencies still affect ordering. Missing
 reusable actions and action-argument components are diagnosed only when dispatch
 reaches them; they do not prevent an unrelated outcome from running.
-Runtime missing-value errors still abort execution; criterion-failure recovery
-and a full preflight API are separate planned improvements.
+Runtime errors evaluated in criteria follow the failure/reporting policy below.
+Errors in parameters and outputs still stop execution. A full preflight API is
+a separate planned improvement.
+
+### Criterion recovery and partial reports
+
+A runtime criterion error is a failed condition with a typed diagnostic in
+`CriterionOutcome.error`, following the [Arazzo evaluation-error rules](https://spec.openapis.org/arazzo/v1.1.0.html#evaluation-errors).
+Missing values, invalid navigation, and malformed runtime-generated regex/JSONPath
+patterns can therefore reach `onFailure` retries or recovery targets. All success
+criteria are recorded. An action's criteria stop at the first failure, and later
+eligible actions can still match; `StepRecord.action_criteria` records the actions
+actually considered. Unreached operands/actions produce no runtime diagnostics.
+The report's text display includes criterion diagnostics.
+
+An ordinary false condition has no error. Explicit null is distinct from a missing
+value: a null regex/JSONPath context fails without a missing-value diagnostic,
+whereas a missing context value retains its expression error. A JSONPath node
+containing null selected from a non-null document still counts as a match.
+The JSON Pointer criterion extension retains its node-existence behavior.
+
+Unsupported XPath/AsyncAPI capabilities remain terminal errors, not false
+conditions silently skipped in favor of another action. Preparation-time syntax
+errors also remain terminal. Runtime failures outside criteria (including output,
+parameter, operation, action-reference, client, and limit errors) retain their
+original `ExecutionError` categories. This policy also applies to v1.0 descriptions
+after upconversion; it does not claim that v1.0 defines the v1.1 evaluation rules.
+
+Existing `execute`, `execute_async`, and `execute_v1_0` signatures are unchanged.
+Use `execute_with_report`, `execute_async_with_report`, or (with `v1_0` enabled)
+`execute_v1_0_with_report` to receive an `ExecutionFailure` containing the original
+error and an optional partial report. No report exists if `Run::start` failed.
+Once started, an interrupted report has `Outcome::Incomplete`, which is never
+successful. It retains previous attempts and actual responses/completed workflow
+calls, including an attempt whose output evaluation or action dispatch failed;
+it does not invent responses for requests that failed or were never sent.
+Workflow outputs are available only after successful output evaluation at completion.
+
+For a custom driver, `Run::partial_report()` returns a snapshot without evaluating
+more expressions. A terminal engine error leaves history inspectable but stops
+further execution (`ExecutionError::Stopped`). `Awaiting` and `NotWaiting` remain
+correctable driving errors. Completed reports remain inspectable, and repeated
+`advance` calls return the same completed report.
 
 ### Migrating from 0.1.x
 
@@ -160,6 +201,10 @@ on these enums must include a fallback arm. Adding the attribute is itself a
 breaking change and does not make the new variants compatible with 0.1.x.
 Also review the dotted-name, short-circuit, and numeric-literal changes described
 above when migrating workflow documents. No public variants are removed.
+Callers that previously expected runtime criterion errors in `Err` must now inspect
+the report's outcome and criterion diagnostics; successful recovery can produce a
+successful run containing earlier failed attempts. The report fields, partial-report
+APIs, and non-exhaustive enum variants added for recovery are additive API changes.
 
 ## What it does not run
 

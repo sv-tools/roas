@@ -1,9 +1,9 @@
 //! What a run did, and what can stop one.
 //!
-//! The split matters: a step whose criteria do not hold is an *outcome*,
-//! not an error — the workflow said what to do about it. An error is
-//! something the run could not answer at all, like an operation no
-//! description holds.
+//! Criteria that are false or cannot be evaluated are failed *outcomes*
+//! with diagnostics, so the workflow's recovery actions remain available.
+//! Unsupported capabilities and failures outside criteria are engine errors;
+//! a partial report retains the history before those errors stopped the run.
 
 use crate::criterion::CriterionError;
 use crate::expression::ExpressionError;
@@ -19,13 +19,16 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Outcome {
-    /// Every step that ran met its criteria.
+    /// The workflow reached successful completion, possibly after recovery.
     #[default]
     Succeeded,
     /// A step failed and nothing said to carry on.
     Failed,
     /// An action ended the workflow before its last step.
     Ended,
+    /// The run has not completed, or an engine error stopped it.
+    /// This is used by partial reports, never a successful workflow result.
+    Incomplete,
 }
 
 impl fmt::Display for Outcome {
@@ -34,6 +37,7 @@ impl fmt::Display for Outcome {
             Outcome::Succeeded => "succeeded",
             Outcome::Failed => "failed",
             Outcome::Ended => "ended early",
+            Outcome::Incomplete => "incomplete",
         })
     }
 }
@@ -45,6 +49,21 @@ pub struct CriterionOutcome {
     /// The condition as the description wrote it.
     pub condition: String,
     /// Whether it held.
+    pub passed: bool,
+    /// Why evaluation failed, distinct from an ordinary false condition.
+    pub error: Option<CriterionError>,
+}
+
+/// The criteria evaluated while considering one success or failure action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ActionCriteriaOutcome {
+    /// The action's name as written in the description.
+    pub name: String,
+    /// Evaluated criteria, in order. Evaluation stops at the first failure.
+    pub criteria: Vec<CriterionOutcome>,
+    /// Whether all criteria passed. A retry can still be ineligible when its
+    /// budget is exhausted; this does not mean the action was selected.
     pub passed: bool,
 }
 
@@ -83,9 +102,14 @@ pub struct StepRecord {
     pub attempt: u32,
     /// What the step did.
     pub performed: Performed,
-    /// Each success criterion, in the order the step lists them.
+    /// Evaluated success criteria, in their declared order. Normally all are
+    /// evaluated; a terminal unsupported-capability error can stop the list early.
     pub criteria: Vec<CriterionOutcome>,
-    /// Whether the step, as a whole, succeeded.
+    /// Criteria of actions considered, in dispatch order. Unreached actions
+    /// are not evaluated or included; `action` describes the selected action.
+    pub action_criteria: Vec<ActionCriteriaOutcome>,
+    /// Whether the step met its success rule and named its outputs. Action
+    /// dispatch can still fail after this becomes true.
     pub passed: bool,
     /// The outputs the step named.
     pub outputs: BTreeMap<String, Value>,
@@ -144,7 +168,7 @@ impl ExecutionReport {
     /// Whether the workflow ran to a successful end.
     #[must_use]
     pub fn is_success(&self) -> bool {
-        self.outcome != Outcome::Failed
+        matches!(self.outcome, Outcome::Succeeded | Outcome::Ended)
     }
 }
 
@@ -173,12 +197,44 @@ impl fmt::Display for ExecutionReport {
                 write!(f, " — {action}")?;
             }
             writeln!(f)?;
+            for criterion in &step.criteria {
+                if let Some(error) = &criterion.error {
+                    writeln!(f, "  criterion `{}`: {error}", criterion.condition)?;
+                }
+            }
+            for action in &step.action_criteria {
+                for criterion in &action.criteria {
+                    if let Some(error) = &criterion.error {
+                        writeln!(
+                            f,
+                            "  action `{}` criterion `{}`: {error}",
+                            action.name, criterion.condition
+                        )?;
+                    }
+                }
+            }
         }
         for (name, value) in &self.outputs {
             writeln!(f, "  {name} = {value}")?;
         }
         Ok(())
     }
+}
+
+/// An execution error together with the history retained before it stopped.
+///
+/// Returned by the report-preserving execution functions. The original error
+/// remains available for matching and as the standard error source.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+#[non_exhaustive]
+pub struct ExecutionFailure {
+    /// The original engine or client error.
+    #[source]
+    pub error: ExecutionError,
+    /// A partial report, or `None` if the run could not be started.
+    /// An interrupted run has [`Outcome::Incomplete`], not success.
+    pub report: Option<Box<ExecutionReport>>,
 }
 
 /// Why a run could not continue.
@@ -245,6 +301,10 @@ pub enum ExecutionError {
         /// Its URL.
         url: String,
     },
+    /// A terminal engine error already stopped this run. Its partial report
+    /// remains available; start another run to execute again.
+    #[error("the run already stopped after an engine error")]
+    Stopped,
 }
 
 #[cfg(test)]
@@ -265,7 +325,9 @@ mod tests {
             criteria: vec![CriterionOutcome {
                 condition: "$statusCode == 200".to_owned(),
                 passed,
+                error: None,
             }],
+            action_criteria: Vec::new(),
             passed,
             outputs: BTreeMap::new(),
             action: None,
@@ -320,6 +382,7 @@ mod tests {
                 outcome: Outcome::Succeeded,
             },
             criteria: Vec::new(),
+            action_criteria: Vec::new(),
             passed: true,
             outputs: BTreeMap::from([("token".to_owned(), json!("t-1"))]),
             action: None,
