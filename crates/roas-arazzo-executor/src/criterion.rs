@@ -59,11 +59,13 @@ pub enum CriterionError {
     #[error(transparent)]
     Select(#[from] SelectError),
     /// The `simple` condition does not parse.
-    #[error("`{condition}` is not a valid condition: {message}")]
+    #[error("`{condition}` is not a valid condition: at byte {offset}: {message}")]
     Syntax {
         /// The condition as written.
         condition: String,
-        /// What the parser objected to.
+        /// Zero-based UTF-8 byte offset into the condition.
+        offset: usize,
+        /// What the parser objected to, without a location prefix.
         message: String,
     },
     /// The `regex` condition is not a valid regular expression.
@@ -148,7 +150,7 @@ fn selects(
 
 pub(crate) fn compile_regex(condition: &str) -> Result<regex::Regex, CriterionError> {
     #[cfg(test)]
-    crate::prepare::instrumentation::compiled(2);
+    crate::prepare::instrumentation::compiled(crate::prepare::instrumentation::Parser::Regex);
     regex::Regex::new(condition).map_err(|error| CriterionError::Regex {
         condition: condition.to_owned(),
         message: error.to_string(),
@@ -388,7 +390,8 @@ impl Operand<'_> {
 fn syntax(condition: &str, offset: usize, message: &str) -> CriterionError {
     CriterionError::Syntax {
         condition: condition.to_owned(),
-        message: format!("at byte {offset}: {message}"),
+        offset,
+        message: message.to_owned(),
     }
 }
 
@@ -397,6 +400,11 @@ fn simple(condition: &str, scope: &Scope<'_>) -> Result<bool, CriterionError> {
         .compiled
         .and_then(|compiled| compiled.conditions.get(condition))
     {
+        // Only a PreparedWorkflow supplies Compiled. Its compiler validates
+        // every use site (including cache hits and short-circuited operands)
+        // against that workflow's declarations before exposing the plan.
+        // Description/options are immutable for the plan's lifetime, so a
+        // cached AST needs no repeat check_reference pass at execution time.
         return Ok(truthy(&tree.evaluate(scope)?));
     }
     let tree = parse(condition)?;
@@ -410,7 +418,9 @@ fn simple(condition: &str, scope: &Scope<'_>) -> Result<bool, CriterionError> {
 
 pub(crate) fn parse(condition: &str) -> Result<Condition<'_>, CriterionError> {
     #[cfg(test)]
-    crate::prepare::instrumentation::compiled(1);
+    crate::prepare::instrumentation::compiled(
+        crate::prepare::instrumentation::Parser::SimpleCondition,
+    );
     let tokens = tokenize(condition)?;
     let mut parser = Parser {
         tokens: tokens.into_iter().peekable(),
@@ -546,12 +556,17 @@ fn operand<'a>(
     offset: usize,
 ) -> Result<Operand<'a>, CriterionError> {
     if expression::is_expression(word) {
-        let (base, mut at) = crate::runtime_syntax::prefix(word).map_err(|error| {
-            let relative = match &error {
-                ExpressionError::Syntax { offset, .. } => *offset,
-                _ => 0,
-            };
-            syntax(condition, offset + relative, &error.to_string())
+        let (base, mut at) = crate::runtime_syntax::prefix(word).map_err(|error| match error {
+            ExpressionError::Syntax {
+                expression,
+                offset: relative,
+                message,
+            } => syntax(
+                condition,
+                offset + relative,
+                &format!("`{expression}` is not a valid runtime expression: {message}"),
+            ),
+            error => syntax(condition, offset, &error.to_string()),
         })?;
         let mut navigation = Vec::new();
         while at < word.len() {

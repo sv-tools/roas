@@ -1,21 +1,5 @@
 //! Strict, IO-free preparation. Runtime values never participate in compilation.
 
-#[cfg(test)]
-pub(crate) mod instrumentation {
-    use std::cell::Cell;
-    thread_local! { static COUNTS: Cell<[usize; 4]> = const { Cell::new([0; 4]) }; }
-    pub fn compiled(parser: usize) {
-        COUNTS.with(|counts| {
-            let mut value = counts.get();
-            value[parser] += 1;
-            counts.set(value);
-        });
-    }
-    pub fn counts() -> [usize; 4] {
-        COUNTS.with(Cell::get)
-    }
-}
-
 use crate::criterion::{self, Condition};
 use crate::expression;
 use crate::operation::{self, Endpoint};
@@ -55,60 +39,6 @@ pub enum PreparationIssue {
     Portability(String),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::testing::Fake;
-    use serde_json::json;
-
-    #[test]
-    fn checked_runs_reuse_parsers_and_constant_patterns() {
-        let description = serde_json::from_value(json!({
-            "arazzo": "1.1.0", "info": { "title": "Compiled", "version": "1" },
-            "sourceDescriptions": [{ "name": "api", "url": "https://example.com/openapi.json" }],
-            "workflows": [{ "workflowId": "w", "steps": [
-                { "stepId": "s", "operationId": "check", "parameters": [
-                    { "name": "x", "in": "query", "value": "value={$inputs.x}" }
-                ], "requestBody": { "payload": { "value": 0 }, "replacements": [
-                    { "target": "$.value", "targetSelectorType": "jsonpath", "value": "$inputs.x" }
-                ] }, "successCriteria": [
-                    { "condition": "$statusCode == 200 && $inputs.x == 7" },
-                    { "type": "regex", "context": "$statusCode", "condition": "^200$" },
-                    { "type": "regex", "context": "$statusCode", "condition": "^200$" },
-                    { "type": "jsonpath", "context": "$response.body", "condition": "$.value" }
-                ], "outputs": { "selected": { "type": "jsonpath", "context": "$response.body", "selector": "$.value" } } }
-            ], "outputs": { "selected": "$steps.s.outputs.selected" } }]
-        })).unwrap();
-        let options = Options::new().input("x", 7).source(
-            "api",
-            "https://example.com/openapi.json",
-            json!({
-                "openapi": "3.1.0", "servers": [{ "url": "https://example.com" }],
-                "paths": { "/check": { "post": { "operationId": "check" } } }
-            }),
-        );
-        let before = instrumentation::counts();
-        let plan = prepare(&description, &options).unwrap();
-        let compiled = instrumentation::counts();
-        assert_eq!(compiled[0] - before[0], plan.compiled.expressions.len());
-        assert_eq!(compiled[1] - before[1], plan.compiled.conditions.len());
-        assert_eq!(compiled[2] - before[2], 1);
-        assert_eq!(compiled[3] - before[3], 1);
-        for _ in 0..3 {
-            let report = plan
-                .execute(&mut Fake::new().reply(200, &json!({ "value": null })))
-                .unwrap();
-            assert!(report.is_success());
-            assert_eq!(report.outputs["selected"], Value::Null);
-        }
-        assert_eq!(
-            instrumentation::counts(),
-            compiled,
-            "executing a checked plan must not recompile its static expressions"
-        );
-    }
-}
-
 /// A located preparation error or warning.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -121,10 +51,12 @@ pub struct PreparationDiagnostic {
     pub path: String,
     /// Zero-based UTF-8 byte offset in that string field, when available.
     pub offset: Option<usize>,
+    /// The underlying structural/static error or non-fatal portability advice.
     pub issue: PreparationIssue,
 }
 
 impl PreparationDiagnostic {
+    /// Whether this finding prevents constructing a checked plan.
     #[must_use]
     pub fn is_error(&self) -> bool {
         !matches!(self.issue, PreparationIssue::Portability(_))
@@ -139,6 +71,19 @@ impl fmt::Display for PreparationDiagnostic {
         }
         match &self.issue {
             PreparationIssue::Model(error) => write!(f, ": {}", error.message),
+            PreparationIssue::Execution(ExecutionError::Criterion(CriterionError::Syntax {
+                condition,
+                message,
+                ..
+            })) => write!(f, ": `{condition}` is not a valid condition: {message}"),
+            PreparationIssue::Execution(ExecutionError::Expression(ExpressionError::Syntax {
+                expression,
+                message,
+                ..
+            })) => write!(
+                f,
+                ": `{expression}` is not a valid runtime expression: {message}"
+            ),
             issue => write!(f, ": {issue}"),
         }
     }
@@ -148,6 +93,7 @@ impl fmt::Display for PreparationDiagnostic {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PreparationError {
+    /// All available errors and advice, ordered by field path with numeric indices.
     pub diagnostics: Vec<PreparationDiagnostic>,
 }
 
@@ -162,6 +108,9 @@ impl fmt::Display for PreparationError {
 }
 impl std::error::Error for PreparationError {}
 
+/// Syntax is shared by text, not validation results. The compiler checks each
+/// use site in its own workflow scope, even when reusing a cached syntax tree.
+/// Only a fully checked immutable PreparedWorkflow exposes this cache to a Run.
 #[derive(Debug, Default)]
 pub(crate) struct Compiled<'d> {
     pub templates: BTreeMap<&'d str, Vec<expression::TemplatePart<'d>>>,
@@ -207,6 +156,7 @@ impl PreparedWorkflow<'_> {
         self.selected
     }
 
+    /// The fixed grammar/truthiness profile used to compile and execute this plan.
     #[must_use]
     pub fn condition_profile(&self) -> &'static str {
         CONDITION_PROFILE
@@ -370,6 +320,7 @@ fn compile<'d>(
     }
     compiler.diagnostics.sort_by_cached_key(|diagnostic| {
         (
+            path_order(&diagnostic.path),
             diagnostic.path.clone(),
             diagnostic.workflow_id.clone(),
             diagnostic.step_id.clone(),
@@ -392,6 +343,31 @@ fn compile<'d>(
         queue,
         compiler,
     })
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum PathPart {
+    Text(String),
+    Index(usize),
+}
+
+/// Field names remain lexical; bracketed array indices sort numerically.
+fn path_order(path: &str) -> Vec<PathPart> {
+    let mut parts = Vec::new();
+    for (position, part) in path.split('[').enumerate() {
+        if position > 0
+            && let Some((index, tail)) = part.split_once(']')
+            && !index.is_empty()
+            && index.bytes().all(|byte| byte.is_ascii_digit())
+            && let Ok(index) = index.parse()
+        {
+            parts.push(PathPart::Index(index));
+            parts.push(PathPart::Text(tail.into()));
+        } else {
+            parts.push(PathPart::Text(part.into()));
+        }
+    }
+    parts
 }
 
 #[derive(Clone)]
@@ -496,12 +472,7 @@ impl<'d> Compiler<'d> {
         let error = error.into();
         let offset = match &error {
             ExecutionError::Expression(ExpressionError::Syntax { offset, .. }) => Some(*offset),
-            // The legacy public Syntax variant encodes its parser offset in the
-            // message; preserve that variant's field shape for downstream users.
-            ExecutionError::Criterion(CriterionError::Syntax { message, .. }) => message
-                .strip_prefix("at byte ")
-                .and_then(|message| message.split_once(':'))
-                .and_then(|(offset, _)| offset.parse().ok()),
+            ExecutionError::Criterion(CriterionError::Syntax { offset, .. }) => Some(*offset),
             _ => None,
         };
         self.finding(site, offset, PreparationIssue::Execution(error));
@@ -1076,13 +1047,7 @@ impl<'d> Compiler<'d> {
                     .workflow
                     .is_some_and(|workflow| workflow.steps.iter().any(|step| step.step_id == id))
                 {
-                    Some(ExecutionError::UnknownStep {
-                        workflow: site
-                            .workflow
-                            .map(|workflow| workflow.workflow_id.clone())
-                            .unwrap_or_default(),
-                        step: id.into(),
-                    })
+                    Some(expression::undeclared_step(parsed.text, id).into())
                 } else {
                     if let (Some(workflow), Some(step)) = (site.workflow, site.step)
                         && step.step_id != id
@@ -1102,7 +1067,7 @@ impl<'d> Compiler<'d> {
                     .iter()
                     .any(|workflow| workflow.workflow_id == parsed.parts[0]) =>
             {
-                Some(ExecutionError::UnknownWorkflow(parsed.parts[0].into()))
+                Some(expression::undeclared_workflow(parsed.text, parsed.parts[0]).into())
             }
             Root::Message => Some(ExpressionError::Unsupported(parsed.text.into()).into()),
             Root::Sources
@@ -1182,5 +1147,123 @@ impl<'d> Compiler<'d> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod instrumentation {
+    use std::cell::Cell;
+
+    pub(crate) enum Parser {
+        RuntimeExpression,
+        SimpleCondition,
+        Regex,
+        JsonPath,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct Counts {
+        pub(crate) runtime_expression: usize,
+        pub(crate) simple_condition: usize,
+        pub(crate) regex: usize,
+        pub(crate) jsonpath: usize,
+    }
+
+    thread_local! { static COUNTS: Cell<Counts> = Cell::default(); }
+
+    pub(crate) fn compiled(parser: Parser) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            let counter = match parser {
+                Parser::RuntimeExpression => &mut value.runtime_expression,
+                Parser::SimpleCondition => &mut value.simple_condition,
+                Parser::Regex => &mut value.regex,
+                Parser::JsonPath => &mut value.jsonpath,
+            };
+            *counter += 1;
+            counts.set(value);
+        });
+    }
+
+    pub(crate) fn counts() -> Counts {
+        COUNTS.with(Cell::get)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Fake;
+    use serde_json::json;
+
+    #[test]
+    fn path_order_only_treats_representable_bracketed_digits_as_indices() {
+        assert!(path_order("steps[2].criteria[9]") < path_order("steps[10].criteria[0]"));
+        for path in [
+            "field[name]",
+            "field[]",
+            "field[+1]",
+            "field[1",
+            "field[999999999999999999999999999999]",
+        ] {
+            assert!(
+                path_order(path)
+                    .iter()
+                    .all(|part| matches!(part, PathPart::Text(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn checked_runs_reuse_parsers_and_constant_patterns() {
+        let description = serde_json::from_value(json!({
+            "arazzo": "1.1.0", "info": { "title": "Compiled", "version": "1" },
+            "sourceDescriptions": [{ "name": "api", "url": "https://example.com/openapi.json" }],
+            "workflows": [{ "workflowId": "w", "steps": [
+                { "stepId": "s", "operationId": "check", "parameters": [
+                    { "name": "x", "in": "query", "value": "value={$inputs.x}" }
+                ], "requestBody": { "payload": { "value": 0 }, "replacements": [
+                    { "target": "$.value", "targetSelectorType": "jsonpath", "value": "$inputs.x" }
+                ] }, "successCriteria": [
+                    { "condition": "$statusCode == 200 && $inputs.x == 7" },
+                    { "type": "regex", "context": "$statusCode", "condition": "^200$" },
+                    { "type": "regex", "context": "$statusCode", "condition": "^200$" },
+                    { "type": "jsonpath", "context": "$response.body", "condition": "$.value" }
+                ], "outputs": { "selected": { "type": "jsonpath", "context": "$response.body", "selector": "$.value" } } }
+            ], "outputs": { "selected": "$steps.s.outputs.selected" } }]
+        })).unwrap();
+        let options = Options::new().input("x", 7).source(
+            "api",
+            "https://example.com/openapi.json",
+            json!({
+                "openapi": "3.1.0", "servers": [{ "url": "https://example.com" }],
+                "paths": { "/check": { "post": { "operationId": "check" } } }
+            }),
+        );
+        let before = instrumentation::counts();
+        let plan = prepare(&description, &options).unwrap();
+        let compiled = instrumentation::counts();
+        assert_eq!(
+            compiled.runtime_expression - before.runtime_expression,
+            plan.compiled.expressions.len()
+        );
+        assert_eq!(
+            compiled.simple_condition - before.simple_condition,
+            plan.compiled.conditions.len()
+        );
+        assert_eq!(compiled.regex - before.regex, 1);
+        assert_eq!(compiled.jsonpath - before.jsonpath, 1);
+        for _ in 0..3 {
+            let report = plan
+                .execute(&mut Fake::new().reply(200, &json!({ "value": null })))
+                .unwrap();
+            assert!(report.is_success());
+            assert_eq!(report.outputs["selected"], Value::Null);
+        }
+        assert_eq!(
+            instrumentation::counts(),
+            compiled,
+            "executing a checked plan must not recompile its static expressions"
+        );
     }
 }

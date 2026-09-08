@@ -184,7 +184,7 @@ pub(crate) fn apply(
 
 pub(crate) fn compile_path(selector: &str) -> Result<JsonPath, SelectError> {
     #[cfg(test)]
-    crate::prepare::instrumentation::compiled(3);
+    crate::prepare::instrumentation::compiled(crate::prepare::instrumentation::Parser::JsonPath);
     JsonPath::parse(selector).map_err(|error| SelectError::Malformed {
         selector: selector.to_owned(),
         kind: "JSONPath",

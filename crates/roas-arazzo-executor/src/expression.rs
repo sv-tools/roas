@@ -172,6 +172,20 @@ fn missing(expression: &str, what: impl Into<String>) -> ExpressionError {
     }
 }
 
+pub(crate) fn undeclared_step(expression: &str, id: &str) -> ExpressionError {
+    missing(
+        expression,
+        format!("step `{id}`, which this workflow has not got"),
+    )
+}
+
+pub(crate) fn undeclared_workflow(expression: &str, id: &str) -> ExpressionError {
+    missing(
+        expression,
+        format!("workflow `{id}`, which this description has not got"),
+    )
+}
+
 /// Whether `text` is an expression rather than a literal.
 #[must_use]
 pub(crate) fn is_expression(text: &str) -> bool {
@@ -196,20 +210,12 @@ pub(crate) fn check_reference(
     scope: &Scope<'_>,
 ) -> Result<(), ExpressionError> {
     match parsed.root {
-        Root::Steps if !scope.declared_steps.contains(parsed.parts[0]) => Err(missing(
-            parsed.text,
-            format!(
-                "step `{}`, which this workflow has not got",
-                parsed.parts[0]
-            ),
-        )),
-        Root::Workflows if !scope.declared_workflows.contains(parsed.parts[0]) => Err(missing(
-            parsed.text,
-            format!(
-                "workflow `{}`, which this description has not got",
-                parsed.parts[0]
-            ),
-        )),
+        Root::Steps if !scope.declared_steps.contains(parsed.parts[0]) => {
+            Err(undeclared_step(parsed.text, parsed.parts[0]))
+        }
+        Root::Workflows if !scope.declared_workflows.contains(parsed.parts[0]) => {
+            Err(undeclared_workflow(parsed.text, parsed.parts[0]))
+        }
         _ => Ok(()),
     }
 }

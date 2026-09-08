@@ -1,7 +1,7 @@
 use roas_arazzo::v1_1::Description;
 use roas_arazzo_executor::{
-    CONDITION_PROFILE, ExecutionError, Options, Outcome, PreparationIssue, Progress, prepare,
-    testing::Fake,
+    CONDITION_PROFILE, CriterionError, ExecutionError, ExpressionError, Options, Outcome,
+    PreparationIssue, Progress, prepare, testing::Fake,
 };
 use serde_json::{Value, json};
 
@@ -852,6 +852,164 @@ fn condition_offsets_ignore_quoted_lookalikes_and_survive_ast_reuse() {
         .collect::<Vec<_>>();
     let expected = condition.rfind("$steps.typo").unwrap();
     assert_eq!(offsets, [expected, expected]);
+}
+
+#[test]
+fn expression_references_use_lookup_errors_not_goto_errors() {
+    for expression in ["$steps.typo.outputs.value", "$workflows.typo.outputs.value"] {
+        let description = serde_json::from_value(document(json!([
+            { "stepId": "a", "operationId": "check", "successCriteria": [{ "condition": expression }] }
+        ]))).unwrap();
+        let options = options();
+        let error = prepare(&description, &options).unwrap_err();
+        let PreparationIssue::Execution(ExecutionError::Expression(prepared)) =
+            &error.diagnostics[0].issue
+        else {
+            panic!("expected an expression lookup error: {error}");
+        };
+        assert!(
+            matches!(prepared, ExpressionError::Missing { expression: actual, .. } if actual == expression)
+        );
+        assert!(!error.to_string().contains("to go to"));
+        let lazy = roas_arazzo_executor::execute_with_report(
+            &description,
+            &options,
+            &mut Fake::new().reply(200, &json!({})),
+        )
+        .unwrap();
+        let Some(CriterionError::Expression(runtime)) = &lazy.steps[0].criteria[0].error else {
+            panic!("expected a runtime lookup error");
+        };
+        assert_eq!(prepared, runtime);
+    }
+    let description = serde_json::from_value(document(json!([
+        { "stepId": "a", "operationId": "check", "onSuccess": [{ "name": "jump", "type": "goto", "stepId": "typo" }] }
+    ]))).unwrap();
+    assert!(prepare(&description, &options()).unwrap_err().diagnostics.iter().any(|diagnostic|
+        matches!(&diagnostic.issue, PreparationIssue::Execution(ExecutionError::UnknownStep { step, .. }) if step == "typo")
+    ));
+}
+
+#[test]
+fn syntax_offsets_are_structured_and_displayed_once() {
+    for condition in ["'é' == 'é' && (", "'é' == 'é' && $steps."] {
+        let description = serde_json::from_value(document(json!([
+            { "stepId": "a", "operationId": "check", "successCriteria": [{ "condition": condition }] }
+        ]))).unwrap();
+        let options = options();
+        let error = prepare(&description, &options).unwrap_err();
+        let diagnostic = &error.diagnostics[0];
+        let PreparationIssue::Execution(ExecutionError::Criterion(CriterionError::Syntax {
+            offset,
+            message,
+            ..
+        })) = &diagnostic.issue
+        else {
+            panic!("expected condition syntax error: {error}");
+        };
+        assert_eq!(diagnostic.offset, Some(*offset));
+        assert_eq!(*offset, condition.len());
+        assert!(!message.contains("at byte"));
+        assert_eq!(diagnostic.to_string().matches("at byte").count(), 1);
+        assert_eq!(diagnostic.issue.to_string().matches("at byte").count(), 1);
+        let lazy =
+            roas_arazzo_executor::execute(&description, &options, &mut Fake::new()).unwrap_err();
+        let ExecutionError::Criterion(CriterionError::Syntax {
+            offset: lazy_offset,
+            ..
+        }) = lazy
+        else {
+            panic!("expected lazy condition syntax error");
+        };
+        assert_eq!(*offset, lazy_offset);
+    }
+    let value = "é {$statusCode.extra}";
+    let description = serde_json::from_value(document(json!([
+        { "stepId": "a", "operationId": "check", "parameters": [{ "name": "x", "in": "query", "value": value }] }
+    ]))).unwrap();
+    let error = prepare(&description, &options()).unwrap_err();
+    let diagnostic = &error.diagnostics[0];
+    let PreparationIssue::Execution(ExecutionError::Expression(ExpressionError::Syntax {
+        offset,
+        ..
+    })) = &diagnostic.issue
+    else {
+        panic!("expected runtime-expression syntax error");
+    };
+    assert_eq!(diagnostic.offset, Some(value.find('.').unwrap()));
+    assert_ne!(
+        diagnostic.offset,
+        Some(*offset),
+        "field and embedded-expression offsets differ"
+    );
+    assert_eq!(diagnostic.to_string().matches("at byte").count(), 1);
+    assert!(
+        diagnostic
+            .to_string()
+            .contains(&format!("at byte {}:", value.find('.').unwrap()))
+    );
+    assert_eq!(diagnostic.issue.to_string().matches("at byte").count(), 1);
+}
+
+#[test]
+fn shared_cached_conditions_are_checked_in_each_workflow_scope() {
+    let condition = "true || $steps.only_in_a.outputs.value";
+    let mut value = document(json!([
+        { "stepId": "only_in_a", "operationId": "check", "outputs": { "value": true } },
+        { "stepId": "call", "workflowId": "b" }
+    ]));
+    value["components"] = json!({ "successActions": { "done": {
+        "name": "done", "type": "end", "criteria": [{ "condition": condition }]
+    } } });
+    value["workflows"][0]["successActions"] =
+        json!([{ "reference": "$components.successActions.done" }]);
+    value["workflows"].as_array_mut().unwrap().push(json!({
+        "workflowId": "b", "steps": [{ "stepId": "only_in_b", "operationId": "check" }],
+        "successActions": [{ "reference": "$components.successActions.done" }]
+    }));
+    let error = prepare(&serde_json::from_value(value.clone()).unwrap(), &options()).unwrap_err();
+    assert_eq!(error.diagnostics.len(), 1);
+    assert_eq!(error.diagnostics[0].workflow_id.as_deref(), Some("b"));
+    assert_eq!(error.diagnostics[0].step_id, None);
+    assert_eq!(
+        error.diagnostics[0].path,
+        "#.components.successActions.done.criteria[0].condition"
+    );
+    value["workflows"][1]["steps"][0]["stepId"] = json!("only_in_a");
+    let description = serde_json::from_value(value).unwrap();
+    assert!(
+        prepare(&description, &options())
+            .unwrap()
+            .execute(&mut Fake::new().reply(200, &json!({})).reply(200, &json!({})),)
+            .unwrap()
+            .is_success()
+    );
+}
+
+#[test]
+fn diagnostic_paths_sort_array_indices_numerically() {
+    let steps = (0..12).map(|step| json!({
+        "stepId": format!("step{step}"), "operationId": "check",
+        "successCriteria": (0..12).map(|_| json!({ "condition": "$steps.typo.outputs.value" })).collect::<Vec<_>>()
+    })).collect::<Vec<_>>();
+    let error = prepare(
+        &serde_json::from_value(document(json!(steps))).unwrap(),
+        &options(),
+    )
+    .unwrap_err();
+    let paths = error
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.path.clone())
+        .collect::<Vec<_>>();
+    let expected = (0..12)
+        .flat_map(|step| {
+            (0..12).map(move |criterion| {
+                format!("#.workflows[0].steps[{step}].successCriteria[{criterion}].condition")
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(paths, expected);
 }
 
 #[test]

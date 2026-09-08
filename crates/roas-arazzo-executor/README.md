@@ -156,7 +156,8 @@ strict pre-execution checks described below.
 
 Use `prepare(&description, &options)` to check a workflow before sending requests.
 It returns an immutable `PreparedWorkflow` or a `PreparationError` containing
-deterministically ordered diagnostics. Findings carry a field path, workflow and
+deterministically ordered diagnostics (numeric array indices, lexical field names).
+Findings carry a field path, workflow and
 step context, a byte offset where available, and the original model/executor error.
 Paths use the model validator's human-readable notation, not JSON Pointer; a
 reusable value's path names its component while the workflow/step identifies its use.
@@ -273,6 +274,12 @@ The grammar and diagnostic changes are released on the **0.2** line, not as a
 `CriterionError`, and `SelectError` are now `#[non_exhaustive]`; downstream matches
 on these enums must include a fallback arm. Adding the attribute is itself a
 breaking change and does not make the new variants compatible with 0.1.x.
+`CriterionError::Syntax` also gains a structured `offset` field (a zero-based
+UTF-8 byte offset into `condition`). Its `message` now contains only the parser's
+reason; use `offset` instead of parsing a location out of that string. Update
+explicit construction/destructuring of this variant for 0.2; matches can use `..`
+to ignore fields. Its standalone display still includes the location, while a
+preparation diagnostic prints the field-relative location once.
 Also review the dotted-name, short-circuit, and numeric-literal changes described
 above when migrating workflow documents. No public variants are removed.
 Callers that previously expected runtime criterion errors in `Err` must now inspect
