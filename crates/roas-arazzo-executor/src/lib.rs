@@ -29,17 +29,26 @@
 //! the caller supplies the parsed documents through
 //! [`Options::source`].
 //!
+//! ## Checked preparation
+//!
+//! [`prepare`] validates static requirements before execution and returns a
+//! reusable [`PreparedWorkflow`]. [`required_sources`] identifies which sources
+//! to supply first. Existing execution functions retain lazy validation;
+//! preparation is an explicit, stricter library path used by the CLI.
+//!
 //! ## What it does not do yet
 //!
 //! AsyncAPI steps (`channelPath` / `action`), XPath criteria and
 //! selectors, `inputs` schema validation, and parallel `dependsOn`
-//! execution. Each is reported where it is met rather than passed over,
-//! so a run never looks successful because something was skipped.
+//! execution. Unsupported execution capabilities are reported when reached, or
+//! statically by preparation. Input schemas remain opaque for caller validation;
+//! a prepared plan does not certify input-schema conformance.
 
 mod criterion;
 mod expression;
 mod http;
 mod operation;
+mod prepare;
 mod report;
 mod run;
 mod runtime_syntax;
@@ -54,6 +63,10 @@ pub use criterion::CriterionError;
 pub use expression::ExpressionError;
 pub use http::{
     AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, SendFuture, SleepFuture,
+};
+pub use prepare::{
+    CONDITION_PROFILE, PreparationDiagnostic, PreparationError, PreparationIssue, PreparedWorkflow,
+    prepare, required_sources,
 };
 pub use report::{
     ActionCriteriaOutcome, CriterionOutcome, ExecutionError, ExecutionFailure, ExecutionReport,
@@ -122,6 +135,13 @@ pub fn execute_with_report<C: HttpClient + ?Sized>(
         error,
         report: None,
     })?;
+    drive(&mut run, client)
+}
+
+pub(crate) fn drive<C: HttpClient + ?Sized>(
+    run: &mut Run<'_>,
+    client: &mut C,
+) -> Result<ExecutionReport, ExecutionFailure> {
     loop {
         match run.advance().map_err(|error| run.failure(error))? {
             Progress::Send(request) => {
@@ -168,6 +188,13 @@ pub async fn execute_async_with_report<C: AsyncHttpClient + ?Sized>(
         error,
         report: None,
     })?;
+    drive_async(&mut run, client).await
+}
+
+pub(crate) async fn drive_async<C: AsyncHttpClient + ?Sized>(
+    run: &mut Run<'_>,
+    client: &mut C,
+) -> Result<ExecutionReport, ExecutionFailure> {
     loop {
         match run.advance().map_err(|error| run.failure(error))? {
             Progress::Send(request) => {

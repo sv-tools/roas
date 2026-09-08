@@ -50,6 +50,7 @@ pub(crate) struct StepState {
 
 /// Everything a runtime expression can name at one point in a run.
 pub(crate) struct Scope<'a> {
+    pub compiled: Option<&'a crate::prepare::Compiled<'a>>,
     /// The inputs the workflow was called with.
     pub inputs: &'a Value,
     /// The outputs the workflow has named so far.
@@ -171,6 +172,20 @@ fn missing(expression: &str, what: impl Into<String>) -> ExpressionError {
     }
 }
 
+pub(crate) fn undeclared_step(expression: &str, id: &str) -> ExpressionError {
+    missing(
+        expression,
+        format!("step `{id}`, which this workflow has not got"),
+    )
+}
+
+pub(crate) fn undeclared_workflow(expression: &str, id: &str) -> ExpressionError {
+    missing(
+        expression,
+        format!("workflow `{id}`, which this description has not got"),
+    )
+}
+
 /// Whether `text` is an expression rather than a literal.
 #[must_use]
 pub(crate) fn is_expression(text: &str) -> bool {
@@ -179,6 +194,12 @@ pub(crate) fn is_expression(text: &str) -> bool {
 
 /// Evaluate one whole expression, e.g. `$response.body#/id`.
 pub(crate) fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Value, ExpressionError> {
+    if let Some(parsed) = scope
+        .compiled
+        .and_then(|compiled| compiled.expressions.get(expression))
+    {
+        return evaluate_parsed(parsed, scope);
+    }
     evaluate_parsed(&runtime_syntax::parse(expression)?, scope)
 }
 
@@ -189,20 +210,12 @@ pub(crate) fn check_reference(
     scope: &Scope<'_>,
 ) -> Result<(), ExpressionError> {
     match parsed.root {
-        Root::Steps if !scope.declared_steps.contains(parsed.parts[0]) => Err(missing(
-            parsed.text,
-            format!(
-                "step `{}`, which this workflow has not got",
-                parsed.parts[0]
-            ),
-        )),
-        Root::Workflows if !scope.declared_workflows.contains(parsed.parts[0]) => Err(missing(
-            parsed.text,
-            format!(
-                "workflow `{}`, which this description has not got",
-                parsed.parts[0]
-            ),
-        )),
+        Root::Steps if !scope.declared_steps.contains(parsed.parts[0]) => {
+            Err(undeclared_step(parsed.text, parsed.parts[0]))
+        }
+        Root::Workflows if !scope.declared_workflows.contains(parsed.parts[0]) => {
+            Err(undeclared_workflow(parsed.text, parsed.parts[0]))
+        }
         _ => Ok(()),
     }
 }
@@ -470,6 +483,22 @@ pub(crate) fn references(text: &str) -> Vec<&str> {
 /// A string is what the caller asked for, so a string value is put in as
 /// it stands and anything else as its JSON.
 pub(crate) fn interpolate(text: &str, scope: &Scope<'_>) -> Result<String, ExpressionError> {
+    if let Some(template) = scope
+        .compiled
+        .and_then(|compiled| compiled.templates.get(text))
+    {
+        let mut out = String::with_capacity(text.len());
+        for part in template {
+            match part {
+                TemplatePart::Literal(text) => out.push_str(text),
+                TemplatePart::Expression { text, .. } => match evaluate(text, scope)? {
+                    Value::String(text) => out.push_str(&text),
+                    value => out.push_str(&value.to_string()),
+                },
+            }
+        }
+        return Ok(out);
+    }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("{$") {
@@ -486,6 +515,30 @@ pub(crate) fn interpolate(text: &str, scope: &Scope<'_>) -> Result<String, Expre
     }
     out.push_str(rest);
     Ok(out)
+}
+
+#[derive(Debug)]
+pub(crate) enum TemplatePart<'a> {
+    Literal(&'a str),
+    Expression { text: &'a str, offset: usize },
+}
+
+pub(crate) fn template(text: &str) -> Vec<TemplatePart<'_>> {
+    let mut parts = Vec::new();
+    let mut at = 0;
+    while let Some(start) = text[at..].find("{$").map(|start| at + start) {
+        let Some(end) = text[start..].find('}').map(|end| start + end) else {
+            break;
+        };
+        parts.push(TemplatePart::Literal(&text[at..start]));
+        parts.push(TemplatePart::Expression {
+            text: &text[start + 1..end],
+            offset: start + 1,
+        });
+        at = end + 1;
+    }
+    parts.push(TemplatePart::Literal(&text[at..]));
+    parts
 }
 
 #[cfg(test)]
@@ -536,6 +589,7 @@ pub(crate) mod tests {
     impl Fixture {
         pub(crate) fn scope(&self) -> Scope<'_> {
             Scope {
+                compiled: None,
                 inputs: &self.inputs,
                 outputs: &self.outputs,
                 steps: &self.steps,

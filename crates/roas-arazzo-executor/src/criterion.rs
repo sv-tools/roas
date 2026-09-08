@@ -59,11 +59,13 @@ pub enum CriterionError {
     #[error(transparent)]
     Select(#[from] SelectError),
     /// The `simple` condition does not parse.
-    #[error("`{condition}` is not a valid condition: {message}")]
+    #[error("`{condition}` is not a valid condition: at byte {offset}: {message}")]
     Syntax {
         /// The condition as written.
         condition: String,
-        /// What the parser objected to.
+        /// Zero-based UTF-8 byte offset into the condition.
+        offset: usize,
+        /// What the parser objected to, without a location prefix.
         message: String,
     },
     /// The `regex` condition is not a valid regular expression.
@@ -104,18 +106,25 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
         None | Some(CriterionType::Simple(CriterionKind::Simple)) => {
             simple(&criterion.condition, scope)
         }
-        Some(CriterionType::Simple(CriterionKind::Regex)) => regex(&written()?, &context("regex")?),
+        Some(CriterionType::Simple(CriterionKind::Regex)) => {
+            regex(&written()?, &context("regex")?, scope)
+        }
         Some(CriterionType::Simple(CriterionKind::Jsonpath)) => {
-            selects(Language::Path, &written()?, &context("jsonpath")?)
+            selects(Language::Path, &written()?, &context("jsonpath")?, scope)
         }
         Some(CriterionType::Simple(CriterionKind::Xpath)) => {
             Err(CriterionError::Unsupported("XPath"))
         }
         Some(CriterionType::Expression(expression)) => match expression.type_ {
-            ExpressionKind::Jsonpath => selects(Language::Path, &written()?, &context("jsonpath")?),
-            ExpressionKind::Jsonpointer => {
-                selects(Language::Pointer, &written()?, &context("jsonpointer")?)
+            ExpressionKind::Jsonpath => {
+                selects(Language::Path, &written()?, &context("jsonpath")?, scope)
             }
+            ExpressionKind::Jsonpointer => selects(
+                Language::Pointer,
+                &written()?,
+                &context("jsonpointer")?,
+                scope,
+            ),
             ExpressionKind::Xpath => Err(CriterionError::Unsupported("XPath")),
         },
     }
@@ -127,18 +136,39 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
 /// expression returns a non-empty nodelist and fails when it returns an
 /// empty one. What was found does not matter — a node holding `false`
 /// is still a node, and a filter is how a criterion asks about a value.
-fn selects(language: Language, condition: &str, context: &Value) -> Result<bool, CriterionError> {
-    let selected = select::apply(language, condition, context)?;
+fn selects(
+    language: Language,
+    condition: &str,
+    context: &Value,
+    scope: &Scope<'_>,
+) -> Result<bool, CriterionError> {
+    let selected = select::apply(language, condition, context, scope.compiled)?;
     // A null JSONPath context fails, but a selected node containing null in
     // a non-null document still counts. JSON Pointer is a separate extension.
     Ok(selected.is_some() && (language != Language::Path || !context.is_null()))
 }
 
-fn regex(condition: &str, context: &Value) -> Result<bool, CriterionError> {
-    let regex = regex::Regex::new(condition).map_err(|error| CriterionError::Regex {
+pub(crate) fn compile_regex(condition: &str) -> Result<regex::Regex, CriterionError> {
+    #[cfg(test)]
+    crate::prepare::instrumentation::compiled(crate::prepare::instrumentation::Parser::Regex);
+    regex::Regex::new(condition).map_err(|error| CriterionError::Regex {
         condition: condition.to_owned(),
         message: error.to_string(),
-    })?;
+    })
+}
+
+fn regex(condition: &str, context: &Value, scope: &Scope<'_>) -> Result<bool, CriterionError> {
+    let owned;
+    let regex = match scope
+        .compiled
+        .and_then(|compiled| compiled.regexes.get(condition))
+    {
+        Some(regex) => regex,
+        None => {
+            owned = compile_regex(condition)?;
+            &owned
+        }
+    };
     Ok(!context.is_null() && regex.is_match(&text(context)))
 }
 
@@ -167,7 +197,7 @@ fn truthy(value: &Value) -> bool {
 
 // Parsing borrows syntax, never runtime values.
 #[derive(Clone, Debug)]
-enum Condition<'a> {
+pub(crate) enum Condition<'a> {
     Operand(Operand<'a>),
     Not(Box<Condition<'a>>),
     Compare(Comparison, Box<Condition<'a>>, Box<Condition<'a>>),
@@ -176,17 +206,19 @@ enum Condition<'a> {
 }
 
 #[derive(Clone, Debug)]
-enum Operand<'a> {
+pub(crate) enum Operand<'a> {
     Runtime {
         base: crate::runtime_syntax::Expression<'a>,
         navigation: Vec<Access<'a>>,
         text: &'a str,
+        /// Byte offset in the original condition, retained when the AST is reused.
+        offset: usize,
     },
     Literal(Value),
 }
 
 #[derive(Clone, Debug)]
-struct Access<'a> {
+pub(crate) struct Access<'a> {
     offset: usize,
     kind: AccessKind<'a>,
 }
@@ -215,7 +247,7 @@ enum TokenKind<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Comparison {
+pub(crate) enum Comparison {
     Equal,
     NotEqual,
     Less,
@@ -260,18 +292,25 @@ pub(crate) fn references(
 }
 
 impl<'a> Condition<'a> {
-    fn expressions(&self, found: &mut Vec<crate::runtime_syntax::Expression<'a>>) {
+    pub(crate) fn expressions(&self, found: &mut Vec<crate::runtime_syntax::Expression<'a>>) {
+        self.visit_expressions(&mut |base, _| found.push(base.clone()));
+    }
+
+    pub(crate) fn visit_expressions(
+        &self,
+        visit: &mut impl FnMut(&crate::runtime_syntax::Expression<'a>, usize),
+    ) {
         match self {
-            Self::Operand(Operand::Runtime { base, .. }) => found.push(base.clone()),
+            Self::Operand(Operand::Runtime { base, offset, .. }) => visit(base, *offset),
             Self::Operand(Operand::Literal(_)) => {}
-            Self::Not(inner) => inner.expressions(found),
+            Self::Not(inner) => inner.visit_expressions(visit),
             Self::Compare(_, left, right) => {
-                left.expressions(found);
-                right.expressions(found);
+                left.visit_expressions(visit);
+                right.visit_expressions(visit);
             }
             Self::And(items) | Self::Or(items) => {
                 for item in items {
-                    item.expressions(found);
+                    item.visit_expressions(visit);
                 }
             }
         }
@@ -314,6 +353,7 @@ impl Operand<'_> {
                 base,
                 navigation,
                 text,
+                ..
             } => (base, navigation, text),
         };
         let value = expression::evaluate_parsed(base, scope)?;
@@ -350,11 +390,23 @@ impl Operand<'_> {
 fn syntax(condition: &str, offset: usize, message: &str) -> CriterionError {
     CriterionError::Syntax {
         condition: condition.to_owned(),
-        message: format!("at byte {offset}: {message}"),
+        offset,
+        message: message.to_owned(),
     }
 }
 
 fn simple(condition: &str, scope: &Scope<'_>) -> Result<bool, CriterionError> {
+    if let Some(tree) = scope
+        .compiled
+        .and_then(|compiled| compiled.conditions.get(condition))
+    {
+        // Only a PreparedWorkflow supplies Compiled. Its compiler validates
+        // every use site (including cache hits and short-circuited operands)
+        // against that workflow's declarations before exposing the plan.
+        // Description/options are immutable for the plan's lifetime, so a
+        // cached AST needs no repeat check_reference pass at execution time.
+        return Ok(truthy(&tree.evaluate(scope)?));
+    }
     let tree = parse(condition)?;
     let mut expressions = Vec::new();
     tree.expressions(&mut expressions);
@@ -364,7 +416,11 @@ fn simple(condition: &str, scope: &Scope<'_>) -> Result<bool, CriterionError> {
     Ok(truthy(&tree.evaluate(scope)?))
 }
 
-fn parse(condition: &str) -> Result<Condition<'_>, CriterionError> {
+pub(crate) fn parse(condition: &str) -> Result<Condition<'_>, CriterionError> {
+    #[cfg(test)]
+    crate::prepare::instrumentation::compiled(
+        crate::prepare::instrumentation::Parser::SimpleCondition,
+    );
     let tokens = tokenize(condition)?;
     let mut parser = Parser {
         tokens: tokens.into_iter().peekable(),
@@ -378,6 +434,19 @@ fn parse(condition: &str) -> Result<Condition<'_>, CriterionError> {
         );
     }
     Ok(tree)
+}
+
+impl Condition<'_> {
+    /// Bare values rely on the executor's truthiness profile, not a portable
+    /// Arazzo boolean-coercion table. Comparisons and boolean literals do not.
+    pub(crate) fn uses_bare_values(&self) -> bool {
+        match self {
+            Self::Operand(Operand::Literal(Value::Bool(_))) | Self::Compare(..) => false,
+            Self::Operand(_) => true,
+            Self::Not(inner) => inner.uses_bare_values(),
+            Self::And(items) | Self::Or(items) => items.iter().any(Self::uses_bare_values),
+        }
+    }
 }
 
 fn tokenize(condition: &str) -> Result<Vec<Token<'_>>, CriterionError> {
@@ -487,12 +556,17 @@ fn operand<'a>(
     offset: usize,
 ) -> Result<Operand<'a>, CriterionError> {
     if expression::is_expression(word) {
-        let (base, mut at) = crate::runtime_syntax::prefix(word).map_err(|error| {
-            let relative = match &error {
-                ExpressionError::Syntax { offset, .. } => *offset,
-                _ => 0,
-            };
-            syntax(condition, offset + relative, &error.to_string())
+        let (base, mut at) = crate::runtime_syntax::prefix(word).map_err(|error| match error {
+            ExpressionError::Syntax {
+                expression,
+                offset: relative,
+                message,
+            } => syntax(
+                condition,
+                offset + relative,
+                &format!("`{expression}` is not a valid runtime expression: {message}"),
+            ),
+            error => syntax(condition, offset, &error.to_string()),
         })?;
         let mut navigation = Vec::new();
         while at < word.len() {
@@ -548,6 +622,7 @@ fn operand<'a>(
             base,
             navigation,
             text: word,
+            offset,
         });
     }
     let literal = match word {
