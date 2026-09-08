@@ -141,7 +141,7 @@ Floating-point or mixed comparisons still use binary64 and can round; this is
 not an arbitrary-precision numeric evaluator. Numeric strings compare numerically
 against numbers, but two strings retain case-insensitive lexical ordering.
 
-Syntax checking during step ordering does not replace full document preparation.
+Legacy syntax checking during step ordering does not replace checked preparation.
 Known workflow-wide action criteria and parameter expressions are syntax-checked
 once, using effective parameter overrides, but their reads do not add prerequisites
 to every step: they use the state available when an action is considered.
@@ -149,8 +149,82 @@ Step-local expression dependencies still affect ordering. Missing
 reusable actions and action-argument components are diagnosed only when dispatch
 reaches them; they do not prevent an unrelated outcome from running.
 Runtime errors evaluated in criteria follow the failure/reporting policy below.
-Errors in parameters and outputs still stop execution. A full preflight API is
-a separate planned improvement.
+Errors in parameters and outputs still stop execution. Use `prepare` for the
+strict pre-execution checks described below.
+
+### Checked preparation
+
+Use `prepare(&description, &options)` to check a workflow before sending requests.
+It returns an immutable `PreparedWorkflow` or a `PreparationError` containing
+deterministically ordered diagnostics. Findings carry a field path, workflow and
+step context, a byte offset where available, and the original model/executor error.
+Paths use the model validator's human-readable notation, not JSON Pointer; a
+reusable value's path names its component while the workflow/step identifies its use.
+
+```rust,no_run
+# use roas_arazzo_executor::{prepare, Options, testing::Fake};
+# fn example(description: &roas_arazzo::v1_1::Description) -> Result<(), Box<dyn std::error::Error>> {
+let options = Options::new().workflow("buyPet"); // also supply source documents
+let plan = prepare(description, &options)?;
+let report = plan.execute(&mut Fake::default())?;
+// Or: plan.execute_async(&mut client).await, or manually drive plan.start().
+# Ok(()) }
+```
+
+Preparation validates document structure globally, then checks the selected
+workflow's potential steps, calls, recovery targets and dependencies. It follows
+both action outcomes and all criteria, including branches that runtime dispatch
+could skip. Shared action reads are validated without becoming step dependencies.
+Effective parameter overrides use the same matching rules as execution. Missing
+components, unknown step/workflow IDs, unsupported capabilities, constant invalid
+patterns, unresolved operations, and dependency cycles prevent a checked run.
+Static URL/path-parameter errors are checked with placeholder values, without
+evaluating inputs or responses.
+
+This is a strict **preparation policy**, separate from Arazzo's runtime criterion
+failure rules. For example, `true || $steps.typo.outputs.value` and a typed criterion
+missing `context` cannot be recovered into a checked success. An absent response
+property or an invalid runtime-generated regex/JSONPath still follows ordinary
+criterion recovery. Constant malformed regex/JSONPath patterns are rejected during
+preparation, even on an action that might not be selected.
+
+`required_sources(&description, &options)` performs source-independent checks and
+returns the source names needed before full preparation. Qualified operation IDs
+and operation paths do not require unrelated sources; bare IDs still need every
+non-Arazzo source to establish uniqueness. Neither API fetches anything. The CLI
+uses this discovery before `--load`, then executes a checked plan. Explicit
+`--source` files are still read, and `--ignore` retains its existing shallow model
+validation exceptions. Terminal CLI errors print available partial history unless
+`--quiet` is set, and still exit unsuccessfully.
+
+The plan borrows immutable description/options and reuses parsed runtime
+expressions, simple-condition ASTs, interpolation templates, constant regex and
+JSONPath programs, resolved endpoints and dependency ordering. Parser-call
+instrumentation tests verify reuse across repeated executions; no wall-clock
+speedup is claimed. Dynamic patterns are compiled per evaluation without a cache
+keyed by runtime values. Every run has separate state; `start_with_inputs` replaces
+the selected workflow's and root dependencies' initial inputs with a fresh map.
+
+`condition_profile()` returns `CONDITION_PROFILE` (`roas-arazzo-conditions-1`).
+The profile is fixed, not inferred from response values. With
+`Options::portability_lints(true)`, bare-value truthiness produces advisory findings
+in `plan.diagnostics()`; it neither invalidates the document nor changes evaluation.
+No persistent cache is provided; any future cache must bind the profile,
+description, sources and relevant options together.
+
+Existing `execute`, `execute_async`, v1.0 wrappers and `Run::start` retain their
+lazy validation behavior and signatures. Library callers opt into strictness by
+preparing a plan. For v1.0, upconvert to a retained v1.1 description before preparing.
+The CLI now opts in by default, so previously skipped document defects can cause an
+earlier, nonzero exit instead of a recovered success.
+
+Preparation is not input-schema validation: `plan.workflow().inputs` exposes the
+opaque schema for caller integration. It does not add XPath, AsyncAPI, external
+workflow execution, source identity loading or referenced OpenAPI resolution.
+Checked JSONPath execution supports `rfc9535`, not the alternate Goessner draft.
+Entry-workflow dependencies are supported; calls/recovery transfers to workflows
+with their own `dependsOn` are rejected by the checked path because the engine
+does not yet schedule those nested dependencies.
 
 ### Criterion recovery and partial reports
 

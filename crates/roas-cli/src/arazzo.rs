@@ -11,7 +11,7 @@ use clap::{Subcommand, ValueEnum};
 use enumset::EnumSet;
 use roas_arazzo::validation::{Error as ArazzoError, Validate, ValidationOptions};
 use roas_arazzo::{v1_0, v1_1};
-use roas_arazzo_executor::{Client, Options, execute};
+use roas_arazzo_executor::{Client, Options, prepare, required_sources};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -424,7 +424,7 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
         ));
     }
 
-    let mut options = Options::new();
+    let mut options = Options::new().validation_options(checks);
     match &args.workflow {
         Some(workflow) => options = options.workflow(workflow),
         // Running a workflow means real requests against a real API, so
@@ -484,7 +484,7 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     }
     let (options, any) = sources(options, &description, &source, &args)?;
 
-    let report = execute(&description, &options, &mut Client::blocking()).map_err(|error| {
+    let explain = |error: anyhow::Error| {
         if any || description.source_descriptions.is_empty() {
             anyhow!(error)
         } else {
@@ -495,6 +495,15 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
                  or `--load file` / `--load http` to fetch what this description points at"
             )
         }
+    };
+    let plan = prepare(&description, &options).map_err(|error| explain(anyhow!(error)))?;
+    let report = plan.execute(&mut Client::blocking()).map_err(|failure| {
+        if !args.quiet
+            && let Some(report) = &failure.report
+        {
+            eprint!("{report}");
+        }
+        explain(anyhow!(failure.error))
     })?;
 
     if !args.quiet {
@@ -532,6 +541,7 @@ fn sources(
         supplied.insert(name.to_owned(), document);
     }
 
+    let needed = required_sources(description, &options)?;
     let mut loader = build_loader(&args.load);
     let base = base_uri(from, description.self_.as_deref())?;
     let mut any = false;
@@ -540,6 +550,9 @@ fn sources(
         let document = match supplied.remove(&declared.name) {
             Some(document) => document,
             None => {
+                if !needed.contains(&declared.name) {
+                    continue;
+                }
                 let Some(loader) = loader.as_mut() else {
                     // Nothing to load it with. The executor says so if a
                     // step turns out to need it, naming the source.
@@ -887,6 +900,79 @@ mod tests {
             error.to_string().contains("nothing was run"),
             "and it says so plainly: {error}"
         );
+    }
+
+    #[test]
+    fn run_prepares_all_steps_before_attempting_a_request() {
+        let (_, openapi) = runnable();
+        for criterion in [
+            json!({ "condition": "true || $steps.typo.outputs.value" }),
+            json!({ "type": "regex", "context": "$response.body", "condition": "[" }),
+        ] {
+            let description = TempFile::write(
+                "unprepared.json",
+                &json!({
+                    "arazzo": "1.1.0", "info": { "title": "T", "version": "1" },
+                    "sourceDescriptions": [{ "name": "petStore", "url": "https://example.com/openapi.json", "type": "openapi" }],
+                    "workflows": [{ "workflowId": "buyPet", "steps": [
+                        { "stepId": "first", "operationId": "getPetById", "parameters": [{ "name": "petId", "in": "path", "value": 7 }] },
+                        { "stepId": "second", "operationId": "getPetById", "parameters": [{ "name": "petId", "in": "path", "value": 7 }],
+                          "successCriteria": [criterion], "onFailure": [{ "name": "recover", "type": "goto", "stepId": "first" }] }
+                    ] }]
+                }),
+            );
+            let args = run_args(&description, &openapi, "http://127.0.0.1:1");
+            let error = run_arazzo_run(args).unwrap_err().to_string();
+            assert!(error.contains("preparation failed"), "{error}");
+            assert!(error.contains("steps[1].successCriteria[0]"), "{error}");
+        }
+    }
+
+    #[test]
+    fn run_loads_only_sources_required_by_the_selected_workflow() {
+        let (base, join) = server(1, 200, "{}");
+        let (_, openapi) = runnable();
+        let description = TempFile::write(
+            "selected.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "T", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "petStore", "url": "https://example.com/openapi.json", "type": "openapi" },
+                    { "name": "unused", "url": "unprovided-source-that-does-not-exist.json", "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "buyPet", "steps": [{ "stepId": "first", "operationId": "$sourceDescriptions.petStore.getPetById",
+                        "parameters": [{ "name": "petId", "in": "path", "value": 7 }] }] },
+                    { "workflowId": "unrelated", "steps": [{ "stepId": "unused", "operationId": "$sourceDescriptions.unused.absent" }] }
+                ]
+            }),
+        );
+        let mut args = run_args(&description, &openapi, &base);
+        args.load.push(LoaderKind::File);
+        run_arazzo_run(args).unwrap();
+        assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn run_retains_a_runtime_output_failure_with_or_without_quiet() {
+        let (_, openapi) = runnable();
+        let description = TempFile::write(
+            "output-error.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "T", "version": "1" },
+                "sourceDescriptions": [{ "name": "petStore", "url": "https://example.com/openapi.json", "type": "openapi" }],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{ "stepId": "first", "operationId": "getPetById",
+                    "parameters": [{ "name": "petId", "in": "path", "value": 7 }], "outputs": { "missing": "$response.body#/missing" } }] }]
+            }),
+        );
+        for quiet in [false, true] {
+            let (base, join) = server(1, 200, "{}");
+            let mut args = run_args(&description, &openapi, &base);
+            args.quiet = quiet;
+            let error = run_arazzo_run(args).unwrap_err().to_string();
+            assert!(error.contains("missing"), "{error}");
+            assert_eq!(join.join().unwrap().len(), 1);
+        }
     }
 
     #[test]

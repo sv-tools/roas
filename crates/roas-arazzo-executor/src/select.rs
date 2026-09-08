@@ -112,7 +112,12 @@ pub(crate) fn resolve(value: &Value, scope: &Scope<'_>) -> Result<Value, SelectE
 /// What a selector picks out of the data its context names.
 pub(crate) fn select(selector: &Selector, scope: &Scope<'_>) -> Result<Value, SelectError> {
     let context = expression::evaluate(&selector.context, scope)?;
-    let picked = apply(kind_of(&selector.type_)?, &selector.selector, &context)?;
+    let picked = apply(
+        kind_of(&selector.type_)?,
+        &selector.selector,
+        &context,
+        scope.compiled,
+    )?;
     picked.ok_or_else(|| SelectError::Empty {
         selector: selector.selector.clone(),
         context: selector.context.clone(),
@@ -145,6 +150,7 @@ pub(crate) fn apply(
     language: Language,
     selector: &str,
     data: &Value,
+    compiled: Option<&crate::prepare::Compiled<'_>>,
 ) -> Result<Option<Value>, SelectError> {
     match language {
         Language::Pointer => {
@@ -154,11 +160,14 @@ pub(crate) fn apply(
             Ok(data.pointer(pointer).cloned())
         }
         Language::Path => {
-            let path = JsonPath::parse(selector).map_err(|error| SelectError::Malformed {
-                selector: selector.to_owned(),
-                kind: "JSONPath",
-                message: error.to_string(),
-            })?;
+            let owned;
+            let path = match compiled.and_then(|compiled| compiled.paths.get(selector)) {
+                Some(path) => path,
+                None => {
+                    owned = compile_path(selector)?;
+                    &owned
+                }
+            };
             let nodes = path.query(data);
             Ok(match nodes.len() {
                 0 => None,
@@ -173,6 +182,16 @@ pub(crate) fn apply(
     }
 }
 
+pub(crate) fn compile_path(selector: &str) -> Result<JsonPath, SelectError> {
+    #[cfg(test)]
+    crate::prepare::instrumentation::compiled(3);
+    JsonPath::parse(selector).map_err(|error| SelectError::Malformed {
+        selector: selector.to_owned(),
+        kind: "JSONPath",
+        message: error.to_string(),
+    })
+}
+
 /// Put `value` where `target` points inside `data`.
 ///
 /// A payload replacement writes into the body the step is about to
@@ -183,12 +202,19 @@ pub(crate) fn place(
     target: &str,
     data: &mut Value,
     value: Value,
+    compiled: Option<&crate::prepare::Compiled<'_>>,
 ) -> Result<(), String> {
     let pointer = match language {
         Language::Pointer => target.strip_prefix('#').unwrap_or(target).to_owned(),
         Language::Path => {
-            let path = JsonPath::parse(target)
-                .map_err(|error| format!("`{target}` is not a valid JSONPath: {error}"))?;
+            let owned;
+            let path = match compiled.and_then(|compiled| compiled.paths.get(target)) {
+                Some(path) => path,
+                None => {
+                    owned = compile_path(target).map_err(|error| error.to_string())?;
+                    &owned
+                }
+            };
             path.query_located(data)
                 .locations()
                 .next()
@@ -351,7 +377,7 @@ mod tests {
     fn several_nodes_come_back_as_the_list_of_them() {
         let data = json!({ "tags": ["cat", "small"] });
         assert_eq!(
-            apply(Language::Path, "$.tags[*]", &data),
+            apply(Language::Path, "$.tags[*]", &data, None),
             Ok(Some(json!(["cat", "small"])))
         );
     }

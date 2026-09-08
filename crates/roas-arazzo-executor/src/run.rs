@@ -47,15 +47,35 @@ impl Default for Limits {
 /// Built by chaining: `Options::new().workflow("buyPet").input("petId", 7)`.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
-    workflow: Option<String>,
+    pub(crate) workflow: Option<String>,
     inputs: Map<String, Value>,
-    sources: BTreeMap<String, Source>,
-    base_urls: BTreeMap<String, String>,
+    pub(crate) sources: BTreeMap<String, Source>,
+    pub(crate) base_urls: BTreeMap<String, String>,
+    pub(crate) validation: enumset::EnumSet<roas_arazzo::validation::ValidationOptions>,
+    pub(crate) portability_lints: bool,
     headers: Vec<(String, String)>,
     limits: Limits,
 }
 
 impl Options {
+    /// Structural validation exceptions used by [`crate::prepare`]. Legacy
+    /// execution does not perform this validation pass.
+    #[must_use]
+    pub fn validation_options(
+        mut self,
+        options: enumset::EnumSet<roas_arazzo::validation::ValidationOptions>,
+    ) -> Self {
+        self.validation = options;
+        self
+    }
+
+    /// Report bare-value truthiness as an advisory portability warning during
+    /// preparation. This does not reject conditions or change their semantics.
+    #[must_use]
+    pub fn portability_lints(mut self, enabled: bool) -> Self {
+        self.portability_lints = enabled;
+        self
+    }
     /// Options with nothing set: the first workflow, no inputs, no
     /// source documents.
     #[must_use]
@@ -169,9 +189,10 @@ fn scope<'s>(
     steps: &'s BTreeMap<String, StepState>,
     here: Option<&'s Exchange>,
     finished: &'s BTreeMap<String, WorkflowState>,
-    ambient: &'s Ambient,
+    ambient: &'s Ambient<'_>,
 ) -> Scope<'s> {
     Scope {
+        compiled: ambient.compiled,
         inputs: &frame.inputs,
         outputs: &frame.outputs,
         steps,
@@ -249,7 +270,8 @@ struct Pending {
 
 /// The parts of the description every expression can see, whichever
 /// workflow is running.
-struct Ambient {
+struct Ambient<'d> {
+    compiled: Option<&'d crate::prepare::Compiled<'d>>,
     /// `sourceDescriptions` as JSON, for `$sourceDescriptions.…`.
     sources: Value,
     /// `components` as JSON, for `$components.…`.
@@ -264,7 +286,9 @@ struct Ambient {
 pub struct Run<'d> {
     description: &'d Description,
     options: &'d Options,
-    ambient: Ambient,
+    ambient: Ambient<'d>,
+    prepared: Option<&'d crate::PreparedWorkflow<'d>>,
+    root_inputs: Map<String, Value>,
     frames: Vec<Frame<'d>>,
     /// Workflows still to run — dependencies first, then the one asked
     /// for.
@@ -294,6 +318,27 @@ impl<'d> Run<'d> {
         description: &'d Description,
         options: &'d Options,
     ) -> Result<Self, ExecutionError> {
+        Self::start_inner(description, options, None, options.inputs.clone())
+    }
+
+    pub(crate) fn start_prepared(
+        prepared: &'d crate::PreparedWorkflow<'d>,
+        inputs: Option<Map<String, Value>>,
+    ) -> Result<Self, ExecutionError> {
+        Self::start_inner(
+            prepared.description,
+            prepared.options,
+            Some(prepared),
+            inputs.unwrap_or_else(|| prepared.options.inputs.clone()),
+        )
+    }
+
+    fn start_inner(
+        description: &'d Description,
+        options: &'d Options,
+        prepared: Option<&'d crate::PreparedWorkflow<'d>>,
+        root_inputs: Map<String, Value>,
+    ) -> Result<Self, ExecutionError> {
         let wanted = match &options.workflow {
             Some(id) => description
                 .workflows
@@ -320,12 +365,18 @@ impl<'d> Run<'d> {
             .and_then(|components| serde_json::to_value(components).ok())
             .unwrap_or(Value::Null);
 
-        let mut queue = ordered_workflows(description, wanted)?;
+        let mut queue = match prepared {
+            Some(prepared) => prepared.queue.clone(),
+            None => ordered_workflows(description, wanted)?,
+        };
         let first = queue.remove(0);
         let mut run = Self {
             description,
             options,
+            prepared,
+            root_inputs: root_inputs.clone(),
             ambient: Ambient {
+                compiled: prepared.map(|prepared| &prepared.compiled),
                 sources,
                 components,
                 self_: description.self_.clone(),
@@ -354,7 +405,7 @@ impl<'d> Run<'d> {
             report: None,
             halted: false,
         };
-        run.enter(first, Value::Object(options.inputs.clone()), None)?;
+        run.enter(first, Value::Object(root_inputs), None)?;
         Ok(run)
     }
 
@@ -638,7 +689,16 @@ impl<'d> Run<'d> {
         self.frames.push(Frame {
             workflow,
             inputs,
-            order: ordered_steps(workflow, self.description)?,
+            order: match self.prepared {
+                Some(prepared) => prepared
+                    .orders
+                    .get(workflow.workflow_id.as_str())
+                    .cloned()
+                    .ok_or_else(|| {
+                        ExecutionError::Unsupported("workflow is outside the prepared plan".into())
+                    })?,
+                None => ordered_steps(workflow, self.description)?,
+            },
             at: 0,
             steps: BTreeMap::new(),
             outputs: BTreeMap::new(),
@@ -692,7 +752,7 @@ impl<'d> Run<'d> {
                 }));
             } else {
                 let next = self.queue.remove(0);
-                let inputs = Value::Object(self.options.inputs.clone());
+                let inputs = Value::Object(self.root_inputs.clone());
                 self.enter(next, inputs, None)?;
             }
             return Ok(());
@@ -810,12 +870,21 @@ impl<'d> Run<'d> {
     fn build(&self, index: usize) -> Result<(HttpRequest, Exchange), ExecutionError> {
         let frame = self.frames.last().expect("a frame to build in");
         let step = &frame.workflow.steps[index];
-        let endpoint = operation::resolve(
-            step,
-            &self.options.sources,
-            &self.options.base_urls,
-            &self.unsupplied,
-        )?;
+        let endpoint = match self.prepared {
+            Some(prepared) => prepared
+                .endpoints
+                .get(&(frame.workflow.workflow_id.as_str(), step.step_id.as_str()))
+                .cloned()
+                .ok_or_else(|| {
+                    ExecutionError::Unsupported("operation is outside the prepared plan".into())
+                })?,
+            None => operation::resolve(
+                step,
+                &self.options.sources,
+                &self.options.base_urls,
+                &self.unsupplied,
+            )?,
+        };
         let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
 
         // The workflow's parameters first, so a step's own override them.
@@ -1175,13 +1244,17 @@ fn parameters(
         .collect()
 }
 
-struct ParameterTemplate<'a> {
-    parameter: &'a Parameter,
-    overridden: Option<&'a Value>,
+pub(crate) struct ParameterTemplate<'a> {
+    pub(crate) parameter: &'a Parameter,
+    pub(crate) overridden: Option<&'a Value>,
 }
 
 impl ParameterTemplate<'_> {
-    fn location(&self) -> ParameterLocation {
+    pub(crate) fn overrides(&self, existing: &Self, workflow_call: bool) -> bool {
+        self.parameter.name == existing.parameter.name
+            && (workflow_call || self.location() == existing.location())
+    }
+    pub(crate) fn location(&self) -> ParameterLocation {
         self.parameter.in_.unwrap_or(ParameterLocation::Query)
     }
 
@@ -1198,7 +1271,7 @@ impl ParameterTemplate<'_> {
     }
 }
 
-fn parameter_templates<'a>(
+pub(crate) fn parameter_templates<'a>(
     list: &'a [ReusableOr<Parameter>],
     description: &'a Description,
 ) -> Result<Vec<ParameterTemplate<'a>>, ExecutionError> {
@@ -1239,29 +1312,26 @@ fn parameter_templates<'a>(
 
 /// Apply overrides before inspecting or evaluating their values. Dependency
 /// discovery and request assembly must agree about which expressions survive.
-fn effective_parameters<'a>(
+pub(crate) fn effective_parameters<'a>(
     workflow: &'a Workflow,
     step: &'a Step,
     description: &'a Description,
 ) -> Result<Vec<ParameterTemplate<'a>>, ExecutionError> {
     let mut templates = parameter_templates(&workflow.parameters, description)?;
     for parameter in parameter_templates(&step.parameters, description)? {
-        templates.retain(|existing| {
-            !(existing.parameter.name == parameter.parameter.name
-                && (step.workflow_id.is_some() || existing.location() == parameter.location()))
-        });
+        templates.retain(|existing| !parameter.overrides(existing, step.workflow_id.is_some()));
         templates.push(parameter);
     }
     Ok(templates)
 }
 
 /// A success action, following a `Reusable` into the components.
-fn success_action(
-    entry: &ReusableOr<roas_arazzo::v1_1::SuccessAction>,
-    description: &Description,
-) -> Result<roas_arazzo::v1_1::SuccessAction, ExecutionError> {
+pub(crate) fn success_action<'a>(
+    entry: &'a ReusableOr<roas_arazzo::v1_1::SuccessAction>,
+    description: &'a Description,
+) -> Result<&'a roas_arazzo::v1_1::SuccessAction, ExecutionError> {
     match entry {
-        ReusableOr::Item(action) => Ok(action.clone()),
+        ReusableOr::Item(action) => Ok(action),
         ReusableOr::Reusable(reusable) => reusable
             .reference
             .strip_prefix("$components.successActions.")
@@ -1271,7 +1341,6 @@ fn success_action(
                     .as_ref()
                     .and_then(|components| components.success_actions.get(name))
             })
-            .cloned()
             .ok_or_else(|| {
                 ExecutionError::Unsupported(format!(
                     "`{}` names a component the description has not got",
@@ -1282,12 +1351,12 @@ fn success_action(
 }
 
 /// A failure action, following a `Reusable` into the components.
-fn failure_action(
-    entry: &ReusableOr<roas_arazzo::v1_1::FailureAction>,
-    description: &Description,
-) -> Result<roas_arazzo::v1_1::FailureAction, ExecutionError> {
+pub(crate) fn failure_action<'a>(
+    entry: &'a ReusableOr<roas_arazzo::v1_1::FailureAction>,
+    description: &'a Description,
+) -> Result<&'a roas_arazzo::v1_1::FailureAction, ExecutionError> {
     match entry {
-        ReusableOr::Item(action) => Ok(action.clone()),
+        ReusableOr::Item(action) => Ok(action),
         ReusableOr::Reusable(reusable) => reusable
             .reference
             .strip_prefix("$components.failureActions.")
@@ -1297,7 +1366,6 @@ fn failure_action(
                     .as_ref()
                     .and_then(|components| components.failure_actions.get(name))
             })
-            .cloned()
             .ok_or_else(|| {
                 ExecutionError::Unsupported(format!(
                     "`{}` names a component the description has not got",
@@ -1427,11 +1495,16 @@ fn body(step: &Step, scope: &Scope<'_>) -> Result<Option<Body>, ExecutionError> 
             Some(type_) => select::kind_of(type_)?,
             None => select::Language::Pointer,
         };
-        select::place(language, &replacement.target, &mut payload, value).map_err(|reason| {
-            ExecutionError::BadRequest {
-                step: step.step_id.clone(),
-                reason,
-            }
+        select::place(
+            language,
+            &replacement.target,
+            &mut payload,
+            value,
+            scope.compiled,
+        )
+        .map_err(|reason| ExecutionError::BadRequest {
+            step: step.step_id.clone(),
+            reason,
         })?;
     }
     let content_type = request_body
@@ -1453,7 +1526,7 @@ fn body(step: &Step, scope: &Scope<'_>) -> Result<Option<Body>, ExecutionError> 
 
 /// The URL a request goes to: the server, the path with its parameters
 /// filled in, and the query.
-fn url(
+pub(crate) fn url(
     endpoint: &operation::Endpoint,
     path: &BTreeMap<String, Value>,
     query: &BTreeMap<String, Value>,
@@ -1517,7 +1590,7 @@ fn encode(text: &str) -> String {
 
 /// The workflows to run, in an order that respects `dependsOn`, ending
 /// with the one that was asked for.
-fn ordered_workflows<'d>(
+pub(crate) fn ordered_workflows<'d>(
     description: &'d Description,
     wanted: &'d Workflow,
 ) -> Result<Vec<&'d Workflow>, ExecutionError> {
@@ -1724,6 +1797,14 @@ fn ordered_steps(
             visit_action_parameter_expressions(&action.parameters, description, &mut |_| {})?;
         }
     }
+    order_steps(workflow, |step| steps_named_by(step, workflow, description))
+}
+
+/// Both lazy execution and checked preparation use this ordering algorithm.
+pub(crate) fn order_steps(
+    workflow: &Workflow,
+    mut reads: impl FnMut(&Step) -> Result<BTreeSet<String>, ExecutionError>,
+) -> Result<Vec<usize>, ExecutionError> {
     let index: BTreeMap<&str, usize> = workflow
         .steps
         .iter()
@@ -1736,7 +1817,7 @@ fn ordered_steps(
     for step in &workflow.steps {
         visit_step(
             workflow,
-            description,
+            &mut reads,
             &index,
             step,
             &mut ordered,
@@ -1749,7 +1830,7 @@ fn ordered_steps(
 
 fn visit_step(
     workflow: &Workflow,
-    description: &Description,
+    reads: &mut impl FnMut(&Step) -> Result<BTreeSet<String>, ExecutionError>,
     index: &BTreeMap<&str, usize>,
     step: &Step,
     ordered: &mut Vec<usize>,
@@ -1771,7 +1852,7 @@ fn visit_step(
             })?;
         visit_step(
             workflow,
-            description,
+            reads,
             index,
             &workflow.steps[*at],
             ordered,
@@ -1782,13 +1863,13 @@ fn visit_step(
     // The same for the steps this one reads. A name that is not a step
     // of this workflow is left alone: an expression may be wrong, and
     // saying so belongs where it is evaluated, with the whole context.
-    for id in steps_named_by(step, workflow, description)? {
+    for id in reads(step)? {
         let Some(at) = index.get(id.as_str()) else {
             continue;
         };
         visit_step(
             workflow,
-            description,
+            reads,
             index,
             &workflow.steps[*at],
             ordered,

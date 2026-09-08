@@ -39,6 +39,8 @@ impl<'a> Expression<'a> {
 }
 
 pub(crate) fn parse(text: &str) -> Result<Expression<'_>, ExpressionError> {
+    #[cfg(test)]
+    crate::prepare::instrumentation::compiled(0);
     let (expression, consumed) = prefix(text)?;
     if consumed != text.len() {
         return Err(syntax(
