@@ -5,12 +5,13 @@
 //! engine serve a blocking caller, an async one, and a test with no
 //! network at all.
 
-use crate::criterion;
+use crate::criterion::{self, CriterionError};
 use crate::expression::{self, Exchange, ExpressionError, Scope, StepState, WorkflowState};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::operation::{self, Source};
 use crate::report::{
-    CriterionOutcome, ExecutionError, ExecutionReport, Outcome, Performed, StepRecord,
+    ActionCriteriaOutcome, CriterionOutcome, ExecutionError, ExecutionFailure, ExecutionReport,
+    Outcome, Performed, StepRecord,
 };
 use crate::runtime_syntax::{self, Expression};
 use crate::select;
@@ -278,6 +279,7 @@ pub struct Run<'d> {
     unsupplied: Vec<String>,
     taken: usize,
     report: Option<Box<ExecutionReport>>,
+    halted: bool,
 }
 
 impl<'d> Run<'d> {
@@ -286,9 +288,8 @@ impl<'d> Run<'d> {
     ///
     /// # Errors
     ///
-    /// [`ExecutionError::UnknownWorkflow`] or
-    /// [`ExecutionError::Circular`] when the description does not
-    /// describe a runnable order.
+    /// An unknown workflow, a dependency cycle, or an error encountered while
+    /// ordering and syntax-checking the initial workflow. No requests are sent.
     pub fn start(
         description: &'d Description,
         options: &'d Options,
@@ -351,9 +352,47 @@ impl<'d> Run<'d> {
                 .collect(),
             taken: 0,
             report: None,
+            halted: false,
         };
         run.enter(first, Value::Object(options.inputs.clone()), None)?;
         Ok(run)
+    }
+
+    /// Clone the history available so far without evaluating more expressions.
+    ///
+    /// Until completion the outcome is [`Outcome::Incomplete`], and workflow
+    /// outputs are not available. Attempts with actual responses or completed
+    /// workflow calls are retained even when output evaluation or dispatch fails.
+    /// Requests that never received a response have no fabricated step record.
+    /// After completion this returns the completed report, including its outputs.
+    #[must_use]
+    pub fn partial_report(&self) -> ExecutionReport {
+        if let Some(report) = &self.report {
+            return report.as_ref().clone();
+        }
+        ExecutionReport {
+            workflow_id: self
+                .options
+                .workflow
+                .clone()
+                .or_else(|| {
+                    self.description
+                        .workflows
+                        .first()
+                        .map(|w| w.workflow_id.clone())
+                })
+                .unwrap_or_default(),
+            outcome: Outcome::Incomplete,
+            outputs: BTreeMap::new(),
+            steps: self.records.clone(),
+        }
+    }
+
+    pub(crate) fn failure(&self, error: ExecutionError) -> ExecutionFailure {
+        ExecutionFailure {
+            error,
+            report: Some(Box::new(self.partial_report())),
+        }
     }
 
     /// Advance until something is needed from the caller.
@@ -365,7 +404,23 @@ impl<'d> Run<'d> {
     /// # Errors
     ///
     /// Whatever stopped the run — see [`ExecutionError`].
+    /// After a terminal error only the partial report can be inspected; later
+    /// calls return [`ExecutionError::Stopped`]. An outstanding-response
+    /// [`ExecutionError::Awaiting`] is a correctable driving error, not terminal.
     pub fn advance(&mut self) -> Result<Progress, ExecutionError> {
+        if self.halted {
+            return Err(ExecutionError::Stopped);
+        }
+        let result = self.advance_inner();
+        if let Err(error) = &result
+            && !matches!(error, ExecutionError::Awaiting { .. })
+        {
+            self.halted = true;
+        }
+        result
+    }
+
+    fn advance_inner(&mut self) -> Result<Progress, ExecutionError> {
         if let Some(wait) = self.wait.take() {
             return Ok(Progress::Wait(wait));
         }
@@ -379,11 +434,11 @@ impl<'d> Run<'d> {
             });
         }
         loop {
-            if let Some(report) = self.report.take() {
-                return Ok(Progress::Done(report));
+            if let Some(report) = &self.report {
+                return Ok(Progress::Done(report.clone()));
             }
             let Some(frame) = self.frames.last() else {
-                return Ok(Progress::Done(Box::new(self.finish())));
+                return Err(ExecutionError::Stopped);
             };
             // The frame is spent: name its outputs and hand them back.
             if frame.at >= frame.order.len() {
@@ -427,10 +482,24 @@ impl<'d> Run<'d> {
     ///
     /// # Errors
     ///
-    /// Whatever the response made impossible — a criterion that cannot
-    /// be decided, an output that names nothing, a `goto` with no
-    /// target.
+    /// Unsupported capabilities, output evaluation failures, or action dispatch
+    /// errors. Ordinary runtime criterion errors are recorded as failed criteria
+    /// and follow failure actions. Terminal errors leave a partial report and
+    /// stop later progress; [`ExecutionError::NotWaiting`] remains correctable.
     pub fn supply(&mut self, response: HttpResponse) -> Result<(), ExecutionError> {
+        if self.halted {
+            return Err(ExecutionError::Stopped);
+        }
+        let result = self.supply_inner(response);
+        if let Err(error) = &result
+            && !matches!(error, ExecutionError::NotWaiting)
+        {
+            self.halted = true;
+        }
+        result
+    }
+
+    fn supply_inner(&mut self, response: HttpResponse) -> Result<(), ExecutionError> {
         let Some(mut pending) = self.pending.take() else {
             return Err(ExecutionError::NotWaiting);
         };
@@ -475,6 +544,22 @@ impl<'d> Run<'d> {
         let step_id = step.step_id.clone();
         let workflow_id = frame.workflow.workflow_id.clone();
 
+        // A real response/completed call already exists. Retain this attempt
+        // before output evaluation or action selection can stop the engine.
+        let record = self.records.len();
+        self.records.push(StepRecord {
+            workflow_id,
+            step_id: step_id.clone(),
+            attempt: done.attempt,
+            performed: done.performed,
+            criteria: Vec::with_capacity(step.success_criteria.len()),
+            action_criteria: Vec::new(),
+            passed: false,
+            outputs: BTreeMap::new(),
+            action: None,
+            elapsed: done.elapsed,
+        });
+
         // What the step produced is in scope while its own outputs are
         // named — that is how a workflow step reads what it called.
         let mut state = StepState {
@@ -482,7 +567,7 @@ impl<'d> Run<'d> {
             outputs: done.given.clone(),
             passed: true,
         };
-        let (passed, criteria, outputs) = {
+        let (passed, outputs) = {
             let mut ahead = frame.steps.clone();
             ahead.insert(step_id.clone(), state.clone());
             let scope = scope(
@@ -493,7 +578,6 @@ impl<'d> Run<'d> {
                 &self.ambient,
             );
 
-            let mut criteria = Vec::with_capacity(step.success_criteria.len());
             // Criteria, where a step states them, are the whole
             // judgement: a step that says `$statusCode == 404` means it.
             let mut passed = if step.success_criteria.is_empty() {
@@ -502,11 +586,8 @@ impl<'d> Run<'d> {
                 true
             };
             for criterion in &step.success_criteria {
-                let holds = criterion::passes(criterion, &scope)?;
-                criteria.push(CriterionOutcome {
-                    condition: criterion.condition.clone(),
-                    passed: holds,
-                });
+                let holds =
+                    evaluate_criterion(criterion, &scope, &mut self.records[record].criteria)?;
                 passed = passed && holds;
             }
             // Only a step that did what it said can name what it
@@ -523,7 +604,7 @@ impl<'d> Run<'d> {
                 // call that went wrong.
                 BTreeMap::new()
             };
-            (passed, criteria, outputs)
+            (passed, outputs)
         };
         state.outputs = outputs.clone();
         state.passed = passed;
@@ -534,20 +615,10 @@ impl<'d> Run<'d> {
         let frame = self.frames.last_mut().expect("the frame is still there");
         frame.steps.insert(step_id.clone(), state);
 
-        let action = self.decide(index, passed, done.exchange.as_ref())?;
-        let described = describe(&action);
-
-        self.records.push(StepRecord {
-            workflow_id,
-            step_id,
-            attempt: done.attempt,
-            performed: done.performed,
-            criteria,
-            passed,
-            outputs,
-            action: described,
-            elapsed: done.elapsed,
-        });
+        self.records[record].passed = passed;
+        self.records[record].outputs = outputs;
+        let action = self.decide(index, passed, done.exchange.as_ref(), record)?;
+        self.records[record].action = describe(&action);
         self.apply(action)
     }
 
@@ -842,10 +913,12 @@ impl<'d> Run<'d> {
         index: usize,
         passed: bool,
         exchange: Option<&Exchange>,
+        record: usize,
     ) -> Result<Action, ExecutionError> {
         let frame = self.frames.last().expect("a frame to decide in");
         let step = &frame.workflow.steps[index];
         let scope = scope(frame, &frame.steps, exchange, &self.finished, &self.ambient);
+        let outcomes = &mut self.records[record].action_criteria;
 
         if passed {
             // A step's own actions first, then the workflow's.
@@ -855,7 +928,7 @@ impl<'d> Run<'d> {
                 .chain(frame.workflow.success_actions.iter());
             for action in actions {
                 let action = success_action(action, self.description)?;
-                if !holds(&action.criteria, &scope)? {
+                if !holds(&action.name, &action.criteria, &scope, outcomes)? {
                     continue;
                 }
                 return Ok(match action.type_ {
@@ -876,7 +949,7 @@ impl<'d> Run<'d> {
             .chain(frame.workflow.failure_actions.iter());
         for (at, action) in actions.enumerate() {
             let action = failure_action(action, self.description)?;
-            if !holds(&action.criteria, &scope)? {
+            if !holds(&action.name, &action.criteria, &scope, outcomes)? {
                 continue;
             }
             return Ok(match action.type_ {
@@ -1013,26 +1086,6 @@ impl<'d> Run<'d> {
                 self.enter(workflow, inputs, Some((step_id, Then::EndCaller)))
             }
             Action::Goto { .. } => Ok(()),
-        }
-    }
-
-    /// The report for a run that has nothing left to do.
-    fn finish(&mut self) -> ExecutionReport {
-        ExecutionReport {
-            workflow_id: self
-                .options
-                .workflow
-                .clone()
-                .or_else(|| {
-                    self.description
-                        .workflows
-                        .first()
-                        .map(|workflow| workflow.workflow_id.clone())
-                })
-                .unwrap_or_default(),
-            outcome: Outcome::Succeeded,
-            outputs: BTreeMap::new(),
-            steps: std::mem::take(&mut self.records),
         }
     }
 }
@@ -1256,13 +1309,61 @@ fn failure_action(
 
 /// Whether every criterion of an action holds. No criteria means the
 /// action applies.
-fn holds(criteria: &[Criterion], scope: &Scope<'_>) -> Result<bool, ExecutionError> {
+fn holds(
+    name: &str,
+    criteria: &[Criterion],
+    scope: &Scope<'_>,
+    outcomes: &mut Vec<ActionCriteriaOutcome>,
+) -> Result<bool, ExecutionError> {
+    outcomes.push(ActionCriteriaOutcome {
+        name: name.to_owned(),
+        criteria: Vec::with_capacity(criteria.len()),
+        passed: false,
+    });
+    let outcome = outcomes.last_mut().expect("the action just recorded");
     for criterion in criteria {
-        if !criterion::passes(criterion, scope)? {
+        if !evaluate_criterion(criterion, scope, &mut outcome.criteria)? {
             return Ok(false);
         }
     }
+    outcome.passed = true;
     Ok(true)
+}
+
+/// Evaluation errors fail a condition and retain its diagnostic. Unsupported
+/// capabilities are engine failures, not ordinary false conditions to skip.
+fn evaluate_criterion(
+    criterion: &Criterion,
+    scope: &Scope<'_>,
+    outcomes: &mut Vec<CriterionOutcome>,
+) -> Result<bool, ExecutionError> {
+    let (passed, error) = match criterion::passes(criterion, scope) {
+        Ok(passed) => (passed, None),
+        Err(error) => (false, Some(error)),
+    };
+    let terminal = error
+        .as_ref()
+        .filter(|error| {
+            matches!(
+                error,
+                CriterionError::Unsupported(_)
+                    | CriterionError::Expression(ExpressionError::Unsupported(_))
+                    | CriterionError::Select(SelectError::Unsupported(_))
+                    | CriterionError::Select(SelectError::Expression(
+                        ExpressionError::Unsupported(_)
+                    ))
+            )
+        })
+        .cloned();
+    outcomes.push(CriterionOutcome {
+        condition: criterion.condition.clone(),
+        passed,
+        error,
+    });
+    if let Some(error) = terminal {
+        return Err(error.into());
+    }
+    Ok(passed)
 }
 
 /// The values a set of `outputs` names, for a workflow that stopped

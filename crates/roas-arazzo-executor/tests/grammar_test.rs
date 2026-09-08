@@ -158,13 +158,13 @@ fn missing_values_are_not_null_and_wrong_type_navigation_is_distinct() {
         "$response.body.missing == null",
         "$response.body.items[1]",
     ] {
-        let error = run(condition, &json!({ "items": [] })).unwrap_err();
+        let report = run(condition, &json!({ "items": [] })).unwrap();
+        assert!(!report.is_success());
+        let error = report.steps[0].criteria[0].error.as_ref().unwrap();
         assert!(
             matches!(
                 error,
-                ExecutionError::Criterion(CriterionError::Expression(
-                    ExpressionError::Missing { .. }
-                ))
+                CriterionError::Expression(ExpressionError::Missing { .. })
             ),
             "{condition}: {error}"
         );
@@ -176,13 +176,13 @@ fn missing_values_are_not_null_and_wrong_type_navigation_is_distinct() {
         "$response.body.nil.name",
         "$response.body.items[0][0]",
     ] {
-        let error = run(condition, &json!({ "items": [1], "nil": null })).unwrap_err();
+        let report = run(condition, &json!({ "items": [1], "nil": null })).unwrap();
+        assert!(!report.is_success());
+        let error = report.steps[0].criteria[0].error.as_ref().unwrap();
         assert!(
             matches!(
                 error,
-                ExecutionError::Criterion(CriterionError::Expression(
-                    ExpressionError::Navigation { .. }
-                ))
+                CriterionError::Expression(ExpressionError::Navigation { .. })
             ),
             "{condition}: {error}"
         );
@@ -448,13 +448,13 @@ fn short_circuiting_does_not_hide_undeclared_steps_or_workflows() {
         "true || $steps.typo.outputs.value",
         "false && $workflows.typo.outputs.value",
     ] {
-        let error = run(condition, &json!({})).unwrap_err();
+        let report = run(condition, &json!({})).unwrap();
+        assert!(!report.is_success());
+        let error = report.steps[0].criteria[0].error.as_ref().unwrap();
         assert!(
             matches!(
                 error,
-                ExecutionError::Criterion(CriterionError::Expression(
-                    ExpressionError::Missing { .. }
-                ))
+                CriterionError::Expression(ExpressionError::Missing { .. })
             ),
             "{error}"
         );
@@ -859,17 +859,19 @@ fn workflow_output_collections_preserve_not_run_and_unknown_workflow_errors() {
         }
         let description = serde_json::from_value(value).unwrap();
         let mut client = Fake::new().reply(200, &json!({}));
-        let error = execute(&description, &options(), &mut client).unwrap_err();
+        let report = execute(&description, &options(), &mut client).unwrap();
+        assert!(!report.is_success());
+        let error = report.steps[0].criteria[0].error.as_ref().unwrap();
         if declared {
             assert!(matches!(
                 error,
-                ExecutionError::Criterion(CriterionError::Expression(ExpressionError::NotRun { expression, .. }))
+                CriterionError::Expression(ExpressionError::NotRun { expression, .. })
                     if expression == "$workflows.inner.outputs"
             ));
         } else {
             assert!(matches!(
                 error,
-                ExecutionError::Criterion(CriterionError::Expression(ExpressionError::Missing { expression, .. }))
+                CriterionError::Expression(ExpressionError::Missing { expression, .. })
                     if expression == "$workflows.inner.outputs"
             ));
         }

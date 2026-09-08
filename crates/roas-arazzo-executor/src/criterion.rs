@@ -128,7 +128,10 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
 /// empty one. What was found does not matter — a node holding `false`
 /// is still a node, and a filter is how a criterion asks about a value.
 fn selects(language: Language, condition: &str, context: &Value) -> Result<bool, CriterionError> {
-    Ok(select::apply(language, condition, context)?.is_some())
+    let selected = select::apply(language, condition, context)?;
+    // A null JSONPath context fails, but a selected node containing null in
+    // a non-null document still counts. JSON Pointer is a separate extension.
+    Ok(selected.is_some() && (language != Language::Path || !context.is_null()))
 }
 
 fn regex(condition: &str, context: &Value) -> Result<bool, CriterionError> {
@@ -136,7 +139,7 @@ fn regex(condition: &str, context: &Value) -> Result<bool, CriterionError> {
         condition: condition.to_owned(),
         message: error.to_string(),
     })?;
-    Ok(regex.is_match(&text(context)))
+    Ok(!context.is_null() && regex.is_match(&text(context)))
 }
 
 /// A value as the text a regular expression is matched against: a

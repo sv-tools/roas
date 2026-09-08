@@ -56,7 +56,8 @@ pub use http::{
     AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, SendFuture, SleepFuture,
 };
 pub use report::{
-    CriterionOutcome, ExecutionError, ExecutionReport, Outcome, Performed, StepRecord,
+    ActionCriteriaOutcome, CriterionOutcome, ExecutionError, ExecutionFailure, ExecutionReport,
+    Outcome, Performed, StepRecord,
 };
 pub use run::{Options, Progress, Run};
 pub use select::SelectError;
@@ -71,6 +72,8 @@ use roas_arazzo::v1_1::Description;
 /// The workflow is [`Options::workflow`], or the first one in the
 /// description. The report says what each step did; a step that fails
 /// its criteria is part of the report, not an error.
+/// Runtime criterion diagnostics are retained in the report. Use
+/// [`execute_with_report`] to also retain history on terminal engine errors.
 ///
 /// # Errors
 ///
@@ -82,12 +85,50 @@ pub fn execute<C: HttpClient + ?Sized>(
     options: &Options,
     client: &mut C,
 ) -> Result<ExecutionReport, ExecutionError> {
-    let mut run = Run::start(description, options)?;
+    execute_with_report(description, options, client).map_err(|failure| failure.error)
+}
+
+/// Run a workflow, retaining a partial report when an engine or client error stops it.
+///
+/// ```no_run
+/// # use roas_arazzo::v1_1::Description;
+/// # use roas_arazzo_executor::{Options, HttpClient, execute_with_report};
+/// # fn inspect(description: &Description, options: &Options, client: &mut dyn HttpClient) {
+/// match execute_with_report(description, options, client) {
+///     Ok(report) => println!("{report}"),
+///     Err(failure) => {
+///         eprintln!("{}", failure.error);
+///         if let Some(report) = failure.report {
+///             eprintln!("{report}");
+///         }
+///     }
+/// }
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// [`ExecutionFailure`] contains the original [`ExecutionError`] and a partial
+/// report with [`Outcome::Incomplete`]. Its report is `None` when preparation
+/// failed before a [`Run`] could be created. Criterion evaluation failures alone
+/// are normal failed outcomes and may be recovered by the workflow's actions.
+/// Unsupported criterion capabilities remain terminal errors.
+pub fn execute_with_report<C: HttpClient + ?Sized>(
+    description: &Description,
+    options: &Options,
+    client: &mut C,
+) -> Result<ExecutionReport, ExecutionFailure> {
+    let mut run = Run::start(description, options).map_err(|error| ExecutionFailure {
+        error,
+        report: None,
+    })?;
     loop {
-        match run.advance()? {
+        match run.advance().map_err(|error| run.failure(error))? {
             Progress::Send(request) => {
-                let response = client.send(&request).map_err(ExecutionError::from)?;
-                run.supply(response)?;
+                let response = client
+                    .send(&request)
+                    .map_err(|error| run.failure(error.into()))?;
+                run.supply(response).map_err(|error| run.failure(error))?;
             }
             Progress::Wait(duration) => std::thread::sleep(duration),
             Progress::Done(report) => return Ok(*report),
@@ -107,12 +148,34 @@ pub async fn execute_async<C: AsyncHttpClient + ?Sized>(
     options: &Options,
     client: &mut C,
 ) -> Result<ExecutionReport, ExecutionError> {
-    let mut run = Run::start(description, options)?;
+    execute_async_with_report(description, options, client)
+        .await
+        .map_err(|failure| failure.error)
+}
+
+/// Async counterpart of [`execute_with_report`], preserving the same diagnostics
+/// and partial history. Retry waits use the client's async sleep implementation.
+///
+/// # Errors
+///
+/// As [`execute_with_report`].
+pub async fn execute_async_with_report<C: AsyncHttpClient + ?Sized>(
+    description: &Description,
+    options: &Options,
+    client: &mut C,
+) -> Result<ExecutionReport, ExecutionFailure> {
+    let mut run = Run::start(description, options).map_err(|error| ExecutionFailure {
+        error,
+        report: None,
+    })?;
     loop {
-        match run.advance()? {
+        match run.advance().map_err(|error| run.failure(error))? {
             Progress::Send(request) => {
-                let response = client.send(&request).await.map_err(ExecutionError::from)?;
-                run.supply(response)?;
+                let response = client
+                    .send(&request)
+                    .await
+                    .map_err(|error| run.failure(error.into()))?;
+                run.supply(response).map_err(|error| run.failure(error))?;
             }
             Progress::Wait(duration) => client.sleep(duration).await,
             Progress::Done(report) => return Ok(*report),
@@ -132,4 +195,19 @@ pub fn execute_v1_0<C: HttpClient + ?Sized>(
     client: &mut C,
 ) -> Result<ExecutionReport, ExecutionError> {
     execute(&Description::from(description.clone()), options, client)
+}
+
+/// Run an Arazzo v1.0 description with the report-preserving API after upconversion.
+/// Runtime criterion recovery follows the same policy as v1.1 execution.
+///
+/// # Errors
+///
+/// As [`execute_with_report`].
+#[cfg(feature = "v1_0")]
+pub fn execute_v1_0_with_report<C: HttpClient + ?Sized>(
+    description: &roas_arazzo::v1_0::Description,
+    options: &Options,
+    client: &mut C,
+) -> Result<ExecutionReport, ExecutionFailure> {
+    execute_with_report(&Description::from(description.clone()), options, client)
 }
