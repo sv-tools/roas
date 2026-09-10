@@ -50,14 +50,117 @@ pub enum ResolveError {
     },
 }
 
+/// The reference payload a [`RefOr`] slot can hold.
+///
+/// The OpenAPI Reference Object (`$ref` plus optional `summary` and
+/// `description`) is the payload for nine of the ten component types and
+/// is modelled by [`Ref`]. The Schema Object is the exception: since
+/// OpenAPI 3.1 it is a JSON Schema, where `$ref` is an ordinary keyword
+/// that may sit beside any other keyword. The 3.1 / 3.2 schema modules
+/// implement this trait for a schema-specific payload that keeps those
+/// siblings, while every other component stays as strict as it is.
+///
+/// Implementations own the *shape* of the object after `$ref`; the
+/// [`RefOr`] visitor owns the routing (an object containing `$ref` is
+/// always a reference, never an inline item).
+pub trait ReferenceObject: Sized {
+    /// A bare reference to `reference`, with no siblings.
+    fn new(reference: impl Into<String>) -> Self;
+
+    /// The `$ref` value.
+    fn reference(&self) -> &str;
+
+    /// Replace the `$ref` value, keeping every sibling. `collapse` uses
+    /// this when it rewrites an external reference to a local one.
+    fn set_reference(&mut self, reference: String);
+
+    /// Build the payload from the `$ref` value and the remaining
+    /// entries of the object. The `$ref` entry itself has already been
+    /// consumed; a second one must be reported as a duplicate.
+    fn deserialize_after_ref<'de, A>(reference: String, map: A) -> Result<Self, A::Error>
+    where
+        A: MapAccess<'de>;
+}
+
+/// Deserialize a [`ReferenceObject`] from an object that contains `$ref`
+/// at any position. Shared by [`Ref`]'s and the schema payloads'
+/// `Deserialize` impls so they cannot drift from the [`RefOr`] visitor.
+pub fn deserialize_reference_object<'de, R, D>(deserializer: D) -> Result<R, D::Error>
+where
+    R: ReferenceObject,
+    D: serde::Deserializer<'de>,
+{
+    struct ReferenceVisitor<R>(PhantomData<fn() -> R>);
+
+    impl<'de, R: ReferenceObject> Visitor<'de> for ReferenceVisitor<R> {
+        type Value = R;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a Reference Object")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<R, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let Some(first_key) = map.next_key::<String>()? else {
+                return Err(de::Error::missing_field("$ref"));
+            };
+            if first_key == "$ref" {
+                let reference: String = map.next_value()?;
+                return R::deserialize_after_ref(reference, map);
+            }
+            let mut entries = serde_json::Map::new();
+            entries.insert(first_key, map.next_value()?);
+            while let Some(key) = map.next_key::<String>()? {
+                if entries.contains_key(&key) {
+                    return Err(de::Error::custom(format_args!("duplicate field `{key}`")));
+                }
+                entries.insert(key, map.next_value()?);
+            }
+            reference_object_from_map(entries).map_err(de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_map(ReferenceVisitor(PhantomData))
+}
+
+/// Build a [`ReferenceObject`] from a buffered object that contains
+/// `$ref` somewhere. The `$ref` entry is pulled out and the rest is
+/// replayed as a map so the payload sees exactly what the streaming
+/// path would have seen.
+fn reference_object_from_map<R: ReferenceObject>(
+    mut entries: serde_json::Map<String, serde_json::Value>,
+) -> Result<R, serde_json::Error> {
+    let reference = match entries.remove("$ref") {
+        Some(serde_json::Value::String(s)) => s,
+        Some(other) => {
+            return Err(de::Error::invalid_type(
+                de::Unexpected::Other(&other.to_string()),
+                &"a string `$ref`",
+            ));
+        }
+        None => return Err(de::Error::missing_field("$ref")),
+    };
+    R::deserialize_after_ref(
+        reference,
+        de::value::MapDeserializer::<_, serde_json::Error>::new(entries.into_iter()),
+    )
+}
+
 /// RefOr is a simple object to allow storing a reference to another component or a component itself.
 ///
 /// Deserialization routes by **presence of `$ref` in the input** rather than
 /// by serde's untagged fallthrough. Inputs containing `$ref` MUST validate as
-/// a `Ref` (which rejects unknown siblings via `deny_unknown_fields`); they
-/// will not be silently re-interpreted as an inline `T` if the `Ref` form
-/// fails. This prevents `{"$ref": "...", "typo": "..."}` from being parsed
-/// as an inline `T` with the `$ref` dropped.
+/// the reference payload `R` — [`Ref`] by default, which rejects unknown
+/// siblings; they will not be silently re-interpreted as an inline `T` if the
+/// reference form fails. This prevents `{"$ref": "...", "typo": "..."}` from
+/// being parsed as an inline `T` with the `$ref` dropped.
+///
+/// The second parameter is the reference payload. It defaults to [`Ref`],
+/// the OpenAPI Reference Object, so `RefOr<T>` means what it always did;
+/// the 3.1 / 3.2 Schema Object uses `RefOr<Schema, SchemaRef>` because a
+/// JSON Schema `$ref` may carry sibling keywords.
 ///
 /// Example:
 ///
@@ -77,16 +180,16 @@ pub enum ResolveError {
 /// ```
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
-pub enum RefOr<T> {
+pub enum RefOr<T, R = Ref> {
     /// A reference to another component.
     ///
-    /// `Ref` is boxed so the enum is not sized for the ~72-byte `Ref`
+    /// The payload is boxed so the enum is not sized for the ~72-byte `Ref`
     /// struct on every slot: a `RefOr<Schema>` (where `Schema` is itself
     /// only ~16 bytes) shrinks from ~80 bytes to ~24. Reference variants
     /// are the minority in a typical document, so the one extra heap
     /// allocation per `$ref` is paid by the rare case while every inline
     /// `Item` in a map or vec gets the smaller slot.
-    Ref(Box<Ref>),
+    Ref(Box<R>),
 
     /// The component itself.
     Item(T),
@@ -99,20 +202,21 @@ const REF_FIELDS: &[&str] = &["$ref", "summary", "description"];
 ///
 /// * A scalar / sequence input can never be a `$ref`, so it is streamed
 ///   straight into `T`.
-/// * A map whose **first** key is `$ref` is streamed straight into a
-///   `Ref` — no intermediate `serde_json::Value` is built.
+/// * A map whose **first** key is `$ref` is streamed straight into the
+///   reference payload `R` — no intermediate `serde_json::Value` is built.
 /// * Any other map is buffered into a `serde_json::Value` so a `$ref`
 ///   appearing at a non-first position can still be detected (the
 ///   OpenAPI Reference Object permits sibling keys in any order). This
 ///   leg matches the historical behaviour; only the fast paths above
 ///   avoid the throwaway DOM.
-struct RefOrVisitor<T>(PhantomData<fn() -> T>);
+struct RefOrVisitor<T, R>(PhantomData<fn() -> (T, R)>);
 
-impl<'de, T> Visitor<'de> for RefOrVisitor<T>
+impl<'de, T, R> Visitor<'de> for RefOrVisitor<T, R>
 where
     T: Deserialize<'de>,
+    R: ReferenceObject,
 {
-    type Value = RefOr<T>;
+    type Value = RefOr<T, R>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter.write_str("a Reference Object or an inline component")
@@ -163,33 +267,9 @@ where
         };
 
         if first_key == "$ref" {
-            // Fast path: stream the Reference Object directly into `Ref`.
+            // Fast path: stream the Reference Object directly into `R`.
             let reference: String = map.next_value()?;
-            let mut summary: Option<String> = None;
-            let mut description: Option<String> = None;
-            while let Some(key) = map.next_key::<String>()? {
-                match key.as_str() {
-                    "$ref" => return Err(de::Error::duplicate_field("$ref")),
-                    "summary" => {
-                        if summary.is_some() {
-                            return Err(de::Error::duplicate_field("summary"));
-                        }
-                        summary = Some(map.next_value()?);
-                    }
-                    "description" => {
-                        if description.is_some() {
-                            return Err(de::Error::duplicate_field("description"));
-                        }
-                        description = Some(map.next_value()?);
-                    }
-                    _ => return Err(de::Error::unknown_field(key.as_str(), REF_FIELDS)),
-                }
-            }
-            return Ok(RefOr::Ref(Box::new(Ref {
-                reference,
-                summary,
-                description,
-            })));
+            return R::deserialize_after_ref(reference, map).map(|r| RefOr::Ref(Box::new(r)));
         }
 
         // Slow path: buffer so a `$ref` at a non-first position is still
@@ -197,24 +277,27 @@ where
         let mut entries = serde_json::Map::new();
         entries.insert(first_key, map.next_value()?);
         while let Some(key) = map.next_key::<String>()? {
+            if entries.contains_key(&key) {
+                return Err(de::Error::custom(format_args!("duplicate field `{key}`")));
+            }
             entries.insert(key, map.next_value()?);
         }
-        let value = serde_json::Value::Object(entries);
-        if value.as_object().is_some_and(|m| m.contains_key("$ref")) {
-            Ref::deserialize(value)
+        if entries.contains_key("$ref") {
+            reference_object_from_map::<R>(entries)
                 .map(|r| RefOr::Ref(Box::new(r)))
                 .map_err(de::Error::custom)
         } else {
-            T::deserialize(value)
+            T::deserialize(serde_json::Value::Object(entries))
                 .map(RefOr::Item)
                 .map_err(de::Error::custom)
         }
     }
 }
 
-impl<'de, T> Deserialize<'de> for RefOr<T>
+impl<'de, T, R> Deserialize<'de> for RefOr<T, R>
 where
     T: Deserialize<'de>,
+    R: ReferenceObject,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -235,8 +318,7 @@ where
 /// ```yaml
 /// $ref: '#/components/schemas/Pet'
 /// ```
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, PartialEq, Default)]
 pub struct Ref {
     /// **Required** The reference identifier.
     /// This MUST be in the form of a URI.
@@ -265,8 +347,8 @@ const _: () = assert!(
     "RefOr::Ref must stay boxed",
 );
 
-impl<D> RefOr<D> {
-    /// Validate this `RefOr<D>` in the surrounding context.
+impl<D, R: ReferenceObject> RefOr<D, R> {
+    /// Validate this `RefOr<D, R>` in the surrounding context.
     ///
     /// Crate-internal: callers drive validation through
     /// [`Validate::validate`](crate::validation::Validate::validate)
@@ -294,17 +376,24 @@ impl<D> RefOr<D> {
     where
         T: ResolveReference<D>,
         D: ValidateWithContext<T> + 'static + Clone + DeserializeOwned,
+        R: ValidateWithContext<T>,
     {
         match self {
             RefOr::Ref(r) => {
-                r.validate_with_context::<T, D>(ctx, path.clone());
-                if !ctx.visit(r.reference.clone()) {
+                // The payload validates itself first: the empty-`$ref`
+                // check for every payload, and for a schema payload the
+                // sibling keywords, which apply alongside the target
+                // and so are validated whether or not the target is
+                // reached below.
+                r.validate_with_context(ctx, path.clone());
+                let reference = r.reference();
+                if !ctx.visit(reference.to_owned()) {
                     return;
                 }
-                if r.reference.starts_with("#/") {
-                    match ctx.spec.resolve_reference(&r.reference) {
-                        Some(d) => d.validate_with_context(ctx, r.reference.clone()),
-                        None => ctx.error(path, format_args!(".$ref: `{}` not found", r.reference)),
+                if reference.starts_with("#/") {
+                    match ctx.spec.resolve_reference(reference) {
+                        Some(d) => d.validate_with_context(ctx, reference.to_owned()),
+                        None => ctx.error(path, format_args!(".$ref: `{reference}` not found")),
                     }
                     return;
                 }
@@ -327,24 +416,22 @@ impl<D> RefOr<D> {
                 let resolved = ctx
                     .loader
                     .as_deref_mut()
-                    .map(|l| l.resolve_reference_as::<D>(&r.reference));
+                    .map(|l| l.resolve_reference_as::<D>(reference));
                 // `IgnoreExternalReferences` was already handled
                 // above; if we got here it isn't set, so any failure
                 // surfaces unconditionally.
                 match resolved {
-                    Some(Ok(d)) => d.validate_with_context(ctx, r.reference.clone()),
+                    Some(Ok(d)) => d.validate_with_context(ctx, reference.to_owned()),
                     Some(Err(source)) => ctx.error(
                         path,
                         format_args!(
-                            ".$ref: failed to resolve external reference `{}`: {source}",
-                            r.reference,
+                            ".$ref: failed to resolve external reference `{reference}`: {source}",
                         ),
                     ),
                     None => ctx.error(
                         path,
                         format_args!(
-                            ".$ref: resolving of an external reference `{}` is not supported",
-                            r.reference,
+                            ".$ref: resolving of an external reference `{reference}` is not supported",
                         ),
                     ),
                 }
@@ -357,7 +444,7 @@ impl<D> RefOr<D> {
 
     /// Create a new RefOr with a reference.
     pub fn new_ref(reference: impl Into<String>) -> Self {
-        RefOr::Ref(Box::new(Ref::new(reference)))
+        RefOr::Ref(Box::new(R::new(reference)))
     }
 
     /// Create a new RefOr with an item.
@@ -373,13 +460,14 @@ impl<D> RefOr<D> {
         match self {
             RefOr::Item(d) => Ok(d),
             RefOr::Ref(r) => {
-                if r.reference.starts_with("#/") {
-                    match spec.resolve_reference(&r.reference) {
+                let reference = r.reference();
+                if reference.starts_with("#/") {
+                    match spec.resolve_reference(reference) {
                         Some(d) => Ok(d),
-                        None => Err(ResolveError::NotFound(r.reference.clone())),
+                        None => Err(ResolveError::NotFound(reference.to_owned())),
                     }
                 } else {
-                    Err(ResolveError::ExternalUnsupported(r.reference.clone()))
+                    Err(ResolveError::ExternalUnsupported(reference.to_owned()))
                 }
             }
         }
@@ -405,16 +493,17 @@ impl<D> RefOr<D> {
         match self {
             RefOr::Item(d) => Ok(Cow::Borrowed(d)),
             RefOr::Ref(r) => {
-                if r.reference.starts_with("#/") {
-                    spec.resolve_reference(&r.reference)
+                let reference = r.reference();
+                if reference.starts_with("#/") {
+                    spec.resolve_reference(reference)
                         .map(Cow::Borrowed)
-                        .ok_or_else(|| ResolveError::NotFound(r.reference.clone()))
+                        .ok_or_else(|| ResolveError::NotFound(reference.to_owned()))
                 } else {
                     loader
-                        .resolve_reference_as::<D>(&r.reference)
+                        .resolve_reference_as::<D>(reference)
                         .map(Cow::Owned)
                         .map_err(|source| ResolveError::External {
-                            reference: r.reference.clone(),
+                            reference: reference.to_owned(),
                             source,
                         })
                 }
@@ -424,16 +513,6 @@ impl<D> RefOr<D> {
 }
 
 impl Ref {
-    pub(crate) fn validate_with_context<T, D>(&self, ctx: &mut Context<T>, path: String)
-    where
-        T: ResolveReference<D>,
-        D: ValidateWithContext<T>,
-    {
-        if self.reference.is_empty() {
-            ctx.error(path, ".$ref: must not be empty");
-        }
-    }
-
     pub fn new(reference: impl Into<String>) -> Self {
         Ref {
             reference: reference.into(),
@@ -442,11 +521,76 @@ impl Ref {
     }
 }
 
+impl<T> ValidateWithContext<T> for Ref {
+    fn validate_with_context(&self, ctx: &mut Context<T>, path: String) {
+        if self.reference.is_empty() {
+            ctx.error(path, ".$ref: must not be empty");
+        }
+    }
+}
+
+impl ReferenceObject for Ref {
+    fn new(reference: impl Into<String>) -> Self {
+        Ref::new(reference)
+    }
+
+    fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    fn set_reference(&mut self, reference: String) {
+        self.reference = reference;
+    }
+
+    /// Streams `summary` / `description` and rejects everything else —
+    /// the OpenAPI Reference Object allows no other sibling.
+    fn deserialize_after_ref<'de, A>(reference: String, mut map: A) -> Result<Self, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut summary: Option<String> = None;
+        let mut description: Option<String> = None;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "$ref" => return Err(de::Error::duplicate_field("$ref")),
+                "summary" => {
+                    if summary.is_some() {
+                        return Err(de::Error::duplicate_field("summary"));
+                    }
+                    summary = Some(map.next_value()?);
+                }
+                "description" => {
+                    if description.is_some() {
+                        return Err(de::Error::duplicate_field("description"));
+                    }
+                    description = Some(map.next_value()?);
+                }
+                _ => return Err(de::Error::unknown_field(key.as_str(), REF_FIELDS)),
+            }
+        }
+        Ok(Ref {
+            reference,
+            summary,
+            description,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Ref {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserialize_reference_object(deserializer)
+    }
+}
+
 // ---- merge ----
 
-impl<D> crate::merge::MergeWithContext for RefOr<D>
+impl<D, R> crate::merge::MergeWithContext for RefOr<D, R>
 where
     D: crate::merge::MergeWithContext,
+    R: crate::merge::MergeWithContext + ReferenceObject,
 {
     fn merge_with_context(
         &mut self,
@@ -466,7 +610,7 @@ where
                 let RefOr::Ref(base_ref) = slot else {
                     unreachable!()
                 };
-                if base_ref.reference == incoming_ref.reference {
+                if base_ref.reference() == incoming_ref.reference() {
                     base_ref.merge_with_context(*incoming_ref, ctx, path);
                 } else if ctx.should_take_incoming(path, ConflictKind::RefReplaced) {
                     *slot = RefOr::Ref(incoming_ref);
@@ -526,14 +670,15 @@ impl crate::merge::MergeWithContext for Ref {
 /// * Cross-map `$ref`s (e.g. a parameter that refs a schema) are resolved
 ///   via `RefOr::get_item`'s spec-wide path, so their cycle handling falls
 ///   to the spec resolver.
-pub fn resolve_in_map<'a, T, D>(
+pub fn resolve_in_map<'a, T, D, R>(
     spec: &'a T,
     reference: &str,
     prefix: &str,
-    map: &'a Option<BTreeMap<String, RefOr<D>>>,
+    map: &'a Option<BTreeMap<String, RefOr<D, R>>>,
 ) -> Option<&'a D>
 where
     T: ResolveReference<D>,
+    R: ReferenceObject,
 {
     let map = map.as_ref()?;
     let mut current = reference;
@@ -546,14 +691,15 @@ where
         match item {
             RefOr::Item(d) => return Some(d),
             RefOr::Ref(r) => {
-                if !r.reference.starts_with(prefix) {
+                let next = r.reference();
+                if !next.starts_with(prefix) {
                     // Cross-map ref: hand off to spec-wide resolver.
                     return item.get_item(spec).ok();
                 }
-                if !visited.insert(r.reference.as_str()) {
+                if !visited.insert(next) {
                     return None;
                 }
-                current = &r.reference;
+                current = next;
             }
         }
     }
@@ -584,7 +730,7 @@ mod tests {
     #[test]
     fn test_ref_or_foo_serialize() {
         assert_eq!(
-            serde_json::to_value(RefOr::new_item(Foo {
+            serde_json::to_value(RefOr::<Foo>::new_item(Foo {
                 foo: String::from("bar"),
             }))
             .unwrap(),
@@ -930,7 +1076,7 @@ mod tests {
         let spec = FooSpec::default();
         let r = Ref::new("");
         let mut ctx = Context::new(&spec, Options::new());
-        Ref::validate_with_context::<FooSpec, Foo>(&r, &mut ctx, "#.x".into());
+        ValidateWithContext::<FooSpec>::validate_with_context(&r, &mut ctx, "#.x".into());
         assert!(
             ctx.errors.mentions("must not be empty"),
             "empty `$ref` must error: {:?}",

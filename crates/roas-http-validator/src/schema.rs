@@ -19,7 +19,8 @@ use roas::common::bool_or::BoolOr;
 use roas::common::formats::SchemaType;
 use roas::common::reference::RefOr;
 use roas::v3_2::schema::{
-    ArraySchema, IntegerSchema, NumberSchema, ObjectSchema, Schema, SingleSchema, StringSchema,
+    ArraySchema, IntegerSchema, NumberSchema, ObjectSchema, Schema, SchemaRef, SingleSchema,
+    StringSchema,
 };
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
@@ -52,7 +53,7 @@ pub(crate) enum FailureKind {
 }
 
 /// Judge `value` against `schema`, collecting every failure.
-pub(crate) fn check(value: &Value, schema: &RefOr<Schema>, spec: &Spec) -> Vec<Failure> {
+pub(crate) fn check(value: &Value, schema: &RefOr<Schema, SchemaRef>, spec: &Spec) -> Vec<Failure> {
     let mut checker = Checker::new(spec);
     checker.schema(value, schema);
     checker.failures
@@ -128,7 +129,7 @@ impl<'s> Checker<'s> {
     /// not a subschema the value failed: reading it as one would let
     /// `{ "not": { "pattern": "(" } }` accept anything at all, on the
     /// strength of a check that never ran.
-    fn judge(&self, value: &Value, schema: &RefOr<Schema>) -> Verdict {
+    fn judge(&self, value: &Value, schema: &RefOr<Schema, SchemaRef>) -> Verdict {
         let mut probe = Checker::new(self.spec);
         // The probe continues this walk, so it inherits its depth — a
         // cycle that runs through `anyOf` must still terminate.
@@ -154,7 +155,7 @@ impl<'s> Checker<'s> {
         Verdict::Unchecked
     }
 
-    fn schema(&mut self, value: &Value, schema: &RefOr<Schema>) {
+    fn schema(&mut self, value: &Value, schema: &RefOr<Schema, SchemaRef>) {
         if self.depth >= MAX_DEPTH {
             self.unchecked(format!(
                 "the schema nests more than {MAX_DEPTH} levels deep"
@@ -166,10 +167,23 @@ impl<'s> Checker<'s> {
         self.depth -= 1;
     }
 
-    fn dispatch(&mut self, value: &Value, schema: &RefOr<Schema>) {
+    fn dispatch(&mut self, value: &Value, schema: &RefOr<Schema, SchemaRef>) {
         match schema.get_item(self.spec) {
             Ok(resolved) => self.resolved(value, resolved),
             Err(error) => self.record(FailureKind::Unresolved, error.to_string()),
+        }
+        // A 3.1+ `$ref` may carry sibling keywords, which apply alongside
+        // the target — `{"$ref": X, "maxLength": 5}` is the intersection
+        // of both, exactly as `allOf` would be — so they are checked as
+        // a second schema against the same value.
+        if let RefOr::Ref(reference) = schema
+            && reference.has_siblings()
+        {
+            match sibling_schema(reference, schema.get_item(self.spec).ok()) {
+                Ok(Some(siblings)) => self.resolved(value, &siblings),
+                Ok(None) => {}
+                Err(message) => self.unchecked(message),
+            }
         }
     }
 
@@ -826,6 +840,65 @@ fn bound_of(number: &serde_json::Number) -> Option<Decimal> {
     Decimal::parse(number.as_str())
 }
 
+/// Sibling keywords whose presence asserts nothing about the value.
+const ANNOTATION_KEYWORDS: &[&str] = &[
+    "title",
+    "description",
+    "default",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+    "example",
+    "examples",
+    "externalDocs",
+    "xml",
+];
+
+/// The sibling keywords of a `$ref` as the schema to check the value
+/// against, or `None` when they assert nothing.
+///
+/// A sibling set with no `type` constrains whatever type the target has,
+/// but `roas` reads a typeless schema as an *object* schema, which would
+/// wrongly reject every non-object value. So when the siblings name no
+/// type and no composition, the target's own type is borrowed; if the
+/// target has no single type to borrow, the siblings are reported as
+/// unchecked rather than guessed.
+fn sibling_schema(
+    reference: &SchemaRef,
+    target: Option<&Schema>,
+) -> Result<Option<Schema>, String> {
+    let asserts = reference
+        .siblings
+        .keys()
+        .any(|k| !k.starts_with("x-") && !ANNOTATION_KEYWORDS.contains(&k.as_str()));
+    if !asserts {
+        return Ok(None);
+    }
+    let mut siblings = reference.siblings.clone();
+    let typed = ["type", "allOf", "anyOf", "oneOf", "not"]
+        .iter()
+        .any(|k| siblings.contains_key(*k));
+    if !typed {
+        match target {
+            Some(Schema::Single(single)) => {
+                siblings.insert("type".to_owned(), Value::String(single.to_string()));
+            }
+            _ => {
+                return Err(
+                    "sibling keywords of `$ref` name no type and the target has no single type to borrow"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    let map: serde_json::Map<String, Value> = siblings.into_iter().collect();
+    serde_json::from_value::<Schema>(Value::Object(map))
+        .map(Some)
+        .map_err(|error| {
+            format!("sibling keywords of `$ref` could not be read as a schema: {error}")
+        })
+}
+
 #[cfg(test)]
 pub(crate) mod tests_support {
     pub(crate) use super::tests::{failures, passes};
@@ -849,7 +922,7 @@ mod tests {
         .expect("the spec must parse")
     }
 
-    fn schema(value: serde_json::Value) -> RefOr<Schema> {
+    fn schema(value: serde_json::Value) -> RefOr<Schema, SchemaRef> {
         serde_json::from_value(value).expect("the schema must parse")
     }
 
@@ -870,6 +943,30 @@ mod tests {
 
     pub(crate) fn passes(value: &Value, schema_json: serde_json::Value) -> bool {
         failures(value, schema_json).is_empty()
+    }
+
+    #[test]
+    fn ref_sibling_keywords_apply_alongside_the_target() {
+        let with_max = json!({"$ref": "#/components/schemas/Name", "maxLength": 3});
+        assert!(passes(&json!("ab"), with_max.clone()));
+        // Too short: the target's `minLength` rejects it.
+        assert!(!passes(&json!("a"), with_max.clone()));
+        // Too long: the sibling's `maxLength` rejects it; the target alone would not.
+        assert!(!passes(&json!("abcd"), with_max));
+        assert!(passes(
+            &json!("abcd"),
+            json!({"$ref": "#/components/schemas/Name"})
+        ));
+        // Annotation-only siblings assert nothing.
+        assert!(passes(
+            &json!("abcd"),
+            json!({"$ref": "#/components/schemas/Name", "description": "d", "x-note": 1})
+        ));
+        // Siblings with their own type stand on their own.
+        assert!(!passes(
+            &json!("abcd"),
+            json!({"$ref": "#/components/schemas/Name", "type": "string", "maxLength": 3})
+        ));
     }
 
     #[test]

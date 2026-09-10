@@ -32,7 +32,7 @@ use std::rc::Rc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::common::reference::RefOr;
+use crate::common::reference::{Ref, RefOr, ReferenceObject};
 use crate::loader::{Loader, LoaderError};
 
 /// Error returned by `Spec::collapse` for any OAS version.
@@ -68,8 +68,8 @@ pub enum CollapseError {
 /// The bag is owned by the version's `Collapser` struct (one per
 /// bag); a [`LiftableBag`] impl exposes `&mut Bag<Self>` via its
 /// `bag` method so the generic [`lift_ref_or`] can intern into it.
-pub struct Bag<T> {
-    entries: BTreeMap<String, RefOr<T>>,
+pub struct Bag<T, R = Ref> {
+    entries: BTreeMap<String, RefOr<T, R>>,
     /// Digest of a component's canonical JSON → candidate component
     /// names. Storing a 64-bit digest instead of the full canonical
     /// JSON keeps the dedup map small regardless of component size;
@@ -88,7 +88,7 @@ fn digest(canonical: &str) -> u64 {
     hasher.finish()
 }
 
-impl<T> Default for Bag<T> {
+impl<T, R> Default for Bag<T, R> {
     fn default() -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -97,7 +97,7 @@ impl<T> Default for Bag<T> {
     }
 }
 
-impl<T> Bag<T> {
+impl<T, R> Bag<T, R> {
     /// True when this bag has no entries — caller uses this to skip
     /// writing back into `spec.components.<bag>` so a no-op collapse
     /// of an input without that bag doesn't materialise an empty one.
@@ -107,17 +107,17 @@ impl<T> Bag<T> {
 
     /// Consume the bag and yield the underlying `BTreeMap` for
     /// writing back into the spec.
-    pub fn into_map(self) -> BTreeMap<String, RefOr<T>> {
+    pub fn into_map(self) -> BTreeMap<String, RefOr<T, R>> {
         self.entries
     }
 }
 
-impl<T: Serialize> Bag<T> {
+impl<T: Serialize, R: ReferenceObject> Bag<T, R> {
     /// Seed the bag from an existing `components.<bag>` map.
     /// Pre-existing entries keep their names; the dedup map is
     /// pre-populated so newly-lifted equivalents collapse onto
     /// them.
-    pub fn seed(&mut self, initial: BTreeMap<String, RefOr<T>>) -> Result<(), CollapseError> {
+    pub fn seed(&mut self, initial: BTreeMap<String, RefOr<T, R>>) -> Result<(), CollapseError> {
         for (name, value) in initial {
             if let RefOr::Item(item) = &value {
                 let d = digest(&serde_json::to_string(item)?);
@@ -516,7 +516,13 @@ pub trait CollapseState {
 /// The generic [`lift_ref_or`] uses this trait to perform the
 /// uniform inline / internal-ref / external-ref-with-loader logic
 /// against any concrete component type.
-pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
+///
+/// The second parameter is the reference payload of the slots this type
+/// lives in — [`Ref`] for every component except the 3.1 / 3.2 schema,
+/// whose `$ref` may carry sibling keywords.
+pub trait LiftableBag<C, R: ReferenceObject = Ref>:
+    Sized + Serialize + DeserializeOwned + 'static
+{
     /// The `#/components/<bag>/` prefix. Used to build internal
     /// `$ref` targets.
     const PREFIX: &'static str;
@@ -529,7 +535,7 @@ pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
     const IS_SCHEMA: bool = false;
 
     /// Borrow this type's bag mutably out of the Collapser.
-    fn bag(c: &mut C) -> &mut Bag<Self>;
+    fn bag(c: &mut C) -> &mut Bag<Self, R>;
 
     /// Walk into an instance, lifting every nested component slot.
     /// After this returns, the instance is ready for canonical-JSON
@@ -558,8 +564,8 @@ pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
 /// * `RefOr::Item`: recurse, then — for schemas — consult
 ///   [`schema_lift_decision`]: lift (intern + rewrite the slot to a
 ///   local ref) or leave the (now child-lifted) schema inline.
-pub fn lift_ref_or<T, C>(
-    slot: &mut RefOr<T>,
+pub fn lift_ref_or<T, R, C>(
+    slot: &mut RefOr<T, R>,
     ctx: NameContext,
     c: &mut C,
 ) -> Result<(), CollapseError>
@@ -568,15 +574,16 @@ where
     // clones cached values out of its typed cache); pinned here at
     // the call site rather than on the trait so the trait surface
     // stays minimal.
-    T: LiftableBag<C> + Clone,
+    T: LiftableBag<C, R> + Clone,
+    R: ReferenceObject,
     C: CollapseState,
 {
     match slot {
         RefOr::Ref(r) => {
-            if is_internal_ref(&r.reference) {
+            if is_internal_ref(r.reference()) {
                 return Ok(());
             }
-            let reference = r.reference.clone();
+            let reference = r.reference().to_owned();
             let Some(loader) = c.loader_mut() else {
                 return Ok(());
             };
@@ -595,7 +602,11 @@ where
             }
             T::walk(&mut fetched, &derived_ctx, c)?;
             let name = intern(c, fetched, &derived_ctx)?;
-            *slot = RefOr::new_ref(format!("{}{name}", T::PREFIX));
+            // Rewrite the target in place rather than replacing the
+            // slot: a schema `$ref` may carry sibling keywords, and
+            // they belong to this use site, not to the fetched
+            // component.
+            r.set_reference(format!("{}{name}", T::PREFIX));
             Ok(())
         }
         RefOr::Item(_) => {
@@ -648,9 +659,10 @@ fn should_lift_schema<T: Serialize, C: CollapseState>(
 /// because the author already named this one. Counting the entry is
 /// what lets the repeat rule see that. A no-op for bags that don't
 /// hold schemas.
-pub fn note_existing_component<T, C>(item: &T, c: &mut C) -> Result<(), CollapseError>
+pub fn note_existing_component<T, R, C>(item: &T, c: &mut C) -> Result<(), CollapseError>
 where
-    T: LiftableBag<C>,
+    T: LiftableBag<C, R>,
+    R: ReferenceObject,
     C: CollapseState,
 {
     if T::IS_SCHEMA {
@@ -676,9 +688,10 @@ fn shape_digest(value: &serde_json::Value) -> u64 {
     digest(&value.to_string())
 }
 
-fn intern<T, C>(c: &mut C, item: T, ctx: &NameContext) -> Result<String, CollapseError>
+fn intern<T, R, C>(c: &mut C, item: T, ctx: &NameContext) -> Result<String, CollapseError>
 where
-    T: LiftableBag<C>,
+    T: LiftableBag<C, R>,
+    R: ReferenceObject,
 {
     let base = match T::name_hint(&item) {
         Some(h) if !h.is_empty() => sanitize_component_name(h),

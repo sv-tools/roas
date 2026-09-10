@@ -25,7 +25,7 @@ use roas::common::formats::SchemaType;
 use roas::common::reference::RefOr;
 use roas::v3_2::media_type::{Encoding, MediaType};
 use roas::v3_2::parameter::{InCookieStyle, InHeaderStyle, InPathStyle, InQueryStyle, Parameter};
-use roas::v3_2::schema::{Schema, SingleSchema};
+use roas::v3_2::schema::{Schema, SchemaRef, SingleSchema};
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
 
@@ -56,15 +56,15 @@ struct Described<'p> {
     required: bool,
     style: Style,
     explode: bool,
-    schema: Option<&'p RefOr<Schema>>,
+    schema: Option<&'p RefOr<Schema, SchemaRef>>,
     content: Option<&'p BTreeMap<String, RefOr<MediaType>>>,
 }
 
 /// What kind of value the schema says this parameter holds.
 enum Shape<'s> {
     Primitive(Primitive),
-    Array(Option<&'s RefOr<Schema>>),
-    Object(Option<&'s BTreeMap<String, RefOr<Schema>>>),
+    Array(Option<&'s RefOr<Schema, SchemaRef>>),
+    Object(Option<&'s BTreeMap<String, RefOr<Schema, SchemaRef>>>),
     /// A schema this module does not read structurally — a composition,
     /// a `$ref` that does not resolve, or no schema at all.
     Opaque,
@@ -112,7 +112,7 @@ impl<'r> Extracted<'r> {
 /// becoming a two-item array.
 pub(crate) fn read_form_body(
     text: &str,
-    properties: Option<&BTreeMap<String, RefOr<Schema>>>,
+    properties: Option<&BTreeMap<String, RefOr<Schema, SchemaRef>>>,
     encoding: Option<&BTreeMap<String, Encoding>>,
     spec: &Spec,
 ) -> Result<Value, String> {
@@ -272,7 +272,7 @@ fn validate_as_content(
 /// Turn schema failures into validation errors.
 fn report_failures(
     value: &Value,
-    declared: &RefOr<Schema>,
+    declared: &RefOr<Schema, SchemaRef>,
     spec: &Spec,
     push: &mut impl FnMut(String, ErrorKind),
 ) {
@@ -301,7 +301,7 @@ impl<'p> Described<'p> {
     fn form_field(
         name: &'p str,
         encoding: Option<&Encoding>,
-        schema: Option<&'p RefOr<Schema>>,
+        schema: Option<&'p RefOr<Schema, SchemaRef>>,
     ) -> Self {
         let style = match encoding.and_then(|encoding| encoding.style.as_ref()) {
             Some(InQueryStyle::SpaceDelimited) => Style::SpaceDelimited,
@@ -700,7 +700,7 @@ impl<'p> Described<'p> {
 /// the property schema that names it.
 fn object_from(
     pairs: Vec<(String, String)>,
-    properties: Option<&BTreeMap<String, RefOr<Schema>>>,
+    properties: Option<&BTreeMap<String, RefOr<Schema, SchemaRef>>>,
     spec: &Spec,
 ) -> Result<Value, String> {
     let mut object = serde_json::Map::new();
@@ -714,7 +714,7 @@ fn object_from(
 /// Coerce one string through whatever schema describes it.
 pub(crate) fn coerce(
     raw: &str,
-    schema: Option<&RefOr<Schema>>,
+    schema: Option<&RefOr<Schema, SchemaRef>>,
     spec: &Spec,
 ) -> Result<Value, String> {
     match schema.map(|schema| Shape::of(schema, spec)) {
@@ -758,7 +758,7 @@ fn coerce_primitive(raw: &str, primitive: Primitive) -> Result<Value, String> {
 impl<'s> Shape<'s> {
     /// What kind of value a schema describes, as far as rebuilding a
     /// flattened parameter needs to know.
-    fn of(schema: &'s RefOr<Schema>, spec: &'s Spec) -> Self {
+    fn of(schema: &'s RefOr<Schema, SchemaRef>, spec: &'s Spec) -> Self {
         let Ok(resolved) = schema.get_item(spec) else {
             return Shape::Opaque;
         };

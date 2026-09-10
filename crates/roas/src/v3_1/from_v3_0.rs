@@ -564,6 +564,50 @@ mod tests {
     }
 
     #[test]
+    fn schema_ref_with_description_survives_as_schema_ref() {
+        // A 3.0 Reference Object may carry `description`; on the 3.1 side
+        // it lands on the schema-specific reference payload, so the
+        // sibling is neither dropped nor pushed into a typed schema.
+        let raw = r##"{
+            "openapi": "3.0.4",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Pet": {"type": "object"},
+                    "Owner": {
+                        "type": "object",
+                        "properties": {
+                            "pet": {"$ref": "#/components/schemas/Pet", "description": "d"}
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        assert_eq!(
+            value["components"]["schemas"]["Owner"]["properties"]["pet"],
+            serde_json::json!({"$ref": "#/components/schemas/Pet", "description": "d"}),
+        );
+        let v31: V31Spec = serde_json::from_value(value).unwrap();
+        let owner = &v31.components.as_ref().unwrap().schemas.as_ref().unwrap()["Owner"];
+        let crate::common::reference::RefOr::Item(crate::v3_1::schema::Schema::Single(single)) =
+            owner
+        else {
+            panic!("expected an inline object schema");
+        };
+        let crate::v3_1::schema::SingleSchema::Object(object) = single.as_ref() else {
+            panic!("expected an object schema");
+        };
+        let pet = &object.properties.as_ref().unwrap()["pet"];
+        let crate::common::reference::RefOr::Ref(r) = pet else {
+            panic!("expected a reference");
+        };
+        assert_eq!(r.description.as_deref(), Some("d"));
+        assert!(!r.has_siblings());
+    }
+
+    #[test]
     fn openapi_version_lifted() {
         let raw = r##"{
             "openapi": "3.0.4",
