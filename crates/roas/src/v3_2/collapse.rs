@@ -37,7 +37,7 @@ use crate::common::collapse::{
     Bag, CollapseState, LiftableBag, NameContext, SchemaRepeats, lift_ref_or,
     note_existing_component,
 };
-use crate::common::reference::RefOr;
+use crate::common::reference::{RefOr, ReferenceObject};
 use crate::loader::Loader;
 use crate::v3_2::callback::Callback;
 use crate::v3_2::example::Example;
@@ -49,7 +49,7 @@ use crate::v3_2::parameter::Parameter;
 use crate::v3_2::path_item::{PathItem, Paths};
 use crate::v3_2::request_body::RequestBody;
 use crate::v3_2::response::{Response, Responses};
-use crate::v3_2::schema::{ArraySchema, ObjectSchema, Schema, SingleSchema};
+use crate::v3_2::schema::{ArraySchema, ObjectSchema, Schema, SchemaRef, SingleSchema};
 use crate::v3_2::spec::Spec;
 
 pub use crate::common::collapse::CollapseError;
@@ -57,7 +57,7 @@ pub use crate::common::collapse::CollapseError;
 // ── Collapser: per-bag state + loader handle ────────────────────────────
 
 pub(crate) struct Collapser<'a> {
-    schemas: Bag<Schema>,
+    schemas: Bag<Schema, SchemaRef>,
     parameters: Bag<Parameter>,
     responses: Bag<Response>,
     request_bodies: Bag<RequestBody>,
@@ -98,11 +98,11 @@ impl CollapseState for Collapser<'_> {
 // function that lifts nested slots, and (d) an optional name hint.
 // The generic `lift_ref_or` in `common::collapse` does the rest.
 
-impl<'a> LiftableBag<Collapser<'a>> for Schema {
+impl<'a> LiftableBag<Collapser<'a>, SchemaRef> for Schema {
     const PREFIX: &'static str = "#/components/schemas/";
     const IS_SCHEMA: bool = true;
 
-    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self> {
+    fn bag<'b>(c: &'b mut Collapser<'a>) -> &'b mut Bag<Self, SchemaRef> {
         &mut c.schemas
     }
 
@@ -271,23 +271,23 @@ fn recurse_schema(
         Schema::Bool(_) | Schema::Empty(_) | Schema::Multi(_) => Ok(()),
         Schema::AllOf(s) => {
             for (i, child) in s.all_of.iter_mut().enumerate() {
-                lift_ref_or::<Schema, _>(child, ctx.push(&format!("allOf[{i}]")), c)?;
+                lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("allOf[{i}]")), c)?;
             }
             Ok(())
         }
         Schema::AnyOf(s) => {
             for (i, child) in s.any_of.iter_mut().enumerate() {
-                lift_ref_or::<Schema, _>(child, ctx.push(&format!("anyOf[{i}]")), c)?;
+                lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("anyOf[{i}]")), c)?;
             }
             Ok(())
         }
         Schema::OneOf(s) => {
             for (i, child) in s.one_of.iter_mut().enumerate() {
-                lift_ref_or::<Schema, _>(child, ctx.push(&format!("oneOf[{i}]")), c)?;
+                lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("oneOf[{i}]")), c)?;
             }
             Ok(())
         }
-        Schema::Not(s) => lift_ref_or::<Schema, _>(&mut s.not, ctx.push("not"), c),
+        Schema::Not(s) => lift_ref_or::<Schema, _, _>(&mut s.not, ctx.push("not"), c),
         Schema::Single(s) => recurse_single_schema(s.as_mut(), ctx, c),
     }
 }
@@ -313,22 +313,22 @@ fn recurse_object_schema(
 ) -> Result<(), CollapseError> {
     if let Some(props) = o.properties.as_mut() {
         for (name, child) in props.iter_mut() {
-            lift_ref_or::<Schema, _>(child, ctx.push(&format!("properties.{name}")), c)?;
+            lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("properties.{name}")), c)?;
         }
     }
     if let Some(props) = o.pattern_properties.as_mut() {
         for (name, child) in props.iter_mut() {
-            lift_ref_or::<Schema, _>(child, ctx.push(&format!("patternProperties.{name}")), c)?;
+            lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("patternProperties.{name}")), c)?;
         }
     }
     if let Some(BoolOr::Item(s)) = o.additional_properties.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("additionalProperties"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("additionalProperties"), c)?;
     }
     if let Some(BoolOr::Item(s)) = o.unevaluated_properties.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("unevaluatedProperties"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("unevaluatedProperties"), c)?;
     }
     if let Some(s) = o.property_names.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("propertyNames"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("propertyNames"), c)?;
     }
     Ok(())
 }
@@ -339,7 +339,7 @@ fn recurse_array_schema(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(BoolOr::Item(s)) = a.items.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("items"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("items"), c)?;
     }
     Ok(())
 }
@@ -384,11 +384,11 @@ fn walk_parameter(
         Parameter::Querystring(p) => {
             let ctx = ctx.push(p.name.as_str());
             for (mime, mt) in p.content.iter_mut() {
-                lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+                lift_ref_or::<MediaType, _, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
             }
             if let Some(examples) = p.examples.as_mut() {
                 for (name, e) in examples.iter_mut() {
-                    lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+                    lift_ref_or::<Example, _, _>(e, ctx.push(&format!("examples.{name}")), c)?;
                 }
             }
             Ok(())
@@ -398,22 +398,22 @@ fn walk_parameter(
 
 fn walk_param_slots(
     ctx: NameContext,
-    schema: Option<&mut RefOr<Schema>>,
+    schema: Option<&mut RefOr<Schema, SchemaRef>>,
     content: Option<&mut BTreeMap<String, RefOr<MediaType>>>,
     examples: Option<&mut BTreeMap<String, RefOr<Example>>>,
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(s) = schema {
-        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("schema"), c)?;
     }
     if let Some(content) = content {
         for (mime, mt) in content.iter_mut() {
-            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+            lift_ref_or::<MediaType, _, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
         }
     }
     if let Some(examples) = examples {
         for (name, e) in examples.iter_mut() {
-            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+            lift_ref_or::<Example, _, _>(e, ctx.push(&format!("examples.{name}")), c)?;
         }
     }
     Ok(())
@@ -426,17 +426,17 @@ fn walk_response(
 ) -> Result<(), CollapseError> {
     if let Some(headers) = r.headers.as_mut() {
         for (name, h) in headers.iter_mut() {
-            lift_ref_or::<Header, _>(h, ctx.push(&format!("headers.{name}")), c)?;
+            lift_ref_or::<Header, _, _>(h, ctx.push(&format!("headers.{name}")), c)?;
         }
     }
     if let Some(content) = r.content.as_mut() {
         for (mime, mt) in content.iter_mut() {
-            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+            lift_ref_or::<MediaType, _, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
         }
     }
     if let Some(links) = r.links.as_mut() {
         for (name, l) in links.iter_mut() {
-            lift_ref_or::<Link, _>(l, ctx.push(&format!("links.{name}")), c)?;
+            lift_ref_or::<Link, _, _>(l, ctx.push(&format!("links.{name}")), c)?;
         }
     }
     Ok(())
@@ -448,11 +448,11 @@ fn walk_responses(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(default) = responses.default.as_mut() {
-        lift_ref_or::<Response, _>(default, ctx.push("default"), c)?;
+        lift_ref_or::<Response, _, _>(default, ctx.push("default"), c)?;
     }
     if let Some(map) = responses.responses.as_mut() {
         for (status, resp) in map.iter_mut() {
-            lift_ref_or::<Response, _>(resp, ctx.push(status), c)?;
+            lift_ref_or::<Response, _, _>(resp, ctx.push(status), c)?;
         }
     }
     Ok(())
@@ -464,7 +464,7 @@ fn walk_request_body(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     for (mime, mt) in rb.content.iter_mut() {
-        lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+        lift_ref_or::<MediaType, _, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
     }
     Ok(())
 }
@@ -475,16 +475,16 @@ fn walk_header(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(s) = h.schema.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("schema"), c)?;
     }
     if let Some(content) = h.content.as_mut() {
         for (mime, mt) in content.iter_mut() {
-            lift_ref_or::<MediaType, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
+            lift_ref_or::<MediaType, _, _>(mt, ctx.push(&format!("content.{mime}")), c)?;
         }
     }
     if let Some(examples) = h.examples.as_mut() {
         for (name, e) in examples.iter_mut() {
-            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+            lift_ref_or::<Example, _, _>(e, ctx.push(&format!("examples.{name}")), c)?;
         }
     }
     Ok(())
@@ -496,14 +496,14 @@ fn walk_media_type(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(s) = mt.schema.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("schema"), c)?;
     }
     if let Some(s) = mt.item_schema.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("itemSchema"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("itemSchema"), c)?;
     }
     if let Some(examples) = mt.examples.as_mut() {
         for (name, e) in examples.iter_mut() {
-            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+            lift_ref_or::<Example, _, _>(e, ctx.push(&format!("examples.{name}")), c)?;
         }
     }
     if let Some(encoding) = mt.encoding.as_mut() {
@@ -529,7 +529,7 @@ fn walk_encoding(
 ) -> Result<(), CollapseError> {
     if let Some(headers) = enc.headers.as_mut() {
         for (name, h) in headers.iter_mut() {
-            lift_ref_or::<Header, _>(h, ctx.push(&format!("headers.{name}")), c)?;
+            lift_ref_or::<Header, _, _>(h, ctx.push(&format!("headers.{name}")), c)?;
         }
     }
     // OAS 3.2 makes `Encoding` recursive (for nested multipart parts):
@@ -570,7 +570,7 @@ fn walk_path_item(
 ) -> Result<(), CollapseError> {
     if let Some(params) = pi.parameters.as_mut() {
         for (i, p) in params.iter_mut().enumerate() {
-            lift_ref_or::<Parameter, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
+            lift_ref_or::<Parameter, _, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
         }
     }
     if let Some(ops) = pi.operations.as_mut() {
@@ -600,18 +600,18 @@ fn walk_operation(
     };
     if let Some(params) = op.parameters.as_mut() {
         for (i, p) in params.iter_mut().enumerate() {
-            lift_ref_or::<Parameter, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
+            lift_ref_or::<Parameter, _, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
         }
     }
     if let Some(rb) = op.request_body.as_mut() {
-        lift_ref_or::<RequestBody, _>(rb, ctx.push("requestBody"), c)?;
+        lift_ref_or::<RequestBody, _, _>(rb, ctx.push("requestBody"), c)?;
     }
     if let Some(responses) = op.responses.as_mut() {
         walk_responses(responses, &ctx.push("responses"), c)?;
     }
     if let Some(callbacks) = op.callbacks.as_mut() {
         for (name, cb) in callbacks.iter_mut() {
-            lift_ref_or::<Callback, _>(cb, ctx.push(name), c)?;
+            lift_ref_or::<Callback, _, _>(cb, ctx.push(name), c)?;
         }
     }
     Ok(())
@@ -753,14 +753,14 @@ fn collapse_pass(
     // lifting its nested children. We compose this from the
     // `inline_names` / `take_inline` / `put_inline` primitives so the
     // walker has full `&mut Collapser` access during the recurse.
-    recurse_existing::<Schema>(&mut c, &["components", "schemas"])?;
-    recurse_existing::<Parameter>(&mut c, &["components", "parameters"])?;
-    recurse_existing::<Response>(&mut c, &["components", "responses"])?;
-    recurse_existing::<RequestBody>(&mut c, &["components", "requestBodies"])?;
-    recurse_existing::<Header>(&mut c, &["components", "headers"])?;
-    recurse_existing::<MediaType>(&mut c, &["components", "mediaTypes"])?;
+    recurse_existing::<Schema, _>(&mut c, &["components", "schemas"])?;
+    recurse_existing::<Parameter, _>(&mut c, &["components", "parameters"])?;
+    recurse_existing::<Response, _>(&mut c, &["components", "responses"])?;
+    recurse_existing::<RequestBody, _>(&mut c, &["components", "requestBodies"])?;
+    recurse_existing::<Header, _>(&mut c, &["components", "headers"])?;
+    recurse_existing::<MediaType, _>(&mut c, &["components", "mediaTypes"])?;
     // Examples and links are leaves — nothing to recurse INTO.
-    recurse_existing::<Callback>(&mut c, &["components", "callbacks"])?;
+    recurse_existing::<Callback, _>(&mut c, &["components", "callbacks"])?;
 
     // PathItem phase 2a: only the inline (reference == None) entries
     // get walked. Skip the ref-form ones (they're already pointers).
@@ -848,9 +848,10 @@ fn collapse_pass(
 /// Generic phase-2a driver: snapshot inline names of `T`'s bag,
 /// pull each out, walk via the trait's `walk`, put back with
 /// refreshed canonical form.
-fn recurse_existing<T>(c: &mut Collapser<'_>, ctx_root: &[&str]) -> Result<(), CollapseError>
+fn recurse_existing<T, R>(c: &mut Collapser<'_>, ctx_root: &[&str]) -> Result<(), CollapseError>
 where
-    T: for<'b> LiftableBag<Collapser<'b>>,
+    T: for<'b> LiftableBag<Collapser<'b>, R>,
+    R: ReferenceObject,
 {
     let names = T::bag(c).inline_names();
     for name in names {
@@ -1314,6 +1315,100 @@ mod tests {
                 "#/components/schemas/Pet"
             );
         }
+    }
+
+    #[test]
+    fn internal_ref_with_siblings_is_left_in_place_by_collapse() {
+        let before = serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "#/components/schemas/Pet",
+                                            "description": "d",
+                                            "readOnly": true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {"schemas": {"Pet": {"type": "object", "title": "Pet"}}}
+        });
+        let mut spec = parse(before);
+        spec.collapse(None).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            schema_in_lifted_content(&v, resp, "application/json"),
+            serde_json::json!({
+                "$ref": "#/components/schemas/Pet",
+                "description": "d",
+                "readOnly": true
+            }),
+        );
+    }
+
+    #[test]
+    fn external_ref_with_siblings_keeps_them_when_lifted() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({
+                    "Pet": {"title": "Pet", "type": "object", "properties": {"id": {"type": "integer"}}}
+                }),
+            )
+            .expect("preload");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "external.json#/Pet",
+                                            "description": "d",
+                                            "readOnly": true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            schema_in_lifted_content(&v, resp, "application/json"),
+            serde_json::json!({
+                "$ref": "#/components/schemas/Pet",
+                "description": "d",
+                "readOnly": true
+            }),
+        );
+        assert_eq!(lifted_schema_names(&spec), vec!["Pet".to_owned()]);
     }
 
     #[test]

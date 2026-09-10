@@ -259,23 +259,23 @@ fn recurse_schema(
     match schema {
         Schema::AllOf(s) => {
             for (i, child) in s.all_of.iter_mut().enumerate() {
-                lift_ref_or::<Schema, _>(child, ctx.push(&format!("allOf[{i}]")), c)?;
+                lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("allOf[{i}]")), c)?;
             }
             Ok(())
         }
         Schema::AnyOf(s) => {
             for (i, child) in s.any_of.iter_mut().enumerate() {
-                lift_ref_or::<Schema, _>(child, ctx.push(&format!("anyOf[{i}]")), c)?;
+                lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("anyOf[{i}]")), c)?;
             }
             Ok(())
         }
         Schema::OneOf(s) => {
             for (i, child) in s.one_of.iter_mut().enumerate() {
-                lift_ref_or::<Schema, _>(child, ctx.push(&format!("oneOf[{i}]")), c)?;
+                lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("oneOf[{i}]")), c)?;
             }
             Ok(())
         }
-        Schema::Not(s) => lift_ref_or::<Schema, _>(&mut s.not, ctx.push("not"), c),
+        Schema::Not(s) => lift_ref_or::<Schema, _, _>(&mut s.not, ctx.push("not"), c),
         Schema::Single(s) => recurse_single_schema(s.as_mut(), ctx, c),
     }
 }
@@ -301,11 +301,11 @@ fn recurse_object_schema(
 ) -> Result<(), CollapseError> {
     if let Some(props) = o.properties.as_mut() {
         for (name, child) in props.iter_mut() {
-            lift_ref_or::<Schema, _>(child, ctx.push(&format!("properties.{name}")), c)?;
+            lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("properties.{name}")), c)?;
         }
     }
     if let Some(BoolOr::Item(s)) = o.additional_properties.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("additionalProperties"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("additionalProperties"), c)?;
     }
     Ok(())
 }
@@ -316,7 +316,7 @@ fn recurse_array_schema(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(s) = a.items.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("items"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("items"), c)?;
     }
     Ok(())
 }
@@ -368,7 +368,7 @@ fn walk_param_slots(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(s) = schema {
-        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("schema"), c)?;
     }
     if let Some(content) = content {
         for (mime, mt) in content.iter_mut() {
@@ -377,7 +377,7 @@ fn walk_param_slots(
     }
     if let Some(examples) = examples {
         for (name, e) in examples.iter_mut() {
-            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+            lift_ref_or::<Example, _, _>(e, ctx.push(&format!("examples.{name}")), c)?;
         }
     }
     Ok(())
@@ -390,7 +390,7 @@ fn walk_response(
 ) -> Result<(), CollapseError> {
     if let Some(headers) = r.headers.as_mut() {
         for (name, h) in headers.iter_mut() {
-            lift_ref_or::<Header, _>(h, ctx.push(&format!("headers.{name}")), c)?;
+            lift_ref_or::<Header, _, _>(h, ctx.push(&format!("headers.{name}")), c)?;
         }
     }
     if let Some(content) = r.content.as_mut() {
@@ -400,7 +400,7 @@ fn walk_response(
     }
     if let Some(links) = r.links.as_mut() {
         for (name, l) in links.iter_mut() {
-            lift_ref_or::<Link, _>(l, ctx.push(&format!("links.{name}")), c)?;
+            lift_ref_or::<Link, _, _>(l, ctx.push(&format!("links.{name}")), c)?;
         }
     }
     Ok(())
@@ -412,11 +412,11 @@ fn walk_responses(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(default) = responses.default.as_mut() {
-        lift_ref_or::<Response, _>(default, ctx.push("default"), c)?;
+        lift_ref_or::<Response, _, _>(default, ctx.push("default"), c)?;
     }
     if let Some(map) = responses.responses.as_mut() {
         for (status, resp) in map.iter_mut() {
-            lift_ref_or::<Response, _>(resp, ctx.push(status), c)?;
+            lift_ref_or::<Response, _, _>(resp, ctx.push(status), c)?;
         }
     }
     Ok(())
@@ -439,7 +439,7 @@ fn walk_header(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(s) = h.schema.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("schema"), c)?;
     }
     if let Some(content) = h.content.as_mut() {
         for (mime, mt) in content.iter_mut() {
@@ -448,7 +448,7 @@ fn walk_header(
     }
     if let Some(examples) = h.examples.as_mut() {
         for (name, e) in examples.iter_mut() {
-            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+            lift_ref_or::<Example, _, _>(e, ctx.push(&format!("examples.{name}")), c)?;
         }
     }
     Ok(())
@@ -460,11 +460,11 @@ fn walk_media_type(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(s) = mt.schema.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("schema"), c)?;
     }
     if let Some(examples) = mt.examples.as_mut() {
         for (name, e) in examples.iter_mut() {
-            lift_ref_or::<Example, _>(e, ctx.push(&format!("examples.{name}")), c)?;
+            lift_ref_or::<Example, _, _>(e, ctx.push(&format!("examples.{name}")), c)?;
         }
     }
     if let Some(encoding) = mt.encoding.as_mut() {
@@ -482,7 +482,7 @@ fn walk_encoding(
 ) -> Result<(), CollapseError> {
     if let Some(headers) = enc.headers.as_mut() {
         for (name, h) in headers.iter_mut() {
-            lift_ref_or::<Header, _>(h, ctx.push(&format!("headers.{name}")), c)?;
+            lift_ref_or::<Header, _, _>(h, ctx.push(&format!("headers.{name}")), c)?;
         }
     }
     Ok(())
@@ -506,7 +506,7 @@ fn walk_path_item(
 ) -> Result<(), CollapseError> {
     if let Some(params) = pi.parameters.as_mut() {
         for (i, p) in params.iter_mut().enumerate() {
-            lift_ref_or::<Parameter, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
+            lift_ref_or::<Parameter, _, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
         }
     }
     if let Some(ops) = pi.operations.as_mut() {
@@ -531,16 +531,16 @@ fn walk_operation(
     };
     if let Some(params) = op.parameters.as_mut() {
         for (i, p) in params.iter_mut().enumerate() {
-            lift_ref_or::<Parameter, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
+            lift_ref_or::<Parameter, _, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
         }
     }
     if let Some(rb) = op.request_body.as_mut() {
-        lift_ref_or::<RequestBody, _>(rb, ctx.push("requestBody"), c)?;
+        lift_ref_or::<RequestBody, _, _>(rb, ctx.push("requestBody"), c)?;
     }
     walk_responses(&mut op.responses, &ctx.push("responses"), c)?;
     if let Some(callbacks) = op.callbacks.as_mut() {
         for (name, cb) in callbacks.iter_mut() {
-            lift_ref_or::<Callback, _>(cb, ctx.push(name), c)?;
+            lift_ref_or::<Callback, _, _>(cb, ctx.push(name), c)?;
         }
     }
     Ok(())

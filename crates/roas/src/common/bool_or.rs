@@ -9,7 +9,10 @@ pub enum BoolOr<T> {
 
 // v2 and v3.0 hold a `BoolOr` but never validate through one.
 #[cfg(any(feature = "v3_1", feature = "v3_2"))]
-impl<D> BoolOr<crate::common::reference::RefOr<D>> {
+impl<D, R> BoolOr<crate::common::reference::RefOr<D, R>>
+where
+    R: crate::common::reference::ReferenceObject,
+{
     pub(crate) fn validate_with_context<T>(
         &self,
         ctx: &mut crate::validation::Context<T>,
@@ -20,6 +23,7 @@ impl<D> BoolOr<crate::common::reference::RefOr<D>> {
             + 'static
             + Clone
             + serde::de::DeserializeOwned,
+        R: crate::validation::ValidateWithContext<T>,
     {
         match self {
             BoolOr::Bool(_) => {}

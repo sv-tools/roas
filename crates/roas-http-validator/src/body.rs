@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use roas::common::reference::RefOr;
 use roas::v3_2::media_type::{Encoding, MediaType};
 use roas::v3_2::request_body::RequestBody;
-use roas::v3_2::schema::{Schema, SingleSchema};
+use roas::v3_2::schema::{Schema, SchemaRef, SingleSchema};
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
 
@@ -170,7 +170,7 @@ pub(crate) fn decode(
     bytes: &[u8],
     media_type: &str,
     content_type: &str,
-    declared: &RefOr<Schema>,
+    declared: &RefOr<Schema, SchemaRef>,
     encoding: Option<&BTreeMap<String, Encoding>>,
     spec: &Spec,
     decoders: &Decoders,
@@ -217,9 +217,9 @@ fn as_text(bytes: &[u8]) -> Result<String, Decoded> {
 /// The `properties` of a schema, when it is an object schema — what a
 /// form body's fields are coerced through.
 fn object_properties<'s>(
-    schema: &'s RefOr<Schema>,
+    schema: &'s RefOr<Schema, SchemaRef>,
     spec: &'s Spec,
-) -> Option<&'s BTreeMap<String, RefOr<Schema>>> {
+) -> Option<&'s BTreeMap<String, RefOr<Schema, SchemaRef>>> {
     match schema.get_item(spec).ok()? {
         Schema::Single(single) => match single.as_ref() {
             SingleSchema::Object(object) => object.properties.as_ref(),
