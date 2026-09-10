@@ -10,6 +10,8 @@ homepage = "https://github.com/sv-tools/roas"
 repository = "https://github.com/sv-tools/roas"
 
 [workspace.dependencies]
+roas = { version = "0.20.1", path = "crates/roas", default-features = false }
+roas-asyncapi = { version = "0.4", path = "crates/roas-asyncapi", default-features = false }
 actix-web = { version = "4.15", default-features = false }
 anyhow = "1.0.99"
 axum = "0.8"

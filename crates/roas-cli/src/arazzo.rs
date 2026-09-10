@@ -11,9 +11,10 @@ use clap::{Subcommand, ValueEnum};
 use enumset::EnumSet;
 use roas_arazzo::validation::{Error as ArazzoError, Validate, ValidationOptions};
 use roas_arazzo::{v1_0, v1_1};
-use roas_arazzo_executor::{Client, Options, prepare, required_sources};
+use roas_arazzo_executor::{
+    Client, Options, SourceLoadOptions, SourceRegistry, prepare, required_sources,
+};
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use url::Url;
 
@@ -141,7 +142,7 @@ pub(crate) enum ArazzoCommand {
     Convert(ArazzoConvertArgs),
     /// Run a workflow: perform every step's request and report what
     /// happened.
-    Run(ArazzoRunArgs),
+    Run(Box<ArazzoRunArgs>),
     /// List the workflows a description offers, and what each one takes.
     List(ArazzoListArgs),
 }
@@ -227,6 +228,27 @@ pub(crate) struct ArazzoRunArgs {
     #[arg(long, value_name = "NAME=PATH")]
     source: Vec<String>,
 
+    /// Preload a possible source document by identity, without assigning a root alias.
+    #[arg(long, value_name = "FILE")]
+    source_document: Vec<PathBuf>,
+
+    /// Traverse every declared source, including linked Arazzo documents.
+    /// Fetching still requires --load; unrelated failures are reported as diagnostics.
+    #[arg(long)]
+    load_all_sources: bool,
+
+    /// Source-graph document/fetch-attempt budget, separate from workflow limits.
+    #[arg(long, default_value_t = 256, value_name = "N")]
+    source_max_documents: usize,
+
+    /// Source-graph depth budget (entry document is depth zero).
+    #[arg(long, default_value_t = 32, value_name = "N")]
+    source_max_depth: usize,
+
+    /// Allow Arazzo retrieval aliases instead of canonical $self identities.
+    #[arg(long)]
+    allow_source_retrieval_aliases: bool,
+
     /// Send a source description's requests somewhere else, e.g.
     /// `--base-url petStore=http://127.0.0.1:8080` (repeatable) —
     /// whatever its document says.
@@ -274,7 +296,7 @@ pub(crate) fn run_arazzo(cmd: ArazzoCommand) -> Result<()> {
     match cmd {
         ArazzoCommand::Validate(args) => run_arazzo_validate(args),
         ArazzoCommand::Convert(args) => run_arazzo_convert(args),
-        ArazzoCommand::Run(args) => run_arazzo_run(args),
+        ArazzoCommand::Run(args) => run_arazzo_run(*args),
         ArazzoCommand::List(args) => run_arazzo_list(args),
     }
 }
@@ -398,7 +420,7 @@ fn inputs_of(workflow: &v1_1::Workflow) -> Vec<String> {
 fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
     let (value, input_format) = read_input(&source, args.format)?;
-    let detected = detect_or_use_arazzo(None, value)?;
+    let detected = detect_or_use_arazzo(None, value.clone())?;
     // One interpreter: a v1.0 description is upconverted first.
     let description = match detected {
         DetectedArazzo::V1_1(description) => description,
@@ -482,9 +504,14 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     if let Some(max_steps) = args.max_steps {
         options = options.max_steps(max_steps);
     }
-    let (options, any) = sources(options, &description, &source, &args)?;
+    let (options, any, source_diagnostics) = sources(options, &description, value, &source, &args)?;
 
     let explain = |error: anyhow::Error| {
+        let error = if source_diagnostics.is_empty() {
+            error
+        } else {
+            anyhow!("{error}\n{}", source_diagnostics.join("\n"))
+        };
         if any || description.source_descriptions.is_empty() {
             anyhow!(error)
         } else {
@@ -497,13 +524,20 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
         }
     };
     let plan = prepare(&description, &options).map_err(|error| explain(anyhow!(error)))?;
+    // Preparation failures carry these diagnostics in the returned error.
+    // Once preparation succeeds, emit optional warnings here, exactly once.
+    if !args.quiet {
+        for diagnostic in &source_diagnostics {
+            eprintln!("- {diagnostic}");
+        }
+    }
     let report = plan.execute(&mut Client::blocking()).map_err(|failure| {
         if !args.quiet
             && let Some(report) = &failure.report
         {
             eprint!("{report}");
         }
-        explain(anyhow!(failure.error))
+        anyhow!(failure.error)
     })?;
 
     if !args.quiet {
@@ -528,67 +562,71 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
 /// line, then — where `--load` allows it — those the description points
 /// at itself.
 fn sources(
-    mut options: Options,
+    options: Options,
     description: &v1_1::Description,
+    value: Value,
     from: &InputSource,
     args: &ArazzoRunArgs,
-) -> Result<(Options, bool)> {
-    let mut supplied = BTreeMap::new();
+) -> Result<(Options, bool, Vec<String>)> {
+    let needed = required_sources(description, &options)?;
+    let mut registry = SourceRegistry::new();
+    let root = registry.insert(base_uri(from, None)?.as_str(), value)?;
+    // Index every explicitly supplied document before linking any source.
+    let mut supplied = Vec::new();
     for source in &args.source {
         let (name, path) = split_pair(source, "--source")?;
-        let (document, _) = read_input(&InputSource::File(PathBuf::from(path)), None)
+        if registry.source(root, name).is_none() {
+            bail!("`--source {name}=…` names no source description of this document");
+        }
+        let from = InputSource::File(PathBuf::from(path));
+        let (document, _) = read_input(&from, None)
             .with_context(|| format!("reading source description {path}"))?;
-        supplied.insert(name.to_owned(), document);
+        let id = registry.insert(base_uri(&from, None)?.as_str(), document)?;
+        supplied.push((name.to_owned(), id));
     }
-
-    let needed = required_sources(description, &options)?;
-    let mut loader = build_loader(&args.load);
-    let base = base_uri(from, description.self_.as_deref())?;
-    let mut any = false;
-    for declared in &description.source_descriptions {
-        let url = declared.url.clone();
-        let document = match supplied.remove(&declared.name) {
-            Some(document) => document,
-            None => {
-                if !needed.contains(&declared.name) {
-                    continue;
-                }
-                let Some(loader) = loader.as_mut() else {
-                    // Nothing to load it with. The executor says so if a
-                    // step turns out to need it, naming the source.
-                    continue;
-                };
-                let uri = base
-                    .join(&url)
-                    .map_err(|error| {
-                        if base.cannot_be_a_base() {
-                            anyhow!(
-                                "`{url}` is relative, and `$self` (`{base}`) is not something a \
-                                 relative reference can be resolved against — give the source an \
-                                 absolute URL, or the description a hierarchical `$self`"
-                            )
-                        } else {
-                            anyhow!("resolving `{url}` against `{base}`: {error}")
-                        }
-                    })?
-                    .to_string();
-                loader
-                    .load_resource(&uri)
-                    .with_context(|| {
-                        format!("loading source description `{}` from {uri}", declared.name)
-                    })?
-                    .clone()
-            }
-        };
-        options = options.source(declared.name.clone(), url, document);
-        any = true;
+    for path in &args.source_document {
+        let from = InputSource::File(path.clone());
+        let (document, _) = read_input(&from, None)
+            .with_context(|| format!("reading source document {}", path.display()))?;
+        registry.insert(base_uri(&from, None)?.as_str(), document)?;
     }
-    // A `--source` for something the description does not declare is
-    // more likely a typo than a spare.
-    if let Some((name, _)) = supplied.into_iter().next() {
-        bail!("`--source {name}=…` names no source description of this document");
+    for (name, id) in supplied {
+        registry.override_source(root, &name, id)?;
     }
-    Ok((options, any))
+    let mut selection = needed;
+    selection.extend(
+        args.source
+            .iter()
+            .filter_map(|source| source.split_once('=').map(|(name, _)| name.to_owned())),
+    );
+    let mut load_options = SourceLoadOptions::default();
+    load_options.root_sources = (!args.load_all_sources).then_some(selection);
+    load_options.max_documents = args.source_max_documents;
+    load_options.max_depth = args.source_max_depth;
+    load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
+    let mut loader = build_loader(&args.load).unwrap_or_default();
+    let report = registry.load_sources(root, &mut loader, &load_options)?;
+    let diagnostics = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{}: {} (`{}`): {}",
+                registry
+                    .document(diagnostic.owner)
+                    .expect("diagnostic owner")
+                    .identity(),
+                diagnostic.path,
+                diagnostic.source_name,
+                diagnostic.error,
+            )
+        })
+        .collect::<Vec<_>>();
+    let any = registry
+        .sources(root)?
+        .iter()
+        .any(|source| source.target.is_some());
+    Ok((options.source_registry(&registry, root)?, any, diagnostics))
 }
 
 /// What a relative source description URL is resolved against.
@@ -839,6 +877,11 @@ mod tests {
             input: vec!["petId=7".to_owned()],
             inputs: None,
             source: vec![format!("petStore={}", openapi.0.display())],
+            source_document: Vec::new(),
+            load_all_sources: false,
+            source_max_documents: 256,
+            source_max_depth: 32,
+            allow_source_retrieval_aliases: false,
             base_url: vec![format!("petStore={base}")],
             header: vec!["Authorization: Bearer abc".to_owned()],
             load: Vec::new(),
@@ -859,7 +902,7 @@ mod tests {
         args.base_url = vec!["petStroe=http://127.0.0.1:9".to_owned()];
         args.quiet = true;
 
-        let error = run_arazzo(ArazzoCommand::Run(args)).unwrap_err();
+        let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -890,7 +933,7 @@ mod tests {
         args.workflow = Some("w".to_owned());
         args.quiet = true;
 
-        let error = run_arazzo(ArazzoCommand::Run(args)).unwrap_err();
+        let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
 
         assert!(
             error.to_string().contains("does not validate"),
@@ -954,6 +997,101 @@ mod tests {
     }
 
     #[test]
+    fn full_graph_failures_are_located_but_only_required_sources_block_preparation() {
+        let (description, openapi) = runnable();
+        let (mut value, _) = read_input(&InputSource::File(description.0.clone()), None).unwrap();
+        value["sourceDescriptions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "name": "unavailable", "url": "missing-for-source-graph.json", "type": "openapi"
+            }));
+        value["workflows"][0]["steps"][0]["operationId"] =
+            json!("$sourceDescriptions.petStore.getPetById");
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
+        args.load_all_sources = true;
+        args.load.push(LoaderKind::File);
+        let (options, any, diagnostics) = sources(
+            Options::new(),
+            &parsed,
+            value.clone(),
+            &InputSource::File(description.0.clone()),
+            &args,
+        )
+        .unwrap();
+        assert!(any);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("sourceDescriptions[1].url"));
+        assert!(diagnostics[0].contains("unavailable"));
+        prepare(&parsed, &options).unwrap();
+        value["workflows"][0]["steps"][0]["operationId"] = json!("getPetById");
+        let bare = serde_json::from_value(value).unwrap();
+        assert!(
+            prepare(&bare, &options)
+                .unwrap_err()
+                .to_string()
+                .contains("was not supplied")
+        );
+
+        args.source_max_documents = 1; // root + explicitly supplied API exceed the initial budget
+        let error = run_arazzo_run(args).unwrap_err().to_string();
+        assert!(error.contains("source graph document limit (1)"), "{error}");
+    }
+
+    #[test]
+    fn supplied_documents_are_indexed_offline_before_linking_and_follow_identity_policy() {
+        let (description, openapi) = runnable();
+        let (mut value, _) = read_input(&InputSource::File(description.0.clone()), None).unwrap();
+        value["workflows"][0]["steps"][0]["operationId"] =
+            json!("$sourceDescriptions.petStore.getPetById");
+        let mut child = value.clone();
+        child["$self"] = json!("https://identity.test/child.json");
+        child["sourceDescriptions"] = json!([]);
+        let supplied = TempFile::write("child.json", &child);
+        value["sourceDescriptions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "name": "child", "url": "https://identity.test/child.json", "type": "arazzo"
+            }));
+        let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
+        args.load_all_sources = true;
+        args.source_document.push(supplied.0.clone());
+        let from = InputSource::File(description.0.clone());
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        let (options, _, diagnostics) =
+            sources(Options::new(), &parsed, value.clone(), &from, &args).unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            options
+                .source_document("child")
+                .unwrap()
+                .identity()
+                .as_str(),
+            "https://identity.test/child.json"
+        );
+
+        value["sourceDescriptions"][1]["url"] = json!(
+            base_uri(&InputSource::File(supplied.0.clone()), None)
+                .unwrap()
+                .as_str()
+        );
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        let (_, _, diagnostics) =
+            sources(Options::new(), &parsed, value.clone(), &from, &args).unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("not the Arazzo identity"));
+        args.allow_source_retrieval_aliases = true;
+        let (_, _, diagnostics) = sources(Options::new(), &parsed, value, &from, &args).unwrap();
+        assert!(diagnostics.is_empty());
+
+        args.source_document = vec![description.0.with_extension("not-found")];
+        let error = run_arazzo_run(args).unwrap_err();
+        assert!(format!("{error:#}").contains("reading source document"));
+    }
+
+    #[test]
     fn run_retains_a_runtime_output_failure_with_or_without_quiet() {
         let (_, openapi) = runnable();
         let description = TempFile::write(
@@ -1005,15 +1143,18 @@ mod tests {
         let mut args = run_args(&lenient, &openapi, &base);
         args.quiet = true;
 
-        let strict = run_arazzo(ArazzoCommand::Run(ArazzoRunArgs {
-            ignore: Vec::new(),
-            ..clone_args(&args)
-        }))
+        let strict = run_arazzo(ArazzoCommand::Run(
+            ArazzoRunArgs {
+                ignore: Vec::new(),
+                ..clone_args(&args)
+            }
+            .into(),
+        ))
         .unwrap_err();
         assert!(strict.to_string().contains("does not validate"), "{strict}");
 
         args.ignore = vec![ValidationOptions::IgnoreEmptyInfoTitle];
-        run_arazzo(ArazzoCommand::Run(args)).expect("the check was let pass");
+        run_arazzo(ArazzoCommand::Run(args.into())).expect("the check was let pass");
         assert_eq!(join.join().expect("the server thread").len(), 1);
     }
 
@@ -1026,6 +1167,11 @@ mod tests {
             input: args.input.clone(),
             inputs: args.inputs.clone(),
             source: args.source.clone(),
+            source_document: args.source_document.clone(),
+            load_all_sources: args.load_all_sources,
+            source_max_documents: args.source_max_documents,
+            source_max_depth: args.source_max_depth,
+            allow_source_retrieval_aliases: args.allow_source_retrieval_aliases,
             base_url: args.base_url.clone(),
             header: args.header.clone(),
             load: args.load.clone(),
@@ -1152,7 +1298,7 @@ mod tests {
         args.workflow = None;
         args.quiet = true;
 
-        let error = run_arazzo(ArazzoCommand::Run(args)).unwrap_err();
+        let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -1169,7 +1315,7 @@ mod tests {
         args.workflow = None;
         args.quiet = true;
 
-        run_arazzo(ArazzoCommand::Run(args)).expect("one workflow is no choice at all");
+        run_arazzo(ArazzoCommand::Run(args.into())).expect("one workflow is no choice at all");
 
         assert_eq!(join.join().expect("the server thread").len(), 1);
     }
@@ -1234,8 +1380,10 @@ mod tests {
         let (description, openapi) = runnable();
         let (base, join) = server(1, 200, r#"{"id":7,"name":"fluffy"}"#);
 
-        run_arazzo(ArazzoCommand::Run(run_args(&description, &openapi, &base)))
-            .expect("the workflow runs");
+        run_arazzo(ArazzoCommand::Run(
+            run_args(&description, &openapi, &base).into(),
+        ))
+        .expect("the workflow runs");
 
         let asked = join.join().expect("the server thread");
         assert_eq!(asked.len(), 1);
@@ -1247,8 +1395,10 @@ mod tests {
         let (description, openapi) = runnable();
         let (base, join) = server(1, 500, r#"{"error":"gone"}"#);
 
-        let error =
-            run_arazzo(ArazzoCommand::Run(run_args(&description, &openapi, &base))).unwrap_err();
+        let error = run_arazzo(ArazzoCommand::Run(
+            run_args(&description, &openapi, &base).into(),
+        ))
+        .unwrap_err();
 
         assert!(
             error.to_string().contains("workflow `buyPet` failed"),
@@ -1268,7 +1418,7 @@ mod tests {
         args.input = vec!["petId=9".to_owned()];
         args.quiet = true;
 
-        run_arazzo(ArazzoCommand::Run(args)).expect("the workflow runs");
+        run_arazzo(ArazzoCommand::Run(args.into())).expect("the workflow runs");
 
         let asked = join.join().expect("the server thread");
         assert!(asked[0].starts_with("GET /pets/9 "), "{}", asked[0]);
@@ -1303,7 +1453,7 @@ mod tests {
             let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
             args.quiet = true;
             change(&mut args);
-            let error = run_arazzo(ArazzoCommand::Run(args)).unwrap_err();
+            let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
             assert!(
                 format!("{error:#}").contains(expected),
                 "expected {expected:?}, got: {error:#}"
@@ -1322,6 +1472,14 @@ mod tests {
             "petId=7",
             "--source",
             "petStore=./openapi.yaml",
+            "--source-document",
+            "./child.yaml",
+            "--load-all-sources",
+            "--source-max-documents",
+            "10",
+            "--source-max-depth",
+            "3",
+            "--allow-source-retrieval-aliases",
             "--base-url",
             "petStore=http://127.0.0.1:8080",
             "--header",
@@ -1339,6 +1497,11 @@ mod tests {
                 assert_eq!(a.workflow.as_deref(), Some("buyPet"));
                 assert_eq!(a.input, ["petId=7"]);
                 assert_eq!(a.source, ["petStore=./openapi.yaml"]);
+                assert_eq!(a.source_document, [PathBuf::from("./child.yaml")]);
+                assert!(a.load_all_sources);
+                assert_eq!(a.source_max_documents, 10);
+                assert_eq!(a.source_max_depth, 3);
+                assert!(a.allow_source_retrieval_aliases);
                 assert_eq!(a.base_url, ["petStore=http://127.0.0.1:8080"]);
                 assert_eq!(a.header, ["Authorization: Bearer abc"]);
                 assert_eq!(a.max_steps, Some(50));
@@ -1379,6 +1542,11 @@ mod tests {
             input: vec!["petId=7".to_owned()],
             inputs: None,
             source: Vec::new(),
+            source_document: Vec::new(),
+            load_all_sources: false,
+            source_max_documents: 256,
+            source_max_depth: 32,
+            allow_source_retrieval_aliases: false,
             base_url: Vec::new(),
             header: Vec::new(),
             load: Vec::new(),
@@ -1388,7 +1556,7 @@ mod tests {
             format: None,
             output_format: None,
         };
-        let error = run_arazzo(ArazzoCommand::Run(args)).unwrap_err();
+        let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
         let error = format!("{error:#}");
         assert!(
             error.contains("no source description was supplied"),

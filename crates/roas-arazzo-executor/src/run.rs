@@ -123,7 +123,7 @@ impl Options {
             name.into(),
             Source {
                 url: url.into(),
-                document,
+                data: crate::operation::SourceData::Owned(document),
             },
         );
         self

@@ -49,6 +49,78 @@ The engine decides *what* to send and asks a client to send it. That is what let
 
 Source descriptions are the same story: fetching them is IO, so the caller passes the parsed documents to `Options::source`. [`roas-file-fetcher`](https://crates.io/crates/roas-file-fetcher) and [`roas-http-fetcher`](https://crates.io/crates/roas-http-fetcher) do that job for the loader and do it here just as well.
 
+### Document identities and source graphs
+
+The optional `source-graph` feature adds `SourceRegistry` and bounded sync/async
+traversal through a caller-configured `roas::loader::Loader`. It registers no file
+or network fetchers itself. The existing `Options::source` API remains available
+without this feature.
+
+```rust,no_run
+use roas::loader::Loader;
+use roas_arazzo_executor::{Options, SourceLoadOptions, SourceRegistry, prepare};
+use serde_json::Value;
+
+# fn example(root_json: Value, loader: &mut Loader) -> Result<(), Box<dyn std::error::Error>> {
+let mut registry = SourceRegistry::new();
+let root = registry.insert("https://example.test/workflows/root.json", root_json)?;
+// Insert every other supplied document here, before loading any links.
+let loading = registry.load_sources(root, loader, &SourceLoadOptions::default())?;
+for diagnostic in &loading.diagnostics {
+    eprintln!("{}: {diagnostic}", registry.document(diagnostic.owner)?.identity());
+}
+let options = Options::new().source_registry(&registry, root)?;
+let description = registry.document(root)?.arazzo().expect("an Arazzo root");
+let plan = prepare(description, &options)?;
+// plan.execute(&mut client), or plan.execute_async(&mut client).await
+# Ok(()) }
+```
+
+Documents retain their original value, retrieval URI, canonical identity, effective
+reference base, and written version. Arazzo is deserialized in full before its
+references are resolved. A relative `$self` resolves against the retrieval URI
+(the final redirect location when exposed by the fetcher); document references
+then resolve against that identity. `$self` fragments and conflicting documents
+claiming the same identity/location are rejected. URI normalization removes
+fragments for document lookup and handles dot segments/default ports; queries
+remain distinct. It does not canonicalize filesystem symlinks or all percent escapes.
+
+Canonical Arazzo identities follow
+[identity-based referencing](https://spec.openapis.org/arazzo/v1.1.0.html#identity-based-referencing).
+An Arazzo retrieval URL different from its `$self` is accepted only with
+`SourceLoadOptions::retrieval_aliases = true`, a compatibility extension. Explicit
+`override_source(owner, name, target)` is also available. Aliases and
+`override_base_url` are scoped to the owning document; identical names in different
+documents never overwrite each other. Explicit `Options::source` / `base_url`
+entries win over the registry adapter. `Options::source_document` exposes the
+metadata of registry-backed sources, and returns `None` for legacy sources.
+Registry-backed options (including cloned options and source aliases) share the
+loader's immutable raw value. They do not keep another full JSON copy. Arazzo also
+has its parsed typed model; API documents remain raw values with checked versions.
+
+Cycles are retained as back edges, not recursively expanded documents. Shared
+dependencies reuse handles and loaded resources. The default limits are 256
+existing documents plus distinct loader attempts, and depth 32 (root depth zero).
+Failed attempts and different retrieval aliases also consume the document budget;
+known cycles/diamonds do not consume additional depth. `root_sources` selects root
+aliases; linked Arazzo documents are traversed in full. These limits are independent
+of workflow step/retry/call-depth limits. Supplied documents must be inserted before
+loading; the caller is responsible for bounding those inputs and response sizes.
+
+Loading failures carry owner/alias/field locations and leave readable documents
+available. Preparation decides whether that partial graph is sufficient: an
+unrelated missing source need not block a qualified operation, but a missing
+candidate source still prevents proving a bare `operationId` unique. Loading does
+not silently certify a partial graph as complete.
+
+Recognized versions are Arazzo 1.0/1.1, OpenAPI 2.0/3.0/3.1/3.2, and AsyncAPI
+2.6/3.0/3.1. Arazzo 1.0 retains its wire version and is upconverted for execution.
+API documents retain complete raw values and model-checked versions; loading is
+**not** API structural or schema validation. AsyncAPI loading does not enable
+broker execution. Cross-document workflow execution, external OpenAPI Path Item
+resolution, and relative API-server computation are not added by this feature.
+Document bases are distinct from API endpoint overrides.
+
 ## Testing a workflow
 
 `testing::Fake` answers from a script and keeps what it was asked, so a workflow can be tested without a server:
