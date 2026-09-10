@@ -24,7 +24,10 @@ use reqwest::Client as AsyncClient;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
-use roas::loader::{AsyncResourceFetcher, FetchFuture, LoaderError, ResourceFetcher};
+use roas::loader::{
+    AsyncResourceFetcher, DocumentFetchFuture, FetchFuture, LoadedDocument, LoaderError,
+    ResourceFetcher,
+};
 #[cfg(feature = "yaml")]
 use serde::de::Error as _;
 use serde_json::Value;
@@ -122,6 +125,10 @@ impl Default for Fetcher<AsyncClient> {
 
 impl ResourceFetcher for Fetcher<Client> {
     fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
+        Ok(self.fetch_document(uri)?.document)
+    }
+
+    fn fetch_document(&mut self, uri: &Url) -> Result<LoadedDocument, LoaderError> {
         check_scheme(uri)?;
         let response = self.client.get(uri.as_str()).send().map_err(|source| {
             fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
@@ -141,16 +148,22 @@ impl ResourceFetcher for Fetcher<Client> {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        let retrieval = response.url().clone();
         let bytes = response.bytes().map_err(|source| {
             fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
         })?;
 
-        parse_body(uri, content_type.as_deref(), &bytes)
+        parse_body(&retrieval, content_type.as_deref(), &bytes)
+            .map(|document| LoadedDocument::new(document, retrieval))
     }
 }
 
 impl AsyncResourceFetcher for Fetcher<AsyncClient> {
     fn fetch<'a>(&'a mut self, uri: &'a Url) -> FetchFuture<'a> {
+        Box::pin(async move { Ok(self.fetch_document(uri).await?.document) })
+    }
+
+    fn fetch_document<'a>(&'a mut self, uri: &'a Url) -> DocumentFetchFuture<'a> {
         let client = self.client.clone();
         Box::pin(async move {
             check_scheme(uri)?;
@@ -172,11 +185,13 @@ impl AsyncResourceFetcher for Fetcher<AsyncClient> {
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
 
+            let retrieval = response.url().clone();
             let bytes = response.bytes().await.map_err(|source| {
                 fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
             })?;
 
-            parse_body(uri, content_type.as_deref(), &bytes)
+            parse_body(&retrieval, content_type.as_deref(), &bytes)
+                .map(|document| LoadedDocument::new(document, retrieval))
         })
     }
 }

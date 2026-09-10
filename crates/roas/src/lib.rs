@@ -12,6 +12,7 @@
 
 pub mod common;
 pub mod loader;
+pub use loader::{DocumentFetchFuture, LoadedDocument};
 pub mod merge;
 pub mod validation;
 

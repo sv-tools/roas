@@ -23,7 +23,7 @@ Both forms are `Clone` so a single fetcher can be registered for both `http://` 
 
 ```toml
 [dependencies]
-roas-http-fetcher = { version = "0.1", features = ["yaml"] }
+roas-http-fetcher = { version = "0.2.5", features = ["yaml"] }
 ```
 
 ## Usage
@@ -57,6 +57,13 @@ loader.register_async_fetcher("http://", http);
 A non-2xx HTTP response, transport failure, or unreadable body is surfaced through
 [`LoaderError::Fetch`](https://docs.rs/roas/latest/roas/loader/enum.LoaderError.html) with a
 [`HttpFetchError`](https://docs.rs/roas-http-fetcher/latest/roas_http_fetcher/enum.HttpFetchError.html) source.
+
+The fetchers also implement `fetch_document`, used by `Loader::load_document` and
+`load_document_async`, to preserve the final response URL after redirects alongside
+the unchanged value. With `yaml`, a missing Content-Type falls back to the final
+URL's extension. Explicit Content-Type still takes precedence. `with_client`
+continues to honor the supplied client's redirect, timeout, proxy and TLS policies;
+metadata collection does not install a different client or enable more URI schemes.
 
 ## License
 

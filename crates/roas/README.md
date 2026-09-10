@@ -79,6 +79,23 @@ For `http(s)://` refs, register a `roas_http_fetcher::HttpFetcher` on the
 `http://` and `https://` prefixes the same way (it's `Clone`, so one client
 can serve both).
 
+### Unchanged documents and retrieval metadata
+
+`Loader::load_document` and `load_document_async` return a `LoadedDocument`: the
+complete parsed value without `$ref` rewriting, plus its actual retrieval URI.
+This is useful for consumers that implement their own document identity/base rules,
+such as Arazzo `$self`. Both APIs use only explicitly registered fetchers.
+
+Existing fetchers need no changes: the new `fetch_document` trait methods default
+to `fetch` and report the requested URI. Redirect-aware fetchers can override them.
+`roas-http-fetcher` 0.2.5 supplies the final response URL.
+
+Raw and existing reference-loading APIs share fetched resources across sync/async
+cache hits. The legacy `load_resource` / `resolve_reference` APIs still return references
+rewritten against the requested resource URI. That rewritten projection is cached
+separately on demand; using both views retains both values. `preload_resource`
+refreshes both views and invalidates affected typed entries as before.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](../../LICENSE-APACHE) or [MIT license](../../LICENSE-MIT) at your

@@ -19,12 +19,46 @@ use url::Url;
 /// Boxed future returned by resource fetchers.
 pub type FetchFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, LoaderError>> + 'a>>;
 
+/// A complete parsed document and the location it was actually retrieved from.
+/// The value is unchanged: in particular, `$ref` and `$self` are not rewritten.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct LoadedDocument {
+    /// Complete JSON-compatible document, before reference rewriting.
+    pub document: Value,
+    /// Final retrieval URI, after redirects when the fetcher exposes them.
+    pub retrieval_uri: Url,
+}
+
+impl LoadedDocument {
+    /// Associate an unchanged document with its actual retrieval location.
+    pub fn new(document: Value, mut retrieval_uri: Url) -> Self {
+        retrieval_uri.set_fragment(None);
+        Self {
+            document,
+            retrieval_uri,
+        }
+    }
+}
+
+/// Future returned by metadata-aware asynchronous fetchers.
+pub type DocumentFetchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<LoadedDocument, LoaderError>> + 'a>>;
+
 /// Fetches and parses resources for the loader.
 ///
 /// Fetchers receive the resource URL without its fragment and return a parsed document.
 /// They do not manage the loader cache.
 pub trait ResourceFetcher {
     fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError>;
+
+    /// Fetch without rewriting references, retaining retrieval metadata.
+    /// Existing fetchers default to the requested location. Redirect-aware
+    /// fetchers can override this without changing their `fetch` API.
+    fn fetch_document(&mut self, uri: &Url) -> Result<LoadedDocument, LoaderError> {
+        self.fetch(uri)
+            .map(|document| LoadedDocument::new(document, uri.clone()))
+    }
 }
 
 /// Asynchronously fetches and parses resources for the loader.
@@ -33,6 +67,15 @@ pub trait ResourceFetcher {
 /// document. They do not manage the loader cache.
 pub trait AsyncResourceFetcher {
     fn fetch<'a>(&'a mut self, uri: &'a Url) -> FetchFuture<'a>;
+
+    /// Async counterpart of [`ResourceFetcher::fetch_document`].
+    fn fetch_document<'a>(&'a mut self, uri: &'a Url) -> DocumentFetchFuture<'a> {
+        Box::pin(async move {
+            self.fetch(uri)
+                .await
+                .map(|document| LoadedDocument::new(document, uri.clone()))
+        })
+    }
 }
 
 /// JSON file-system fetcher.
@@ -123,15 +166,15 @@ pub enum LoaderError {
 
 /// External resource loader with a fetcher registry and document cache.
 ///
-/// Two layers of caching are maintained: the raw `Value` cache keyed by
-/// resource URI (so the same file/URL is fetched once), and a typed
-/// cache keyed by `(reference, TypeId)` (so a `$ref` deserialized into
-/// some concrete `T` is parsed only once across the run, regardless of
-/// how many places point to it).
+/// Complete unchanged documents are cached by requested resource URI so a
+/// file/URL is fetched once. Legacy resource/reference reads also cache a
+/// reference-rewritten projection, created on demand. A typed cache keyed by
+/// `(reference, TypeId)` avoids repeatedly deserializing the same `$ref`.
 pub struct Loader {
     fetchers: BTreeMap<String, Box<dyn ResourceFetcher>>,
     async_fetchers: BTreeMap<String, Box<dyn AsyncResourceFetcher>>,
     cache: BTreeMap<Url, Value>,
+    documents: BTreeMap<Url, LoadedDocument>,
     typed_cache: BTreeMap<(String, TypeId), Box<dyn Any>>,
 }
 
@@ -142,6 +185,7 @@ impl Loader {
             fetchers: BTreeMap::new(),
             async_fetchers: BTreeMap::new(),
             cache: BTreeMap::new(),
+            documents: BTreeMap::new(),
             typed_cache: BTreeMap::new(),
         }
     }
@@ -193,6 +237,10 @@ impl Loader {
         document: Value,
     ) -> Result<Option<Value>, LoaderError> {
         let (key, _) = parse_reference(uri.as_ref())?;
+        self.documents.insert(
+            key.clone(),
+            LoadedDocument::new(document.clone(), key.clone()),
+        );
         let mut document = document;
         rewrite_refs_against(&mut document, &key);
         let previous = self.cache.insert(key, document);
@@ -212,16 +260,7 @@ impl Loader {
 
     fn load_resource_by_key(&mut self, key: Url) -> Result<&Value, LoaderError> {
         if !self.cache.contains_key(&key) {
-            let fetcher_key = best_fetcher_key(&self.fetchers, key.as_str()).ok_or_else(|| {
-                LoaderError::NoFetcherRegistered {
-                    uri: key.as_str().to_string(),
-                }
-            })?;
-            let mut parsed = self
-                .fetchers
-                .get_mut(&fetcher_key)
-                .expect("fetcher key came from the registry")
-                .fetch(&key)?;
+            let mut parsed = self.load_document(key.as_str())?.document.clone();
             rewrite_refs_against(&mut parsed, &key);
 
             self.cache.insert(key.clone(), parsed);
@@ -244,18 +283,11 @@ impl Loader {
 
     async fn load_resource_by_key_async(&mut self, key: Url) -> Result<&Value, LoaderError> {
         if !self.cache.contains_key(&key) {
-            let fetcher_key =
-                best_fetcher_key(&self.async_fetchers, key.as_str()).ok_or_else(|| {
-                    LoaderError::NoFetcherRegistered {
-                        uri: key.as_str().to_string(),
-                    }
-                })?;
             let mut parsed = self
-                .async_fetchers
-                .get_mut(&fetcher_key)
-                .expect("async fetcher key came from the registry")
-                .fetch(&key)
-                .await?;
+                .load_document_async(key.as_str())
+                .await?
+                .document
+                .clone();
             rewrite_refs_against(&mut parsed, &key);
 
             self.cache.insert(key.clone(), parsed);
@@ -265,6 +297,50 @@ impl Loader {
             .cache
             .get(&key)
             .expect("resource was inserted into the cache"))
+    }
+
+    /// Load a complete document without rewriting `$ref` or `$self`.
+    ///
+    /// Shares the fetch cache with legacy resource loading. The latter keeps a
+    /// separate rewritten projection only when requested. Fetch policies and
+    /// longest-prefix selection are unchanged; no fetcher is enabled implicitly.
+    pub fn load_document(&mut self, uri: &str) -> Result<&LoadedDocument, LoaderError> {
+        let (key, _) = parse_reference(uri)?;
+        if !self.documents.contains_key(&key) {
+            let prefix = best_fetcher_key(&self.fetchers, key.as_str()).ok_or_else(|| {
+                LoaderError::NoFetcherRegistered {
+                    uri: key.to_string(),
+                }
+            })?;
+            let document = self
+                .fetchers
+                .get_mut(&prefix)
+                .expect("fetcher key came from the registry")
+                .fetch_document(&key)?;
+            self.documents.insert(key.clone(), document);
+        }
+        Ok(self.documents.get(&key).expect("document was cached"))
+    }
+
+    /// Async counterpart of [`Self::load_document`], using only async fetchers
+    /// on cache misses. Both loading modes share complete-document cache hits.
+    pub async fn load_document_async(&mut self, uri: &str) -> Result<&LoadedDocument, LoaderError> {
+        let (key, _) = parse_reference(uri)?;
+        if !self.documents.contains_key(&key) {
+            let prefix = best_fetcher_key(&self.async_fetchers, key.as_str()).ok_or_else(|| {
+                LoaderError::NoFetcherRegistered {
+                    uri: key.to_string(),
+                }
+            })?;
+            let document = self
+                .async_fetchers
+                .get_mut(&prefix)
+                .expect("async fetcher key came from the registry")
+                .fetch_document(&key)
+                .await?;
+            self.documents.insert(key.clone(), document);
+        }
+        Ok(self.documents.get(&key).expect("document was cached"))
     }
 
     /// Resolve a reference and return the referenced JSON value.

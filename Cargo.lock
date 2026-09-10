@@ -2271,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "roas"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "clap",
  "enumset",
@@ -2302,7 +2302,9 @@ dependencies = [
  "enumset",
  "regex",
  "reqwest",
+ "roas",
  "roas-arazzo",
+ "roas-asyncapi",
  "serde_json",
  "serde_json_path",
  "serde_yaml_ng",
@@ -2364,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "roas-http-fetcher"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "reqwest",
  "roas",

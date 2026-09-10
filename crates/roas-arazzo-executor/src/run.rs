@@ -124,6 +124,8 @@ impl Options {
             Source {
                 url: url.into(),
                 document,
+                #[cfg(feature = "source-graph")]
+                origin: None,
             },
         );
         self

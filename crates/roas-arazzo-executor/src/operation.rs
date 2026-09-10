@@ -23,6 +23,8 @@ pub(crate) struct Source {
     pub url: String,
     /// The parsed document.
     pub document: Value,
+    #[cfg(feature = "source-graph")]
+    pub origin: Option<std::sync::Arc<crate::SourceDocument>>,
 }
 
 /// Where a step's request is going.
@@ -363,6 +365,8 @@ pub(crate) mod tests {
         BTreeMap::from([(
             "petStore".to_owned(),
             Source {
+                #[cfg(feature = "source-graph")]
+                origin: None,
                 url: "https://api.example.com/openapi.json".to_owned(),
                 document: petstore(),
             },
@@ -429,6 +433,8 @@ pub(crate) mod tests {
         sources.insert(
             "mirror".to_owned(),
             Source {
+                #[cfg(feature = "source-graph")]
+                origin: None,
                 url: "https://mirror.example.com/openapi.json".to_owned(),
                 document: petstore(),
             },
@@ -539,6 +545,8 @@ pub(crate) mod tests {
         let sources = BTreeMap::from([(
             "petStore".to_owned(),
             Source {
+                #[cfg(feature = "source-graph")]
+                origin: None,
                 url: "https://api.example.com/openapi.json".to_owned(),
                 document,
             },
@@ -567,6 +575,8 @@ pub(crate) mod tests {
         let sources = BTreeMap::from([(
             "petStore".to_owned(),
             Source {
+                #[cfg(feature = "source-graph")]
+                origin: None,
                 url: "https://api.example.com/swagger.json".to_owned(),
                 document,
             },
@@ -588,6 +598,8 @@ pub(crate) mod tests {
         let sources = BTreeMap::from([(
             "petStore".to_owned(),
             Source {
+                #[cfg(feature = "source-graph")]
+                origin: None,
                 url: "u".to_owned(),
                 document: json!({ "paths": { "/pets": { "get": { "operationId": "listPets" } } } }),
             },

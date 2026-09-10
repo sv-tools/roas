@@ -197,6 +197,29 @@ It needs the source descriptions the steps point at: name them with `--source <n
 
 The description is validated before anything is sent — a run makes real requests, and a description that does not hold together should not make them. `--ignore <CHECK>` lets one pass, as `arazzo validate --ignore` does.
 
+Source loading uses document-local aliases and Arazzo `$self` identities. Relative
+references use `$self` when present, otherwise the retrieval location; a relative
+`$self` first resolves against that location. HTTP redirects retain the final URL.
+`--source <name>=<path>` is an explicit root-alias override. Repeat
+`--source-document <FILE>` to preload additional possible documents by identity
+before any links are resolved, without assigning a root alias.
+
+By default only sources needed by the selected workflow (plus explicit `--source`
+entries) are traversed. `--load-all-sources` traverses all root sources and linked
+Arazzo documents; it does **not** grant file/network access without `--load`.
+`--source-max-documents` (default 256) bounds existing supplied documents plus
+distinct loader attempts, including failures. `--source-max-depth` (default 32)
+bounds graph expansion, independently of `--max-steps`. Cycles and shared sources
+reuse document handles. These are not byte-size limits or a network sandbox;
+only enable `--load http` for documents whose referenced destinations you trust.
+
+An unavailable unrelated source is a located warning, not necessarily a failed run.
+Checked preparation still rejects missing required sources and an unprovable bare
+operation ID before sending API requests. Canonical `$self` identities are used by
+default; `--allow-source-retrieval-aliases` explicitly permits noncanonical Arazzo
+retrieval URLs as a compatibility extension. Loading linked Arazzo/AsyncAPI documents
+does not add external workflow calls or broker execution.
+
 The report goes to **stderr** and the workflow's outputs to **stdout**, so the outputs pipe onward; `--quiet` silences the report. The exit status follows the workflow: non-zero when it failed.
 
 ### `asyncapi`

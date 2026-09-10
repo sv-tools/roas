@@ -24,9 +24,13 @@ v1_0 = ["roas-arazzo/v1_0"]
 # Ready-made HTTP clients built on `reqwest` — blocking and async.
 # Without this the caller supplies its own `HttpClient`.
 reqwest = ["dep:reqwest", "dep:tokio"]
+# Complete source registries and graph loading through caller-configured roas loaders.
+source-graph = ["dep:roas", "dep:roas-asyncapi", "roas-arazzo/v1_0"]
 
 [dependencies]
 enumset.workspace = true
+roas = { workspace = true, optional = true, features = ["v2", "v3_0", "v3_1", "v3_2"] }
+roas-asyncapi = { workspace = true, optional = true, features = ["v2_6", "v3_0", "v3_1"] }
 roas-arazzo = { version = "0.3", path = "../roas-arazzo", features = ["v1_1"] }
 regex.workspace = true
 reqwest = { workspace = true, optional = true }

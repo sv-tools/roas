@@ -28,6 +28,10 @@
 //! Source descriptions are loaded the same way: fetching them is IO, so
 //! the caller supplies the parsed documents through
 //! [`Options::source`].
+//! The optional `source-graph` feature adds a document registry and bounded
+//! sync/async loading through explicitly configured `roas` fetchers. It retains
+//! canonical Arazzo identities, retrieval metadata, local aliases and loading
+//! diagnostics without adding IO to the execution state machine.
 //!
 //! ## Checked preparation
 //!
@@ -53,6 +57,17 @@ mod report;
 mod run;
 mod runtime_syntax;
 mod select;
+#[cfg(feature = "source-graph")]
+mod source_graph;
+#[cfg(feature = "source-graph")]
+mod source_registry;
+#[cfg(feature = "source-graph")]
+pub use source_graph::{SourceCycle, SourceLoadOptions, SourceLoadReport};
+#[cfg(feature = "source-graph")]
+pub use source_registry::{
+    DocumentId, SourceDiagnostic, SourceDocument, SourceError, SourceLink, SourceRegistry,
+    SourceVersion,
+};
 
 pub mod testing;
 
