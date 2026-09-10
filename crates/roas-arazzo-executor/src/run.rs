@@ -123,9 +123,7 @@ impl Options {
             name.into(),
             Source {
                 url: url.into(),
-                document,
-                #[cfg(feature = "source-graph")]
-                origin: None,
+                data: crate::operation::SourceData::Owned(document),
             },
         );
         self

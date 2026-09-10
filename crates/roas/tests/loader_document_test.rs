@@ -1,4 +1,4 @@
-use roas::loader::{
+use roas::{
     AsyncResourceFetcher, FetchFuture, LoadedDocument, Loader, LoaderError, ResourceFetcher,
 };
 use serde_json::{Value, json};
@@ -70,19 +70,28 @@ impl ResourceFetcher for Redirect {
 
 #[test]
 fn raw_metadata_retains_redirects_without_changing_legacy_rewrite_behavior() {
-    let mut loader = Loader::new();
-    loader.register_fetcher("https://", Redirect);
     let uri = "https://original.test/doc.json";
-    assert_eq!(
-        loader.load_document(uri).unwrap().retrieval_uri.as_str(),
-        "https://final.test/path/doc.json"
-    );
-    assert_eq!(
-        loader.load_resource(uri).unwrap()["$ref"],
-        "https://original.test/relative.json"
-    );
+    for raw_first in [true, false] {
+        let mut loader = Loader::new();
+        loader.register_fetcher("https://", Redirect);
+        if raw_first {
+            loader.load_document(uri).unwrap();
+        } else {
+            loader.load_resource(uri).unwrap();
+        }
+        let shared = ready(loader.load_document_shared_async(uri)).unwrap();
+        assert_eq!(
+            shared.retrieval_uri.as_str(),
+            "https://final.test/path/doc.json"
+        );
+        assert_eq!(shared.document["$ref"], "relative.json");
+        assert_eq!(
+            loader.load_resource(uri).unwrap()["$ref"],
+            "https://original.test/relative.json"
+        );
+        assert!(loader.load_document("http://[invalid").is_err());
+    }
     assert!(Loader::new().load_document(uri).is_err());
-    assert!(loader.load_document("http://[invalid").is_err());
 }
 
 // The crate has no async runtime dependency: these futures complete immediately.
@@ -115,4 +124,68 @@ fn asynchronous_raw_fetching_and_legacy_loading_share_cache_and_policy() {
     assert!(loader.load_document(uri).is_ok());
     assert_eq!(count.get(), 1);
     assert!(ready(Loader::new().load_document_async(uri)).is_err());
+}
+
+#[test]
+fn shared_raw_views_restore_every_reference_and_survive_cache_replacement() {
+    use std::sync::Arc;
+    let uri = "https://example.test/folder/root.json";
+    let original = json!({
+        "$ref": 42,
+        "a": [{"$ref":"#/x"}, {"$ref":"https://already.test/x"}, {"$ref":"http://["}, {"$ref":null}],
+        "b": {"$ref":{"$ref":"../nested.json"}, "": {"$ref":"child.json#/%E2%82%AC"}, "a/b~": {"$ref":""}},
+        "c": {"reference":"raw.json", "$self":"identity.json"},
+        "x": null
+    });
+    let mut loader = Loader::new();
+    loader.preload_resource(uri, original.clone()).unwrap();
+    assert_eq!(
+        loader.load_resource(uri).unwrap()["a"][0]["$ref"],
+        format!("{uri}#/x")
+    );
+    let shared = loader.load_document_shared(uri).unwrap();
+    assert_eq!(shared.document, original);
+    let asynchronous = ready(loader.load_document_shared_async(uri)).unwrap();
+    assert!(Arc::ptr_eq(&shared, &asynchronous));
+    assert!(std::ptr::eq(
+        &shared.document,
+        &loader.load_document(uri).unwrap().document
+    ));
+    let typed = loader
+        .resolve_reference_as_arc::<Value>(&format!("{uri}#/x"))
+        .unwrap();
+    assert_eq!(*typed, Value::Null);
+    loader.preload_resource(uri, json!({"x":200})).unwrap();
+    let replacement = ready(loader.load_document_shared_async(uri)).unwrap();
+    assert!(!Arc::ptr_eq(&shared, &replacement));
+    assert_eq!(
+        *loader
+            .resolve_reference_as_arc::<Value>(&format!("{uri}#/x"))
+            .unwrap(),
+        json!(200)
+    );
+    drop(loader);
+    assert_eq!(shared.document, original);
+    assert_eq!(replacement.document, json!({"x":200}));
+}
+
+#[test]
+fn shared_async_first_reads_and_legacy_sync_reads_fetch_once() {
+    let count = Rc::new(Cell::new(0));
+    let mut loader = Loader::new();
+    loader.register_async_fetcher("https://", Fetcher(count.clone()));
+    let uri = "https://example.test/doc.json";
+    let shared = ready(loader.load_document_shared_async(uri)).unwrap();
+    assert_eq!(
+        loader.load_resource(uri).unwrap()["nested"]["$ref"],
+        "https://example.test/other.json#/thing"
+    );
+    assert_eq!(shared.document["nested"]["$ref"], "other.json#/thing");
+    assert_eq!(count.get(), 1);
+    let second = loader.load_document_shared(uri).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&shared, &second));
+    assert!(loader.load_document_shared("http://[").is_err());
+    assert!(ready(loader.load_document_shared_async("http://[")).is_err());
+    let _: Option<roas::DocumentFetchFuture<'static>> = None;
+    let _: roas::loader::JsonFileFetcher = roas::JsonFileFetcher;
 }

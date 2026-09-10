@@ -107,6 +107,86 @@ fn relative_self_and_equivalent_references_reuse_one_document() {
     assert!(options.source_document("absent").is_none());
 }
 
+#[tokio::test]
+async fn graph_and_cloned_options_share_the_loaders_document_value() {
+    let memory = Memory::new([("https://graph.test/api.json", api())]);
+    let mut loader = Loader::new();
+    loader.register_async_fetcher("https://", memory.clone());
+    let mut registry = SourceRegistry::new();
+    let root = registry
+        .insert(
+            "https://graph.test/root.json",
+            workflow(json!([
+                {"name":"api", "url":"api.json"}, {"name":"same", "url":"./api.json"}
+            ])),
+        )
+        .unwrap();
+    registry
+        .load_sources_async(root, &mut loader, &SourceLoadOptions::default())
+        .await
+        .unwrap();
+    let loaded = loader
+        .load_document_shared("https://graph.test/api.json")
+        .unwrap();
+    let options = Options::new().source_registry(&registry, root).unwrap();
+    let cloned = options.clone();
+    let api_id = registry.source(root, "api").unwrap().target.unwrap();
+    assert!(std::ptr::eq(
+        registry.document(api_id).unwrap().value(),
+        &loaded.document
+    ));
+    for entry in [&options, &cloned] {
+        for alias in ["api", "same"] {
+            assert!(std::ptr::eq(
+                entry.source_document(alias).unwrap().value(),
+                &loaded.document
+            ));
+        }
+    }
+    let description = registry.document(root).unwrap().arazzo().unwrap().clone();
+    drop(registry);
+    drop(loader);
+    let mut client = Fake::new().reply(200, &json!({}));
+    assert!(
+        prepare(&description, &cloned)
+            .unwrap()
+            .execute(&mut client)
+            .unwrap()
+            .is_success()
+    );
+    assert_eq!(memory.reads.borrow().len(), 1);
+}
+
+#[test]
+fn opaque_self_errors_explain_both_remedies_without_rejecting_absolute_sources() {
+    let mut document = workflow(json!([
+        {"name":"relative", "url":"api.json"},
+        {"name":"absolute", "url":"https://graph.test/api.json"},
+        {"name":"malformed", "url":"http://["}
+    ]));
+    document["$self"] = json!("urn:example:root");
+    let mut registry = SourceRegistry::new();
+    let root = registry.insert("file:///root.json", document).unwrap();
+    let api = registry
+        .insert("https://graph.test/api.json", api())
+        .unwrap();
+    let report = registry
+        .load_sources(root, &mut Loader::new(), &SourceLoadOptions::default())
+        .unwrap();
+    assert_eq!(report.diagnostics.len(), 2);
+    let message = report.diagnostics[0].error.to_string();
+    assert!(message.contains("absolute URL"), "{message}");
+    assert!(message.contains("hierarchical `$self`"), "{message}");
+    assert!(message.contains("urn:example:root"), "{message}");
+    assert!(
+        !report.diagnostics[1]
+            .error
+            .to_string()
+            .contains("hierarchical `$self`")
+    );
+    assert_eq!(registry.source(root, "absolute").unwrap().target, Some(api));
+}
+
 #[test]
 fn failed_aliases_share_an_attempt_but_queries_remain_distinct() {
     let mut registry = SourceRegistry::new();

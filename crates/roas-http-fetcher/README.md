@@ -60,8 +60,11 @@ A non-2xx HTTP response, transport failure, or unreadable body is surfaced throu
 
 The fetchers also implement `fetch_document`, used by `Loader::load_document` and
 `load_document_async`, to preserve the final response URL after redirects alongside
-the unchanged value. With `yaml`, a missing Content-Type falls back to the final
-URL's extension. Explicit Content-Type still takes precedence. `with_client`
+the unchanged value. With `yaml`, a missing, empty or octet-stream Content-Type
+uses a YAML extension on either the requested or final URL. Thus a `.yaml` URL
+redirecting to an extensionless blob retains its original format hint, and an
+extensionless URL redirecting to `.yaml` works too. Explicit Content-Type still
+takes precedence over both URLs; disabling `yaml` still means JSON only. `with_client`
 continues to honor the supplied client's redirect, timeout, proxy and TLS policies;
 metadata collection does not install a different client or enable more URI schemes.
 

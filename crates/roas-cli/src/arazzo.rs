@@ -524,13 +524,20 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
         }
     };
     let plan = prepare(&description, &options).map_err(|error| explain(anyhow!(error)))?;
+    // Preparation failures carry these diagnostics in the returned error.
+    // Once preparation succeeds, emit optional warnings here, exactly once.
+    if !args.quiet {
+        for diagnostic in &source_diagnostics {
+            eprintln!("- {diagnostic}");
+        }
+    }
     let report = plan.execute(&mut Client::blocking()).map_err(|failure| {
         if !args.quiet
             && let Some(report) = &failure.report
         {
             eprint!("{report}");
         }
-        explain(anyhow!(failure.error))
+        anyhow!(failure.error)
     })?;
 
     if !args.quiet {
@@ -604,19 +611,17 @@ fn sources(
         .iter()
         .map(|diagnostic| {
             format!(
-                "{}: {diagnostic}",
+                "{}: {} (`{}`): {}",
                 registry
                     .document(diagnostic.owner)
                     .expect("diagnostic owner")
-                    .identity()
+                    .identity(),
+                diagnostic.path,
+                diagnostic.source_name,
+                diagnostic.error,
             )
         })
         .collect::<Vec<_>>();
-    if !args.quiet {
-        for diagnostic in &diagnostics {
-            eprintln!("- {diagnostic}");
-        }
-    }
     let any = registry
         .sources(root)?
         .iter()

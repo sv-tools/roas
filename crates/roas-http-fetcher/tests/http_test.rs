@@ -1,6 +1,6 @@
 use roas::loader::{AsyncResourceFetcher, LoaderError, ResourceFetcher};
 use roas_http_fetcher::{AsyncHttpFetcher, HttpFetchError, HttpFetcher};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::{self, JoinHandle};
@@ -58,6 +58,11 @@ impl TestServer {
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // Accepted sockets inherit non-blocking mode on some platforms.
+                        stream.set_nonblocking(false).expect("blocking request");
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                            .expect("request timeout");
                         let request_line = read_request_line(&stream);
                         let resp = handler(&request_line);
                         write_response(stream, resp);
@@ -91,11 +96,20 @@ impl Drop for TestServer {
     }
 }
 
-fn read_request_line(mut stream: &TcpStream) -> String {
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).expect("read request");
-    let raw = String::from_utf8_lossy(&buf[..n]).to_string();
-    raw.lines().next().unwrap_or("").to_string()
+fn read_request_line(stream: &TcpStream) -> String {
+    let mut reader = BufReader::new(stream);
+    let mut request = String::new();
+    assert_ne!(reader.read_line(&mut request).expect("read request"), 0);
+    // Consume complete headers before closing the connection with a response.
+    let mut header = String::new();
+    loop {
+        header.clear();
+        assert_ne!(reader.read_line(&mut header).expect("read header"), 0);
+        if header == "\r\n" {
+            break;
+        }
+    }
+    request.trim_end().to_owned()
 }
 
 fn write_response(mut stream: TcpStream, resp: TestResponse) {
@@ -196,6 +210,73 @@ fn redirected_yaml_uses_the_final_extension_when_content_type_is_absent() {
         .unwrap();
     assert_eq!(loaded.document, serde_json::json!({"name": "final"}));
     assert_eq!(loaded.retrieval_uri, server.url("document.yaml"));
+}
+
+fn yaml_blob_server(content_type: Option<&'static str>) -> TestServer {
+    TestServer::start(move |request| {
+        if request.contains(" /source.yaml ") {
+            TestResponse {
+                status: 302,
+                reason: "Found",
+                content_type: None,
+                location: Some("/blob"),
+                body: Vec::new(),
+            }
+        } else {
+            TestResponse {
+                content_type,
+                ..TestResponse::ok_body(b"openapi: 3.1.0\n".to_vec())
+            }
+        }
+    })
+}
+
+#[test]
+fn requested_yaml_hint_survives_redirects_for_both_sync_apis() {
+    for content_type in [
+        None,
+        Some("application/octet-stream"),
+        Some("application/json"),
+    ] {
+        let server = yaml_blob_server(content_type);
+        let uri = server.url("source.yaml");
+        let mut fetcher = HttpFetcher::new();
+        let plain = fetcher.fetch(&uri);
+        let metadata = fetcher.fetch_document(&uri);
+        if cfg!(feature = "yaml") && content_type != Some("application/json") {
+            assert_eq!(plain.unwrap(), serde_json::json!({"openapi": "3.1.0"}));
+            let loaded = metadata.unwrap();
+            assert_eq!(loaded.retrieval_uri, server.url("blob"));
+            assert_eq!(loaded.document["openapi"], "3.1.0");
+        } else {
+            assert!(matches!(plain, Err(LoaderError::Parse { .. })));
+            assert!(matches!(metadata, Err(LoaderError::Parse { .. })));
+        }
+    }
+}
+
+#[tokio::test]
+async fn requested_yaml_hint_survives_redirects_for_both_async_apis() {
+    for content_type in [
+        None,
+        Some("application/octet-stream"),
+        Some("application/json"),
+    ] {
+        let server = yaml_blob_server(content_type);
+        let uri = server.url("source.yaml");
+        let mut fetcher = AsyncHttpFetcher::new();
+        let plain = fetcher.fetch(&uri).await;
+        let metadata = fetcher.fetch_document(&uri).await;
+        if cfg!(feature = "yaml") && content_type != Some("application/json") {
+            assert_eq!(plain.unwrap(), serde_json::json!({"openapi": "3.1.0"}));
+            let loaded = metadata.unwrap();
+            assert_eq!(loaded.retrieval_uri, server.url("blob"));
+            assert_eq!(loaded.document["openapi"], "3.1.0");
+        } else {
+            assert!(matches!(plain, Err(LoaderError::Parse { .. })));
+            assert!(matches!(metadata, Err(LoaderError::Parse { .. })));
+        }
+    }
 }
 
 #[test]

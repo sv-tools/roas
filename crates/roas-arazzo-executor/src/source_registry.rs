@@ -1,6 +1,6 @@
 //! Complete documents, canonical identities and document-local source aliases.
 
-use roas::loader::LoaderError;
+use roas::{LoadedDocument, LoaderError};
 use roas_arazzo::v1_1::{Description, SourceType};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,7 +53,7 @@ impl SourceVersion {
 /// documents retain raw JSON and a checked version without structural validation.
 #[derive(Debug)]
 pub struct SourceDocument {
-    pub(crate) value: Value,
+    loaded: Arc<LoadedDocument>,
     retrieval: Url,
     identity: Url,
     model: SourceVersion,
@@ -64,7 +64,7 @@ pub struct SourceDocument {
 impl SourceDocument {
     /// Complete original JSON-compatible value; references are not rewritten.
     pub fn value(&self) -> &Value {
-        &self.value
+        &self.loaded.document
     }
     /// Actual retrieval location (the final redirect location when available).
     pub fn retrieval_uri(&self) -> &Url {
@@ -234,14 +234,23 @@ impl SourceRegistry {
     /// Invalid URI/version, malformed Arazzo, duplicate aliases or identity collision.
     pub fn insert(&mut self, retrieval: &str, value: Value) -> Result<DocumentId, SourceError> {
         let retrieval = resource_uri(retrieval)?;
+        self.insert_document(Arc::new(LoadedDocument::new(value, retrieval)))
+    }
+
+    pub(crate) fn insert_document(
+        &mut self,
+        loaded: Arc<LoadedDocument>,
+    ) -> Result<DocumentId, SourceError> {
+        let retrieval = resource_uri(loaded.retrieval_uri.as_str())?;
+        let value = &loaded.document;
         if let Some(id) = self.retrievals.get(&retrieval).copied() {
-            return if self.documents[id.0].value == value {
+            return if self.documents[id.0].value() == value {
                 Ok(id)
             } else {
                 Err(SourceError::Conflict(retrieval.to_string()))
             };
         }
-        let (model, version, arazzo) = parse_document(&value, &retrieval)?;
+        let (model, version, arazzo) = parse_document(value, &retrieval)?;
         let identity = match arazzo
             .as_ref()
             .and_then(|document| document.self_.as_deref())
@@ -259,7 +268,7 @@ impl SourceRegistry {
             None => retrieval.clone(),
         };
         if let Some(id) = self.identities.get(&identity).copied() {
-            if self.documents[id.0].value != value {
+            if self.documents[id.0].value() != value {
                 return Err(SourceError::Conflict(identity.to_string()));
             }
             self.add_retrieval_alias(id, retrieval.as_str())?;
@@ -297,7 +306,7 @@ impl SourceRegistry {
         self.identities.insert(identity.clone(), id);
         self.retrievals.insert(retrieval.clone(), id);
         self.documents.push(Arc::new(SourceDocument {
-            value,
+            loaded,
             retrieval,
             identity,
             model,
@@ -454,7 +463,11 @@ pub(crate) fn join(base: &Url, reference: &str) -> Result<Url, SourceError> {
     base.join(reference)
         .map_err(|error| SourceError::InvalidUri {
             uri: reference.into(),
-            reason: format!("resolving against `{base}`: {error}"),
+            reason: if base.cannot_be_a_base() && matches!(Url::parse(reference), Err(url::ParseError::RelativeUrlWithoutBase)) {
+                format!("base `{base}` is not hierarchical — give the source an absolute URL, or the Arazzo description a hierarchical `$self`")
+            } else {
+                format!("resolving against `{base}`: {error}")
+            },
         })
 }
 
@@ -529,8 +542,7 @@ impl crate::Options {
                     .entry(link.name.clone())
                     .or_insert_with(|| crate::operation::Source {
                         url: link.declared_uri.clone(),
-                        document: document.value.clone(),
-                        origin: Some(document),
+                        data: crate::operation::SourceData::Registry(document),
                     });
             }
             if let Some(url) = registry.base_urls.get(&(owner, link.name.clone())) {
@@ -545,6 +557,9 @@ impl crate::Options {
     /// Original document metadata for a registry-backed source. Legacy
     /// `Options::source` values have no invented retrieval URI or identity.
     pub fn source_document(&self, name: &str) -> Option<&SourceDocument> {
-        self.sources.get(name)?.origin.as_deref()
+        match &self.sources.get(name)?.data {
+            crate::operation::SourceData::Registry(document) => Some(document),
+            crate::operation::SourceData::Owned(_) => None,
+        }
     }
 }

@@ -21,10 +21,26 @@ const METHODS: [&str; 8] = [
 pub(crate) struct Source {
     /// The URL the description was declared with.
     pub url: String,
-    /// The parsed document.
-    pub document: Value,
+    pub data: SourceData,
+}
+
+/// Legacy callers own their value; registry-backed sources share the same
+/// immutable document with the registry and loader, including cloned Options.
+#[derive(Clone, Debug)]
+pub(crate) enum SourceData {
+    Owned(Value),
     #[cfg(feature = "source-graph")]
-    pub origin: Option<std::sync::Arc<crate::SourceDocument>>,
+    Registry(std::sync::Arc<crate::SourceDocument>),
+}
+
+impl Source {
+    pub(crate) fn document(&self) -> &Value {
+        match &self.data {
+            SourceData::Owned(value) => value,
+            #[cfg(feature = "source-graph")]
+            SourceData::Registry(document) => document.value(),
+        }
+    }
 }
 
 /// Where a step's request is going.
@@ -137,7 +153,7 @@ fn by_id<'s>(
         let source = sources
             .get(name)
             .ok_or_else(|| OperationError::MissingSource(name.to_owned()))?;
-        let found = search(&source.document, id).ok_or_else(|| OperationError::Unknown {
+        let found = search(source.document(), id).ok_or_else(|| OperationError::Unknown {
             operation: operation.to_owned(),
         })?;
         return Ok((
@@ -153,7 +169,7 @@ fn by_id<'s>(
     // so, and if it is not, guessing would send the request somewhere
     // the author did not name.
     let mut hits = sources.iter().filter_map(|(name, source)| {
-        search(&source.document, operation).map(|found| {
+        search(source.document(), operation).map(|found| {
             (
                 source,
                 Found {
@@ -224,7 +240,7 @@ fn by_path<'s>(
         .get(&name)
         .ok_or_else(|| OperationError::MissingSource(name.clone()))?;
 
-    if source.document.pointer(pointer).is_none() {
+    if source.document().pointer(pointer).is_none() {
         return Err(bad("the document has nothing at that pointer"));
     }
     // `/paths/~1pets~1{petId}/get` — the pointer itself says which path
@@ -280,7 +296,7 @@ fn endpoint(
     let base = base_urls
         .get(&found.name)
         .cloned()
-        .or_else(|| server(&source.document, &found.path, &found.method))
+        .or_else(|| server(source.document(), &found.path, &found.method))
         .ok_or_else(|| OperationError::NoServer(named.to_owned()))?;
     Ok(Endpoint {
         method: found.method.to_uppercase(),
@@ -365,10 +381,8 @@ pub(crate) mod tests {
         BTreeMap::from([(
             "petStore".to_owned(),
             Source {
-                #[cfg(feature = "source-graph")]
-                origin: None,
                 url: "https://api.example.com/openapi.json".to_owned(),
-                document: petstore(),
+                data: SourceData::Owned(petstore()),
             },
         )])
     }
@@ -433,10 +447,8 @@ pub(crate) mod tests {
         sources.insert(
             "mirror".to_owned(),
             Source {
-                #[cfg(feature = "source-graph")]
-                origin: None,
                 url: "https://mirror.example.com/openapi.json".to_owned(),
-                document: petstore(),
+                data: SourceData::Owned(petstore()),
             },
         );
         let error = resolve(
@@ -545,10 +557,8 @@ pub(crate) mod tests {
         let sources = BTreeMap::from([(
             "petStore".to_owned(),
             Source {
-                #[cfg(feature = "source-graph")]
-                origin: None,
                 url: "https://api.example.com/openapi.json".to_owned(),
-                document,
+                data: SourceData::Owned(document),
             },
         )]);
         assert_eq!(
@@ -575,10 +585,8 @@ pub(crate) mod tests {
         let sources = BTreeMap::from([(
             "petStore".to_owned(),
             Source {
-                #[cfg(feature = "source-graph")]
-                origin: None,
                 url: "https://api.example.com/swagger.json".to_owned(),
-                document,
+                data: SourceData::Owned(document),
             },
         )]);
         assert_eq!(
@@ -598,10 +606,10 @@ pub(crate) mod tests {
         let sources = BTreeMap::from([(
             "petStore".to_owned(),
             Source {
-                #[cfg(feature = "source-graph")]
-                origin: None,
                 url: "u".to_owned(),
-                document: json!({ "paths": { "/pets": { "get": { "operationId": "listPets" } } } }),
+                data: SourceData::Owned(
+                    json!({ "paths": { "/pets": { "get": { "operationId": "listPets" } } } }),
+                ),
             },
         )]);
         assert_eq!(

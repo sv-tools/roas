@@ -153,7 +153,7 @@ impl ResourceFetcher for Fetcher<Client> {
             fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
         })?;
 
-        parse_body(&retrieval, content_type.as_deref(), &bytes)
+        parse_body(uri, &retrieval, content_type.as_deref(), &bytes)
             .map(|document| LoadedDocument::new(document, retrieval))
     }
 }
@@ -190,7 +190,7 @@ impl AsyncResourceFetcher for Fetcher<AsyncClient> {
                 fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
             })?;
 
-            parse_body(&retrieval, content_type.as_deref(), &bytes)
+            parse_body(uri, &retrieval, content_type.as_deref(), &bytes)
                 .map(|document| LoadedDocument::new(document, retrieval))
         })
     }
@@ -203,12 +203,19 @@ fn check_scheme(uri: &Url) -> Result<(), LoaderError> {
     }
 }
 
-fn parse_body(uri: &Url, content_type: Option<&str>, bytes: &[u8]) -> Result<Value, LoaderError> {
-    if is_yaml(content_type, uri) {
-        parse_yaml(uri, bytes)
+fn parse_body(
+    requested: &Url,
+    retrieval: &Url,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<Value, LoaderError> {
+    // Preserve the original request's extension hint across redirects. Either
+    // URL may add a YAML hint, but an explicit non-YAML media type wins over both.
+    if is_yaml(content_type, requested) || is_yaml(content_type, retrieval) {
+        parse_yaml(retrieval, bytes)
     } else {
         serde_json::from_slice(bytes).map_err(|source| LoaderError::Parse {
-            uri: uri.as_str().to_string(),
+            uri: retrieval.as_str().to_string(),
             source,
         })
     }

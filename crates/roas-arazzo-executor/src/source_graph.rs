@@ -77,7 +77,7 @@ impl SourceRegistry {
     ) -> Result<SourceLoadReport, SourceError> {
         let mut traversal = Traversal::new(self, root, options)?;
         while let Some(uri) = traversal.next(self) {
-            let document = loader.load_document(uri.as_str()).cloned();
+            let document = loader.load_document_shared(uri.as_str());
             traversal.accept(self, uri, document);
         }
         Ok(traversal.finish(self))
@@ -93,7 +93,7 @@ impl SourceRegistry {
     ) -> Result<SourceLoadReport, SourceError> {
         let mut traversal = Traversal::new(self, root, options)?;
         while let Some(uri) = traversal.next(self) {
-            let document = loader.load_document_async(uri.as_str()).await.cloned();
+            let document = loader.load_document_shared_async(uri.as_str()).await;
             traversal.accept(self, uri, document);
         }
         Ok(traversal.finish(self))
@@ -286,10 +286,10 @@ impl<'a> Traversal<'a> {
         &mut self,
         registry: &mut SourceRegistry,
         uri: Url,
-        result: Result<LoadedDocument, LoaderError>,
+        result: Result<Arc<LoadedDocument>, LoaderError>,
     ) {
         let result = result.map_err(SourceError::Load).and_then(|loaded| {
-            let id = registry.insert(loaded.retrieval_uri.as_str(), loaded.document)?;
+            let id = registry.insert_document(loaded)?;
             registry.add_retrieval_alias(id, uri.as_str())?;
             Ok(id)
         });

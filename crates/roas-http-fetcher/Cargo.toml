@@ -16,12 +16,12 @@ publish = true
 [features]
 default = []
 # Parse YAML response bodies in addition to JSON. The fetcher sniffs the
-# response Content-Type and falls back to the URL path extension to decide
-# which parser to use.
+# response Content-Type and falls back to either the requested or final URL
+# path extension to decide which parser to use.
 yaml = ["dep:serde_yaml_ng"]
 
 [dependencies]
-roas = { version = "0.20.1", path = "../roas" }
+roas = { workspace = true, features = ["v3_2"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

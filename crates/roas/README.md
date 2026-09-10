@@ -92,9 +92,17 @@ to `fetch` and report the requested URI. Redirect-aware fetchers can override th
 
 Raw and existing reference-loading APIs share fetched resources across sync/async
 cache hits. The legacy `load_resource` / `resolve_reference` APIs still return references
-rewritten against the requested resource URI. That rewritten projection is cached
-separately on demand; using both views retains both values. `preload_resource`
-refreshes both views and invalidates affected typed entries as before.
+rewritten against the requested resource URI. Legacy-only callers retain one value
+plus a compact journal of changed `$ref` strings, not another full document. A raw
+view is reconstructed from that journal only when requested, without another fetch.
+Using both views retains both values. `preload_resource` replaces the cache entry,
+invalidates its raw view and clears the typed cache as before.
+
+`load_document_shared` / `load_document_shared_async` return `Arc<LoadedDocument>`
+handles to the same raw cache entry, so a source registry and its execution options
+can share the value without cloning it. Existing handles remain valid after cache
+replacement or loader drop. Loader types/traits are exported at the crate root;
+their existing `roas::loader` paths also remain valid.
 
 ## License
 

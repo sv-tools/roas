@@ -12,7 +12,10 @@
 
 pub mod common;
 pub mod loader;
-pub use loader::{DocumentFetchFuture, LoadedDocument};
+pub use loader::{
+    AsyncResourceFetcher, DocumentFetchFuture, FetchFuture, JsonFileFetcher, LoadedDocument,
+    Loader, LoaderError, ResourceFetcher,
+};
 pub mod merge;
 pub mod validation;
 

@@ -166,16 +166,24 @@ pub enum LoaderError {
 
 /// External resource loader with a fetcher registry and document cache.
 ///
-/// Complete unchanged documents are cached by requested resource URI so a
-/// file/URL is fetched once. Legacy resource/reference reads also cache a
-/// reference-rewritten projection, created on demand. A typed cache keyed by
-/// `(reference, TypeId)` avoids repeatedly deserializing the same `$ref`.
+/// A resource is fetched once. Legacy-only readers retain a rewritten value and
+/// a compact journal of changed reference strings, not a second full document.
+/// Unchanged documents are materialized only on demand and can be shared with
+/// callers. A typed cache avoids repeatedly deserializing the same `$ref`.
 pub struct Loader {
     fetchers: BTreeMap<String, Box<dyn ResourceFetcher>>,
     async_fetchers: BTreeMap<String, Box<dyn AsyncResourceFetcher>>,
     cache: BTreeMap<Url, Value>,
-    documents: BTreeMap<Url, LoadedDocument>,
+    documents: BTreeMap<Url, Arc<LoadedDocument>>,
+    origins: BTreeMap<Url, ResourceOrigin>,
     typed_cache: BTreeMap<(String, TypeId), Box<dyn Any>>,
+}
+
+/// Enough information to restore the raw view of an immutable rewritten cache
+/// entry. Ordinals follow `visit_refs` order; the cached tree is never reordered.
+struct ResourceOrigin {
+    retrieval_uri: Url,
+    original_refs: Vec<(usize, String)>,
 }
 
 impl Loader {
@@ -186,6 +194,7 @@ impl Loader {
             async_fetchers: BTreeMap::new(),
             cache: BTreeMap::new(),
             documents: BTreeMap::new(),
+            origins: BTreeMap::new(),
             typed_cache: BTreeMap::new(),
         }
     }
@@ -237,13 +246,8 @@ impl Loader {
         document: Value,
     ) -> Result<Option<Value>, LoaderError> {
         let (key, _) = parse_reference(uri.as_ref())?;
-        self.documents.insert(
-            key.clone(),
-            LoadedDocument::new(document.clone(), key.clone()),
-        );
-        let mut document = document;
-        rewrite_refs_against(&mut document, &key);
-        let previous = self.cache.insert(key, document);
+        self.documents.remove(&key);
+        let previous = self.cache_resource(key.clone(), LoadedDocument::new(document, key));
         if previous.is_some() {
             self.typed_cache.clear();
         }
@@ -260,10 +264,11 @@ impl Loader {
 
     fn load_resource_by_key(&mut self, key: Url) -> Result<&Value, LoaderError> {
         if !self.cache.contains_key(&key) {
-            let mut parsed = self.load_document(key.as_str())?.document.clone();
-            rewrite_refs_against(&mut parsed, &key);
-
-            self.cache.insert(key.clone(), parsed);
+            let loaded = match self.documents.get(&key) {
+                Some(raw) => raw.as_ref().clone(), // both views explicitly requested
+                None => self.fetch_document(&key)?,
+            };
+            self.cache_resource(key.clone(), loaded);
         }
 
         Ok(self
@@ -283,14 +288,11 @@ impl Loader {
 
     async fn load_resource_by_key_async(&mut self, key: Url) -> Result<&Value, LoaderError> {
         if !self.cache.contains_key(&key) {
-            let mut parsed = self
-                .load_document_async(key.as_str())
-                .await?
-                .document
-                .clone();
-            rewrite_refs_against(&mut parsed, &key);
-
-            self.cache.insert(key.clone(), parsed);
+            let loaded = match self.documents.get(&key) {
+                Some(raw) => raw.as_ref().clone(),
+                None => self.fetch_document_async(&key).await?,
+            };
+            self.cache_resource(key.clone(), loaded);
         }
 
         Ok(self
@@ -306,18 +308,10 @@ impl Loader {
     /// longest-prefix selection are unchanged; no fetcher is enabled implicitly.
     pub fn load_document(&mut self, uri: &str) -> Result<&LoadedDocument, LoaderError> {
         let (key, _) = parse_reference(uri)?;
+        self.restore_document(&key);
         if !self.documents.contains_key(&key) {
-            let prefix = best_fetcher_key(&self.fetchers, key.as_str()).ok_or_else(|| {
-                LoaderError::NoFetcherRegistered {
-                    uri: key.to_string(),
-                }
-            })?;
-            let document = self
-                .fetchers
-                .get_mut(&prefix)
-                .expect("fetcher key came from the registry")
-                .fetch_document(&key)?;
-            self.documents.insert(key.clone(), document);
+            let document = self.fetch_document(&key)?;
+            self.documents.insert(key.clone(), Arc::new(document));
         }
         Ok(self.documents.get(&key).expect("document was cached"))
     }
@@ -326,21 +320,119 @@ impl Loader {
     /// on cache misses. Both loading modes share complete-document cache hits.
     pub async fn load_document_async(&mut self, uri: &str) -> Result<&LoadedDocument, LoaderError> {
         let (key, _) = parse_reference(uri)?;
+        self.restore_document(&key);
         if !self.documents.contains_key(&key) {
-            let prefix = best_fetcher_key(&self.async_fetchers, key.as_str()).ok_or_else(|| {
-                LoaderError::NoFetcherRegistered {
-                    uri: key.to_string(),
-                }
-            })?;
-            let document = self
-                .async_fetchers
-                .get_mut(&prefix)
-                .expect("async fetcher key came from the registry")
-                .fetch_document(&key)
-                .await?;
-            self.documents.insert(key.clone(), document);
+            let document = self.fetch_document_async(&key).await?;
+            self.documents.insert(key.clone(), Arc::new(document));
         }
         Ok(self.documents.get(&key).expect("document was cached"))
+    }
+
+    /// Share the unchanged cached document without cloning its value. The handle
+    /// stays valid if the loader is dropped or the resource is later preloaded.
+    ///
+    /// ```
+    /// use roas::Loader;
+    /// use serde_json::json;
+    /// use std::sync::Arc;
+    /// # fn main() -> Result<(), roas::LoaderError> {
+    /// let mut loader = Loader::new();
+    /// loader.preload_resource("https://example.test/api.json", json!({"openapi":"3.1.0"}))?;
+    /// let first = loader.load_document_shared("https://example.test/api.json")?;
+    /// let second = loader.load_document_shared("https://example.test/api.json")?;
+    /// assert!(Arc::ptr_eq(&first, &second));
+    /// drop(loader);
+    /// assert_eq!(first.document["openapi"], "3.1.0");
+    /// # Ok(()) }
+    /// ```
+    pub fn load_document_shared(&mut self, uri: &str) -> Result<Arc<LoadedDocument>, LoaderError> {
+        self.load_document(uri)?;
+        let (key, _) = parse_reference(uri)?;
+        Ok(Arc::clone(
+            self.documents.get(&key).expect("document was cached"),
+        ))
+    }
+
+    /// Async counterpart of [`Self::load_document_shared`], with the same cache
+    /// and registered-fetcher policy as [`Self::load_document_async`].
+    pub async fn load_document_shared_async(
+        &mut self,
+        uri: &str,
+    ) -> Result<Arc<LoadedDocument>, LoaderError> {
+        self.load_document_async(uri).await?;
+        let (key, _) = parse_reference(uri)?;
+        Ok(Arc::clone(
+            self.documents.get(&key).expect("document was cached"),
+        ))
+    }
+
+    fn fetch_document(&mut self, key: &Url) -> Result<LoadedDocument, LoaderError> {
+        let prefix = best_fetcher_key(&self.fetchers, key.as_str()).ok_or_else(|| {
+            LoaderError::NoFetcherRegistered {
+                uri: key.to_string(),
+            }
+        })?;
+        self.fetchers
+            .get_mut(&prefix)
+            .expect("registered fetcher")
+            .fetch_document(key)
+    }
+
+    async fn fetch_document_async(&mut self, key: &Url) -> Result<LoadedDocument, LoaderError> {
+        let prefix = best_fetcher_key(&self.async_fetchers, key.as_str()).ok_or_else(|| {
+            LoaderError::NoFetcherRegistered {
+                uri: key.to_string(),
+            }
+        })?;
+        self.async_fetchers
+            .get_mut(&prefix)
+            .expect("registered async fetcher")
+            .fetch_document(key)
+            .await
+    }
+
+    fn cache_resource(&mut self, key: Url, mut loaded: LoadedDocument) -> Option<Value> {
+        let original_refs = rewrite_refs_against(&mut loaded.document, &key);
+        self.origins.insert(
+            key.clone(),
+            ResourceOrigin {
+                retrieval_uri: loaded.retrieval_uri,
+                original_refs,
+            },
+        );
+        self.cache.insert(key, loaded.document)
+    }
+
+    fn restore_document(&mut self, key: &Url) {
+        if self.documents.contains_key(key) {
+            return;
+        }
+        if let Some(value) = self.cache.get(key) {
+            let origin = self
+                .origins
+                .get(key)
+                .expect("cached resources retain their origin");
+            let mut document = value.clone(); // raw view is now explicitly requested
+            let mut originals = origin.original_refs.iter().peekable();
+            let mut ordinal = 0;
+            visit_refs(&mut document, &mut |reference| {
+                if let Some((index, value)) = originals.peek()
+                    && *index == ordinal
+                {
+                    reference.clone_from(value);
+                    originals.next();
+                }
+                ordinal += 1;
+            });
+            debug_assert!(
+                originals.next().is_none(),
+                "immutable cached reference order"
+            );
+            self.documents.insert(
+                key.clone(),
+                Arc::new(LoadedDocument::new(document, origin.retrieval_uri.clone())),
+            );
+        }
     }
 
     /// Resolve a reference and return the referenced JSON value.
@@ -514,21 +606,33 @@ fn best_fetcher_key<T: ?Sized>(fetchers: &BTreeMap<String, Box<T>>, uri: &str) -
 /// Strings that don't successfully `Url::join` (e.g. exotic malformed
 /// inputs) are left as-is rather than silently corrupted — validation
 /// downstream will catch them.
-fn rewrite_refs_against(value: &mut Value, base: &Url) {
+fn rewrite_refs_against(value: &mut Value, base: &Url) -> Vec<(usize, String)> {
+    let mut originals = Vec::new();
+    let mut ordinal = 0;
+    visit_refs(value, &mut |reference| {
+        if let Ok(joined) = base.join(reference)
+            && joined.as_str() != reference
+        {
+            originals.push((ordinal, std::mem::replace(reference, joined.to_string())));
+        }
+        ordinal += 1;
+    });
+    originals
+}
+
+fn visit_refs(value: &mut Value, visitor: &mut impl FnMut(&mut String)) {
     match value {
         Value::Object(map) => {
-            if let Some(Value::String(s)) = map.get_mut("$ref")
-                && let Ok(joined) = base.join(s)
-            {
-                *s = joined.to_string();
+            if let Some(Value::String(s)) = map.get_mut("$ref") {
+                visitor(s);
             }
             for v in map.values_mut() {
-                rewrite_refs_against(v, base);
+                visit_refs(v, visitor);
             }
         }
         Value::Array(items) => {
             for v in items.iter_mut() {
-                rewrite_refs_against(v, base);
+                visit_refs(v, visitor);
             }
         }
         _ => {}
@@ -669,6 +773,42 @@ mod tests {
             .load_resource("Cargo.toml")
             .expect_err("file loading should not happen without a fetcher");
         assert!(matches!(err, LoaderError::NoFetcherRegistered { .. }));
+    }
+
+    #[test]
+    fn legacy_only_fetches_do_not_retain_a_second_document_tree() {
+        let uri = "https://example.test/doc.json";
+        let mut sync = Loader::new();
+        sync.register_fetcher("https://", StaticFetcher::default());
+        sync.load_resource(uri).unwrap();
+        assert_eq!(sync.cache.len(), 1);
+        assert!(sync.documents.is_empty());
+
+        let mut asynchronous = Loader::new();
+        asynchronous.register_async_fetcher("https://", AsyncStaticFetcher::default());
+        block_on(asynchronous.load_resource_async(uri)).unwrap();
+        assert_eq!(asynchronous.cache.len(), 1);
+        assert!(asynchronous.documents.is_empty());
+
+        let mut preloaded = Loader::new();
+        let value = serde_json::json!({
+            "payload": "x".repeat(1024 * 1024),
+            "a": {"$ref":"./other.json"},
+            "b": {"$ref":"https://example.test/unchanged.json"}
+        });
+        preloaded.preload_resource(uri, value).unwrap();
+        assert!(preloaded.documents.is_empty());
+        let origin = preloaded.origins.get(&Url::parse(uri).unwrap()).unwrap();
+        assert_eq!(origin.original_refs, [(0, "./other.json".into())]);
+        assert_eq!(
+            preloaded.load_resource(uri).unwrap()["payload"]
+                .as_str()
+                .unwrap()
+                .len(),
+            1024 * 1024
+        );
+        preloaded.load_document(uri).unwrap(); // only an explicit raw read materializes the other view
+        assert_eq!(preloaded.documents.len(), 1);
     }
 
     #[test]

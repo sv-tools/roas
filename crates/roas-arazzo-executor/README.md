@@ -94,6 +94,9 @@ An Arazzo retrieval URL different from its `$self` is accepted only with
 documents never overwrite each other. Explicit `Options::source` / `base_url`
 entries win over the registry adapter. `Options::source_document` exposes the
 metadata of registry-backed sources, and returns `None` for legacy sources.
+Registry-backed options (including cloned options and source aliases) share the
+loader's immutable raw value. They do not keep another full JSON copy. Arazzo also
+has its parsed typed model; API documents remain raw values with checked versions.
 
 Cycles are retained as back edges, not recursively expanded documents. Shared
 dependencies reuse handles and loaded resources. The default limits are 256
