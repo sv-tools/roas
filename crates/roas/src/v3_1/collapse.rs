@@ -120,6 +120,39 @@ impl<'a> LiftableBag<Collapser<'a>, SchemaRef> for Schema {
     fn name_hint(item: &Self) -> Option<String> {
         schema_title(item).map(str::to_owned)
     }
+
+    /// Sibling keywords are kept raw on the reference, so they are
+    /// parsed, walked like any schema, and written back only when the
+    /// walk changed something. A typeless sibling set parses as an
+    /// object schema, whose serialization adds `type: "object"`; that
+    /// key is dropped again when the author did not write it, so the
+    /// document's meaning is untouched. Siblings that only make sense
+    /// under the target's type — `items` beside an array `$ref` — are
+    /// not reached this way, since the target is not resolved here.
+    fn walk_ref(
+        reference: &mut SchemaRef,
+        ctx: &NameContext,
+        c: &mut Collapser<'a>,
+    ) -> Result<(), CollapseError> {
+        let Some(mut schema) = reference.siblings_schema()? else {
+            return Ok(());
+        };
+        let before = serde_json::to_value(&schema)?;
+        recurse_schema(&mut schema, ctx, c)?;
+        let after = serde_json::to_value(schema)?;
+        if before == after {
+            return Ok(());
+        }
+        let serde_json::Value::Object(map) = after else {
+            return Ok(());
+        };
+        let had_type = reference.siblings.contains_key("type");
+        reference.siblings = map
+            .into_iter()
+            .filter(|(k, _)| had_type || k != "type")
+            .collect();
+        Ok(())
+    }
 }
 
 impl<'a> LiftableBag<Collapser<'a>> for Parameter {
@@ -1320,6 +1353,82 @@ mod tests {
             }),
         );
         assert_eq!(lifted_schema_names(&spec), vec!["Pet".to_owned()]);
+    }
+
+    #[test]
+    fn external_refs_inside_ref_siblings_are_lifted() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({
+                    "Child": {"title": "Child", "type": "object", "properties": {"id": {"type": "integer"}}}
+                }),
+            )
+            .expect("preload");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "$ref": "#/components/schemas/Pet",
+                                            "properties": {
+                                                "child": {"$ref": "external.json#/Child"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {"schemas": {"Pet": {"type": "object", "title": "Pet"}}}
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        let resp = v["paths"]["/a"]["get"]["responses"]["200"]["$ref"]
+            .as_str()
+            .unwrap();
+        // The sibling's external reference is now local, and no `type`
+        // was invented for the typeless sibling set.
+        assert_eq!(
+            schema_in_lifted_content(&v, resp, "application/json"),
+            serde_json::json!({
+                "$ref": "#/components/schemas/Pet",
+                "properties": {"child": {"$ref": "#/components/schemas/Child"}}
+            }),
+        );
+        let mut names = lifted_schema_names(&spec);
+        names.sort();
+        assert_eq!(names, vec!["Child".to_owned(), "Pet".to_owned()]);
+    }
+
+    #[test]
+    fn unchanged_ref_siblings_are_left_byte_identical() {
+        let before = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {"schemas": {
+                "Pet": {"type": "object", "title": "Pet"},
+                "Narrow": {"$ref": "#/components/schemas/Pet", "properties": {"id": {"type": "integer"}}, "readOnly": true}
+            }}
+        });
+        let mut spec = parse(before.clone());
+        spec.collapse(None).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["components"]["schemas"]["Narrow"],
+            before["components"]["schemas"]["Narrow"]
+        );
     }
 
     #[test]

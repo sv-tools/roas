@@ -3,7 +3,9 @@
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, SchemaType, StringFormat};
 use crate::common::helpers::validate_pattern;
-use crate::common::reference::{RefOr, ReferenceObject, deserialize_reference_object};
+use crate::common::reference::{
+    RefOr, ReferenceObject, ResolveReference, deserialize_reference_object,
+};
 use crate::v3_2::discriminator::Discriminator;
 use crate::v3_2::external_documentation::ExternalDocumentation;
 use crate::v3_2::spec::Spec;
@@ -184,14 +186,58 @@ impl SchemaRef {
     /// The parse is the ordinary [`Schema`] one, so a sibling set with no
     /// `type` reads as an object schema, as any typeless schema does.
     pub fn siblings_schema(&self) -> Result<Option<Schema>, serde_json::Error> {
+        self.siblings_schema_with_type(None)
+    }
+
+    /// The sibling keywords parsed as a [`Schema`] that constrains the
+    /// same kind of value as `target`, or `None` when there are none.
+    ///
+    /// A sibling set that names no `type` and no composition constrains
+    /// whatever the target is — `{"$ref": Tags, "items": {…}}` is an
+    /// array schema when `Tags` is one — but the ordinary parse reads a
+    /// typeless schema as an *object* schema and would file `items`
+    /// among the extensions. So when `target` has a single type, that
+    /// type is borrowed for the parse; otherwise this is
+    /// [`siblings_schema`](Self::siblings_schema).
+    pub fn siblings_schema_for(
+        &self,
+        target: &Schema,
+    ) -> Result<Option<Schema>, serde_json::Error> {
+        let borrowed = match target {
+            Schema::Single(single) => Some(single.to_string()),
+            _ => None,
+        };
+        self.siblings_schema_with_type(borrowed.as_deref())
+    }
+
+    /// True when the siblings say what kind of value they constrain —
+    /// a `type`, or a composition keyword that carries its own.
+    pub fn siblings_name_a_type(&self) -> bool {
+        ["type", "allOf", "anyOf", "oneOf", "not"]
+            .iter()
+            .any(|k| self.siblings.contains_key(*k))
+    }
+
+    fn siblings_schema_with_type(
+        &self,
+        borrowed_type: Option<&str>,
+    ) -> Result<Option<Schema>, serde_json::Error> {
         if self.siblings.is_empty() {
             return Ok(None);
         }
-        let map: serde_json::Map<String, serde_json::Value> = self
+        let mut map: serde_json::Map<String, serde_json::Value> = self
             .siblings
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        if let Some(borrowed_type) = borrowed_type
+            && !self.siblings_name_a_type()
+        {
+            map.insert(
+                "type".to_owned(),
+                serde_json::Value::String(borrowed_type.to_owned()),
+            );
+        }
         serde_json::from_value(serde_json::Value::Object(map)).map(Some)
     }
 }
@@ -286,7 +332,14 @@ impl ValidateWithContext<Spec> for SchemaRef {
         if self.reference.is_empty() {
             ctx.error(path.clone(), ".$ref: must not be empty");
         }
-        match self.siblings_schema() {
+        // Borrow the target's type when the siblings name none, so a
+        // sibling `items` on an array target is walked as an array's
+        // items rather than filed as an unknown keyword.
+        let siblings = match ctx.spec.resolve_reference(&self.reference) {
+            Some(target) => self.siblings_schema_for(target),
+            None => self.siblings_schema(),
+        };
+        match siblings {
             Ok(None) => {}
             Ok(Some(schema)) => schema.validate_with_context(ctx, path),
             Err(err) => ctx.error(
@@ -3575,5 +3628,61 @@ mod tests {
         r.set_reference("#/components/schemas/Pet".into());
         assert_eq!(r.reference(), "#/components/schemas/Pet");
         assert_eq!(r.siblings.len(), 1);
+    }
+
+    #[test]
+    fn ref_siblings_borrow_the_targets_type_when_validated() {
+        // `items` beside an array `$ref` is walked as an array's items,
+        // so a dangling reference inside it is found.
+        let spec = spec_with_schemas(serde_json::json!({
+            "Tags": {"type": "array", "items": {"type": "string"}},
+            "Narrow": {
+                "$ref": "#/components/schemas/Tags",
+                "items": {"$ref": "#/components/schemas/Missing"},
+            },
+        }));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        let narrow = &spec.components.as_ref().unwrap().schemas.as_ref().unwrap()["Narrow"];
+        narrow.validate_with_context(&mut ctx, "#.components.schemas.Narrow".into());
+        assert!(
+            ctx.errors.mentions_all(&["Narrow", "items", "Missing"]),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn siblings_schema_for_borrows_only_when_no_type_is_named() {
+        let slot = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Tags",
+            "maxItems": 3,
+        }));
+        let RefOr::Ref(r) = &slot else { unreachable!() };
+        let array_target: Schema =
+            serde_json::from_value(serde_json::json!({"type": "array"})).unwrap();
+        let siblings = r.siblings_schema_for(&array_target).unwrap().unwrap();
+        assert!(matches!(&siblings, Schema::Single(s) if matches!(**s, SingleSchema::Array(_))));
+        // Plain parse: typeless reads as an object schema.
+        let plain = r.siblings_schema().unwrap().unwrap();
+        assert!(matches!(&plain, Schema::Single(s) if matches!(**s, SingleSchema::Object(_))));
+        // A named type is kept as written.
+        let typed = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Tags",
+            "type": "string",
+        }));
+        let RefOr::Ref(r) = &typed else {
+            unreachable!()
+        };
+        assert!(r.siblings_name_a_type());
+        let siblings = r.siblings_schema_for(&array_target).unwrap().unwrap();
+        assert!(matches!(&siblings, Schema::Single(s) if matches!(**s, SingleSchema::String(_))));
+        // A composite target has no single type to lend.
+        let composite: Schema =
+            serde_json::from_value(serde_json::json!({"allOf": [{"type": "array"}]})).unwrap();
+        let slot =
+            schema_slot(serde_json::json!({"$ref": "#/components/schemas/X", "maxItems": 3}));
+        let RefOr::Ref(r) = &slot else { unreachable!() };
+        let siblings = r.siblings_schema_for(&composite).unwrap().unwrap();
+        assert!(matches!(&siblings, Schema::Single(s) if matches!(**s, SingleSchema::Object(_))));
     }
 }
