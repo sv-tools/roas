@@ -10,7 +10,7 @@ use crate::v3_1::parameter::Parameter;
 use crate::v3_1::path_item::PathItem;
 use crate::v3_1::request_body::RequestBody;
 use crate::v3_1::response::Response;
-use crate::v3_1::schema::Schema;
+use crate::v3_1::schema::{Schema, SchemaRef};
 use crate::v3_1::security_scheme::SecurityScheme;
 use crate::v3_1::spec::Spec;
 use crate::validation::Options;
@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 pub struct Components {
     /// An object to hold reusable Schema Objects.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schemas: Option<BTreeMap<String, RefOr<Schema>>>,
+    pub schemas: Option<BTreeMap<String, RefOr<Schema, SchemaRef>>>,
 
     /// An object to hold reusable Response Objects.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,6 +220,7 @@ impl ValidateWithContext<Spec> for Components {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::reference::ReferenceObject;
     use crate::v3_1::operation::Operation;
     use crate::v3_1::parameter::{InQuery, Parameter};
     use crate::v3_1::response::{Response, Responses};
@@ -232,7 +233,7 @@ mod tests {
     use crate::validation::ValidationErrorsExt;
     use serde_json::json;
 
-    fn map_with<T>(name: &str, t: T) -> BTreeMap<String, RefOr<T>> {
+    fn map_with<T, R: ReferenceObject>(name: &str, t: T) -> BTreeMap<String, RefOr<T, R>> {
         BTreeMap::from([(name.to_owned(), RefOr::new_item(t))])
     }
 
@@ -474,7 +475,7 @@ mod tests {
 
     #[test]
     fn invalid_component_name_reported() {
-        let mut schemas: BTreeMap<String, RefOr<Schema>> = BTreeMap::new();
+        let mut schemas: BTreeMap<String, RefOr<Schema, SchemaRef>> = BTreeMap::new();
         schemas.insert(
             "bad name".to_owned(),
             RefOr::new_item(Schema::Single(Box::new(SingleSchema::String(

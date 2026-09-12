@@ -8,7 +8,7 @@ use crate::common::reference::RefOr;
 use crate::v3_1::example::Example;
 use crate::v3_1::header::Header;
 use crate::v3_1::parameter::InQueryStyle;
-use crate::v3_1::schema::Schema;
+use crate::v3_1::schema::{Schema, SchemaRef};
 use crate::v3_1::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
 
@@ -43,7 +43,7 @@ use crate::validation::{Context, PushError, ValidateWithContext};
 pub struct MediaType {
     /// The schema defining the content of the request, response, or parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<RefOr<Schema>>,
+    pub schema: Option<RefOr<Schema, SchemaRef>>,
 
     /// Example of the media type.
     /// The example SHOULD match the specified schema and encoding properties if present.

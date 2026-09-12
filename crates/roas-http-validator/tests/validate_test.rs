@@ -513,6 +513,38 @@ fn a_base_path_option_overrides_what_the_servers_say() {
 // ── references ───────────────────────────────────────────────────────
 
 #[test]
+fn a_sibling_type_on_a_schema_ref_drives_parameter_coercion() {
+    // `Any` is `{}`; the reference narrows it to an integer, so the
+    // query text must be read as one — and is, at any hop of a chain.
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/x": { "get": { "parameters": [
+            { "name": "limit", "in": "query",
+              "schema": { "$ref": "#/components/schemas/Any", "type": "integer", "maximum": 100 } },
+            { "name": "page", "in": "query",
+              "schema": { "$ref": "#/components/schemas/Count" } }
+        ] } } },
+        "components": { "schemas": {
+            "Any": {},
+            "Count": { "$ref": "#/components/schemas/Any", "type": "integer" }
+        } }
+    }))
+    .expect("the description must parse");
+    let validator = Validator::new(spec);
+    let request = |query: &'static str| RequestView::new("GET", "/x").with_query(query);
+    assert!(errors(&validator, &request("limit=5&page=2")).is_empty());
+    assert_eq!(
+        errors(&validator, &request("limit=500")),
+        ["query parameter \"limit\": 500 is above maximum 100"],
+    );
+    assert_eq!(
+        errors(&validator, &request("page=many")),
+        ["query parameter \"page\": cannot be read: \"many\" is not an integer"],
+    );
+}
+
+#[test]
 fn a_referenced_parameter_is_followed_to_what_it_names() {
     let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
         "openapi": "3.2.0",

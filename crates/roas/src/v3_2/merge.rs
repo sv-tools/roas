@@ -42,7 +42,7 @@ use crate::v3_2::parameter::{InCookie, InHeader, InPath, InQuery, InQuerystring,
 use crate::v3_2::path_item::{PathItem, Paths};
 use crate::v3_2::request_body::RequestBody;
 use crate::v3_2::response::{Response, Responses};
-use crate::v3_2::schema::{ObjectSchema, Schema, SingleSchema};
+use crate::v3_2::schema::{ObjectSchema, Schema, SchemaRef, SingleSchema};
 use crate::v3_2::security_scheme::{
     ApiKeySecurityScheme, AuthorizationCodeOAuth2Flow, ClientCredentialsOAuth2Flow,
     DeviceAuthorizationOAuth2Flow, HttpSecurityScheme, ImplicitOAuth2Flow, MutualTLSSecurityScheme,
@@ -1067,13 +1067,13 @@ impl MergeWithContext for InQuerystring {
     }
 }
 
-/// Shared helper: merge an `Option<RefOr<Schema>>`. `field_name` is
+/// Shared helper: merge an `Option<RefOr<Schema, SchemaRef>>`. `field_name` is
 /// the JSONPath segment (`schema`, `itemSchema`, `propertyNames`, …)
 /// — without it, every collision was previously misreported as
 /// `.schema`.
 fn merge_schema_field(
-    base: &mut Option<RefOr<Schema>>,
-    other: Option<RefOr<Schema>>,
+    base: &mut Option<RefOr<Schema, SchemaRef>>,
+    other: Option<RefOr<Schema, SchemaRef>>,
     ctx: &mut MergeContext,
     path: &mut String,
     field_name: &str,
@@ -2314,6 +2314,39 @@ oauth_flow_merge!(
     token_url => "tokenUrl",
 );
 
+// ----- SchemaRef -----
+
+impl MergeWithContext for SchemaRef {
+    /// `summary` / `description` merge as on a Reference Object; the
+    /// sibling keywords merge key by key like extensions, an incoming
+    /// value replacing a differing base one. The `$ref` target itself
+    /// is compared by the slot ([`RefOr`]) before this is reached.
+    fn merge_with_context(&mut self, other: Self, ctx: &mut MergeContext, path: &mut String) {
+        if ctx.errored {
+            return;
+        }
+        merge_opt_scalar(
+            &mut self.summary,
+            other.summary,
+            ctx,
+            path,
+            ".summary",
+            ConflictKind::ScalarOverridden,
+        );
+        merge_opt_scalar(
+            &mut self.description,
+            other.description,
+            ctx,
+            path,
+            ".description",
+            ConflictKind::ScalarOverridden,
+        );
+        let mut base = Some(std::mem::take(&mut self.siblings));
+        merge_extensions(&mut base, Some(other.siblings), ctx, path, "");
+        self.siblings = base.unwrap_or_default();
+    }
+}
+
 // ----- Schema -----
 
 impl MergeWithContext for Schema {
@@ -2530,7 +2563,7 @@ mod tests {
     use crate::v3_2::parameter::{InPath, InQuery, Parameter};
     use crate::v3_2::path_item::{PathItem, Paths};
     use crate::v3_2::response::{Response, Responses};
-    use crate::v3_2::schema::{ObjectSchema, Schema, SingleSchema};
+    use crate::v3_2::schema::{ObjectSchema, Schema, SchemaRef, SingleSchema};
     use crate::v3_2::tag::Tag;
     use std::collections::BTreeMap;
 
@@ -5238,5 +5271,62 @@ mod tests {
         assert_eq!(m.get("x-a"), Some(&serde_json::json!(1)));
         assert_eq!(ctx.conflicts.len(), 1);
         assert_eq!(ctx.conflicts[0].resolution, Resolution::Base);
+    }
+
+    #[test]
+    fn schema_ref_same_target_merges_siblings() {
+        let mut base: RefOr<Schema, SchemaRef> = serde_json::from_value(serde_json::json!({
+            "$ref": "#/components/schemas/Pet",
+            "summary": "old",
+            "maxLength": 5,
+            "readOnly": true
+        }))
+        .unwrap();
+        let incoming: RefOr<Schema, SchemaRef> = serde_json::from_value(serde_json::json!({
+            "$ref": "#/components/schemas/Pet",
+            "description": "d",
+            "maxLength": 9,
+            "readOnly": true
+        }))
+        .unwrap();
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
+        let mut path = String::from("#.x");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
+        let RefOr::Ref(r) = &base else {
+            panic!("expected Ref");
+        };
+        assert_eq!(r.summary.as_deref(), Some("old"));
+        assert_eq!(r.description.as_deref(), Some("d"));
+        assert_eq!(r.siblings["maxLength"], serde_json::json!(9));
+        assert_eq!(r.siblings["readOnly"], serde_json::json!(true));
+        assert_eq!(ctx.conflicts.len(), 1, "conflicts: {:?}", ctx.conflicts);
+        assert_eq!(ctx.conflicts[0].kind, ConflictKind::ScalarOverridden);
+        assert!(
+            ctx.conflicts[0].path.ends_with(".maxLength"),
+            "{}",
+            ctx.conflicts[0].path
+        );
+    }
+
+    #[test]
+    fn schema_ref_different_target_replaces_whole_reference() {
+        let mut base: RefOr<Schema, SchemaRef> = serde_json::from_value(serde_json::json!({
+            "$ref": "#/components/schemas/A",
+            "maxLength": 5
+        }))
+        .unwrap();
+        let incoming: RefOr<Schema, SchemaRef> = serde_json::from_value(serde_json::json!({
+            "$ref": "#/components/schemas/B"
+        }))
+        .unwrap();
+        let mut ctx: MergeContext = MergeContext::new(MergeOptions::new());
+        let mut path = String::from("#.x");
+        base.merge_with_context(incoming, &mut ctx, &mut path);
+        let RefOr::Ref(r) = &base else {
+            panic!("expected Ref");
+        };
+        assert_eq!(r.reference, "#/components/schemas/B");
+        assert!(!r.has_siblings());
+        assert_eq!(ctx.conflicts[0].kind, ConflictKind::RefReplaced);
     }
 }

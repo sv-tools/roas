@@ -4,7 +4,7 @@ use crate::common::reference::RefOr;
 use crate::v3_1::example::Example;
 use crate::v3_1::media_type::MediaType;
 use crate::v3_1::parameter::InHeaderStyle;
-use crate::v3_1::schema::Schema;
+use crate::v3_1::schema::{Schema, SchemaRef};
 use crate::v3_1::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ pub struct Header {
 
     /// The schema defining the type used for the parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<RefOr<Schema>>,
+    pub schema: Option<RefOr<Schema, SchemaRef>>,
 
     /// Example of the parameter’s potential value.
     /// The example SHOULD match the specified schema and encoding properties if present.

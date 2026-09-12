@@ -190,6 +190,57 @@ mod tests {
     }
 
     #[test]
+    fn schema_ref_siblings_survive_the_conversion() {
+        let raw = r##"{
+            "openapi": "3.1.2",
+            "info": { "title": "t", "version": "1" },
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "Pet": {"type": "object"},
+                    "Owner": {
+                        "type": "object",
+                        "properties": {
+                            "pet": {
+                                "$ref": "#/components/schemas/Pet",
+                                "description": "d",
+                                "readOnly": true,
+                                "x-note": 1
+                            }
+                        }
+                    }
+                }
+            }
+        }"##;
+        let value = convert(raw);
+        assert_eq!(
+            value["components"]["schemas"]["Owner"]["properties"]["pet"],
+            serde_json::json!({
+                "$ref": "#/components/schemas/Pet",
+                "description": "d",
+                "readOnly": true,
+                "x-note": 1
+            }),
+        );
+        let v32: V32Spec = serde_json::from_value(value).unwrap();
+        let owner = &v32.components.as_ref().unwrap().schemas.as_ref().unwrap()["Owner"];
+        let crate::common::reference::RefOr::Item(crate::v3_2::schema::Schema::Single(single)) =
+            owner
+        else {
+            panic!("expected an inline object schema");
+        };
+        let crate::v3_2::schema::SingleSchema::Object(object) = single.as_ref() else {
+            panic!("expected an object schema");
+        };
+        let crate::common::reference::RefOr::Ref(r) = &object.properties.as_ref().unwrap()["pet"]
+        else {
+            panic!("expected a reference");
+        };
+        assert_eq!(r.description.as_deref(), Some("d"));
+        assert_eq!(r.siblings.len(), 2);
+    }
+
+    #[test]
     fn openapi_version_lifted() {
         let raw = r##"{
             "openapi": "3.1.2",

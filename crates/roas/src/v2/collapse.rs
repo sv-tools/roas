@@ -147,13 +147,13 @@ fn recurse_schema(
     match schema {
         Schema::AllOf(s) => {
             for (i, child) in s.all_of.iter_mut().enumerate() {
-                lift_ref_or::<Schema, _>(child, ctx.push(&format!("allOf[{i}]")), c)?;
+                lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("allOf[{i}]")), c)?;
             }
         }
         Schema::Object(o) => recurse_object_schema(o.as_mut(), ctx, c)?,
         Schema::Array(a) => {
             if let Some(items) = a.items.as_mut() {
-                lift_ref_or::<Schema, _>(items, ctx.push("items"), c)?;
+                lift_ref_or::<Schema, _, _>(items, ctx.push("items"), c)?;
             }
         }
         // Primitive variants (String, Integer, Number, Boolean, Null)
@@ -174,11 +174,11 @@ fn recurse_object_schema(
 ) -> Result<(), CollapseError> {
     if let Some(props) = o.properties.as_mut() {
         for (name, child) in props.iter_mut() {
-            lift_ref_or::<Schema, _>(child, ctx.push(&format!("properties.{name}")), c)?;
+            lift_ref_or::<Schema, _, _>(child, ctx.push(&format!("properties.{name}")), c)?;
         }
     }
     if let Some(BoolOr::Item(s)) = o.additional_properties.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("additionalProperties"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("additionalProperties"), c)?;
     }
     // `all_of` holds `RefOr<ObjectSchema>` rather than `RefOr<Schema>` —
     // there's no `definitions` slot that matches `ObjectSchema` directly,
@@ -203,7 +203,7 @@ fn walk_parameter(
     // have no nested ref slots.
     if let Parameter::Body(b) = param {
         let ctx = ctx.push(b.name.as_str());
-        lift_ref_or::<Schema, _>(&mut b.schema, ctx.push("schema"), c)?;
+        lift_ref_or::<Schema, _, _>(&mut b.schema, ctx.push("schema"), c)?;
     }
     Ok(())
 }
@@ -214,7 +214,7 @@ fn walk_response(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(s) = r.schema.as_mut() {
-        lift_ref_or::<Schema, _>(s, ctx.push("schema"), c)?;
+        lift_ref_or::<Schema, _, _>(s, ctx.push("schema"), c)?;
     }
     Ok(())
 }
@@ -225,11 +225,11 @@ fn walk_responses(
     c: &mut Collapser<'_>,
 ) -> Result<(), CollapseError> {
     if let Some(default) = responses.default.as_mut() {
-        lift_ref_or::<Response, _>(default, ctx.push("default"), c)?;
+        lift_ref_or::<Response, _, _>(default, ctx.push("default"), c)?;
     }
     if let Some(map) = responses.responses.as_mut() {
         for (status, resp) in map.iter_mut() {
-            lift_ref_or::<Response, _>(resp, ctx.push(status), c)?;
+            lift_ref_or::<Response, _, _>(resp, ctx.push(status), c)?;
         }
     }
     Ok(())
@@ -242,7 +242,7 @@ fn walk_path_item(
 ) -> Result<(), CollapseError> {
     if let Some(params) = pi.parameters.as_mut() {
         for (i, p) in params.iter_mut().enumerate() {
-            lift_ref_or::<Parameter, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
+            lift_ref_or::<Parameter, _, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
         }
     }
     if let Some(ops) = pi.operations.as_mut() {
@@ -267,7 +267,7 @@ fn walk_operation(
     };
     if let Some(params) = op.parameters.as_mut() {
         for (i, p) in params.iter_mut().enumerate() {
-            lift_ref_or::<Parameter, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
+            lift_ref_or::<Parameter, _, _>(p, ctx.push(&format!("parameters[{i}]")), c)?;
         }
     }
     walk_responses(&mut op.responses, &ctx.push("responses"), c)?;

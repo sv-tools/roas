@@ -17,7 +17,7 @@ use crate::v3_2::parameter::Parameter;
 use crate::v3_2::path_item::{PathItem, Paths};
 use crate::v3_2::request_body::RequestBody;
 use crate::v3_2::response::Response;
-use crate::v3_2::schema::Schema;
+use crate::v3_2::schema::{Schema, SchemaRef};
 use crate::v3_2::security_scheme::SecurityScheme;
 use crate::v3_2::server::Server;
 use crate::v3_2::tag::Tag;
@@ -431,7 +431,7 @@ impl Spec {
         &mut self,
         name: impl Into<String>,
         schema: impl Into<Schema>,
-    ) -> Result<RefOr<Schema>, InvalidComponentName> {
+    ) -> Result<RefOr<Schema, SchemaRef>, InvalidComponentName> {
         let name = name.into();
         check_component_name(&name)?;
         let reference = format!("#/components/schemas/{name}");

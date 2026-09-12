@@ -3,7 +3,9 @@
 use crate::common::bool_or::BoolOr;
 use crate::common::formats::{IntegerFormat, NumberFormat, SchemaType, StringFormat};
 use crate::common::helpers::validate_pattern;
-use crate::common::reference::RefOr;
+use crate::common::reference::{
+    RefOr, ReferenceObject, ResolveReference, deserialize_reference_object,
+};
 use crate::v3_2::discriminator::Discriminator;
 use crate::v3_2::external_documentation::ExternalDocumentation;
 use crate::v3_2::spec::Spec;
@@ -117,6 +119,234 @@ impl From<SingleSchema> for Schema {
 impl From<MultiSchema> for Schema {
     fn from(s: MultiSchema) -> Self {
         Schema::Multi(Box::new(s))
+    }
+}
+
+/// A Schema Object written as a reference: `$ref` plus, since OpenAPI
+/// 3.1, any sibling keywords.
+///
+/// OpenAPI 3.1 made the Schema Object a JSON Schema 2020-12 document,
+/// where `$ref` is an ordinary keyword: `{"$ref": "#/components/schemas/Pet",
+/// "maxLength": 5}` means *both* `Pet` and `maxLength: 5` apply — an
+/// intersection, exactly as `allOf: [{"$ref": …}, {"maxLength": 5}]`
+/// would. That is different from the Reference Object used by every
+/// other component, which allows only `summary` and `description`
+/// beside `$ref`, so the schema slots carry this payload instead of
+/// [`Ref`](crate::common::reference::Ref).
+///
+/// `summary` and `description` are typed, as on the Reference Object.
+/// Every other sibling is kept verbatim in [`siblings`](Self::siblings):
+/// as a raw map the document round-trips byte for byte, and a consumer
+/// that needs the siblings as a schema calls
+/// [`siblings_schema`](Self::siblings_schema). Resolving the reference —
+/// [`RefOr::get_item`](crate::common::reference::RefOr::get_item) and
+/// friends — yields the *target* only; the siblings stay on the
+/// reference, because they belong to this use site.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SchemaRef {
+    /// **Required** The reference identifier. This MUST be in the form
+    /// of a URI.
+    pub reference: String,
+
+    /// A short summary which by default SHOULD override that of the
+    /// referenced schema.
+    pub summary: Option<String>,
+
+    /// A description which by default SHOULD override that of the
+    /// referenced schema. CommonMark syntax MAY be used for rich text
+    /// representation.
+    pub description: Option<String>,
+
+    /// Every sibling keyword other than `summary` and `description`,
+    /// verbatim — JSON Schema keywords and `x-` extensions alike. They
+    /// apply *alongside* the referenced schema.
+    pub siblings: BTreeMap<String, serde_json::Value>,
+}
+
+impl SchemaRef {
+    /// A bare reference with no siblings.
+    pub fn new(reference: impl Into<String>) -> Self {
+        SchemaRef {
+            reference: reference.into(),
+            ..Default::default()
+        }
+    }
+
+    /// True when any keyword other than `$ref`, `summary` and
+    /// `description` is present — the cases where resolving the
+    /// target alone would lose a constraint.
+    pub fn has_siblings(&self) -> bool {
+        !self.siblings.is_empty()
+    }
+
+    /// The sibling keywords parsed as a [`Schema`], or `None` when there
+    /// are none. This is the second operand of the intersection the
+    /// reference denotes.
+    ///
+    /// The parse is the ordinary [`Schema`] one, so a sibling set with no
+    /// `type` reads as an object schema, as any typeless schema does.
+    pub fn siblings_schema(&self) -> Result<Option<Schema>, serde_json::Error> {
+        self.siblings_schema_with_type(None)
+    }
+
+    /// The sibling keywords parsed as a [`Schema`] that constrains the
+    /// same kind of value as `target`, or `None` when there are none.
+    ///
+    /// A sibling set that names no `type` and no composition constrains
+    /// whatever the target is — `{"$ref": Tags, "items": {…}}` is an
+    /// array schema when `Tags` is one — but the ordinary parse reads a
+    /// typeless schema as an *object* schema and would file `items`
+    /// among the extensions. So when `target` has a single type, that
+    /// type is borrowed for the parse; otherwise this is
+    /// [`siblings_schema`](Self::siblings_schema).
+    pub fn siblings_schema_for(
+        &self,
+        target: &Schema,
+    ) -> Result<Option<Schema>, serde_json::Error> {
+        let borrowed = match target {
+            Schema::Single(single) => Some(single.to_string()),
+            _ => None,
+        };
+        self.siblings_schema_with_type(borrowed.as_deref())
+    }
+
+    /// True when the siblings say what kind of value they constrain —
+    /// a `type`, or a composition keyword that carries its own.
+    pub fn siblings_name_a_type(&self) -> bool {
+        ["type", "allOf", "anyOf", "oneOf", "not"]
+            .iter()
+            .any(|k| self.siblings.contains_key(*k))
+    }
+
+    fn siblings_schema_with_type(
+        &self,
+        borrowed_type: Option<&str>,
+    ) -> Result<Option<Schema>, serde_json::Error> {
+        if self.siblings.is_empty() {
+            return Ok(None);
+        }
+        let mut map: serde_json::Map<String, serde_json::Value> = self
+            .siblings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Some(borrowed_type) = borrowed_type
+            && !self.siblings_name_a_type()
+        {
+            map.insert(
+                "type".to_owned(),
+                serde_json::Value::String(borrowed_type.to_owned()),
+            );
+        }
+        serde_json::from_value(serde_json::Value::Object(map)).map(Some)
+    }
+}
+
+impl ReferenceObject for SchemaRef {
+    fn new(reference: impl Into<String>) -> Self {
+        SchemaRef::new(reference)
+    }
+
+    fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    fn set_reference(&mut self, reference: String) {
+        self.reference = reference;
+    }
+
+    fn deserialize_after_ref<'de, A>(reference: String, mut map: A) -> Result<Self, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        use serde::de::Error;
+        let mut summary: Option<String> = None;
+        let mut description: Option<String> = None;
+        let mut siblings = BTreeMap::new();
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "$ref" => return Err(A::Error::duplicate_field("$ref")),
+                "summary" => {
+                    if summary.is_some() {
+                        return Err(A::Error::duplicate_field("summary"));
+                    }
+                    summary = Some(map.next_value()?);
+                }
+                "description" => {
+                    if description.is_some() {
+                        return Err(A::Error::duplicate_field("description"));
+                    }
+                    description = Some(map.next_value()?);
+                }
+                _ => {
+                    let value: serde_json::Value = map.next_value()?;
+                    if siblings.insert(key.clone(), value).is_some() {
+                        return Err(A::Error::custom(format_args!("duplicate field `{key}`")));
+                    }
+                }
+            }
+        }
+        Ok(SchemaRef {
+            reference,
+            summary,
+            description,
+            siblings,
+        })
+    }
+}
+
+impl Serialize for SchemaRef {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let len = 1
+            + usize::from(self.summary.is_some())
+            + usize::from(self.description.is_some())
+            + self.siblings.len();
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("$ref", &self.reference)?;
+        if let Some(summary) = &self.summary {
+            map.serialize_entry("summary", summary)?;
+        }
+        if let Some(description) = &self.description {
+            map.serialize_entry("description", description)?;
+        }
+        for (k, v) in &self.siblings {
+            map.serialize_entry(k, v)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaRef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_reference_object(deserializer)
+    }
+}
+
+impl ValidateWithContext<Spec> for SchemaRef {
+    /// The reference itself, then the siblings as the schema they
+    /// form. The target is validated by the slot ([`RefOr`]), which
+    /// resolves it; the siblings apply regardless of whether the
+    /// target resolves, so they are checked here unconditionally.
+    fn validate_with_context(&self, ctx: &mut Context<Spec>, path: String) {
+        if self.reference.is_empty() {
+            ctx.error(path.clone(), ".$ref: must not be empty");
+        }
+        // Borrow the target's type when the siblings name none, so a
+        // sibling `items` on an array target is walked as an array's
+        // items rather than filed as an unknown keyword.
+        let siblings = match ctx.spec.resolve_reference(&self.reference) {
+            Some(target) => self.siblings_schema_for(target),
+            None => self.siblings_schema(),
+        };
+        match siblings {
+            Ok(None) => {}
+            Ok(Some(schema)) => schema.validate_with_context(ctx, path),
+            Err(err) => ctx.error(
+                path,
+                format_args!(".$ref: sibling keywords do not form a valid schema: {err}"),
+            ),
+        }
     }
 }
 
@@ -284,7 +514,7 @@ impl From<ObjectSchema> for SingleSchema {
 pub struct AllOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "allOf")]
-    pub all_of: Vec<RefOr<Schema>>,
+    pub all_of: Vec<RefOr<Schema, SchemaRef>>,
 
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -322,7 +552,7 @@ pub struct AllOfSchema {
 pub struct AnyOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "anyOf")]
-    pub any_of: Vec<RefOr<Schema>>,
+    pub any_of: Vec<RefOr<Schema, SchemaRef>>,
 
     /// Adds support for polymorphism.
     /// The discriminator is an object name that is used to differentiate between other schemas
@@ -360,7 +590,7 @@ pub struct AnyOfSchema {
 pub struct OneOfSchema {
     /// **Required** The list of schemas that this schema is composed of.
     #[serde(rename = "oneOf")]
-    pub one_of: Vec<RefOr<Schema>>,
+    pub one_of: Vec<RefOr<Schema, SchemaRef>>,
 
     /// Adds support for polymorphism.
     /// The discriminator is an object name that is used to differentiate between other schemas
@@ -397,7 +627,7 @@ pub struct OneOfSchema {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NotSchema {
     /// **Required** The schema that this schema must not match.
-    pub not: RefOr<Schema>,
+    pub not: RefOr<Schema, SchemaRef>,
 
     /// Additional external documentation for this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -874,7 +1104,7 @@ pub struct ArraySchema {
 
     /// **Required** Describes the type of items in the array.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<BoolOr<RefOr<Schema>>>,
+    pub items: Option<BoolOr<RefOr<Schema, SchemaRef>>>,
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -974,7 +1204,7 @@ pub struct ObjectSchema {
     ///
     /// <https://json-schema.org/understanding-json-schema/reference/object.html#properties>
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<BTreeMap<String, RefOr<Schema>>>,
+    pub properties: Option<BTreeMap<String, RefOr<Schema, SchemaRef>>>,
 
     /// Sometimes you want to say that, given a particular kind of property name, the value should match a particular schema.
     /// That’s where patternProperties comes in: it maps regular expressions to schemas.
@@ -982,7 +1212,7 @@ pub struct ObjectSchema {
     ///
     /// <https://json-schema.org/understanding-json-schema/reference/object.html#pattern-properties>
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pattern_properties: Option<BTreeMap<String, RefOr<Schema>>>,
+    pub pattern_properties: Option<BTreeMap<String, RefOr<Schema, SchemaRef>>>,
 
     /// Declares the values of the header that the server will use if none is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1007,14 +1237,14 @@ pub struct ObjectSchema {
     ///
     /// <https://json-schema.org/understanding-json-schema/reference/object.html#additional-properties>
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_properties: Option<BoolOr<RefOr<Schema>>>,
+    pub additional_properties: Option<BoolOr<RefOr<Schema, SchemaRef>>>,
 
     /// The unevaluatedProperties keyword is similar to additionalProperties except that it can recognize properties declared in subschemas.
     /// So, the example from the previous section can be rewritten without the need to redeclare properties.
     ///
     /// <https://json-schema.org/understanding-json-schema/reference/object.html#unevaluated-properties>
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unevaluated_properties: Option<BoolOr<RefOr<Schema>>>,
+    pub unevaluated_properties: Option<BoolOr<RefOr<Schema, SchemaRef>>>,
 
     /// The names of properties can be validated against a schema, irrespective of their values.
     /// This can be useful if you don’t want to enforce specific properties, but you want to make sure that
@@ -1024,7 +1254,7 @@ pub struct ObjectSchema {
     ///
     /// <https://json-schema.org/understanding-json-schema/reference/object.html#property-names>
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub property_names: Option<RefOr<Schema>>,
+    pub property_names: Option<RefOr<Schema, SchemaRef>>,
 
     /// A list of required properties.
     /// If the object is defined at the root of the document,
@@ -3159,5 +3389,300 @@ mod tests {
         let result = super::extensions::serialize(&none, ser);
         let val = result.unwrap();
         assert_eq!(val, serde_json::Value::Null);
+    }
+
+    // ── `$ref` with sibling keywords (OpenAPI 3.1+) ─────────────────────
+
+    fn schema_slot(value: serde_json::Value) -> RefOr<Schema, SchemaRef> {
+        serde_json::from_value(value).expect("must parse")
+    }
+
+    fn spec_with_schemas(schemas: serde_json::Value) -> Spec {
+        serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {},
+            "components": {"schemas": schemas},
+        }))
+        .expect("spec must parse")
+    }
+
+    #[test]
+    fn ref_with_sibling_keywords_parses_and_round_trips() {
+        let json = serde_json::json!({
+            "$ref": "#/components/schemas/Pet",
+            "summary": "s",
+            "description": "d",
+            "maxLength": 5,
+            "x-note": true,
+        });
+        let parsed = schema_slot(json.clone());
+        let RefOr::Ref(r) = &parsed else {
+            panic!("expected a reference, got {parsed:?}");
+        };
+        assert_eq!(r.reference, "#/components/schemas/Pet");
+        assert_eq!(r.summary.as_deref(), Some("s"));
+        assert_eq!(r.description.as_deref(), Some("d"));
+        assert_eq!(r.siblings.get("maxLength"), Some(&serde_json::json!(5)));
+        assert_eq!(r.siblings.get("x-note"), Some(&serde_json::json!(true)));
+        assert!(r.has_siblings());
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn ref_at_non_first_position_keeps_siblings() {
+        let json = serde_json::json!({
+            "maxLength": 5,
+            "$ref": "#/components/schemas/Pet",
+            "description": "d",
+        });
+        let parsed = schema_slot(json.clone());
+        let RefOr::Ref(r) = &parsed else {
+            panic!("expected a reference, got {parsed:?}");
+        };
+        assert_eq!(r.reference, "#/components/schemas/Pet");
+        assert_eq!(r.description.as_deref(), Some("d"));
+        assert_eq!(r.siblings.len(), 1);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn bare_ref_has_no_siblings() {
+        let json = serde_json::json!({"$ref": "#/components/schemas/Pet"});
+        let parsed = schema_slot(json.clone());
+        let RefOr::Ref(r) = &parsed else {
+            panic!("expected a reference, got {parsed:?}");
+        };
+        assert!(!r.has_siblings());
+        assert_eq!(r.siblings_schema().unwrap(), None);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn ref_beside_a_composition_keyword_is_still_a_reference() {
+        // `$ref` wins the routing: `allOf` is a sibling, not the variant.
+        let parsed = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Pet",
+            "allOf": [{"type": "object"}],
+        }));
+        let RefOr::Ref(r) = &parsed else {
+            panic!("expected a reference, got {parsed:?}");
+        };
+        assert!(r.siblings.contains_key("allOf"));
+    }
+
+    #[test]
+    fn ref_duplicate_keys_are_rejected() {
+        for raw in [
+            r##"{"$ref": "#/a", "$ref": "#/b"}"##,
+            r##"{"$ref": "#/a", "summary": "x", "summary": "y"}"##,
+            r##"{"$ref": "#/a", "description": "x", "description": "y"}"##,
+            r##"{"$ref": "#/a", "maxLength": 1, "maxLength": 2}"##,
+            r##"{"maxLength": 1, "$ref": "#/a", "maxLength": 2}"##,
+        ] {
+            assert!(
+                serde_json::from_str::<RefOr<Schema, SchemaRef>>(raw).is_err(),
+                "must reject duplicate keys in {raw}",
+            );
+        }
+    }
+
+    #[test]
+    fn ref_must_be_a_string() {
+        assert!(
+            serde_json::from_str::<RefOr<Schema, SchemaRef>>(r##"{"maxLength": 1, "$ref": 5}"##)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<SchemaRef>(r##"{"maxLength": 1}"##).is_err());
+    }
+
+    #[test]
+    fn schema_ref_deserializes_directly() {
+        let r: SchemaRef = serde_json::from_value(serde_json::json!({
+            "readOnly": true,
+            "$ref": "#/components/schemas/Pet",
+        }))
+        .unwrap();
+        assert_eq!(r.reference, "#/components/schemas/Pet");
+        assert_eq!(r.siblings.get("readOnly"), Some(&serde_json::json!(true)));
+        let r: SchemaRef = serde_json::from_value(serde_json::json!({
+            "$ref": "#/components/schemas/Pet",
+            "summary": "s",
+        }))
+        .unwrap();
+        assert_eq!(r.summary.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn siblings_schema_parses_the_siblings() {
+        let parsed = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Pet",
+            "type": "string",
+            "maxLength": 5,
+        }));
+        let RefOr::Ref(r) = &parsed else {
+            panic!("expected a reference, got {parsed:?}");
+        };
+        let siblings = r.siblings_schema().unwrap().expect("has siblings");
+        let Schema::Single(single) = siblings else {
+            panic!("expected a single schema, got {siblings:?}");
+        };
+        let SingleSchema::String(string) = *single else {
+            panic!("expected a string schema");
+        };
+        assert_eq!(string.max_length, Some(5));
+    }
+
+    #[test]
+    fn get_item_resolves_the_target_and_leaves_siblings_on_the_reference() {
+        let spec = spec_with_schemas(serde_json::json!({
+            "Pet": {"type": "object"},
+        }));
+        let slot = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Pet",
+            "maxLength": 5,
+        }));
+        let target = slot.get_item(&spec).expect("resolves");
+        assert!(matches!(target, Schema::Single(_)));
+        let RefOr::Ref(r) = &slot else { unreachable!() };
+        assert_eq!(r.siblings.len(), 1);
+    }
+
+    #[test]
+    fn component_written_as_ref_with_siblings_resolves_through_the_chain() {
+        let spec = spec_with_schemas(serde_json::json!({
+            "Pet": {"type": "object"},
+            "Alias": {"$ref": "#/components/schemas/Pet", "description": "d"},
+        }));
+        let slot = schema_slot(serde_json::json!({"$ref": "#/components/schemas/Alias"}));
+        assert!(matches!(slot.get_item(&spec), Ok(Schema::Single(_))));
+    }
+
+    #[test]
+    fn ref_siblings_are_validated_alongside_the_target() {
+        let spec = spec_with_schemas(serde_json::json!({
+            "Pet": {"type": "object"},
+            "BadPattern": {
+                "$ref": "#/components/schemas/Pet",
+                "patternProperties": {"(": {"type": "string"}},
+            },
+            "DanglingNested": {
+                "$ref": "#/components/schemas/Pet",
+                "properties": {"x": {"$ref": "#/components/schemas/Missing"}},
+            },
+            "Fine": {"$ref": "#/components/schemas/Pet", "maxLength": 5},
+        }));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        let schemas = spec.components.as_ref().unwrap().schemas.as_ref().unwrap();
+        for (name, slot) in schemas {
+            slot.validate_with_context(&mut ctx, format!("#.components.schemas.{name}"));
+        }
+        assert!(
+            ctx.errors.mentions_all(&["BadPattern", "pattern"]),
+            "errors: {:?}",
+            ctx.errors
+        );
+        assert!(
+            ctx.errors
+                .mentions_all(&["DanglingNested", "Missing", "not found"]),
+            "errors: {:?}",
+            ctx.errors
+        );
+        assert!(!ctx.errors.mentions("Fine"), "errors: {:?}", ctx.errors);
+    }
+
+    #[test]
+    fn ref_siblings_that_are_not_a_schema_are_reported() {
+        let spec = spec_with_schemas(serde_json::json!({"Pet": {"type": "object"}}));
+        let slot = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Pet",
+            "allOf": "not an array",
+        }));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        slot.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.mentions("sibling keywords"),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn empty_ref_with_siblings_is_reported() {
+        let spec = spec_with_schemas(serde_json::json!({"Pet": {"type": "object"}}));
+        let slot = schema_slot(serde_json::json!({"$ref": "", "maxLength": 1}));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        slot.validate_with_context(&mut ctx, "#.x".into());
+        assert!(
+            ctx.errors.mentions("must not be empty"),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn schema_ref_set_reference_keeps_siblings() {
+        let mut r = SchemaRef::new("external.json#/Pet");
+        r.siblings
+            .insert("readOnly".into(), serde_json::json!(true));
+        r.set_reference("#/components/schemas/Pet".into());
+        assert_eq!(r.reference(), "#/components/schemas/Pet");
+        assert_eq!(r.siblings.len(), 1);
+    }
+
+    #[test]
+    fn ref_siblings_borrow_the_targets_type_when_validated() {
+        // `items` beside an array `$ref` is walked as an array's items,
+        // so a dangling reference inside it is found.
+        let spec = spec_with_schemas(serde_json::json!({
+            "Tags": {"type": "array", "items": {"type": "string"}},
+            "Narrow": {
+                "$ref": "#/components/schemas/Tags",
+                "items": {"$ref": "#/components/schemas/Missing"},
+            },
+        }));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        let narrow = &spec.components.as_ref().unwrap().schemas.as_ref().unwrap()["Narrow"];
+        narrow.validate_with_context(&mut ctx, "#.components.schemas.Narrow".into());
+        assert!(
+            ctx.errors.mentions_all(&["Narrow", "items", "Missing"]),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn siblings_schema_for_borrows_only_when_no_type_is_named() {
+        let slot = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Tags",
+            "maxItems": 3,
+        }));
+        let RefOr::Ref(r) = &slot else { unreachable!() };
+        let array_target: Schema =
+            serde_json::from_value(serde_json::json!({"type": "array"})).unwrap();
+        let siblings = r.siblings_schema_for(&array_target).unwrap().unwrap();
+        assert!(matches!(&siblings, Schema::Single(s) if matches!(**s, SingleSchema::Array(_))));
+        // Plain parse: typeless reads as an object schema.
+        let plain = r.siblings_schema().unwrap().unwrap();
+        assert!(matches!(&plain, Schema::Single(s) if matches!(**s, SingleSchema::Object(_))));
+        // A named type is kept as written.
+        let typed = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Tags",
+            "type": "string",
+        }));
+        let RefOr::Ref(r) = &typed else {
+            unreachable!()
+        };
+        assert!(r.siblings_name_a_type());
+        let siblings = r.siblings_schema_for(&array_target).unwrap().unwrap();
+        assert!(matches!(&siblings, Schema::Single(s) if matches!(**s, SingleSchema::String(_))));
+        // A composite target has no single type to lend.
+        let composite: Schema =
+            serde_json::from_value(serde_json::json!({"allOf": [{"type": "array"}]})).unwrap();
+        let slot =
+            schema_slot(serde_json::json!({"$ref": "#/components/schemas/X", "maxItems": 3}));
+        let RefOr::Ref(r) = &slot else { unreachable!() };
+        let siblings = r.siblings_schema_for(&composite).unwrap().unwrap();
+        assert!(matches!(&siblings, Schema::Single(s) if matches!(**s, SingleSchema::Object(_))));
     }
 }
