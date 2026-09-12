@@ -17,13 +17,14 @@ use std::collections::BTreeSet;
 
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::SchemaType;
-use roas::common::reference::RefOr;
+use roas::common::reference::{RefOr, ReferenceObject, ResolveError};
 use roas::v3_2::schema::{
     ArraySchema, IntegerSchema, NumberSchema, ObjectSchema, Schema, SchemaRef, SingleSchema,
     StringSchema,
 };
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
+use std::collections::HashSet;
 
 use crate::decimal::Decimal;
 
@@ -168,21 +169,52 @@ impl<'s> Checker<'s> {
     }
 
     fn dispatch(&mut self, value: &Value, schema: &RefOr<Schema, SchemaRef>) {
-        match schema.get_item(self.spec) {
-            Ok(resolved) => self.resolved(value, resolved),
-            Err(error) => self.record(FailureKind::Unresolved, error.to_string()),
-        }
         // A 3.1+ `$ref` may carry sibling keywords, which apply alongside
         // the target — `{"$ref": X, "maxLength": 5}` is the intersection
-        // of both, exactly as `allOf` would be — so they are checked as
-        // a second schema against the same value.
-        if let RefOr::Ref(reference) = schema
-            && reference.has_siblings()
-        {
-            match sibling_schema(reference, schema.get_item(self.spec).ok()) {
-                Ok(Some(siblings)) => self.resolved(value, &siblings),
-                Ok(None) => {}
-                Err(message) => self.unchecked(message),
+        // of both, exactly as `allOf` would be. That holds at every hop:
+        // when `X` is itself a `$ref` with siblings, those apply too. So
+        // the chain is walked one hop at a time, each hop's siblings
+        // checked against the same value, until the inline target.
+        let target = schema.get_item(self.spec).ok();
+        let mut current = schema;
+        let mut visited: HashSet<&str> = HashSet::new();
+        loop {
+            let reference = match current {
+                RefOr::Item(resolved) => {
+                    self.resolved(value, resolved);
+                    return;
+                }
+                RefOr::Ref(reference) => reference,
+            };
+            if reference.has_siblings() {
+                match sibling_schemas(reference, target) {
+                    Ok(schemas) => {
+                        for siblings in &schemas {
+                            self.resolved(value, siblings);
+                        }
+                    }
+                    Err(message) => self.unchecked(message),
+                }
+            }
+            let target_ref = reference.reference();
+            if !visited.insert(target_ref) {
+                self.record(
+                    FailureKind::Unresolved,
+                    format!("reference `{target_ref}` is part of a cycle"),
+                );
+                return;
+            }
+            match next_hop(self.spec, target_ref) {
+                Some(next) => current = next,
+                None => {
+                    let error = if target_ref.starts_with("#/") {
+                        ResolveError::NotFound(target_ref.to_owned())
+                    } else {
+                        ResolveError::ExternalUnsupported(target_ref.to_owned())
+                    };
+                    self.record(FailureKind::Unresolved, error.to_string());
+                    return;
+                }
             }
         }
     }
@@ -854,34 +886,59 @@ const ANNOTATION_KEYWORDS: &[&str] = &[
     "xml",
 ];
 
-/// The sibling keywords of a `$ref` as the schema to check the value
-/// against, or `None` when they assert nothing.
+/// Composition keywords, each of which stands on its own as a schema.
+const COMPOSITION_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf", "not"];
+
+/// One hop along a chain of local schema references: the component the
+/// reference names, which may itself be a reference.
+pub(crate) fn next_hop<'s>(
+    spec: &'s Spec,
+    reference: &str,
+) -> Option<&'s RefOr<Schema, SchemaRef>> {
+    let name = reference.strip_prefix("#/components/schemas/")?;
+    spec.components.as_ref()?.schemas.as_ref()?.get(name)
+}
+
+/// The sibling keywords of a `$ref` as the schemas to check the value
+/// against — empty when they assert nothing.
 ///
-/// A sibling set with no `type` constrains whatever type the target has,
-/// but `roas` reads a typeless schema as an *object* schema, which would
-/// wrongly reject every non-object value. So when the siblings name no
-/// type and no composition, the target's own type is borrowed; if the
-/// target has no single type to borrow, the siblings are reported as
-/// unchecked rather than guessed.
-fn sibling_schema(
-    reference: &SchemaRef,
-    target: Option<&Schema>,
-) -> Result<Option<Schema>, String> {
-    let asserts = reference
-        .siblings
-        .keys()
-        .any(|k| !k.starts_with("x-") && !ANNOTATION_KEYWORDS.contains(&k.as_str()));
-    if !asserts {
-        return Ok(None);
+/// Two things make this more than one parse. A composition keyword
+/// beside a leaf constraint — `{"allOf": […], "maxLength": 3}` — parses
+/// as the composition alone, the leaf constraint filed away unchecked;
+/// so each composition keyword becomes its own schema and the leaf
+/// constraints another. And a leaf set with no `type` constrains
+/// whatever type the target has, but `roas` reads a typeless schema as
+/// an *object* schema, which would wrongly reject every non-object
+/// value; so the target's single type is borrowed, and when there is
+/// none to borrow the leaf set is reported as unchecked rather than
+/// guessed.
+fn sibling_schemas(reference: &SchemaRef, target: Option<&Schema>) -> Result<Vec<Schema>, String> {
+    let parse = |map: serde_json::Map<String, Value>| {
+        serde_json::from_value::<Schema>(Value::Object(map)).map_err(|error| {
+            format!("sibling keywords of `$ref` could not be read as a schema: {error}")
+        })
+    };
+    let mut schemas = Vec::new();
+    let mut leaf = serde_json::Map::new();
+    for (key, value) in &reference.siblings {
+        if key.starts_with("x-") || ANNOTATION_KEYWORDS.contains(&key.as_str()) {
+            continue;
+        }
+        if COMPOSITION_KEYWORDS.contains(&key.as_str()) {
+            let mut map = serde_json::Map::new();
+            map.insert(key.clone(), value.clone());
+            schemas.push(parse(map)?);
+        } else {
+            leaf.insert(key.clone(), value.clone());
+        }
     }
-    let mut siblings = reference.siblings.clone();
-    let typed = ["type", "allOf", "anyOf", "oneOf", "not"]
-        .iter()
-        .any(|k| siblings.contains_key(*k));
-    if !typed {
+    if leaf.is_empty() {
+        return Ok(schemas);
+    }
+    if !leaf.contains_key("type") {
         match target {
             Some(Schema::Single(single)) => {
-                siblings.insert("type".to_owned(), Value::String(single.to_string()));
+                leaf.insert("type".to_owned(), Value::String(single.to_string()));
             }
             _ => {
                 return Err(
@@ -891,12 +948,8 @@ fn sibling_schema(
             }
         }
     }
-    let map: serde_json::Map<String, Value> = siblings.into_iter().collect();
-    serde_json::from_value::<Schema>(Value::Object(map))
-        .map(Some)
-        .map_err(|error| {
-            format!("sibling keywords of `$ref` could not be read as a schema: {error}")
-        })
+    schemas.push(parse(leaf)?);
+    Ok(schemas)
 }
 
 #[cfg(test)]
@@ -916,6 +969,8 @@ mod tests {
             "components": {
                 "schemas": {
                     "Name": { "type": "string", "minLength": 2 },
+                    "ShortName": { "$ref": "#/components/schemas/Name", "maxLength": 3 },
+                    "Anything": {},
                 }
             }
         }))
@@ -967,6 +1022,54 @@ mod tests {
             &json!("abcd"),
             json!({"$ref": "#/components/schemas/Name", "type": "string", "maxLength": 3})
         ));
+    }
+
+    #[test]
+    fn ref_siblings_apply_at_every_hop_of_a_chain() {
+        // `ShortName` is `Name` plus `maxLength: 3`; a reference to
+        // `ShortName` inherits both constraints.
+        assert!(passes(
+            &json!("ab"),
+            json!({"$ref": "#/components/schemas/ShortName"})
+        ));
+        assert!(!passes(
+            &json!("a"),
+            json!({"$ref": "#/components/schemas/ShortName"})
+        ));
+        assert!(!passes(
+            &json!("abcd"),
+            json!({"$ref": "#/components/schemas/ShortName"})
+        ));
+        // And the outer slot's own siblings stack on top.
+        assert!(!passes(
+            &json!("abc"),
+            json!({"$ref": "#/components/schemas/ShortName", "maxLength": 2})
+        ));
+    }
+
+    #[test]
+    fn ref_siblings_beside_a_composition_are_still_enforced() {
+        let schema = json!({
+            "$ref": "#/components/schemas/Name",
+            "allOf": [{}],
+            "maxLength": 3
+        });
+        assert!(passes(&json!("abc"), schema.clone()));
+        assert!(!passes(&json!("abcd"), schema));
+        assert!(!passes(
+            &json!("abc"),
+            json!({"$ref": "#/components/schemas/Name", "not": {"type": "string"}})
+        ));
+    }
+
+    #[test]
+    fn ref_siblings_without_a_type_to_borrow_are_reported_unchecked() {
+        let found = failures(
+            &json!("abcd"),
+            json!({"$ref": "#/components/schemas/Anything", "maxLength": 3}),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("no single type to borrow"), "{found:?}");
     }
 
     #[test]

@@ -548,6 +548,14 @@ pub trait LiftableBag<C, R: ReferenceObject = Ref>:
     fn name_hint(_item: &Self) -> Option<String> {
         None
     }
+
+    /// Walk into a reference payload's own nested slots. A plain
+    /// Reference Object has none; a 3.1+ schema `$ref` may carry
+    /// sibling keywords with inline or external schemas inside them.
+    /// Default: no-op.
+    fn walk_ref(_reference: &mut R, _ctx: &NameContext, _c: &mut C) -> Result<(), CollapseError> {
+        Ok(())
+    }
 }
 
 /// The "lift one `RefOr<T>` into the bag of T" generic. Used by
@@ -580,6 +588,10 @@ where
 {
     match slot {
         RefOr::Ref(r) => {
+            // The payload's own nested slots first — for a schema `$ref`
+            // with siblings, an external `$ref` inside `properties` is
+            // lifted whether or not the target is.
+            T::walk_ref(r, &ctx, c)?;
             if is_internal_ref(r.reference()) {
                 return Ok(());
             }

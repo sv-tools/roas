@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::SchemaType;
-use roas::common::reference::RefOr;
+use roas::common::reference::{RefOr, ReferenceObject};
 use roas::v3_2::media_type::{Encoding, MediaType};
 use roas::v3_2::parameter::{InCookieStyle, InHeaderStyle, InPathStyle, InQueryStyle, Parameter};
 use roas::v3_2::schema::{Schema, SchemaRef, SingleSchema};
@@ -756,9 +756,40 @@ fn coerce_primitive(raw: &str, primitive: Primitive) -> Result<Value, String> {
 }
 
 impl<'s> Shape<'s> {
+    /// The shape a sibling `type` names. Nested slots are not known
+    /// here, so an array or object is shaped without them.
+    fn named(schema_type: &str) -> Self {
+        match schema_type {
+            "string" => Shape::Primitive(Primitive::String),
+            "integer" => Shape::Primitive(Primitive::Integer),
+            "number" => Shape::Primitive(Primitive::Number),
+            "boolean" => Shape::Primitive(Primitive::Boolean),
+            "null" => Shape::Primitive(Primitive::Null),
+            "array" => Shape::Array(None),
+            "object" => Shape::Object(None),
+            _ => Shape::Opaque,
+        }
+    }
+
     /// What kind of value a schema describes, as far as rebuilding a
     /// flattened parameter needs to know.
     fn of(schema: &'s RefOr<Schema, SchemaRef>, spec: &'s Spec) -> Self {
+        // A `$ref` may narrow its target with a sibling `type` — at this
+        // hop or at any hop of a chain — and that is the type the text
+        // must be coerced to: `{"$ref": Any, "type": "integer"}` with
+        // `Any` being `{}` still wants a number.
+        let mut current = schema;
+        let mut hops = 0;
+        while let RefOr::Ref(reference) = current {
+            if let Some(Value::String(named)) = reference.siblings.get("type") {
+                return Shape::named(named);
+            }
+            hops += 1;
+            match crate::schema::next_hop(spec, reference.reference()) {
+                Some(next) if hops < 64 => current = next,
+                _ => break,
+            }
+        }
         let Ok(resolved) = schema.get_item(spec) else {
             return Shape::Opaque;
         };
