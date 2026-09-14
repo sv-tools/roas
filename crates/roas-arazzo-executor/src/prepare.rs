@@ -283,6 +283,7 @@ fn compile<'d>(
         reads: BTreeMap::new(),
         required_sources: BTreeSet::new(),
         resolve_operations,
+        operations: crate::operation_index::Resolver::new(options),
     };
     if let Err(error) = description.validate(options.validation) {
         for error in error.errors {
@@ -423,6 +424,7 @@ struct Compiler<'d> {
     reads: BTreeMap<(&'d str, &'d str), BTreeSet<String>>,
     required_sources: BTreeSet<String>,
     resolve_operations: bool,
+    operations: crate::operation_index::Resolver<'d>,
 }
 
 fn checked_selector_kind(kind: &roas_arazzo::v1_1::SelectorType) -> Result<Language, SelectError> {
@@ -536,12 +538,7 @@ impl<'d> Compiler<'d> {
                     .collect::<Vec<_>>();
                 self.operation_sources(step, &step_site);
                 if self.resolve_operations {
-                    match operation::resolve(
-                        step,
-                        &self.options.sources,
-                        &self.options.base_urls,
-                        &missing,
-                    ) {
+                    match self.operations.resolve(step, &missing) {
                         Ok(endpoint) => {
                             self.endpoints
                                 .insert((&workflow.workflow_id, &step.step_id), endpoint);
@@ -747,11 +744,33 @@ impl<'d> Compiler<'d> {
             {
                 self.need_source(name, &site);
             } else {
+                let supplied = self.operations.matching_sources(document);
+                let base = self
+                    .description
+                    .self_
+                    .as_deref()
+                    .and_then(|base| url::Url::parse(base).ok());
+                #[cfg(feature = "source-graph")]
+                let base = self
+                    .options
+                    .registry
+                    .as_ref()
+                    .and_then(|context| context.registry.document(context.owner).ok())
+                    .map(|owner| owner.base_uri().clone())
+                    .or(base);
                 let matching = self
                     .description
                     .source_descriptions
                     .iter()
-                    .filter(|source| source.url == document)
+                    .filter(|source| {
+                        supplied.contains(&source.name)
+                            || self.operations.declared_source_matches(
+                                &source.name,
+                                &source.url,
+                                document,
+                                base.as_ref(),
+                            )
+                    })
                     .collect::<Vec<_>>();
                 if matching.is_empty() {
                     self.error(

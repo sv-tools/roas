@@ -51,6 +51,8 @@ pub struct Options {
     inputs: Map<String, Value>,
     pub(crate) sources: BTreeMap<String, Source>,
     pub(crate) base_urls: BTreeMap<String, String>,
+    #[cfg(feature = "source-graph")]
+    pub(crate) registry: Option<crate::source_registry::OperationContext>,
     pub(crate) validation: enumset::EnumSet<roas_arazzo::validation::ValidationOptions>,
     pub(crate) portability_lints: bool,
     headers: Vec<(String, String)>,
@@ -108,6 +110,9 @@ impl Options {
 
     /// Supply a source description: the `name` it was declared with, the
     /// `url` it was declared with, and the parsed document.
+    /// An absolute URL also supplies the document's retrieval base for relative
+    /// references and servers. Use a source registry when identity and retrieval
+    /// differ (for example after an HTTP redirect).
     ///
     /// Fetching documents is IO, which this crate leaves to its caller —
     /// `roas-file-fetcher` and `roas-http-fetcher` do it for the loader
@@ -878,12 +883,8 @@ impl<'d> Run<'d> {
                 .ok_or_else(|| {
                     ExecutionError::Unsupported("operation is outside the prepared plan".into())
                 })?,
-            None => operation::resolve(
-                step,
-                &self.options.sources,
-                &self.options.base_urls,
-                &self.unsupplied,
-            )?,
+            None => crate::operation_index::Resolver::new(self.options)
+                .resolve(step, &self.unsupplied)?,
         };
         let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
 

@@ -70,7 +70,7 @@ impl SourceDocument {
     pub fn retrieval_uri(&self) -> &Url {
         &self.retrieval
     }
-    /// Resolved Arazzo `$self`, or the retrieval URI if no identity is declared.
+    /// Resolved Arazzo/OpenAPI 3.2 `$self`, or the retrieval URI otherwise.
     pub fn identity(&self) -> &Url {
         &self.identity
     }
@@ -112,6 +112,9 @@ pub struct SourceLink {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SourceError {
+    /// Invalid operation-reference document, pointer or target.
+    #[error(transparent)]
+    Operation(#[from] crate::OperationError),
     /// Invalid retrieval URI, reference resolution or `$self` fragment.
     #[error("invalid document URI `{uri}`: {reason}")]
     InvalidUri {
@@ -212,7 +215,7 @@ impl std::fmt::Display for SourceDiagnostic {
 /// Registry of immutable documents and owner-scoped source/base-URL overrides.
 /// Insert all supplied documents before loading/resolving links, so `$self`
 /// identities can be found even when their retrieval locations differ.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SourceRegistry {
     pub(crate) documents: Vec<Arc<SourceDocument>>,
     identities: BTreeMap<Url, DocumentId>,
@@ -220,6 +223,15 @@ pub struct SourceRegistry {
     pub(crate) links: BTreeMap<(DocumentId, String), SourceLink>,
     pub(crate) overrides: BTreeMap<(DocumentId, String), DocumentId>,
     pub(crate) base_urls: BTreeMap<(DocumentId, String), String>,
+    reference_documents: BTreeMap<Url, Arc<LoadedDocument>>,
+    reference_aliases: BTreeMap<Url, Url>,
+}
+
+/// Immutable registry snapshot: options share documents, not mutable link state.
+#[derive(Clone, Debug)]
+pub(crate) struct OperationContext {
+    pub registry: Arc<SourceRegistry>,
+    pub owner: DocumentId,
 }
 
 impl SourceRegistry {
@@ -251,10 +263,22 @@ impl SourceRegistry {
             };
         }
         let (model, version, arazzo) = parse_document(value, &retrieval)?;
-        let identity = match arazzo
-            .as_ref()
-            .and_then(|document| document.self_.as_deref())
-        {
+        let declared_identity = if model == SourceVersion::OpenApi3_2 {
+            value
+                .get("$self")
+                .map(|identity| {
+                    identity.as_str().ok_or_else(|| SourceError::InvalidUri {
+                        uri: retrieval.to_string(),
+                        reason: "$self must be a URI string".into(),
+                    })
+                })
+                .transpose()?
+        } else {
+            arazzo
+                .as_ref()
+                .and_then(|document| document.self_.as_deref())
+        };
+        let identity = match declared_identity {
             Some(self_) => {
                 let identity = join(&retrieval, self_)?;
                 if identity.fragment().is_some() {
@@ -275,7 +299,13 @@ impl SourceRegistry {
             return Ok(id);
         }
         // Never let a new canonical identity replace another document's alias.
-        if self.retrievals.contains_key(&identity) || self.identities.contains_key(&retrieval) {
+        if self.retrievals.contains_key(&identity)
+            || self.identities.contains_key(&retrieval)
+            || self.reference_documents.contains_key(&identity)
+            || self.reference_documents.contains_key(&retrieval)
+            || self.reference_aliases.contains_key(&identity)
+            || self.reference_aliases.contains_key(&retrieval)
+        {
             return Err(SourceError::Conflict(identity.to_string()));
         }
         let id = DocumentId(self.documents.len());
@@ -326,6 +356,8 @@ impl SourceRegistry {
             .get(&uri)
             .or_else(|| self.identities.get(&uri))
             .is_some_and(|existing| *existing != id)
+            || self.reference_documents.contains_key(&uri)
+            || self.reference_aliases.contains_key(&uri)
         {
             return Err(SourceError::Conflict(uri.to_string()));
         }
@@ -342,11 +374,11 @@ impl SourceRegistry {
     }
     /// Number of unique documents registered, not the number of aliases.
     pub fn len(&self) -> usize {
-        self.documents.len()
+        self.documents.len() + self.reference_documents.len()
     }
     /// Whether this registry has no documents.
     pub fn is_empty(&self) -> bool {
-        self.documents.is_empty()
+        self.documents.is_empty() && self.reference_documents.is_empty()
     }
     /// Sources declared by one owner, in document order.
     pub fn sources(&self, owner: DocumentId) -> Result<Vec<&SourceLink>, SourceError> {
@@ -448,6 +480,81 @@ impl SourceRegistry {
             .cloned()
             .ok_or(SourceError::UnknownDocument(id))
     }
+
+    /// Supply a complete JSON/YAML reference resource without assigning a source
+    /// alias. Versioned documents use normal registration; standalone Path Item
+    /// containers retain their raw value and retrieval URI. They cannot be used
+    /// as Arazzo source descriptions without a supported version discriminator.
+    /// # Errors
+    /// Invalid URI/version or conflicting document content/identity.
+    pub fn insert_reference_document(
+        &mut self,
+        retrieval: &str,
+        value: Value,
+    ) -> Result<(), SourceError> {
+        self.insert_reference_loaded(Arc::new(LoadedDocument::new(
+            value,
+            resource_uri(retrieval)?,
+        )))
+    }
+
+    pub(crate) fn insert_reference_loaded(
+        &mut self,
+        loaded: Arc<LoadedDocument>,
+    ) -> Result<(), SourceError> {
+        if ["arazzo", "openapi", "swagger", "asyncapi"]
+            .iter()
+            .any(|key| loaded.document.get(*key).is_some())
+        {
+            self.insert_document(loaded)?;
+        } else {
+            let uri = resource_uri(loaded.retrieval_uri.as_str())?;
+            if let Some((value, _)) = self.operation_document(&uri) {
+                if value != &loaded.document {
+                    return Err(SourceError::Conflict(uri.to_string()));
+                }
+                return Ok(());
+            }
+            self.reference_documents.insert(uri, loaded);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn operation_document(&self, uri: &Url) -> Option<(&Value, &Url)> {
+        if let Some(id) = self
+            .identities
+            .get(uri)
+            .or_else(|| self.retrievals.get(uri))
+        {
+            let document = &self.documents[id.0];
+            return Some((document.value(), document.retrieval_uri()));
+        }
+        let key = self.reference_aliases.get(uri).unwrap_or(uri);
+        self.reference_documents
+            .get(key)
+            .map(|document| (&document.document, &document.retrieval_uri))
+    }
+
+    pub(crate) fn reference_alias(
+        &mut self,
+        requested: Url,
+        retrieval: Url,
+    ) -> Result<(), SourceError> {
+        if let Some(id) = self.retrievals.get(&retrieval).copied() {
+            return self.add_retrieval_alias(id, requested.as_str());
+        }
+        if let Some((value, _)) = self.operation_document(&requested) {
+            if self
+                .operation_document(&retrieval)
+                .is_none_or(|(target, _)| target != value)
+            {
+                return Err(SourceError::Conflict(requested.to_string()));
+            }
+        } else {
+            self.reference_aliases.insert(requested, retrieval);
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn resource_uri(uri: &str) -> Result<Url, SourceError> {
@@ -528,6 +635,9 @@ impl crate::Options {
     /// Existing `source`/`base_url` entries are explicit overrides and win.
     /// Unresolved graph links remain absent, so checked preparation still rejects
     /// a missing required source (or an unprovable bare operation ID).
+    /// Retains an immutable registry snapshot sharing its raw document values.
+    /// Construct fresh options after changing registry links or overrides;
+    /// existing adapted entries also win when this method is called again.
     /// # Errors
     /// An invalid registry handle. Loading diagnostics remain in SourceLoadReport.
     pub fn source_registry(
@@ -535,6 +645,11 @@ impl crate::Options {
         registry: &SourceRegistry,
         owner: DocumentId,
     ) -> Result<Self, SourceError> {
+        registry.document(owner)?;
+        self.registry = Some(OperationContext {
+            registry: Arc::new(registry.clone()),
+            owner,
+        });
         for link in registry.sources(owner)? {
             if let Some(target) = link.target {
                 let document = registry.shared(target)?;

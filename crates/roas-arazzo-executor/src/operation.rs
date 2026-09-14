@@ -1,20 +1,10 @@
 //! Finding the operation a step names, in the descriptions it points at.
 //!
-//! Source descriptions are read as plain JSON rather than through a
-//! typed OpenAPI model: only a handful of fields matter here — the
-//! method, the path template and a server — and reading them from JSON
-//! serves OpenAPI 3.x and Swagger 2.0 with the same code, which is what
-//! an Arazzo description is allowed to point at.
+//! Source values stay immutable. `operation_index` builds borrowed, version-aware
+//! views of mounted operations and referenced fields; `operation_document` keeps
+//! document identities separate from server retrieval bases.
 
-use roas_arazzo::v1_1::Step;
 use serde_json::Value;
-use std::collections::BTreeMap;
-
-/// The HTTP methods a path item may hold, in the order a search sees
-/// them.
-const METHODS: [&str; 8] = [
-    "get", "put", "post", "delete", "options", "head", "patch", "trace",
-];
 
 /// A source description the run was given.
 #[derive(Clone, Debug)]
@@ -46,7 +36,7 @@ impl Source {
 /// Where a step's request is going.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Endpoint {
-    /// Upper-case HTTP method.
+    /// HTTP method, preserving case for OpenAPI 3.2 additional operations.
     pub method: String,
     /// The path template, `{parameters}` still in it.
     pub path: String,
@@ -56,7 +46,46 @@ pub(crate) struct Endpoint {
 
 /// Why a step could not be turned into a request.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum OperationError {
+    /// Duplicate IDs cannot identify a unique mounted operation within a source.
+    #[error("operation `{operation}` is duplicated in source `{source_name}`: {locations}")]
+    Duplicate {
+        /// Duplicated operation ID.
+        operation: String,
+        /// Source alias.
+        source_name: String,
+        /// Conflicting mounted operation pointers.
+        locations: String,
+    },
+    /// A Path Item reference or target could not be resolved safely.
+    #[error("{document}#{pointer}: Path Item reference `{reference}`: {reason}")]
+    Reference {
+        /// Document identity or supplied location.
+        document: String,
+        /// JSON Pointer to the referring field or invalid target.
+        pointer: String,
+        /// Reference as written, empty for an invalid object/cycle.
+        reference: String,
+        /// Resolution, shape, cycle or conflicting-field explanation.
+        reason: String,
+    },
+    /// The supplied source cannot be interpreted by the OpenAPI execution profile.
+    #[error("cannot index operation document `{document}`: {reason}")]
+    Document {
+        /// Supplied document location.
+        document: String,
+        /// Version or document-context error.
+        reason: String,
+    },
+    /// A selected server cannot produce an absolute HTTP endpoint.
+    #[error("invalid server for operation `{operation}`: {reason}")]
+    Server {
+        /// Operation ID or operationPath as written.
+        operation: String,
+        /// Invalid template, missing origin or unsupported URL explanation.
+        reason: String,
+    },
     /// No source description holds the named operation.
     #[error("operation `{operation}` is in none of the source descriptions")]
     Unknown {
@@ -106,257 +135,26 @@ pub enum OperationError {
     Nothing(String),
 }
 
-/// Resolve the endpoint a step's request goes to.
-pub(crate) fn resolve(
-    step: &Step,
-    sources: &BTreeMap<String, Source>,
-    base_urls: &BTreeMap<String, String>,
+/// Test adapter for the original operation-resolution contract.
+#[cfg(test)]
+fn resolve(
+    step: &roas_arazzo::v1_1::Step,
+    sources: &std::collections::BTreeMap<String, Source>,
+    base_urls: &std::collections::BTreeMap<String, String>,
     missing: &[String],
 ) -> Result<Endpoint, OperationError> {
-    if step.channel_path.is_some() || step.action.is_some() {
-        return Err(OperationError::Async(step.step_id.clone()));
-    }
-    if let Some(operation) = &step.operation_id {
-        let (source, found) = by_id(operation, sources, missing)?;
-        return endpoint(source, &found, base_urls, operation);
-    }
-    if let Some(path) = &step.operation_path {
-        let (source, found) = by_path(path, sources)?;
-        return endpoint(source, &found, base_urls, path);
-    }
-    Err(OperationError::Nothing(step.step_id.clone()))
-}
-
-/// Where an operation sits inside a document.
-struct Found {
-    /// The source description's name.
-    name: String,
-    /// The path template.
-    path: String,
-    /// The lower-case method key.
-    method: String,
-}
-
-/// Find an operation by `operationId`, either bare or written as
-/// `$sourceDescriptions.<name>.<operationId>`.
-fn by_id<'s>(
-    operation: &str,
-    sources: &'s BTreeMap<String, Source>,
-    missing: &[String],
-) -> Result<(&'s Source, Found), OperationError> {
-    if let Some(rest) = operation.strip_prefix("$sourceDescriptions.") {
-        let (name, id) = rest
-            .split_once('.')
-            .ok_or_else(|| OperationError::Unknown {
-                operation: operation.to_owned(),
-            })?;
-        let source = sources
-            .get(name)
-            .ok_or_else(|| OperationError::MissingSource(name.to_owned()))?;
-        let found = search(source.document(), id).ok_or_else(|| OperationError::Unknown {
-            operation: operation.to_owned(),
-        })?;
-        return Ok((
-            source,
-            Found {
-                name: name.to_owned(),
-                ..found
-            },
-        ));
-    }
-
-    // A bare id must be unique across the descriptions — the spec says
-    // so, and if it is not, guessing would send the request somewhere
-    // the author did not name.
-    let mut hits = sources.iter().filter_map(|(name, source)| {
-        search(source.document(), operation).map(|found| {
-            (
-                source,
-                Found {
-                    name: name.clone(),
-                    ..found
-                },
-            )
-        })
-    });
-    let first = hits.next();
-    let rest: Vec<String> = hits.map(|(_, found)| found.name).collect();
-
-    // Ambiguity is worth saying first: it is already proven, and
-    // supplying whatever is missing cannot unprove it.
-    if let Some((_, found)) = &first
-        && !rest.is_empty()
-    {
-        let mut names = vec![found.name.clone()];
-        names.extend(rest);
-        return Err(OperationError::Ambiguous {
-            operation: operation.to_owned(),
-            sources: names.join(", "),
-        });
-    }
-    // Otherwise a missing description leaves the question open: one hit
-    // here says nothing about what is in the one left out, and no hit
-    // says nothing either.
-    if !missing.is_empty() {
-        return Err(OperationError::Unproven {
-            operation: operation.to_owned(),
-            missing: missing.join(", "),
-        });
-    }
-    first.ok_or_else(|| OperationError::Unknown {
-        operation: operation.to_owned(),
-    })
-}
-
-/// Find the operation an `operationPath` points at: a source URL, then a
-/// JSON Pointer into that document.
-fn by_path<'s>(
-    path: &str,
-    sources: &'s BTreeMap<String, Source>,
-) -> Result<(&'s Source, Found), OperationError> {
-    let bad = |reason: &str| OperationError::BadPath {
-        path: path.to_owned(),
-        reason: reason.to_owned(),
-    };
-    let (document, pointer) = path
-        .split_once('#')
-        .ok_or_else(|| bad("it has no `#` and so names no operation inside the document"))?;
-
-    // The document half is usually `{$sourceDescriptions.<name>.url}`;
-    // a literal URL matching a declared one works too.
-    let name = match document
-        .trim()
-        .strip_prefix("{$sourceDescriptions.")
-        .and_then(|rest| rest.strip_suffix(".url}"))
-    {
-        Some(name) => name.to_owned(),
-        None => sources
-            .iter()
-            .find(|(_, source)| source.url == document)
-            .map(|(name, _)| name.clone())
-            .ok_or_else(|| bad("no source description has that URL"))?,
-    };
-    let source = sources
-        .get(&name)
-        .ok_or_else(|| OperationError::MissingSource(name.clone()))?;
-
-    if source.document().pointer(pointer).is_none() {
-        return Err(bad("the document has nothing at that pointer"));
-    }
-    // `/paths/~1pets~1{petId}/get` — the pointer itself says which path
-    // and which method.
-    let tokens: Vec<String> = pointer
-        .split('/')
-        .skip(1)
-        .map(|token| token.replace("~1", "/").replace("~0", "~"))
-        .collect();
-    let [paths, template, method] = tokens.as_slice() else {
-        return Err(bad("it does not point at `/paths/<path>/<method>`"));
-    };
-    if paths != "paths" || !METHODS.contains(&method.as_str()) {
-        return Err(bad("it does not point at `/paths/<path>/<method>`"));
-    }
-    Ok((
-        source,
-        Found {
-            name,
-            path: template.clone(),
-            method: method.clone(),
-        },
-    ))
-}
-
-/// Search a document's `paths` for an operation id.
-fn search(document: &Value, operation: &str) -> Option<Found> {
-    let paths = document.get("paths")?.as_object()?;
-    for (path, item) in paths {
-        for method in METHODS {
-            let Some(candidate) = item.get(method) else {
-                continue;
-            };
-            if candidate.get("operationId").and_then(Value::as_str) == Some(operation) {
-                return Some(Found {
-                    name: String::new(),
-                    path: path.clone(),
-                    method: method.to_owned(),
-                });
-            }
-        }
-    }
-    None
-}
-
-/// The endpoint for an operation that has been found.
-fn endpoint(
-    source: &Source,
-    found: &Found,
-    base_urls: &BTreeMap<String, String>,
-    named: &str,
-) -> Result<Endpoint, OperationError> {
-    let base = base_urls
-        .get(&found.name)
-        .cloned()
-        .or_else(|| server(source.document(), &found.path, &found.method))
-        .ok_or_else(|| OperationError::NoServer(named.to_owned()))?;
-    Ok(Endpoint {
-        method: found.method.to_uppercase(),
-        path: found.path.clone(),
-        base: base.trim_end_matches('/').to_owned(),
-    })
-}
-
-/// The server an operation hangs off: the operation's own, else the path
-/// item's, else the document's — or, for Swagger 2.0, the scheme, host
-/// and base path it was written with.
-fn server(document: &Value, path: &str, method: &str) -> Option<String> {
-    let item = document.get("paths").and_then(|paths| paths.get(path));
-    let operation = item.and_then(|item| item.get(method));
-    let first = |value: Option<&Value>| -> Option<String> {
-        let servers = value?.get("servers")?.as_array()?;
-        let server = servers.first()?;
-        let url = server.get("url")?.as_str()?;
-        Some(with_variables(url, server.get("variables")))
-    };
-    if let Some(url) = first(operation)
-        .or_else(|| first(item))
-        .or_else(|| first(Some(document)))
-    {
-        return Some(url);
-    }
-
-    // Swagger 2.0 spells the same thing in three fields.
-    let host = document.get("host").and_then(Value::as_str)?;
-    let scheme = document
-        .get("schemes")
-        .and_then(Value::as_array)
-        .and_then(|schemes| schemes.first())
-        .and_then(Value::as_str)
-        .unwrap_or("https");
-    let base = document
-        .get("basePath")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    Some(format!("{scheme}://{host}{base}"))
-}
-
-/// A server URL with its variables replaced by their defaults.
-fn with_variables(url: &str, variables: Option<&Value>) -> String {
-    let Some(variables) = variables.and_then(Value::as_object) else {
-        return url.to_owned();
-    };
-    let mut url = url.to_owned();
-    for (name, variable) in variables {
-        if let Some(default) = variable.get("default").and_then(Value::as_str) {
-            url = url.replace(&format!("{{{name}}}"), default);
-        }
-    }
-    url
+    let mut options = crate::Options::default();
+    options.sources = sources.clone();
+    options.base_urls = base_urls.clone();
+    crate::operation_index::Resolver::new(&options).resolve(step, missing)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use roas_arazzo::v1_1::Step;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     pub(crate) fn petstore() -> Value {
         json!({

@@ -228,7 +228,7 @@ pub(crate) struct ArazzoRunArgs {
     #[arg(long, value_name = "NAME=PATH")]
     source: Vec<String>,
 
-    /// Preload a possible source document by identity, without assigning a root alias.
+    /// Preload a source or complete Path Item reference document without a root alias.
     #[arg(long, value_name = "FILE")]
     source_document: Vec<PathBuf>,
 
@@ -568,7 +568,6 @@ fn sources(
     from: &InputSource,
     args: &ArazzoRunArgs,
 ) -> Result<(Options, bool, Vec<String>)> {
-    let needed = required_sources(description, &options)?;
     let mut registry = SourceRegistry::new();
     let root = registry.insert(base_uri(from, None)?.as_str(), value)?;
     // Index every explicitly supplied document before linking any source.
@@ -588,11 +587,15 @@ fn sources(
         let from = InputSource::File(path.clone());
         let (document, _) = read_input(&from, None)
             .with_context(|| format!("reading source document {}", path.display()))?;
-        registry.insert(base_uri(&from, None)?.as_str(), document)?;
+        registry.insert_reference_document(base_uri(&from, None)?.as_str(), document)?;
     }
     for (name, id) in supplied {
         registry.override_source(root, &name, id)?;
     }
+    let needed = required_sources(
+        description,
+        &options.clone().source_registry(&registry, root)?,
+    )?;
     let mut selection = needed;
     selection.extend(
         args.source
@@ -621,6 +624,7 @@ fn sources(
                 diagnostic.error,
             )
         })
+        .chain(report.reference_diagnostics.iter().map(ToString::to_string))
         .collect::<Vec<_>>();
     let any = registry
         .sources(root)?
@@ -1037,6 +1041,56 @@ mod tests {
         args.source_max_documents = 1; // root + explicitly supplied API exceed the initial budget
         let error = run_arazzo_run(args).unwrap_err().to_string();
         assert!(error.contains("source graph document limit (1)"), "{error}");
+    }
+
+    #[test]
+    fn operation_reference_files_use_load_policy_or_explicit_preloads() {
+        let parts = TempFile::write(
+            "parts.json",
+            &json!({"item":{"get":{"operationId":"getPetById"}}}),
+        );
+        let reference = format!("{}#/item", parts.0.file_name().unwrap().to_string_lossy());
+        let (description, _) = runnable();
+        let openapi = TempFile::write(
+            "referencing.json",
+            &json!({"openapi":"3.1.0", "paths":{"/pets/{petId}":{"$ref":reference}}}),
+        );
+        let (value, _) = read_input(&InputSource::File(description.0.clone()), None).unwrap();
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        for mode in ["blocked", "file", "preload"] {
+            let mut args = run_args(&description, &openapi, "https://override.test");
+            if mode == "file" {
+                args.load.push(LoaderKind::File);
+            }
+            if mode == "preload" {
+                args.source_document.push(parts.0.clone());
+            }
+            let (options, _, diagnostics) = sources(
+                Options::new()
+                    .input("petId", 7)
+                    .base_url("petStore", "https://override.test"),
+                &parsed,
+                value.clone(),
+                &InputSource::File(description.0.clone()),
+                &args,
+            )
+            .unwrap();
+            if mode == "blocked" {
+                assert_eq!(diagnostics.len(), 1);
+                assert!(diagnostics[0].contains("/paths/~1pets~1{petId}/$ref"));
+                assert!(diagnostics[0].contains("no fetcher"));
+                assert!(prepare(&parsed, &options).is_err());
+            } else {
+                assert!(diagnostics.is_empty(), "{diagnostics:?}");
+                let mut fake =
+                    roas_arazzo_executor::testing::Fake::new().reply(200, &json!({"name":"pet"}));
+                prepare(&parsed, &options)
+                    .unwrap()
+                    .execute(&mut fake)
+                    .unwrap();
+                assert_eq!(fake.sent()[0].url, "https://override.test/pets/7");
+            }
+        }
     }
 
     #[test]
