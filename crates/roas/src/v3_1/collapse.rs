@@ -1566,6 +1566,144 @@ mod tests {
     }
 
     #[test]
+    fn typeless_schemas_inside_ref_siblings_are_never_lifted() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {"schemas": {
+                "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "Narrow": {
+                    "$ref": "#/components/schemas/Pet",
+                    "properties": {
+                        "name": {"title": "Name", "readOnly": true},
+                        "other": {"title": "Other", "readOnly": true}
+                    }
+                }
+            }}
+        }));
+        spec.collapse(None).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        // Lifted, the sibling would have become an object schema and
+        // contradicted `Pet.name`, a string. It stays where it is,
+        // byte for byte.
+        assert_eq!(
+            v["components"]["schemas"]["Narrow"]["properties"],
+            serde_json::json!({
+                "name": {"title": "Name", "readOnly": true},
+                "other": {"title": "Other", "readOnly": true}
+            }),
+        );
+        assert!(v["components"]["schemas"]["Name"].is_null());
+        assert!(v["components"]["schemas"]["Other"].is_null());
+    }
+
+    #[test]
+    fn a_child_titled_like_its_alias_does_not_take_the_alias_name() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {"schemas": {
+                "Pet": {"type": "object"},
+                "Alias": {
+                    "$ref": "#/components/schemas/Pet",
+                    "properties": {
+                        "child": {"title": "Alias", "type": "object", "properties": {"id": {"type": "integer"}}}
+                    }
+                }
+            }}
+        }));
+        spec.collapse(None).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        // The alias keeps its name and its `$ref`; the child lands
+        // under a fresh name and keeps its constraints.
+        assert_eq!(
+            v["components"]["schemas"]["Alias"]["$ref"],
+            "#/components/schemas/Pet"
+        );
+        let child = v["components"]["schemas"]["Alias"]["properties"]["child"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_ne!(child, "#/components/schemas/Alias");
+        let child_name = child.trim_start_matches("#/components/schemas/");
+        assert_eq!(v["components"]["schemas"][child_name]["title"], "Alias");
+        assert_eq!(
+            v["components"]["schemas"][child_name]["properties"]["id"]["type"],
+            "integer"
+        );
+    }
+
+    #[test]
+    fn a_child_titled_like_its_component_does_not_take_the_component_name() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {"schemas": {
+                "Pet": {
+                    "type": "object",
+                    "properties": {
+                        "child": {"title": "Pet", "type": "object", "properties": {"id": {"type": "integer"}}}
+                    }
+                }
+            }}
+        }));
+        spec.collapse(None).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v["components"]["schemas"]["Pet"]["type"], "object");
+        let child = v["components"]["schemas"]["Pet"]["properties"]["child"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_ne!(child, "#/components/schemas/Pet");
+        let child_name = child.trim_start_matches("#/components/schemas/");
+        assert_eq!(
+            v["components"]["schemas"][child_name]["properties"]["id"]["type"],
+            "integer"
+        );
+    }
+
+    #[test]
+    fn typed_siblings_with_typeless_descendants_are_never_lifted() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {"schemas": {
+                "Pet": {"type": "object"},
+                "Narrow": {
+                    "$ref": "#/components/schemas/Pet",
+                    "properties": {
+                        "owner": {
+                            "title": "Owner",
+                            "type": "object",
+                            "properties": {"name": {"readOnly": true}}
+                        },
+                        "either": {"title": "Either", "anyOf": [{"readOnly": true}, {"type": "string"}]}
+                    }
+                }
+            }}
+        }));
+        spec.collapse(None).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        // Both would have gained `type: "object"` somewhere inside
+        // when interned, so both stay inline, byte for byte.
+        assert_eq!(
+            v["components"]["schemas"]["Narrow"]["properties"],
+            serde_json::json!({
+                "owner": {
+                    "title": "Owner",
+                    "type": "object",
+                    "properties": {"name": {"readOnly": true}}
+                },
+                "either": {"title": "Either", "anyOf": [{"readOnly": true}, {"type": "string"}]}
+            }),
+        );
+        assert!(v["components"]["schemas"]["Owner"].is_null());
+        assert!(v["components"]["schemas"]["Either"].is_null());
+    }
+
+    #[test]
     fn external_ref_without_loader_is_left_alone() {
         let mut spec = parse(serde_json::json!({
             "openapi": "3.1.0",

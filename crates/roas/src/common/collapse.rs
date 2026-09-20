@@ -180,12 +180,28 @@ impl<T: Serialize, R: ReferenceObject> Bag<T, R> {
     /// ref is put back so the bag isn't left short an entry.
     pub fn take_inline(&mut self, name: &str) -> Option<T> {
         match self.entries.remove(name)? {
-            RefOr::Item(item) => Some(item),
+            RefOr::Item(item) => {
+                self.reserve(name);
+                Some(item)
+            }
             r @ RefOr::Ref(_) => {
                 self.entries.insert(name.to_owned(), r);
                 None
             }
         }
+    }
+
+    /// Keep `name` occupied while its entry is out of the bag being
+    /// walked. Without this, a nested schema titled like the entry
+    /// would be interned under the entry's own name and then be
+    /// overwritten when the entry is put back — leaving it a
+    /// reference to its parent. The placeholder is an empty `$ref`:
+    /// [`unique_name`] sees the key as taken, [`Self::inline_names`]
+    /// and [`Self::intern`] skip it because it is not an item, and
+    /// putting the entry back replaces it.
+    fn reserve(&mut self, name: &str) {
+        self.entries
+            .insert(name.to_owned(), RefOr::new_ref(String::new()));
     }
 
     /// Put an entry back under its original name and refresh the
@@ -201,6 +217,7 @@ impl<T: Serialize, R: ReferenceObject> Bag<T, R> {
         Ok(())
     }
 
+    #[cfg(any(feature = "v3_1", feature = "v3_2"))]
     /// The names of the entries that are references — the complement
     /// of [`Self::inline_names`]. A reference entry has no body to
     /// intern, but its payload may carry nested slots of its own
@@ -216,11 +233,15 @@ impl<T: Serialize, R: ReferenceObject> Bag<T, R> {
             .collect()
     }
 
+    #[cfg(any(feature = "v3_1", feature = "v3_2"))]
     /// Take a reference entry out of the bag, mirroring
     /// [`Self::take_inline`]: an inline entry is put back untouched.
     pub fn take_ref(&mut self, name: &str) -> Option<R> {
         match self.entries.remove(name)? {
-            RefOr::Ref(r) => Some(*r),
+            RefOr::Ref(r) => {
+                self.reserve(name);
+                Some(*r)
+            }
             item @ RefOr::Item(_) => {
                 self.entries.insert(name.to_owned(), item);
                 None
@@ -228,6 +249,7 @@ impl<T: Serialize, R: ReferenceObject> Bag<T, R> {
         }
     }
 
+    #[cfg(any(feature = "v3_1", feature = "v3_2"))]
     /// Put a reference entry back under its original name.
     pub fn put_ref(&mut self, name: String, reference: R) {
         self.entries.insert(name, RefOr::Ref(Box::new(reference)));
@@ -681,6 +703,7 @@ where
     }
 }
 
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
 /// Keywords whose value is one schema.
 const SCHEMA_KEYWORDS: &[&str] = &[
     "items",
@@ -696,9 +719,11 @@ const SCHEMA_KEYWORDS: &[&str] = &[
     "contentSchema",
 ];
 
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
 /// Keywords whose value is an array of schemas.
 const SCHEMA_LIST_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf", "prefixItems"];
 
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
 /// Keywords whose value is a map of schemas.
 const SCHEMA_MAP_KEYWORDS: &[&str] = &[
     "properties",
@@ -708,6 +733,7 @@ const SCHEMA_MAP_KEYWORDS: &[&str] = &[
     "definitions",
 ];
 
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
 /// Lift every schema slot nested in a raw schema object, in place.
 ///
 /// This is how the sibling keywords of a schema `$ref` are walked. They
@@ -751,6 +777,7 @@ where
     Ok(())
 }
 
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
 /// Lift one raw schema slot found by [`walk_raw_schema_slots`].
 ///
 /// A boolean schema has nothing to lift. An object carrying `$ref` is
@@ -761,6 +788,15 @@ where
 /// first, so its nested slots are lifted without the typed detour, and
 /// then weighed for lifting as a whole; only when it lifts is the slot
 /// rewritten, to the `$ref` that replaces it.
+///
+/// An inline schema is lifted as a whole only when the typed model
+/// reads it back exactly as written. A schema that names no type —
+/// anywhere inside it: at the top, in a nested property, in a
+/// composition branch — is read as an object schema and would be
+/// interned with `type: "object"` added, contradicting a target that
+/// declares the same property a string. So the raw slot is compared
+/// with its typed round trip, and when they differ the slot stays put.
+/// Its nested slots were already walked, so nothing under it is lost.
 pub fn lift_raw_schema_slot<T, R, C>(
     slot: &mut serde_json::Value,
     ctx: NameContext,
@@ -771,7 +807,7 @@ where
     R: ReferenceObject + Clone + Serialize + DeserializeOwned,
     C: CollapseState,
 {
-    let serde_json::Value::Object(map) = slot else {
+    let serde_json::Value::Object(map) = &*slot else {
         return Ok(());
     };
     if map.contains_key("$ref") {
@@ -783,7 +819,11 @@ where
     walk_raw_schema_slots(slot, &ctx, &mut |nested, ctx| {
         lift_raw_schema_slot::<T, R, C>(nested, ctx, c)
     })?;
-    let mut parsed: RefOr<T, R> = RefOr::new_item(serde_json::from_value(slot.clone())?);
+    let item: T = serde_json::from_value(slot.clone())?;
+    if serde_json::to_value(&item)? != *slot {
+        return Ok(());
+    }
+    let mut parsed: RefOr<T, R> = RefOr::new_item(item);
     lift_ref_or(&mut parsed, ctx, c)?;
     if let RefOr::Ref(reference) = &parsed {
         *slot = serde_json::to_value(reference)?;
