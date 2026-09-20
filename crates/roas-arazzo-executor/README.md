@@ -424,8 +424,9 @@ entry checks apply to lazy, prepared, sync, async, and v1.0-upconverted runs.
 The profile is JSON Schema 2020-12, including local reusable inputs, JSON Pointer
 references, `$id`, `$anchor`, recursive schemas and schema-valued applicators.
 There is no coercion, default insertion, or format assertion (`format` remains
-an annotation). Other explicitly declared dialects are rejected. Numeric values
-retain `serde_json`'s normal representation; this is not arbitrary-precision JSON.
+an annotation). Other explicitly declared dialects in selected schemas are
+rejected. Numeric values retain `serde_json`'s normal representation; this is not
+arbitrary-precision JSON.
 
 Resolution is **offline**. Supply complete resources with
 `Options::schema_document(uri, value)` or through a source registry (including
@@ -437,15 +438,19 @@ absolute `$self` or retrieval metadata, an isolated internal base permits local
 references only; supply a real base for relative external references. Endpoint
 base-URL overrides do not affect schema resolution.
 
-The schema catalog indexes embedded input/schema identities and anchors before
-compilation, rejecting conflicting definitions, invalid URI scopes and unsupported
-dialects. Registered resources must have resolvable references; registry preparation
-can reject an unavailable reference even in an unused indexed resource. No schema
-reference starts a file or network fetch, including when other dependencies enable
-the backend's fetch features. A private normalized indexing view preserves schema
-URI scope across Arazzo/OpenAPI container fields; supplied documents and runtime
-expression contexts are unchanged. Compilation caches belong to each prepared
-plan (or lazy run), not a process-global cache.
+The schema catalog discovers embedded input/schema identities and anchors without
+compiling unused schemas. Compilation selects each reachable workflow input and
+the reusable inputs, OpenAPI component schemas, and standalone schema documents
+reached through its references. Unused components/documents cannot fail a run just
+because they declare another dialect or refer to an unavailable resource. Selection
+is by schema root, not by individual assertion: the entire definition tree within
+a selected root is checked, and its references must resolve. Conflicting claims on
+a selected identity, invalid URI scopes and unsupported dialects are errors.
+No schema reference starts a file or network fetch, including when other
+dependencies enable the backend's fetch features. A private normalized indexing
+view preserves schema URI scope across Arazzo/OpenAPI container fields; supplied
+documents and runtime expression contexts are unchanged. Compilation caches
+belong to each prepared plan (or lazy run), not a process-global cache.
 
 `ExecutionError::Input` distinguishes malformed configuration/schema failures
 from `InputError::Invalid`, which carries all instance violations with schema and

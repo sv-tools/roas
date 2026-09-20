@@ -199,6 +199,7 @@ impl InputSchemas {
 mod backend {
     use super::{InputError, InputViolation, resource_uri};
     use crate::Options;
+    use crate::input_catalog::{Catalog, Documents, children};
     use jsonschema::{Draft, Registry, Validator};
     use roas_arazzo::v1_1::{Description, Workflow};
     use serde_json::{Value, json};
@@ -210,7 +211,7 @@ mod backend {
 
     #[derive(Debug)]
     pub(super) struct Schemas {
-        registry: Registry<'static>,
+        catalog: Catalog,
         base: Url,
         validators: BTreeMap<String, Validator>,
     }
@@ -273,6 +274,14 @@ mod backend {
             if let Some(retrieval) = retrieval {
                 documents.insert(retrieval, (base.clone(), value));
             }
+            Ok(Self {
+                catalog: Catalog::new(documents),
+                base,
+                validators: BTreeMap::new(),
+            })
+        }
+
+        fn registry(documents: Documents) -> Result<Registry<'static>, InputError> {
             let mut registry = Registry::new().draft(DRAFT);
             let mut identities = BTreeMap::new();
             let mut anchors = BTreeMap::new();
@@ -316,14 +325,9 @@ mod backend {
             // referencing::Registry's default retriever never performs IO.
             // Validator construction below additionally selects offline mode,
             // even if another dependency enables jsonschema's retrieval features.
-            let registry = registry
+            registry
                 .prepare()
-                .map_err(|error| InputError::Configuration(error.to_string()))?;
-            Ok(Self {
-                registry,
-                base,
-                validators: BTreeMap::new(),
-            })
+                .map_err(|error| InputError::Configuration(error.to_string()))
         }
 
         pub(super) fn compile(
@@ -341,11 +345,12 @@ mod backend {
                 .expect("workflow belongs to the description");
             let mut uri = self.base.clone();
             uri.set_fragment(Some(&format!("/workflows/{index}/inputs")));
+            let registry = Self::registry(self.catalog.reachable(&uri))?;
             let validator = jsonschema::options()
                 .offline()
                 .with_draft(DRAFT)
                 .should_validate_formats(false)
-                .with_registry(&self.registry)
+                .with_registry(&registry)
                 .build(&json!({"$ref": uri.as_str()}))
                 .map_err(|error| InputError::Schema {
                     workflow: workflow.workflow_id.clone(),
@@ -362,6 +367,8 @@ mod backend {
             workflow: &Workflow,
             inputs: &Value,
         ) -> Result<(), InputError> {
+            #[cfg(test)]
+            super::tests::VALIDATIONS.with(|count| count.set(count.get() + 1));
             // Prepared plans compile every potential entry. Never silently skip
             // validation if a future traversal misses a schema-bearing workflow.
             let validator = self.validators.get(&workflow.workflow_id).ok_or_else(|| {
@@ -564,7 +571,7 @@ mod backend {
             && dialect.trim_end_matches('#') != "https://json-schema.org/draft/2020-12/schema"
         {
             return Err(InputError::Configuration(format!(
-                "unsupported input-schema dialect `{dialect}`; expected JSON Schema 2020-12"
+                "unsupported input-schema dialect `{dialect}` at `{base}#{pointer}/$schema`; expected JSON Schema 2020-12"
             )));
         }
         for name in ["$ref", "$dynamicRef"] {
@@ -615,48 +622,6 @@ mod backend {
 
     fn escape(segment: &str) -> String {
         segment.replace('~', "~0").replace('/', "~1")
-    }
-
-    /// Schema-valued keyword positions, never arbitrary JSON objects or annotations.
-    fn children(object: &mut serde_json::Map<String, Value>) -> Vec<(String, &mut Value)> {
-        let mut children = Vec::new();
-        for (name, value) in object {
-            match name.as_str() {
-                "additionalProperties"
-                | "contains"
-                | "contentSchema"
-                | "else"
-                | "if"
-                | "items"
-                | "not"
-                | "propertyNames"
-                | "then"
-                | "unevaluatedItems"
-                | "unevaluatedProperties" => children.push((format!("/{name}"), value)),
-                "allOf" | "anyOf" | "oneOf" | "prefixItems" => {
-                    if let Some(values) = value.as_array_mut() {
-                        children.extend(
-                            values
-                                .iter_mut()
-                                .enumerate()
-                                .map(|(index, value)| (format!("/{name}/{index}"), value)),
-                        );
-                    }
-                }
-                "$defs" | "definitions" | "dependentSchemas" | "patternProperties"
-                | "properties" => {
-                    if let Some(values) = value.as_object_mut() {
-                        children.extend(
-                            values
-                                .iter_mut()
-                                .map(|(key, value)| (format!("/{name}/{}", escape(key)), value)),
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-        children
     }
 
     fn rewrite_document_anchors(document: &mut Value, anchors: &BTreeMap<String, String>) {
@@ -715,6 +680,54 @@ mod backend {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(feature = "input-validation")]
+    thread_local! { pub(super) static VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+    #[cfg(feature = "input-validation")]
+    #[test]
+    fn root_inputs_are_checked_once_but_calls_revalidate_bound_arguments() {
+        let description: Description = serde_json::from_value(json!({
+            "arazzo":"1.1.0","info":{"title":"Entry counts","version":"1"},
+            "sourceDescriptions":[{"name":"api","url":"https://example.com/api.json"}],"workflows":[
+                {"workflowId":"root","inputs":{},"dependsOn":["dependency"],
+                 "steps":[{"stepId":"call","workflowId":"dependency"}]},
+                {"workflowId":"dependency","inputs":{},"steps":[{"stepId":"request","operationId":"check"}]}
+            ]
+        }))
+        .unwrap();
+        let options = Options::new().input_validation(InputValidation::Draft202012)
+            .source("api", "https://example.com/api.json", json!({"openapi":"3.1.0",
+                "servers":[{"url":"https://example.com"}],"paths":{"/check":{"get":{"operationId":"check"}}}}));
+        for prepared in [false, true] {
+            let plan = prepared.then(|| crate::prepare(&description, &options).unwrap());
+            let before = VALIDATIONS.get();
+            let mut run = match &plan {
+                Some(plan) => plan.start(),
+                None => crate::Run::start(&description, &options),
+            }
+            .unwrap();
+            assert_eq!(
+                VALIDATIONS.get() - before,
+                2,
+                "root and dependency preflight"
+            );
+            loop {
+                match run.advance().unwrap() {
+                    crate::Progress::Send(_) => run
+                        .supply(crate::HttpResponse::json(200, &json!({})))
+                        .unwrap(),
+                    crate::Progress::Done(_) => break,
+                    progress => panic!("unexpected progress: {progress:?}"),
+                }
+            }
+            assert_eq!(
+                VALIDATIONS.get() - before,
+                3,
+                "only the explicit call revalidates"
+            );
+        }
+    }
 
     fn description() -> Description {
         serde_json::from_value(

@@ -96,7 +96,8 @@ impl Options {
         self
     }
 
-    /// Set one workflow input.
+    /// Set one workflow input. This does not clear an earlier non-object
+    /// [`Self::inputs`] batch error; replace that batch with a JSON object first.
     #[must_use]
     pub fn input(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
         self.inputs.insert(name.into(), value.into());
@@ -718,12 +719,18 @@ impl<'d> Run<'d> {
                 at: self.options.limits.depth,
             });
         }
-        match self.prepared {
-            Some(prepared) => prepared.input_schemas.validate(workflow, &inputs)?,
-            None => {
-                self.input_schemas
-                    .compile(self.description, self.options, workflow)?;
-                self.input_schemas.validate(workflow, &inputs)?;
+        // Caller-free entries are the initial root/dependency queue: start_inner
+        // already checked every one against the immutable root_inputs snapshot.
+        // Calls and recovery entries have newly bound arguments, even when they
+        // re-enter a workflow that was also in the initial queue.
+        if caller.is_some() {
+            match self.prepared {
+                Some(prepared) => prepared.input_schemas.validate(workflow, &inputs)?,
+                None => {
+                    self.input_schemas
+                        .compile(self.description, self.options, workflow)?;
+                    self.input_schemas.validate(workflow, &inputs)?;
+                }
             }
         }
         self.frames.push(Frame {

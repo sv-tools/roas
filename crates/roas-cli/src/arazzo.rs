@@ -226,7 +226,7 @@ pub(crate) struct ArazzoRunArgs {
     #[arg(long)]
     skip_input_validation: bool,
 
-    /// Supply an offline input-schema resource, e.g. --schema https://example.com/input.json=./input.json.
+    /// Supply an offline input-schema resource, e.g. `--schema https://example.com/input.json=./input.json`.
     /// Repeat for every external resource; --load never fetches input schemas implicitly.
     #[arg(long, value_name = "URI=FILE")]
     schema: Vec<String>,
@@ -977,6 +977,29 @@ mod tests {
         args.skip_input_validation = true;
         run_arazzo(ArazzoCommand::Run(args.into())).unwrap();
         assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn default_input_validation_ignores_unreferenced_api_component_schemas() {
+        for unused in [
+            json!({"$schema":"http://json-schema.org/draft-04/schema#","type":"object"}),
+            json!({"$anchor":"unused","$ref":"https://127.0.0.1:1/not-preloaded"}),
+        ] {
+            let openapi = TempFile::write(
+                "unused-input-schema-api.json",
+                &json!({
+                    "openapi":"3.1.0","servers":[{"url":"https://example.com"}],
+                    "paths":{"/pets/{petId}":{"get":{"operationId":"getPetById"}}},
+                    "components":{"schemas":{"Unused":unused}}
+                }),
+            );
+            let description =
+                input_schema_workflow(json!({"properties":{"petId":{"type":"integer"}}}));
+            let (base, join) = server(1, 200, "{}");
+            let args = run_args(&description, &openapi, &base);
+            run_arazzo(ArazzoCommand::Run(args.into())).unwrap();
+            assert_eq!(join.join().unwrap().len(), 1);
+        }
     }
 
     #[test]

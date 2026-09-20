@@ -45,6 +45,10 @@ fn non_object_batches_are_never_silently_ignored() {
                 .to_string()
                 .contains("must be a JSON object")
         );
+        assert!(matches!(
+            Run::start(&description, &options.clone().input("replacement", 2)),
+            Err(ExecutionError::Input(InputError::NotObject))
+        ));
         assert!(Run::start(&description, &options.inputs(json!({}))).is_ok());
     }
 }
@@ -256,6 +260,245 @@ mod enabled {
                 .unwrap_err()
                 .to_string()
                 .contains("non-object $defs")
+        );
+    }
+
+    #[test]
+    fn unused_openapi_schemas_do_not_block_input_validation() {
+        for schema in [
+            json!({"$schema":"http://json-schema.org/draft-04/schema#","type":"object"}),
+            json!({"$anchor":"unused","$ref":"https://example.com/not-supplied"}),
+        ] {
+            let expected = if schema.get("$schema").is_some() {
+                "https://example.com/api.json#/components/schemas/Unused/$schema"
+            } else {
+                "https://example.com/not-supplied"
+            };
+            let api = json!({"openapi":"3.1.0","servers":[{"url":"https://example.com"}],
+                "paths":{"/check":{"get":{"operationId":"check"}}},
+                "components":{"schemas":{"Unused":schema,"Used":{"type":"object"}}}});
+            let options = Options::new()
+                .input_validation(InputValidation::Draft202012)
+                .source("api", "https://example.com/api.json", api);
+            for inputs in [
+                json!({}),
+                json!({"$ref":"https://example.com/api.json#/components/schemas/Used"}),
+            ] {
+                let description = document(inputs);
+                let mut lazy = execute(&description, &options, &mut fake()).unwrap();
+                let mut prepared = prepare(&description, &options)
+                    .unwrap()
+                    .execute(&mut fake())
+                    .unwrap();
+                for report in [&mut lazy, &mut prepared] {
+                    for step in &mut report.steps {
+                        step.elapsed = std::time::Duration::ZERO;
+                    }
+                }
+                assert_eq!(lazy, prepared);
+                assert!(prepared.is_success());
+            }
+            let description =
+                document(json!({"$ref":"https://example.com/api.json#/components/schemas/Unused"}));
+            let error = prepare(&description, &options).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(Run::start(&description, &options).is_err());
+        }
+    }
+
+    #[test]
+    fn unused_workflows_reusable_inputs_and_standalone_documents_are_not_compiled() {
+        let bad = json!({"$anchor":"unused","$schema":"http://json-schema.org/draft-04/schema#", "$ref":"https://example.com/missing"});
+        let mut raw = value(json!({"type":"object"}));
+        raw["components"] = json!({"inputs":{"Unused":bad,"InvalidId":{"$id":"https://["}}});
+        raw["workflows"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"workflowId":"unused","inputs":bad,"steps":[{"stepId":"request","operationId":"check"}]}));
+        let description: Description = serde_json::from_value(raw).unwrap();
+        let options = checked()
+            .schema_document("https://example.com/unused", bad)
+            .unwrap();
+        assert!(prepare(&description, &options).unwrap().start().is_ok());
+        assert!(Run::start(&description, &options).is_ok());
+        assert!(prepare(&description, &options.workflow("unused")).is_err());
+    }
+
+    #[test]
+    fn schema_selection_follows_transitive_refs_and_keeps_recursive_targets() {
+        let description = document(json!({"$ref":"https://example.com/api.json#entry"}));
+        let api = json!({"openapi":"3.1.0","servers":[{"url":"https://example.com"}],
+        "paths":{"/check":{"get":{"operationId":"check"}}},
+        "components":{"schemas":{
+            "Entry":{"$anchor":"entry","$ref":"types/node.json#node"},
+            "Node":{"$id":"types/node.json","$dynamicAnchor":"node", "type":"object", "required":["value"],
+                "properties":{"value":{"$ref":"number.json"},"child":{"$dynamicRef":"#node"}}},
+            "Unused":{"$anchor":"unused","$ref":"https://example.com/missing"}
+        }}});
+        let options = Options::new()
+            .input_validation(InputValidation::Draft202012)
+            .source("api", "https://example.com/api.json", api)
+            .schema_document(
+                "https://example.com/types/number.json",
+                json!({"type":"integer"}),
+            )
+            .unwrap();
+        let plan = prepare(&description, &options).unwrap();
+        for inputs in [
+            json!({"value":1,"child":{"value":2}}),
+            json!({"value":"wrong"}),
+            json!({"value":1,"child":{}}),
+        ] {
+            let valid = inputs == json!({"value":1,"child":{"value":2}});
+            assert_eq!(
+                plan.start_with_inputs(inputs.as_object().unwrap().clone())
+                    .is_ok(),
+                valid
+            );
+            assert_eq!(
+                Run::start(&description, &options.clone().inputs(inputs)).is_ok(),
+                valid
+            );
+        }
+    }
+
+    #[test]
+    fn retrieval_and_canonical_aliases_share_the_same_schema_selection() {
+        let mut raw = value(json!({"allOf":[
+            {"$ref":"https://example.com/download.json#/components/inputs/A"},
+            {"$ref":"https://example.com/flow.json#/components/inputs/B"}
+        ]}));
+        raw["$self"] = json!("https://example.com/flow.json");
+        raw["components"] = json!({"inputs":{
+            "A":{"required":["a"]},"B":{"required":["b"]},
+            "Unused":{"$anchor":"unused","$ref":"https://example.com/missing"}
+        }});
+        let description: Description = serde_json::from_value(raw).unwrap();
+        let options = checked()
+            .input_schema_base("https://example.com/download.json")
+            .unwrap();
+        let plan = prepare(&description, &options).unwrap();
+        assert!(plan.start().is_err());
+        for inputs in [json!({"a":1}), json!({"b":1}), json!({"a":1,"b":1})] {
+            assert_eq!(
+                plan.start_with_inputs(inputs.as_object().unwrap().clone())
+                    .is_ok(),
+                inputs.as_object().unwrap().len() == 2
+            );
+        }
+    }
+
+    #[test]
+    fn openapi_retrieval_aliases_and_escaped_component_pointers_select_the_same_schema() {
+        for reference in [
+            "https://example.com/download.json#params",
+            "https://example.com/canonical/api.json#params",
+            "https://example.com/download.json#/components/schemas/a~1b~0c%2520",
+        ] {
+            let description = document(json!({"$ref":reference}));
+            let options = Options::new().input_validation(InputValidation::Draft202012)
+                .source("api", "https://example.com/download.json", json!({
+                    "openapi":"3.1.0","$self":"canonical/api.json", "servers":[{"url":"https://example.com"}],
+                    "paths":{"/check":{"get":{"operationId":"check"}}},
+                    "components":{"schemas":{
+                        "a/b~c%20":{"$anchor":"params","$ref":"input.json"},
+                        "unused/~key":{"$anchor":"unused","$ref":"https://example.com/missing"}
+                    }}
+                }))
+                .schema_document("https://example.com/canonical/input.json", json!({"required":["name"]})).unwrap();
+            let plan = prepare(&description, &options).unwrap();
+            assert!(plan.start().is_err(), "{reference}");
+            assert!(
+                plan.start_with_inputs(json!({"name":"ok"}).as_object().unwrap().clone())
+                    .is_ok(),
+                "{reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_schema_pointer_targets_keep_their_supplied_external_resources() {
+        let description = document(
+            json!({"$ref":"https://example.com/api.json#/paths/~1check/get/parameters/0/schema"}),
+        );
+        let options = Options::new().input_validation(InputValidation::Draft202012)
+            .source("api", "https://example.com/api.json", json!({"openapi":"3.1.0","servers":[{"url":"https://example.com"}],
+                "paths":{"/check":{"get":{"operationId":"check","parameters":[{"in":"query","name":"q","schema":{"$ref":"input.json"}}]}}}}))
+            .schema_document("https://example.com/input.json", json!({"required":["q"]})).unwrap();
+        let plan = prepare(&description, &options).unwrap();
+        assert!(plan.start().is_err());
+        assert!(
+            plan.start_with_inputs(json!({"q":1}).as_object().unwrap().clone())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn explicit_pointer_targets_can_enter_annotation_data_as_a_schema() {
+        for reference in [
+            "https://example.com/catalog#/$defs/Root/default",
+            "https://example.com/types/root#/default",
+        ] {
+            let description = document(json!({"$ref":reference}));
+            let options = checked()
+                .schema_document(
+                    "https://example.com/catalog",
+                    json!({"$defs":{
+                        "Root":{"$id":"types/root", "default":{"$ref":"input.json"}}
+                    }}),
+                )
+                .unwrap()
+                .schema_document(
+                    "https://example.com/types/input.json",
+                    json!({"required":["name"]}),
+                )
+                .unwrap();
+            let plan = prepare(&description, &options).unwrap();
+            assert!(plan.start().is_err());
+            assert!(
+                plan.start_with_inputs(json!({"name":"ok"}).as_object().unwrap().clone())
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn schema_id_empty_fragments_do_not_hide_supplied_resources() {
+        let description = document(json!({"$ref":"https://example.com/input"}));
+        let options = checked()
+            .schema_document(
+                "https://example.com/download",
+                json!({
+                    "$id":"https://example.com/input#","required":["name"]
+                }),
+            )
+            .unwrap();
+        let plan = prepare(&description, &options).unwrap();
+        assert!(plan.start().is_err());
+        assert!(
+            plan.start_with_inputs(json!({"name":"ok"}).as_object().unwrap().clone())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn reached_schema_roots_keep_their_entire_definition_tree() {
+        let description = document(json!({"$ref":"https://example.com/schema#used"}));
+        let options = checked()
+            .schema_document(
+                "https://example.com/schema",
+                json!({"$defs":{
+                    "Used":{"$anchor":"used","type":"object"},
+                    "Other":{"$schema":"http://json-schema.org/draft-04/schema#"}
+                }}),
+            )
+            .unwrap();
+        // Selection excludes unrelated documents/components, not individual
+        // assertions or definitions inside a selected standalone resource.
+        let error = prepare(&description, &options).unwrap_err().to_string();
+        assert!(
+            error.contains("https://example.com/schema#/$defs/Other/$schema"),
+            "{error}"
         );
     }
 

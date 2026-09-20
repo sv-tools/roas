@@ -53,6 +53,8 @@ mod criterion;
 mod expression;
 mod http;
 mod input;
+#[cfg(feature = "input-validation")]
+mod input_catalog;
 mod operation;
 mod operation_document;
 #[cfg(feature = "source-graph")]
