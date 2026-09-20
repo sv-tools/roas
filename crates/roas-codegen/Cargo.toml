@@ -1,0 +1,45 @@
+[package]
+name = "roas-codegen"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["openapi", "codegen", "swagger", "rust", "golang"]
+description = "Generate Rust and Go types from OpenAPI 2.0 / 3.0 / 3.1 / 3.2 descriptions"
+readme = "README.md"
+categories = ["development-tools", "web-programming"]
+# `templates/` will join this list when the default templates land; it is
+# not `src`, so an explicit include is what keeps it in the package.
+include = ["src", "Cargo.toml", "README.md"]
+publish = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# Keep every number exactly as written. A Cargo feature rather than a
+# runtime setting because `serde_json/arbitrary_precision` is global to
+# the build and changes how `serde_json::Value` compares numbers; the
+# consumer opts in, never this crate on its behalf.
+exact-numbers = ["roas/exact-numbers"]
+
+[dependencies]
+# All four versions unconditionally: normalizing every one of them to 3.2
+# is the crate's premise, so a build that cannot hold a 2.0 document is
+# not a build of this crate.
+roas = { workspace = true, features = ["v2", "v3_0", "v3_1", "v3_2"] }
+# Types that appear in the public API are direct dependencies even though
+# each is transitive through `roas`: a caller names the same crate to
+# construct an argument.
+enumset.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+enumset.workspace = true
