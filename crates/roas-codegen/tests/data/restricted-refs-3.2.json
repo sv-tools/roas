@@ -1,0 +1,38 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Refs",
+    "version": "1"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "Local": {
+        "$ref": "#/components/schemas/Named"
+      },
+      "Named": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "External": {
+        "$ref": "https://example.com/schemas.json#/Pet"
+      },
+      "Anchor": {
+        "$ref": "#Pet"
+      },
+      "Rebased": {
+        "$id": "https://example.com/rebased",
+        "type": "object",
+        "properties": {
+          "x": {
+            "$ref": "#/components/schemas/Named"
+          }
+        }
+      }
+    }
+  }
+}

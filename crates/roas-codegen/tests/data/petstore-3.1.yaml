@@ -1,0 +1,15 @@
+openapi: 3.1.0
+info:
+  title: Pets
+  version: "1"
+paths: {}
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        id:
+          type: integer
+        weight:
+          type: number
+          default: 1.00000000000000000001
