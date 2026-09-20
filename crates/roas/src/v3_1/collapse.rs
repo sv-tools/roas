@@ -1679,15 +1679,16 @@ mod tests {
                             "type": "object",
                             "properties": {"name": {"readOnly": true}}
                         },
-                        "either": {"title": "Either", "anyOf": [{"readOnly": true}, {"type": "string"}]}
+                        "either": {"title": "Either", "anyOf": [{"readOnly": true}, {"type": "string"}]},
+                        "all": {"title": "All", "allOf": [{"maxLength": 5}, {"type": "string"}]}
                     }
                 }
             }}
         }));
         spec.collapse(None).expect("collapse ok");
         let v = serde_json::to_value(&spec).unwrap();
-        // Both would have gained `type: "object"` somewhere inside
-        // when interned, so both stay inline, byte for byte.
+        // Each would have gained `type: "object"` somewhere inside
+        // when interned, so each stays inline, byte for byte.
         assert_eq!(
             v["components"]["schemas"]["Narrow"]["properties"],
             serde_json::json!({
@@ -1696,11 +1697,13 @@ mod tests {
                     "type": "object",
                     "properties": {"name": {"readOnly": true}}
                 },
-                "either": {"title": "Either", "anyOf": [{"readOnly": true}, {"type": "string"}]}
+                "either": {"title": "Either", "anyOf": [{"readOnly": true}, {"type": "string"}]},
+                "all": {"title": "All", "allOf": [{"maxLength": 5}, {"type": "string"}]}
             }),
         );
         assert!(v["components"]["schemas"]["Owner"].is_null());
         assert!(v["components"]["schemas"]["Either"].is_null());
+        assert!(v["components"]["schemas"]["All"].is_null());
     }
 
     #[test]
