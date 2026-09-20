@@ -2271,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "roas"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "clap",
  "enumset",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "roas-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "roas-file-fetcher"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "roas",
  "serde",
@@ -2394,7 +2394,7 @@ dependencies = [
 
 [[package]]
 name = "roas-http-validator"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "actix-web",
  "axum",
