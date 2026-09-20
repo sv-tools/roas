@@ -19,6 +19,87 @@ fn by_id() -> Description {
     description(json!({"operationId":"$sourceDescriptions.api.check"}))
 }
 
+#[test]
+fn bare_ids_ignore_supplied_non_openapi_documents() {
+    let bare = description(json!({"operationId":"check"}));
+    for other in [json!({"arazzo":"1.1.0"}), json!({"asyncapi":"3.0.0"})] {
+        // Cover non-OpenAPI documents before and after the API in lookup order.
+        for name in ["aaa", "zzz"] {
+            let options = Options::new().source("api", API, api()).source(
+                name,
+                "https://example.test/other.json",
+                other.clone(),
+            );
+            agree(&bare, &options, "GET", "https://example.test/v1/pets");
+
+            let ambiguous =
+                options
+                    .clone()
+                    .source("second", "https://example.test/second.json", api());
+            assert!(
+                prepare(&bare, &ambiguous)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("more than one")
+            );
+        }
+        // An explicitly selected non-OpenAPI source is still a document error,
+        // while a bare ID with no OpenAPI candidates is simply not found.
+        let options = Options::new().source("api", API, other);
+        assert!(
+            prepare(&by_id(), &options)
+                .unwrap_err()
+                .to_string()
+                .contains("not an OpenAPI")
+        );
+        assert!(
+            prepare(&bare, &options)
+                .unwrap_err()
+                .to_string()
+                .contains("in none")
+        );
+        let mut fake = Fake::new();
+        assert!(
+            execute(&bare, &options, &mut fake)
+                .unwrap_err()
+                .to_string()
+                .contains("in none")
+        );
+        assert!(fake.sent().is_empty());
+    }
+}
+
+#[test]
+fn bare_ids_keep_invalid_openapi_sources_loud() {
+    let bare = description(json!({"operationId":"check"}));
+    for invalid in [
+        json!({"openapi":"9.0.0"}),
+        json!({"openapi":"3.1.0", "paths":false}),
+        json!({"openapi":"3.1.0", "arazzo":"1.1.0"}),
+        json!({"swagger":"2.0", "asyncapi":"3.0.0"}),
+        json!({"openapi":"3.1.0", "paths":{"/bad":{"$ref":"#/missing"}}}),
+    ] {
+        let options = Options::new().source("api", API, api()).source(
+            "invalid",
+            "https://example.test/bad.json",
+            invalid,
+        );
+        assert!(prepare(&bare, &options).is_err());
+        let mut fake = Fake::new();
+        assert!(execute(&bare, &options, &mut fake).is_err());
+        assert!(fake.sent().is_empty());
+    }
+    // Existing unversioned OpenAPI compatibility must not be filtered out.
+    let mut legacy = api();
+    legacy.as_object_mut().unwrap().remove("openapi");
+    agree(
+        &bare,
+        &Options::new().source("api", API, legacy),
+        "GET",
+        "https://example.test/v1/pets",
+    );
+}
+
 fn api() -> Value {
     json!({"openapi":"3.1.0", "servers":[{"url":"/v1"}], "paths":{"/pets":{"get":{"operationId":"check"}}}})
 }
@@ -271,6 +352,69 @@ fn invalid_servers_explain_missing_bases_and_bad_templates() {
             "GET",
             "https://override.test/pets",
         );
+    }
+}
+
+#[test]
+fn base_overrides_keep_absolute_http_validation_and_normalization() {
+    for (base, expected) in [
+        ("/relative", "base URL override"),
+        ("http://[", "base URL override"),
+        ("file:///tmp/api", "HTTP(S) origin"),
+        ("https://override.test/?q=1", "query strings"),
+        ("https://override.test/#fragment", "fragments"),
+    ] {
+        let options = Options::new()
+            .source("api", API, api())
+            .base_url("api", base);
+        assert!(
+            prepare(&by_id(), &options)
+                .unwrap_err()
+                .to_string()
+                .contains(expected)
+        );
+        let mut fake = Fake::new();
+        assert!(
+            execute(&by_id(), &options, &mut fake)
+                .unwrap_err()
+                .to_string()
+                .contains(expected)
+        );
+        assert!(fake.sent().is_empty());
+    }
+    agree(
+        &by_id(),
+        &Options::new()
+            .source("api", API, api())
+            .base_url("api", "https://OVERRIDE.test:443/v1/"),
+        "GET",
+        "https://override.test/v1/pets",
+    );
+}
+
+#[test]
+fn path_item_annotation_overlaps_follow_the_documented_rejection_policy() {
+    for field in ["summary", "description", "x-owner"] {
+        let mut value = api();
+        value["components"] = json!({"pathItems":{"pet":value["paths"]["/pets"].clone()}});
+        value["components"]["pathItems"]["pet"][field] = json!("shared");
+        value["paths"]["/pets"] = json!({"$ref":"#/components/pathItems/pet", field:"local"});
+        let options = Options::new().source("api", API, value);
+        let expected = format!("overlapping Path Item field `{field}`");
+        assert!(
+            prepare(&by_id(), &options)
+                .unwrap_err()
+                .to_string()
+                .contains(&expected)
+        );
+        let mut fake = Fake::new();
+        assert!(
+            execute(&by_id(), &options, &mut fake)
+                .unwrap_err()
+                .to_string()
+                .contains(&expected)
+        );
+        assert!(fake.sent().is_empty());
     }
 }
 

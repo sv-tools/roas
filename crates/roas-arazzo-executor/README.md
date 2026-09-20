@@ -130,9 +130,10 @@ unsupported.
 ### OpenAPI operation resolution
 
 Preparation builds one borrowed operation index per needed source and retains
-resolved endpoints for repeated runs. The lazy APIs use the same resolver, without
-retaining that preparation cache. Both resolve inline operations and local/external
-Path Item `$ref` chains while preserving the path where each operation is mounted.
+resolved endpoints for repeated runs. The lazy APIs use the same resolver but
+rebuild its indexes for each request step; use preparation to reuse that work.
+Both resolve inline operations and local/external Path Item `$ref` chains while
+preserving the path where each operation is mounted.
 Source values are never rewritten and schemas are not dereferenced.
 
 | Source version | Executable methods | Server selection |
@@ -150,12 +151,18 @@ authentication, request-body or response-schema generation.
 
 The resolver rejects duplicate operation IDs within a source, reference cycles,
 missing/malformed targets, and overlapping fields in a Path Item plus its `$ref`
-target. Non-overlapping siblings are combined. Rejecting overlaps is an explicit
-policy for the [specification's undefined merge case](https://spec.openapis.org/oas/v3.1.1.html#path-item-object),
+target, including `summary`, `description` and `x-*` annotations. These annotations
+do not override their referenced counterparts. Non-overlapping siblings are combined.
+Rejecting overlaps is an explicit policy for the
+[specification's undefined merge case](https://spec.openapis.org/oas/v3.1.1.html#path-item-object),
 not a claim that the specification mandates that policy. Indexing checks all
 mounted paths in a needed source; even an unrelated broken mount in that source
 prevents preparation. Qualified IDs avoid indexing unrelated sources, whereas
 bare IDs require every candidate source to establish uniqueness.
+Supplied Arazzo and AsyncAPI documents are not OpenAPI candidates and are skipped
+by bare-ID lookup. Explicitly selecting one as an HTTP operation source is still
+an error. Malformed or conflicting OpenAPI documents are never silently skipped;
+unversioned OpenAPI values retain their legacy compatibility behavior.
 
 For example, `paths: { /pets: { $ref: 'parts.yaml#/pet' } }` mounts the referenced
 item at `/pets`. An operationPath ending in `#/paths/~1pets/get` selects that mount.

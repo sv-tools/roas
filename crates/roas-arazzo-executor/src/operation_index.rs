@@ -323,7 +323,16 @@ impl<'a> Resolver<'a> {
                 (name.to_owned(), position, id)
             } else {
                 let mut hits = Vec::new();
-                for name in self.options.sources.keys() {
+                for (name, source) in &self.options.sources {
+                    let document = source.document();
+                    // Bare IDs search only OpenAPI namespaces. Keep explicit
+                    // selections and malformed/conflicting OpenAPI candidates loud.
+                    if document.get("openapi").is_none()
+                        && document.get("swagger").is_none()
+                        && (document.get("arazzo").is_some() || document.get("asyncapi").is_some())
+                    {
+                        continue;
+                    }
                     let index = self.index(name)?;
                     if let Some(position) = index.ids.get(id.as_str()) {
                         hits.push((name.clone(), *position));
@@ -483,13 +492,13 @@ fn endpoint(
     named: &str,
 ) -> Result<Endpoint, OperationError> {
     let base = if let Some(url) = override_url {
-        Url::parse(url).map_err(|error| {
+        let url = Url::parse(url).map_err(|error| {
             invalid_server(
                 named,
                 format!("base URL override `{url}` is not a URL: {error}"),
             )
         })?;
-        absolute_server(url, document, named)?
+        checked_server_url(url, named)?
     } else if document.version == Version::Swagger {
         swagger_server(document, operation, named)?
     } else {
@@ -567,6 +576,10 @@ fn absolute_server(
             .map_err(|error| invalid_server(named, error.to_string()))?,
         Err(error) => return Err(invalid_server(named, error.to_string())),
     };
+    checked_server_url(url, named)
+}
+
+fn checked_server_url(url: Url, named: &str) -> Result<String, OperationError> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(invalid_server(
             named,

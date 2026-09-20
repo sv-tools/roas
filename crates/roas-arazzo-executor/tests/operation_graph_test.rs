@@ -21,6 +21,62 @@ fn workflow() -> Value {
         "workflows":[{"workflowId":"w","steps":[{"stepId":"s","operationId":"$sourceDescriptions.api.check"}]}]})
 }
 
+#[test]
+fn bare_ids_ignore_non_openapi_documents_from_registry_links() {
+    let mut value = workflow();
+    value["workflows"][0]["steps"][0]["operationId"] = json!("check");
+    value["sourceDescriptions"].as_array_mut().unwrap().extend([
+        json!({"name":"aaa", "url":"https://example.test/child.json", "type":"arazzo"}),
+        json!({"name":"zzz", "url":"https://example.test/events.json", "type":"asyncapi"}),
+    ]);
+    let mut child = workflow();
+    child["sourceDescriptions"] = json!([]);
+    let mut registry = SourceRegistry::new();
+    let root = registry
+        .insert("https://example.test/root.json", value.clone())
+        .unwrap();
+    registry
+        .insert("https://example.test/child.json", child)
+        .unwrap();
+    registry
+        .insert(
+            "https://example.test/events.json",
+            json!({"asyncapi":"3.0.0"}),
+        )
+        .unwrap();
+    registry
+        .insert(
+            "https://api.test/openapi.json",
+            json!({"openapi":"3.1.0", "paths":{"/pets":{"get":{"operationId":"check"}}}}),
+        )
+        .unwrap();
+    let loading = registry
+        .load_sources(root, &mut Loader::new(), &SourceLoadOptions::default())
+        .unwrap();
+    assert!(loading.diagnostics.is_empty());
+    assert_eq!(loading.fetch_attempts, 0);
+    let options = Options::new().source_registry(&registry, root).unwrap();
+    assert!(options.source_document("aaa").is_some());
+    assert!(options.source_document("zzz").is_some());
+    let description = serde_json::from_value(value).unwrap();
+    let mut lazy = Fake::new().reply(200, &json!({}));
+    assert!(
+        execute(&description, &options, &mut lazy)
+            .unwrap()
+            .is_success()
+    );
+    let mut checked = Fake::new().reply(200, &json!({}));
+    assert!(
+        prepare(&description, &options)
+            .unwrap()
+            .execute(&mut checked)
+            .unwrap()
+            .is_success()
+    );
+    assert_eq!(lazy.sent(), checked.sent());
+    assert_eq!(checked.sent()[0].url, "https://api.test/pets");
+}
+
 #[derive(Clone, Default)]
 struct Memory {
     values: BTreeMap<String, (String, Value)>,

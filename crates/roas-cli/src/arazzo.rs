@@ -1094,6 +1094,50 @@ mod tests {
     }
 
     #[test]
+    fn bare_ids_ignore_linked_non_openapi_sources_in_cli_options() {
+        let (description, openapi) = runnable();
+        let from = InputSource::File(description.0.clone());
+        let (mut value, _) = read_input(&from, None).unwrap();
+        let mut child = value.clone();
+        child["sourceDescriptions"] = json!([]);
+        child["$self"] = json!("https://identity.test/child.json");
+        let child_file = TempFile::write("mixed-child.json", &child);
+        let events_file = TempFile::write("mixed-events.json", &json!({"asyncapi":"3.0.0"}));
+        value["workflows"][0]["steps"][0]["operationId"] = json!("getPetById");
+        value["sourceDescriptions"].as_array_mut().unwrap().extend([
+            json!({"name":"child", "url":"https://identity.test/child.json", "type":"arazzo"}),
+            json!({"name":"events", "url":base_uri(&InputSource::File(events_file.0.clone()), None).unwrap().as_str(), "type":"asyncapi"}),
+        ]);
+        let parsed = serde_json::from_value(value.clone()).unwrap();
+        let mut args = run_args(&description, &openapi, "https://override.test");
+        args.load_all_sources = true;
+        args.source_document = vec![child_file.0.clone(), events_file.0.clone()];
+        let (options, _, diagnostics) = sources(
+            Options::new()
+                .input("petId", 7)
+                .base_url("petStore", "https://override.test"),
+            &parsed,
+            value,
+            &from,
+            &args,
+        )
+        .unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(options.source_document("child").is_some());
+        assert!(options.source_document("events").is_some());
+        let mut fake =
+            roas_arazzo_executor::testing::Fake::new().reply(200, &json!({"name":"pet"}));
+        assert!(
+            prepare(&parsed, &options)
+                .unwrap()
+                .execute(&mut fake)
+                .unwrap()
+                .is_success()
+        );
+        assert_eq!(fake.sent()[0].url, "https://override.test/pets/7");
+    }
+
+    #[test]
     fn supplied_documents_are_indexed_offline_before_linking_and_follow_identity_policy() {
         let (description, openapi) = runnable();
         let (mut value, _) = read_input(&InputSource::File(description.0.clone()), None).unwrap();
