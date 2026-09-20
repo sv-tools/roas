@@ -545,6 +545,33 @@ fn a_sibling_type_on_a_schema_ref_drives_parameter_coercion() {
 }
 
 #[test]
+fn a_sibling_type_that_restates_the_target_keeps_its_item_schema() {
+    let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
+        "openapi": "3.2.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/x": { "get": { "parameters": [
+            { "name": "value", "in": "query",
+              "schema": { "$ref": "#/components/schemas/Ints", "type": "array", "maxItems": 3 } }
+        ] } } },
+        "components": { "schemas": {
+            "Ints": { "type": "array", "items": { "type": "integer" } }
+        } }
+    }))
+    .expect("the description must parse");
+    let validator = Validator::new(spec);
+    let request = |query: &'static str| RequestView::new("GET", "/x").with_query(query);
+    assert!(errors(&validator, &request("value=1&value=2")).is_empty());
+    assert_eq!(
+        errors(&validator, &request("value=1&value=x")),
+        ["query parameter \"value\": cannot be read: \"x\" is not an integer"],
+    );
+    assert_eq!(
+        errors(&validator, &request("value=1&value=2&value=3&value=4")),
+        ["query parameter \"value\": has 4 items, more than maxItems 3"],
+    );
+}
+
+#[test]
 fn a_referenced_parameter_is_followed_to_what_it_names() {
     let spec: roas::v3_2::spec::Spec = serde_json::from_value(json!({
         "openapi": "3.2.0",

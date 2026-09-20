@@ -34,8 +34,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::common::bool_or::BoolOr;
 use crate::common::collapse::{
-    Bag, CollapseState, LiftableBag, NameContext, SchemaRepeats, lift_ref_or,
-    note_existing_component,
+    Bag, CollapseState, LiftableBag, NameContext, SchemaRepeats, lift_raw_schema_slot, lift_ref_or,
+    note_existing_component, walk_raw_schema_slots,
 };
 use crate::common::reference::{RefOr, ReferenceObject};
 use crate::loader::Loader;
@@ -118,36 +118,34 @@ impl<'a> LiftableBag<Collapser<'a>, SchemaRef> for Schema {
         schema_title(item).map(str::to_owned)
     }
 
-    /// Sibling keywords are kept raw on the reference, so they are
-    /// parsed, walked like any schema, and written back only when the
-    /// walk changed something. A typeless sibling set parses as an
-    /// object schema, whose serialization adds `type: "object"`; that
-    /// key is dropped again when the author did not write it, so the
-    /// document's meaning is untouched. Siblings that only make sense
-    /// under the target's type — `items` beside an array `$ref` — are
-    /// not reached this way, since the target is not resolved here.
+    /// Sibling keywords are kept raw on the reference and walked raw:
+    /// every keyword whose value is a schema — `items`, `properties.*`,
+    /// `allOf[*]` and the rest — is lifted in place, and nothing else
+    /// in the map is rewritten. See
+    /// [`walk_raw_schema_slots`](crate::common::collapse::walk_raw_schema_slots)
+    /// for why the typed model is not used here.
     fn walk_ref(
         reference: &mut SchemaRef,
         ctx: &NameContext,
         c: &mut Collapser<'a>,
     ) -> Result<(), CollapseError> {
-        let Some(mut schema) = reference.siblings_schema()? else {
-            return Ok(());
-        };
-        let before = serde_json::to_value(&schema)?;
-        recurse_schema(&mut schema, ctx, c)?;
-        let after = serde_json::to_value(schema)?;
-        if before == after {
+        if reference.siblings.is_empty() {
             return Ok(());
         }
-        let serde_json::Value::Object(map) = after else {
+        let mut siblings = serde_json::Value::Object(
+            reference
+                .siblings
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        );
+        walk_raw_schema_slots(&mut siblings, ctx, &mut |slot, ctx| {
+            lift_raw_schema_slot::<Schema, SchemaRef, _>(slot, ctx, c)
+        })?;
+        let serde_json::Value::Object(map) = siblings else {
             return Ok(());
         };
-        let had_type = reference.siblings.contains_key("type");
-        reference.siblings = map
-            .into_iter()
-            .filter(|(k, _)| had_type || k != "type")
-            .collect();
+        reference.siblings = map.into_iter().collect();
         Ok(())
     }
 }
@@ -901,6 +899,21 @@ where
         T::walk(&mut item, &ctx, c)?;
         T::bag(c).put_inline(name, item)?;
     }
+    // A component written as a reference keeps its name and is never
+    // interned, but its payload may hold slots of its own — a schema
+    // alias with sibling `properties`, say — and those lift like any
+    // other.
+    let names = T::bag(c).ref_names();
+    for name in names {
+        let Some(mut reference) = T::bag(c).take_ref(&name) else {
+            continue;
+        };
+        let mut parts: Vec<String> = ctx_root.iter().map(|s| (*s).to_owned()).collect();
+        parts.push(name.clone());
+        let ctx = NameContext::new(parts);
+        T::walk_ref(&mut reference, &ctx, c)?;
+        T::bag(c).put_ref(name, reference);
+    }
     Ok(())
 }
 
@@ -1518,6 +1531,127 @@ mod tests {
             v["components"]["schemas"]["Narrow"],
             before["components"]["schemas"]["Narrow"]
         );
+    }
+
+    #[test]
+    fn walking_ref_siblings_leaves_untouched_neighbours_verbatim() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({
+                    "Child": {"title": "Child", "type": "object", "properties": {"id": {"type": "integer"}}}
+                }),
+            )
+            .expect("preload");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {"schemas": {
+                "Pet": {"type": "object", "title": "Pet"},
+                "Narrow": {
+                    "$ref": "#/components/schemas/Pet",
+                    "properties": {
+                        "child": {"$ref": "external.json#/Child"},
+                        "name": {"readOnly": true},
+                        "flag": true
+                    },
+                    "items": {"$ref": "external.json#/Child"},
+                    "readOnly": true
+                }
+            }}
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        // The external references are rewritten — including the one
+        // under `items`, which needs no target type to be found — and
+        // the typeless neighbour did not gain a `type`.
+        assert_eq!(
+            v["components"]["schemas"]["Narrow"],
+            serde_json::json!({
+                "$ref": "#/components/schemas/Pet",
+                "properties": {
+                    "child": {"$ref": "#/components/schemas/Child"},
+                    "name": {"readOnly": true},
+                    "flag": true
+                },
+                "items": {"$ref": "#/components/schemas/Child"},
+                "readOnly": true
+            }),
+        );
+    }
+
+    #[test]
+    fn component_aliases_have_their_siblings_walked() {
+        let mut loader = Loader::new();
+        loader
+            .preload_resource(
+                "external.json",
+                serde_json::json!({
+                    "Child": {"title": "Child", "type": "object"}
+                }),
+            )
+            .expect("preload");
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"$ref": "#/components/schemas/Alias"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {"schemas": {
+                "Pet": {"type": "object", "title": "Pet"},
+                "Alias": {
+                    "$ref": "#/components/schemas/Pet",
+                    "properties": {"child": {"$ref": "external.json#/Child"}}
+                }
+            }}
+        }));
+        spec.collapse(Some(&mut loader)).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["components"]["schemas"]["Alias"]["properties"]["child"],
+            serde_json::json!({"$ref": "#/components/schemas/Child"}),
+        );
+        assert!(v["components"]["schemas"]["Child"].is_object());
+    }
+
+    #[test]
+    fn inline_schemas_inside_ref_siblings_are_lifted_like_any_other() {
+        let mut spec = parse(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "x", "version": "1"},
+            "paths": {},
+            "components": {"schemas": {
+                "Pet": {"type": "object", "title": "Pet"},
+                "Narrow": {
+                    "$ref": "#/components/schemas/Pet",
+                    "properties": {
+                        "owner": {"title": "Owner", "type": "object", "properties": {"id": {"type": "integer"}}}
+                    }
+                }
+            }}
+        }));
+        spec.collapse(None).expect("collapse ok");
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            v["components"]["schemas"]["Narrow"]["properties"]["owner"],
+            serde_json::json!({"$ref": "#/components/schemas/Owner"}),
+        );
+        assert_eq!(v["components"]["schemas"]["Owner"]["title"], "Owner");
     }
 
     #[test]

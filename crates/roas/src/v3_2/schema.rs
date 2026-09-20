@@ -218,6 +218,48 @@ impl SchemaRef {
             .any(|k| self.siblings.contains_key(*k))
     }
 
+    /// The sibling keywords as the *set* of schemas they form, for
+    /// walking every one of them.
+    ///
+    /// One parse is not enough: a composition keyword beside other
+    /// keywords — `{"allOf": […], "properties": {…}}` — parses as the
+    /// composition alone, and the `properties` beside it are filed
+    /// among its extensions, unwalked. So each composition keyword
+    /// (`allOf`, `anyOf`, `oneOf`, `not`) becomes a schema of its own,
+    /// and everything else forms one more, typed as
+    /// [`siblings_schema_for`](Self::siblings_schema_for) would type
+    /// it. Empty when there are no siblings.
+    pub fn siblings_schemas_for(
+        &self,
+        target: Option<&Schema>,
+    ) -> Result<Vec<Schema>, serde_json::Error> {
+        const COMPOSITION: &[&str] = &["allOf", "anyOf", "oneOf", "not"];
+        let mut schemas = Vec::new();
+        let mut rest = serde_json::Map::new();
+        for (key, value) in &self.siblings {
+            if COMPOSITION.contains(&key.as_str()) {
+                let mut one = serde_json::Map::new();
+                one.insert(key.clone(), value.clone());
+                schemas.push(serde_json::from_value(serde_json::Value::Object(one))?);
+            } else {
+                rest.insert(key.clone(), value.clone());
+            }
+        }
+        if rest.is_empty() {
+            return Ok(schemas);
+        }
+        if !rest.contains_key("type")
+            && let Some(Schema::Single(single)) = target
+        {
+            rest.insert(
+                "type".to_owned(),
+                serde_json::Value::String(single.to_string()),
+            );
+        }
+        schemas.push(serde_json::from_value(serde_json::Value::Object(rest))?);
+        Ok(schemas)
+    }
+
     fn siblings_schema_with_type(
         &self,
         borrowed_type: Option<&str>,
@@ -332,16 +374,17 @@ impl ValidateWithContext<Spec> for SchemaRef {
         if self.reference.is_empty() {
             ctx.error(path.clone(), ".$ref: must not be empty");
         }
-        // Borrow the target's type when the siblings name none, so a
-        // sibling `items` on an array target is walked as an array's
-        // items rather than filed as an unknown keyword.
-        let siblings = match ctx.spec.resolve_reference(&self.reference) {
-            Some(target) => self.siblings_schema_for(target),
-            None => self.siblings_schema(),
-        };
-        match siblings {
-            Ok(None) => {}
-            Ok(Some(schema)) => schema.validate_with_context(ctx, path),
+        // Every schema the siblings form is walked: composition
+        // keywords each on their own, the rest typed after the target
+        // so a sibling `items` on an array target is walked as an
+        // array's items rather than filed as an unknown keyword.
+        let target = ctx.spec.resolve_reference(&self.reference);
+        match self.siblings_schemas_for(target) {
+            Ok(schemas) => {
+                for schema in &schemas {
+                    schema.validate_with_context(ctx, path.clone());
+                }
+            }
             Err(err) => ctx.error(
                 path,
                 format_args!(".$ref: sibling keywords do not form a valid schema: {err}"),
@@ -3684,5 +3727,47 @@ mod tests {
         let RefOr::Ref(r) = &slot else { unreachable!() };
         let siblings = r.siblings_schema_for(&composite).unwrap().unwrap();
         assert!(matches!(&siblings, Schema::Single(s) if matches!(**s, SingleSchema::Object(_))));
+    }
+
+    #[test]
+    fn ref_siblings_beside_a_composition_are_still_validated() {
+        let spec = spec_with_schemas(serde_json::json!({
+            "Pet": {"type": "object"},
+            "Mixed": {
+                "$ref": "#/components/schemas/Pet",
+                "allOf": [{}],
+                "properties": {"x": {"$ref": "#/components/schemas/Missing"}},
+            },
+        }));
+        let mut ctx = crate::validation::Context::new(&spec, crate::validation::Options::new());
+        let mixed = &spec.components.as_ref().unwrap().schemas.as_ref().unwrap()["Mixed"];
+        mixed.validate_with_context(&mut ctx, "#.components.schemas.Mixed".into());
+        assert!(
+            ctx.errors
+                .mentions_all(&["Mixed", "properties.x", "Missing"]),
+            "errors: {:?}",
+            ctx.errors
+        );
+    }
+
+    #[test]
+    fn siblings_schemas_for_splits_composition_from_the_rest() {
+        let slot = schema_slot(serde_json::json!({
+            "$ref": "#/components/schemas/Tags",
+            "allOf": [{"type": "array"}],
+            "not": {"type": "string"},
+            "maxItems": 3,
+        }));
+        let RefOr::Ref(r) = &slot else { unreachable!() };
+        let array_target: Schema =
+            serde_json::from_value(serde_json::json!({"type": "array"})).unwrap();
+        let schemas = r.siblings_schemas_for(Some(&array_target)).unwrap();
+        assert_eq!(schemas.len(), 3, "{schemas:?}");
+        assert!(matches!(schemas[0], Schema::AllOf(_)));
+        assert!(matches!(schemas[1], Schema::Not(_)));
+        assert!(matches!(&schemas[2], Schema::Single(s) if matches!(**s, SingleSchema::Array(_))));
+        let bare = schema_slot(serde_json::json!({"$ref": "#/components/schemas/Tags"}));
+        let RefOr::Ref(r) = &bare else { unreachable!() };
+        assert!(r.siblings_schemas_for(None).unwrap().is_empty());
     }
 }

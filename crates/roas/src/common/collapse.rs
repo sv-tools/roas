@@ -200,6 +200,38 @@ impl<T: Serialize, R: ReferenceObject> Bag<T, R> {
         self.entries.insert(name, RefOr::new_item(item));
         Ok(())
     }
+
+    /// The names of the entries that are references — the complement
+    /// of [`Self::inline_names`]. A reference entry has no body to
+    /// intern, but its payload may carry nested slots of its own
+    /// (a schema `$ref` with sibling keywords), which
+    /// [`LiftableBag::walk_ref`] visits.
+    pub fn ref_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|(name, value)| match value {
+                RefOr::Ref(_) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Take a reference entry out of the bag, mirroring
+    /// [`Self::take_inline`]: an inline entry is put back untouched.
+    pub fn take_ref(&mut self, name: &str) -> Option<R> {
+        match self.entries.remove(name)? {
+            RefOr::Ref(r) => Some(*r),
+            item @ RefOr::Item(_) => {
+                self.entries.insert(name.to_owned(), item);
+                None
+            }
+        }
+    }
+
+    /// Put a reference entry back under its original name.
+    pub fn put_ref(&mut self, name: String, reference: R) {
+        self.entries.insert(name, RefOr::Ref(Box::new(reference)));
+    }
 }
 
 /// Picks the first non-colliding name in `bag` starting from `base`.
@@ -647,6 +679,116 @@ where
             Ok(())
         }
     }
+}
+
+/// Keywords whose value is one schema.
+const SCHEMA_KEYWORDS: &[&str] = &[
+    "items",
+    "additionalProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "propertyNames",
+    "contains",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+];
+
+/// Keywords whose value is an array of schemas.
+const SCHEMA_LIST_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf", "prefixItems"];
+
+/// Keywords whose value is a map of schemas.
+const SCHEMA_MAP_KEYWORDS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+    "$defs",
+    "definitions",
+];
+
+/// Lift every schema slot nested in a raw schema object, in place.
+///
+/// This is how the sibling keywords of a schema `$ref` are walked. They
+/// are kept as raw JSON, and going through the typed model to walk them
+/// would change what was not touched: a typeless `{"readOnly": true}`
+/// reads as an object schema and comes back as
+/// `{"readOnly": true, "type": "object"}`, and a sibling `items` beside
+/// an array target would be filed among the extensions. So the raw
+/// object is walked by keyword position — the JSON Schema keywords
+/// whose values are schemas, lists of schemas or maps of schemas — and
+/// each slot found is handed to `lift`, which parses that one slot,
+/// lifts it, and writes back only what changed.
+pub fn walk_raw_schema_slots<F>(
+    schema: &mut serde_json::Value,
+    ctx: &NameContext,
+    lift: &mut F,
+) -> Result<(), CollapseError>
+where
+    F: FnMut(&mut serde_json::Value, NameContext) -> Result<(), CollapseError>,
+{
+    let serde_json::Value::Object(map) = schema else {
+        return Ok(());
+    };
+    for (key, value) in map.iter_mut() {
+        if SCHEMA_KEYWORDS.contains(&key.as_str()) {
+            lift(value, ctx.push(key))?;
+        } else if SCHEMA_LIST_KEYWORDS.contains(&key.as_str()) {
+            if let serde_json::Value::Array(items) = value {
+                for (i, item) in items.iter_mut().enumerate() {
+                    lift(item, ctx.push(&format!("{key}[{i}]")))?;
+                }
+            }
+        } else if SCHEMA_MAP_KEYWORDS.contains(&key.as_str())
+            && let serde_json::Value::Object(entries) = value
+        {
+            for (name, entry) in entries.iter_mut() {
+                lift(entry, ctx.push(&format!("{key}.{name}")))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Lift one raw schema slot found by [`walk_raw_schema_slots`].
+///
+/// A boolean schema has nothing to lift. An object carrying `$ref` is
+/// parsed as the reference it is and handed to [`lift_ref_or`], which
+/// walks its own siblings and, for an external target, fetches and
+/// rewrites it — the payload serializes verbatim, so writing it back
+/// changes nothing the walk did not. An inline schema is walked raw
+/// first, so its nested slots are lifted without the typed detour, and
+/// then weighed for lifting as a whole; only when it lifts is the slot
+/// rewritten, to the `$ref` that replaces it.
+pub fn lift_raw_schema_slot<T, R, C>(
+    slot: &mut serde_json::Value,
+    ctx: NameContext,
+    c: &mut C,
+) -> Result<(), CollapseError>
+where
+    T: LiftableBag<C, R> + Clone,
+    R: ReferenceObject + Clone + Serialize + DeserializeOwned,
+    C: CollapseState,
+{
+    let serde_json::Value::Object(map) = slot else {
+        return Ok(());
+    };
+    if map.contains_key("$ref") {
+        let mut parsed: RefOr<T, R> = serde_json::from_value(slot.clone())?;
+        lift_ref_or(&mut parsed, ctx, c)?;
+        *slot = serde_json::to_value(&parsed)?;
+        return Ok(());
+    }
+    walk_raw_schema_slots(slot, &ctx, &mut |nested, ctx| {
+        lift_raw_schema_slot::<T, R, C>(nested, ctx, c)
+    })?;
+    let mut parsed: RefOr<T, R> = RefOr::new_item(serde_json::from_value(slot.clone())?);
+    lift_ref_or(&mut parsed, ctx, c)?;
+    if let RefOr::Ref(reference) = &parsed {
+        *slot = serde_json::to_value(reference)?;
+    }
+    Ok(())
 }
 
 /// Apply [`schema_lift_decision`] to one not-yet-walked schema,

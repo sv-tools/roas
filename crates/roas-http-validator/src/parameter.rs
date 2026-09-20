@@ -780,9 +780,11 @@ impl<'s> Shape<'s> {
         // `Any` being `{}` still wants a number.
         let mut current = schema;
         let mut hops = 0;
+        let mut narrowed: Option<&str> = None;
         while let RefOr::Ref(reference) = current {
             if let Some(Value::String(named)) = reference.siblings.get("type") {
-                return Shape::named(named);
+                narrowed = Some(named);
+                break;
             }
             hops += 1;
             match crate::schema::next_hop(spec, reference.reference()) {
@@ -790,9 +792,23 @@ impl<'s> Shape<'s> {
                 _ => break,
             }
         }
-        let Ok(resolved) = schema.get_item(spec) else {
-            return Shape::Opaque;
-        };
+        let target = schema.get_item(spec).ok().map(Shape::resolved);
+        match (narrowed, target) {
+            (None, Some(target)) => target,
+            (None, None) => Shape::Opaque,
+            // A sibling `type` that restates the target's own kind adds
+            // nothing, and the target's nested slots — an array's
+            // `items`, an object's `properties` — are what coercion
+            // needs; a sibling `type` that differs is the narrowing
+            // the author asked for.
+            (Some("array"), Some(target @ Shape::Array(_)))
+            | (Some("object"), Some(target @ Shape::Object(_))) => target,
+            (Some(named), _) => Shape::named(named),
+        }
+    }
+
+    /// The shape of a resolved, inline schema.
+    fn resolved(resolved: &'s Schema) -> Self {
         match resolved {
             Schema::Single(single) => match single.as_ref() {
                 SingleSchema::String(_) => Shape::Primitive(Primitive::String),
