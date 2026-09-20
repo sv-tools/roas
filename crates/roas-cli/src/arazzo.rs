@@ -222,13 +222,22 @@ pub(crate) struct ArazzoRunArgs {
     #[arg(long, value_name = "FILE")]
     inputs: Option<PathBuf>,
 
+    /// Disable JSON Schema validation of workflow inputs (no coercion is done either way).
+    #[arg(long)]
+    skip_input_validation: bool,
+
+    /// Supply an offline input-schema resource, e.g. --schema https://example.com/input.json=./input.json.
+    /// Repeat for every external resource; --load never fetches input schemas implicitly.
+    #[arg(long, value_name = "URI=FILE")]
+    schema: Vec<String>,
+
     /// A source description document, e.g.
     /// `--source petStore=./openapi.yaml` (repeatable). Without this,
     /// `--load` fetches what the description points at.
     #[arg(long, value_name = "NAME=PATH")]
     source: Vec<String>,
 
-    /// Preload a source or complete Path Item reference document without a root alias.
+    /// Preload a source, schema or complete Path Item reference document without a root alias.
     #[arg(long, value_name = "FILE")]
     source_document: Vec<PathBuf>,
 
@@ -446,7 +455,20 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
         ));
     }
 
-    let mut options = Options::new().validation_options(checks);
+    let mut options =
+        Options::new()
+            .validation_options(checks)
+            .input_validation(if args.skip_input_validation {
+                roas_arazzo_executor::InputValidation::Disabled
+            } else {
+                roas_arazzo_executor::InputValidation::Draft202012
+            });
+    for schema in &args.schema {
+        let (uri, path) = split_pair(schema, "--schema")?;
+        let (document, _) = read_input(&InputSource::File(PathBuf::from(path)), None)
+            .with_context(|| format!("reading input schema {path}"))?;
+        options = options.schema_document(uri, document)?;
+    }
     match &args.workflow {
         Some(workflow) => options = options.workflow(workflow),
         // Running a workflow means real requests against a real API, so
@@ -527,6 +549,9 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     // Preparation failures carry these diagnostics in the returned error.
     // Once preparation succeeds, emit optional warnings here, exactly once.
     if !args.quiet {
+        if args.skip_input_validation {
+            eprintln!("- workflow input-schema validation is disabled (--skip-input-validation)");
+        }
         for diagnostic in &source_diagnostics {
             eprintln!("- {diagnostic}");
         }
@@ -880,6 +905,8 @@ mod tests {
             workflow: Some("buyPet".to_owned()),
             input: vec!["petId=7".to_owned()],
             inputs: None,
+            skip_input_validation: false,
+            schema: Vec::new(),
             source: vec![format!("petStore={}", openapi.0.display())],
             source_document: Vec::new(),
             load_all_sources: false,
@@ -895,6 +922,82 @@ mod tests {
             format: None,
             output_format: Some(InputFormat::Json),
         }
+    }
+
+    fn input_schema_workflow(schema: Value) -> TempFile {
+        TempFile::write(
+            "input-schema.json",
+            &json!({
+                "arazzo":"1.1.0", "info":{"title":"Input validation","version":"1"},
+                "sourceDescriptions":[{"name":"petStore","url":"https://example.com/api.json","type":"openapi"}],
+                "workflows":[{"workflowId":"buyPet","inputs":schema,"steps":[{
+                    "stepId":"request","operationId":"getPetById",
+                    "parameters":[{"name":"petId","in":"path","value":"$inputs.petId"}]
+                }]}]
+            }),
+        )
+    }
+
+    #[test]
+    fn run_validates_declared_inputs_even_when_no_expression_reads_them() {
+        let (_, openapi) = runnable();
+        for schema in [
+            json!({"required":["unusedButRequired"]}),
+            json!({"properties":{"petId":{"type":"string"}}}),
+        ] {
+            let description = input_schema_workflow(schema);
+            let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
+            args.quiet = true;
+            let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
+            assert!(error.to_string().contains("invalid inputs"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn run_rejects_malformed_or_unavailable_input_schemas_before_execution() {
+        let (_, openapi) = runnable();
+        for schema in [
+            json!({"required":17}),
+            json!({"$ref":"https://127.0.0.1:1/not-preloaded"}),
+        ] {
+            let description = input_schema_workflow(schema);
+            let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
+            args.quiet = true;
+            let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
+            assert!(error.to_string().contains("nothing was run"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn run_can_explicitly_skip_schema_validation() {
+        let (_, openapi) = runnable();
+        let description = input_schema_workflow(json!({"required":["missing"]}));
+        let (base, join) = server(1, 200, "{}");
+        let mut args = run_args(&description, &openapi, &base);
+        args.skip_input_validation = true;
+        run_arazzo(ArazzoCommand::Run(args.into())).unwrap();
+        assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn run_accepts_explicit_offline_schema_resources_and_flag_overrides() {
+        let (_, openapi) = runnable();
+        let description =
+            input_schema_workflow(json!({"$ref":"https://example.com/input.json#params"}));
+        let schema = TempFile::write(
+            "schema.json",
+            &json!({"$defs":{"Params":{"$anchor":"params","required":["petId"],"properties":{"petId":{"type":"integer"}}}}}),
+        );
+        let inputs = TempFile::write("inputs.json", &json!({"petId":"overridden"}));
+        let (base, join) = server(1, 200, "{}");
+        let mut args = run_args(&description, &openapi, &base);
+        args.inputs = Some(inputs.0.clone());
+        args.schema = vec![format!(
+            "https://example.com/input.json={}",
+            schema.0.display()
+        )];
+        run_arazzo(ArazzoCommand::Run(args.into())).unwrap();
+        assert_eq!(join.join().unwrap().len(), 1);
     }
 
     #[test]
@@ -1264,6 +1367,8 @@ mod tests {
             workflow: args.workflow.clone(),
             input: args.input.clone(),
             inputs: args.inputs.clone(),
+            skip_input_validation: args.skip_input_validation,
+            schema: args.schema.clone(),
             source: args.source.clone(),
             source_document: args.source_document.clone(),
             load_all_sources: args.load_all_sources,
@@ -1587,6 +1692,9 @@ mod tests {
             "--max-steps",
             "50",
             "--quiet",
+            "--skip-input-validation",
+            "--schema",
+            "https://example.com/schema.json=./schema.json",
             "wf.yaml",
         ])
         .unwrap();
@@ -1604,6 +1712,8 @@ mod tests {
                 assert_eq!(a.header, ["Authorization: Bearer abc"]);
                 assert_eq!(a.max_steps, Some(50));
                 assert!(a.quiet);
+                assert!(a.skip_input_validation);
+                assert_eq!(a.schema, ["https://example.com/schema.json=./schema.json"]);
             }
             _ => panic!("expected run"),
         }
@@ -1639,6 +1749,8 @@ mod tests {
             workflow: None,
             input: vec!["petId=7".to_owned()],
             inputs: None,
+            skip_input_validation: false,
+            schema: Vec::new(),
             source: Vec::new(),
             source_document: Vec::new(),
             load_all_sources: false,
