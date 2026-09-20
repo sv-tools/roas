@@ -1,0 +1,9 @@
+{
+  "arazzo": "1.1.0",
+  "info": { "title": "Mixed-format graph", "version": "1" },
+  "sourceDescriptions": [
+    { "name": "left", "url": "left.yaml", "type": "arazzo" },
+    { "name": "right", "url": "right.json", "type": "arazzo" }
+  ],
+  "workflows": [{ "workflowId": "root", "steps": [{ "stepId": "s", "operationId": "check" }] }]
+}

@@ -1,0 +1,6 @@
+pets:
+  $ref: next.json#/pets
+  servers:
+    - url: ../path
+dogs:
+  $ref: next.json#/dogs

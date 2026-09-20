@@ -1,6 +1,6 @@
 use roas::loader::{AsyncResourceFetcher, LoaderError, ResourceFetcher};
 use roas_http_fetcher::{AsyncHttpFetcher, HttpFetchError, HttpFetcher};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::{self, JoinHandle};
@@ -16,6 +16,7 @@ struct TestResponse {
     status: u16,
     reason: &'static str,
     content_type: Option<&'static str>,
+    location: Option<&'static str>,
     body: Vec<u8>,
 }
 
@@ -25,6 +26,7 @@ impl TestResponse {
             status: 200,
             reason: "OK",
             content_type: None,
+            location: None,
             body,
         }
     }
@@ -56,6 +58,11 @@ impl TestServer {
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // Accepted sockets inherit non-blocking mode on some platforms.
+                        stream.set_nonblocking(false).expect("blocking request");
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                            .expect("request timeout");
                         let request_line = read_request_line(&stream);
                         let resp = handler(&request_line);
                         write_response(stream, resp);
@@ -89,11 +96,20 @@ impl Drop for TestServer {
     }
 }
 
-fn read_request_line(mut stream: &TcpStream) -> String {
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).expect("read request");
-    let raw = String::from_utf8_lossy(&buf[..n]).to_string();
-    raw.lines().next().unwrap_or("").to_string()
+fn read_request_line(stream: &TcpStream) -> String {
+    let mut reader = BufReader::new(stream);
+    let mut request = String::new();
+    assert_ne!(reader.read_line(&mut request).expect("read request"), 0);
+    // Consume complete headers before closing the connection with a response.
+    let mut header = String::new();
+    loop {
+        header.clear();
+        assert_ne!(reader.read_line(&mut header).expect("read header"), 0);
+        if header == "\r\n" {
+            break;
+        }
+    }
+    request.trim_end().to_owned()
 }
 
 fn write_response(mut stream: TcpStream, resp: TestResponse) {
@@ -105,6 +121,9 @@ fn write_response(mut stream: TcpStream, resp: TestResponse) {
     );
     if let Some(ct) = resp.content_type {
         header.push_str(&format!("Content-Type: {ct}\r\n"));
+    }
+    if let Some(location) = resp.location {
+        header.push_str(&format!("Location: {location}\r\n"));
     }
     header.push_str("\r\n");
     stream.write_all(header.as_bytes()).expect("write header");
@@ -119,12 +138,154 @@ fn http_fetcher_returns_parsed_json_on_success() {
     assert_eq!(value, serde_json::json!({ "hello": "world" }));
 }
 
+fn redirect_response(request: &str) -> TestResponse {
+    if request.starts_with("GET /start ") {
+        TestResponse {
+            status: 302,
+            reason: "Found",
+            content_type: None,
+            location: Some("/nested/document.json"),
+            body: Vec::new(),
+        }
+    } else {
+        assert!(request.starts_with("GET /nested/document.json "));
+        TestResponse::ok_body(br#"{"$self":"../identity.json","$ref":"./other.json"}"#.to_vec())
+    }
+}
+
+#[test]
+fn document_metadata_retains_final_redirect_uri_and_caller_redirect_policy() {
+    let server = TestServer::start(redirect_response);
+    let mut fetcher = HttpFetcher::new();
+    let loaded = fetcher.fetch_document(&server.url("start")).unwrap();
+    assert_eq!(loaded.retrieval_uri, server.url("nested/document.json"));
+    assert_eq!(loaded.document["$self"], "../identity.json");
+    assert_eq!(loaded.document["$ref"], "./other.json");
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let error = HttpFetcher::with_client(client)
+        .fetch_document(&server.url("start"))
+        .unwrap_err();
+    assert!(matches!(error, LoaderError::Fetch { .. }));
+}
+
+#[tokio::test]
+async fn async_document_metadata_retains_final_redirect_uri() {
+    let server = TestServer::start(redirect_response);
+    let loaded = AsyncHttpFetcher::new()
+        .fetch_document(&server.url("start"))
+        .await
+        .unwrap();
+    assert_eq!(loaded.retrieval_uri, server.url("nested/document.json"));
+    assert_eq!(loaded.document["$ref"], "./other.json");
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    assert!(matches!(
+        AsyncHttpFetcher::with_client(client)
+            .fetch_document(&server.url("start"))
+            .await,
+        Err(LoaderError::Fetch { .. })
+    ));
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn redirected_yaml_uses_the_final_extension_when_content_type_is_absent() {
+    let server = TestServer::start(|request| {
+        if request.starts_with("GET /start ") {
+            TestResponse {
+                location: Some("/document.yaml"),
+                ..redirect_response(request)
+            }
+        } else {
+            TestResponse::ok_body(b"name: final\n".to_vec())
+        }
+    });
+    let loaded = HttpFetcher::new()
+        .fetch_document(&server.url("start"))
+        .unwrap();
+    assert_eq!(loaded.document, serde_json::json!({"name": "final"}));
+    assert_eq!(loaded.retrieval_uri, server.url("document.yaml"));
+}
+
+fn yaml_blob_server(content_type: Option<&'static str>) -> TestServer {
+    TestServer::start(move |request| {
+        if request.contains(" /source.yaml ") {
+            TestResponse {
+                status: 302,
+                reason: "Found",
+                content_type: None,
+                location: Some("/blob"),
+                body: Vec::new(),
+            }
+        } else {
+            TestResponse {
+                content_type,
+                ..TestResponse::ok_body(b"openapi: 3.1.0\n".to_vec())
+            }
+        }
+    })
+}
+
+#[test]
+fn requested_yaml_hint_survives_redirects_for_both_sync_apis() {
+    for content_type in [
+        None,
+        Some("application/octet-stream"),
+        Some("application/json"),
+    ] {
+        let server = yaml_blob_server(content_type);
+        let uri = server.url("source.yaml");
+        let mut fetcher = HttpFetcher::new();
+        let plain = fetcher.fetch(&uri);
+        let metadata = fetcher.fetch_document(&uri);
+        if cfg!(feature = "yaml") && content_type != Some("application/json") {
+            assert_eq!(plain.unwrap(), serde_json::json!({"openapi": "3.1.0"}));
+            let loaded = metadata.unwrap();
+            assert_eq!(loaded.retrieval_uri, server.url("blob"));
+            assert_eq!(loaded.document["openapi"], "3.1.0");
+        } else {
+            assert!(matches!(plain, Err(LoaderError::Parse { .. })));
+            assert!(matches!(metadata, Err(LoaderError::Parse { .. })));
+        }
+    }
+}
+
+#[tokio::test]
+async fn requested_yaml_hint_survives_redirects_for_both_async_apis() {
+    for content_type in [
+        None,
+        Some("application/octet-stream"),
+        Some("application/json"),
+    ] {
+        let server = yaml_blob_server(content_type);
+        let uri = server.url("source.yaml");
+        let mut fetcher = AsyncHttpFetcher::new();
+        let plain = fetcher.fetch(&uri).await;
+        let metadata = fetcher.fetch_document(&uri).await;
+        if cfg!(feature = "yaml") && content_type != Some("application/json") {
+            assert_eq!(plain.unwrap(), serde_json::json!({"openapi": "3.1.0"}));
+            let loaded = metadata.unwrap();
+            assert_eq!(loaded.retrieval_uri, server.url("blob"));
+            assert_eq!(loaded.document["openapi"], "3.1.0");
+        } else {
+            assert!(matches!(plain, Err(LoaderError::Parse { .. })));
+            assert!(matches!(metadata, Err(LoaderError::Parse { .. })));
+        }
+    }
+}
+
 #[test]
 fn http_fetcher_surfaces_non_2xx_as_loader_error_fetch_with_status() {
     let server = TestServer::start(|_req| TestResponse {
         status: 404,
         reason: "Not Found",
         content_type: None,
+        location: None,
         body: b"missing".to_vec(),
     });
     let mut fetcher = HttpFetcher::new();
@@ -264,6 +425,7 @@ async fn async_http_fetcher_surfaces_non_2xx_as_loader_error_fetch_with_status()
         status: 404,
         reason: "Not Found",
         content_type: None,
+        location: None,
         body: b"missing".to_vec(),
     });
     let mut fetcher = AsyncHttpFetcher::new();
