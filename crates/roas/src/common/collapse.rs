@@ -32,7 +32,7 @@ use std::rc::Rc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::common::reference::RefOr;
+use crate::common::reference::{Ref, RefOr, ReferenceObject};
 use crate::loader::{Loader, LoaderError};
 
 /// Error returned by `Spec::collapse` for any OAS version.
@@ -68,8 +68,8 @@ pub enum CollapseError {
 /// The bag is owned by the version's `Collapser` struct (one per
 /// bag); a [`LiftableBag`] impl exposes `&mut Bag<Self>` via its
 /// `bag` method so the generic [`lift_ref_or`] can intern into it.
-pub struct Bag<T> {
-    entries: BTreeMap<String, RefOr<T>>,
+pub struct Bag<T, R = Ref> {
+    entries: BTreeMap<String, RefOr<T, R>>,
     /// Digest of a component's canonical JSON → candidate component
     /// names. Storing a 64-bit digest instead of the full canonical
     /// JSON keeps the dedup map small regardless of component size;
@@ -88,7 +88,7 @@ fn digest(canonical: &str) -> u64 {
     hasher.finish()
 }
 
-impl<T> Default for Bag<T> {
+impl<T, R> Default for Bag<T, R> {
     fn default() -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -97,7 +97,7 @@ impl<T> Default for Bag<T> {
     }
 }
 
-impl<T> Bag<T> {
+impl<T, R> Bag<T, R> {
     /// True when this bag has no entries — caller uses this to skip
     /// writing back into `spec.components.<bag>` so a no-op collapse
     /// of an input without that bag doesn't materialise an empty one.
@@ -107,17 +107,17 @@ impl<T> Bag<T> {
 
     /// Consume the bag and yield the underlying `BTreeMap` for
     /// writing back into the spec.
-    pub fn into_map(self) -> BTreeMap<String, RefOr<T>> {
+    pub fn into_map(self) -> BTreeMap<String, RefOr<T, R>> {
         self.entries
     }
 }
 
-impl<T: Serialize> Bag<T> {
+impl<T: Serialize, R: ReferenceObject> Bag<T, R> {
     /// Seed the bag from an existing `components.<bag>` map.
     /// Pre-existing entries keep their names; the dedup map is
     /// pre-populated so newly-lifted equivalents collapse onto
     /// them.
-    pub fn seed(&mut self, initial: BTreeMap<String, RefOr<T>>) -> Result<(), CollapseError> {
+    pub fn seed(&mut self, initial: BTreeMap<String, RefOr<T, R>>) -> Result<(), CollapseError> {
         for (name, value) in initial {
             if let RefOr::Item(item) = &value {
                 let d = digest(&serde_json::to_string(item)?);
@@ -180,12 +180,28 @@ impl<T: Serialize> Bag<T> {
     /// ref is put back so the bag isn't left short an entry.
     pub fn take_inline(&mut self, name: &str) -> Option<T> {
         match self.entries.remove(name)? {
-            RefOr::Item(item) => Some(item),
+            RefOr::Item(item) => {
+                self.reserve(name);
+                Some(item)
+            }
             r @ RefOr::Ref(_) => {
                 self.entries.insert(name.to_owned(), r);
                 None
             }
         }
+    }
+
+    /// Keep `name` occupied while its entry is out of the bag being
+    /// walked. Without this, a nested schema titled like the entry
+    /// would be interned under the entry's own name and then be
+    /// overwritten when the entry is put back — leaving it a
+    /// reference to its parent. The placeholder is an empty `$ref`:
+    /// [`unique_name`] sees the key as taken, [`Self::inline_names`]
+    /// and [`Self::intern`] skip it because it is not an item, and
+    /// putting the entry back replaces it.
+    fn reserve(&mut self, name: &str) {
+        self.entries
+            .insert(name.to_owned(), RefOr::new_ref(String::new()));
     }
 
     /// Put an entry back under its original name and refresh the
@@ -199,6 +215,44 @@ impl<T: Serialize> Bag<T> {
         }
         self.entries.insert(name, RefOr::new_item(item));
         Ok(())
+    }
+
+    #[cfg(any(feature = "v3_1", feature = "v3_2"))]
+    /// The names of the entries that are references — the complement
+    /// of [`Self::inline_names`]. A reference entry has no body to
+    /// intern, but its payload may carry nested slots of its own
+    /// (a schema `$ref` with sibling keywords), which
+    /// [`LiftableBag::walk_ref`] visits.
+    pub fn ref_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|(name, value)| match value {
+                RefOr::Ref(_) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(any(feature = "v3_1", feature = "v3_2"))]
+    /// Take a reference entry out of the bag, mirroring
+    /// [`Self::take_inline`]: an inline entry is put back untouched.
+    pub fn take_ref(&mut self, name: &str) -> Option<R> {
+        match self.entries.remove(name)? {
+            RefOr::Ref(r) => {
+                self.reserve(name);
+                Some(*r)
+            }
+            item @ RefOr::Item(_) => {
+                self.entries.insert(name.to_owned(), item);
+                None
+            }
+        }
+    }
+
+    #[cfg(any(feature = "v3_1", feature = "v3_2"))]
+    /// Put a reference entry back under its original name.
+    pub fn put_ref(&mut self, name: String, reference: R) {
+        self.entries.insert(name, RefOr::Ref(Box::new(reference)));
     }
 }
 
@@ -516,7 +570,13 @@ pub trait CollapseState {
 /// The generic [`lift_ref_or`] uses this trait to perform the
 /// uniform inline / internal-ref / external-ref-with-loader logic
 /// against any concrete component type.
-pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
+///
+/// The second parameter is the reference payload of the slots this type
+/// lives in — [`Ref`] for every component except the 3.1 / 3.2 schema,
+/// whose `$ref` may carry sibling keywords.
+pub trait LiftableBag<C, R: ReferenceObject = Ref>:
+    Sized + Serialize + DeserializeOwned + 'static
+{
     /// The `#/components/<bag>/` prefix. Used to build internal
     /// `$ref` targets.
     const PREFIX: &'static str;
@@ -529,7 +589,7 @@ pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
     const IS_SCHEMA: bool = false;
 
     /// Borrow this type's bag mutably out of the Collapser.
-    fn bag(c: &mut C) -> &mut Bag<Self>;
+    fn bag(c: &mut C) -> &mut Bag<Self, R>;
 
     /// Walk into an instance, lifting every nested component slot.
     /// After this returns, the instance is ready for canonical-JSON
@@ -541,6 +601,14 @@ pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
     /// Default: `None`.
     fn name_hint(_item: &Self) -> Option<String> {
         None
+    }
+
+    /// Walk into a reference payload's own nested slots. A plain
+    /// Reference Object has none; a 3.1+ schema `$ref` may carry
+    /// sibling keywords with inline or external schemas inside them.
+    /// Default: no-op.
+    fn walk_ref(_reference: &mut R, _ctx: &NameContext, _c: &mut C) -> Result<(), CollapseError> {
+        Ok(())
     }
 }
 
@@ -558,8 +626,8 @@ pub trait LiftableBag<C>: Sized + Serialize + DeserializeOwned + 'static {
 /// * `RefOr::Item`: recurse, then — for schemas — consult
 ///   [`schema_lift_decision`]: lift (intern + rewrite the slot to a
 ///   local ref) or leave the (now child-lifted) schema inline.
-pub fn lift_ref_or<T, C>(
-    slot: &mut RefOr<T>,
+pub fn lift_ref_or<T, R, C>(
+    slot: &mut RefOr<T, R>,
     ctx: NameContext,
     c: &mut C,
 ) -> Result<(), CollapseError>
@@ -568,15 +636,20 @@ where
     // clones cached values out of its typed cache); pinned here at
     // the call site rather than on the trait so the trait surface
     // stays minimal.
-    T: LiftableBag<C> + Clone,
+    T: LiftableBag<C, R> + Clone,
+    R: ReferenceObject,
     C: CollapseState,
 {
     match slot {
         RefOr::Ref(r) => {
-            if is_internal_ref(&r.reference) {
+            // The payload's own nested slots first — for a schema `$ref`
+            // with siblings, an external `$ref` inside `properties` is
+            // lifted whether or not the target is.
+            T::walk_ref(r, &ctx, c)?;
+            if is_internal_ref(r.reference()) {
                 return Ok(());
             }
-            let reference = r.reference.clone();
+            let reference = r.reference().to_owned();
             let Some(loader) = c.loader_mut() else {
                 return Ok(());
             };
@@ -595,7 +668,11 @@ where
             }
             T::walk(&mut fetched, &derived_ctx, c)?;
             let name = intern(c, fetched, &derived_ctx)?;
-            *slot = RefOr::new_ref(format!("{}{name}", T::PREFIX));
+            // Rewrite the target in place rather than replacing the
+            // slot: a schema `$ref` may carry sibling keywords, and
+            // they belong to this use site, not to the fetched
+            // component.
+            r.set_reference(format!("{}{name}", T::PREFIX));
             Ok(())
         }
         RefOr::Item(_) => {
@@ -626,6 +703,134 @@ where
     }
 }
 
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
+/// Keywords whose value is one schema.
+const SCHEMA_KEYWORDS: &[&str] = &[
+    "items",
+    "additionalProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "propertyNames",
+    "contains",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+];
+
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
+/// Keywords whose value is an array of schemas.
+const SCHEMA_LIST_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf", "prefixItems"];
+
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
+/// Keywords whose value is a map of schemas.
+const SCHEMA_MAP_KEYWORDS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+    "$defs",
+    "definitions",
+];
+
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
+/// Lift every schema slot nested in a raw schema object, in place.
+///
+/// This is how the sibling keywords of a schema `$ref` are walked. They
+/// are kept as raw JSON, and going through the typed model to walk them
+/// would change what was not touched: a typeless `{"readOnly": true}`
+/// reads as an object schema and comes back as
+/// `{"readOnly": true, "type": "object"}`, and a sibling `items` beside
+/// an array target would be filed among the extensions. So the raw
+/// object is walked by keyword position — the JSON Schema keywords
+/// whose values are schemas, lists of schemas or maps of schemas — and
+/// each slot found is handed to `lift`, which parses that one slot,
+/// lifts it, and writes back only what changed.
+pub fn walk_raw_schema_slots<F>(
+    schema: &mut serde_json::Value,
+    ctx: &NameContext,
+    lift: &mut F,
+) -> Result<(), CollapseError>
+where
+    F: FnMut(&mut serde_json::Value, NameContext) -> Result<(), CollapseError>,
+{
+    let serde_json::Value::Object(map) = schema else {
+        return Ok(());
+    };
+    for (key, value) in map.iter_mut() {
+        if SCHEMA_KEYWORDS.contains(&key.as_str()) {
+            lift(value, ctx.push(key))?;
+        } else if SCHEMA_LIST_KEYWORDS.contains(&key.as_str()) {
+            if let serde_json::Value::Array(items) = value {
+                for (i, item) in items.iter_mut().enumerate() {
+                    lift(item, ctx.push(&format!("{key}[{i}]")))?;
+                }
+            }
+        } else if SCHEMA_MAP_KEYWORDS.contains(&key.as_str())
+            && let serde_json::Value::Object(entries) = value
+        {
+            for (name, entry) in entries.iter_mut() {
+                lift(entry, ctx.push(&format!("{key}.{name}")))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "v3_1", feature = "v3_2"))]
+/// Lift one raw schema slot found by [`walk_raw_schema_slots`].
+///
+/// A boolean schema has nothing to lift. An object carrying `$ref` is
+/// parsed as the reference it is and handed to [`lift_ref_or`], which
+/// walks its own siblings and, for an external target, fetches and
+/// rewrites it — the payload serializes verbatim, so writing it back
+/// changes nothing the walk did not. An inline schema is walked raw
+/// first, so its nested slots are lifted without the typed detour, and
+/// then weighed for lifting as a whole; only when it lifts is the slot
+/// rewritten, to the `$ref` that replaces it.
+///
+/// An inline schema is lifted as a whole only when the typed model
+/// reads it back exactly as written. A schema that names no type —
+/// anywhere inside it: at the top, in a nested property, in a
+/// composition branch — is read as an object schema and would be
+/// interned with `type: "object"` added, contradicting a target that
+/// declares the same property a string. So the raw slot is compared
+/// with its typed round trip, and when they differ the slot stays put.
+/// Its nested slots were already walked, so nothing under it is lost.
+pub fn lift_raw_schema_slot<T, R, C>(
+    slot: &mut serde_json::Value,
+    ctx: NameContext,
+    c: &mut C,
+) -> Result<(), CollapseError>
+where
+    T: LiftableBag<C, R> + Clone,
+    R: ReferenceObject + Clone + Serialize + DeserializeOwned,
+    C: CollapseState,
+{
+    let serde_json::Value::Object(map) = &*slot else {
+        return Ok(());
+    };
+    if map.contains_key("$ref") {
+        let mut parsed: RefOr<T, R> = serde_json::from_value(slot.clone())?;
+        lift_ref_or(&mut parsed, ctx, c)?;
+        *slot = serde_json::to_value(&parsed)?;
+        return Ok(());
+    }
+    walk_raw_schema_slots(slot, &ctx, &mut |nested, ctx| {
+        lift_raw_schema_slot::<T, R, C>(nested, ctx, c)
+    })?;
+    let item: T = serde_json::from_value(slot.clone())?;
+    if serde_json::to_value(&item)? != *slot {
+        return Ok(());
+    }
+    let mut parsed: RefOr<T, R> = RefOr::new_item(item);
+    lift_ref_or(&mut parsed, ctx, c)?;
+    if let RefOr::Ref(reference) = &parsed {
+        *slot = serde_json::to_value(reference)?;
+    }
+    Ok(())
+}
+
 /// Apply [`schema_lift_decision`] to one not-yet-walked schema,
 /// weighing the [`LiftDecision::IfRepeated`] case against the census.
 fn should_lift_schema<T: Serialize, C: CollapseState>(
@@ -648,9 +853,10 @@ fn should_lift_schema<T: Serialize, C: CollapseState>(
 /// because the author already named this one. Counting the entry is
 /// what lets the repeat rule see that. A no-op for bags that don't
 /// hold schemas.
-pub fn note_existing_component<T, C>(item: &T, c: &mut C) -> Result<(), CollapseError>
+pub fn note_existing_component<T, R, C>(item: &T, c: &mut C) -> Result<(), CollapseError>
 where
-    T: LiftableBag<C>,
+    T: LiftableBag<C, R>,
+    R: ReferenceObject,
     C: CollapseState,
 {
     if T::IS_SCHEMA {
@@ -676,9 +882,10 @@ fn shape_digest(value: &serde_json::Value) -> u64 {
     digest(&value.to_string())
 }
 
-fn intern<T, C>(c: &mut C, item: T, ctx: &NameContext) -> Result<String, CollapseError>
+fn intern<T, R, C>(c: &mut C, item: T, ctx: &NameContext) -> Result<String, CollapseError>
 where
-    T: LiftableBag<C>,
+    T: LiftableBag<C, R>,
+    R: ReferenceObject,
 {
     let base = match T::name_hint(&item) {
         Some(h) if !h.is_empty() => sanitize_component_name(h),

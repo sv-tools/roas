@@ -8,7 +8,7 @@ use crate::common::reference::RefOr;
 use crate::v3_2::example::Example;
 use crate::v3_2::header::Header;
 use crate::v3_2::parameter::InQueryStyle;
-use crate::v3_2::schema::Schema;
+use crate::v3_2::schema::{Schema, SchemaRef};
 use crate::v3_2::spec::Spec;
 use crate::validation::{Context, PushError, ValidateWithContext};
 
@@ -48,7 +48,7 @@ pub struct MediaType {
 
     /// The schema defining the content of the request, response, or parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<RefOr<Schema>>,
+    pub schema: Option<RefOr<Schema, SchemaRef>>,
 
     /// The schema defining each item within a sequential media type
     /// (added in OAS 3.2). Used for line-delimited JSON, JSON Lines,
@@ -56,7 +56,7 @@ pub struct MediaType {
     /// where `schema` would describe the whole stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "itemSchema")]
-    pub item_schema: Option<RefOr<Schema>>,
+    pub item_schema: Option<RefOr<Schema, SchemaRef>>,
 
     /// Example of the media type.
     /// The example SHOULD match the specified schema and encoding properties if present.

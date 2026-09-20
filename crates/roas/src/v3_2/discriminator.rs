@@ -2,7 +2,7 @@
 
 use crate::common::helpers::validate_required_string;
 use crate::common::reference::RefOr;
-use crate::v3_2::schema::Schema;
+use crate::v3_2::schema::{Schema, SchemaRef};
 use crate::v3_2::spec::Spec;
 use crate::validation::{Context, ValidateWithContext};
 use serde::{Deserialize, Serialize};
@@ -52,12 +52,12 @@ impl ValidateWithContext<Spec> for Discriminator {
         };
         if let Some(mapping) = &self.mapping {
             for (k, v) in mapping {
-                RefOr::<Schema>::new_ref(resolve(v))
+                RefOr::<Schema, SchemaRef>::new_ref(resolve(v))
                     .validate_with_context(ctx, format!("{path}.mapping[{k}]"));
             }
         }
         if let Some(v) = &self.default_mapping {
-            RefOr::<Schema>::new_ref(resolve(v))
+            RefOr::<Schema, SchemaRef>::new_ref(resolve(v))
                 .validate_with_context(ctx, format!("{path}.defaultMapping"));
         }
     }

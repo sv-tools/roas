@@ -1,0 +1,87 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Schema references with sibling keywords",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/pets/{petId}": {
+      "get": {
+        "operationId": "getPet",
+        "parameters": [
+          {
+            "name": "petId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PetId",
+              "description": "The pet to fetch"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A pet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pet",
+                  "readOnly": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PetId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "Named": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Tag": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Named",
+            "deprecated": false
+          }
+        ]
+      },
+      "Pet": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/PetId",
+            "maxLength": 32,
+            "x-primary": true
+          },
+          "parent": {
+            "$ref": "#/components/schemas/Pet",
+            "summary": "The parent pet",
+            "description": "Absent for a root pet"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag",
+              "title": "A tag"
+            }
+          }
+        }
+      }
+    }
+  }
+}

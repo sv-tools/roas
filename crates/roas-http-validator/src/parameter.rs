@@ -22,10 +22,10 @@ use std::collections::BTreeMap;
 
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::SchemaType;
-use roas::common::reference::RefOr;
+use roas::common::reference::{RefOr, ReferenceObject};
 use roas::v3_2::media_type::{Encoding, MediaType};
 use roas::v3_2::parameter::{InCookieStyle, InHeaderStyle, InPathStyle, InQueryStyle, Parameter};
-use roas::v3_2::schema::{Schema, SingleSchema};
+use roas::v3_2::schema::{Schema, SchemaRef, SingleSchema};
 use roas::v3_2::spec::Spec;
 use serde_json::Value;
 
@@ -56,15 +56,15 @@ struct Described<'p> {
     required: bool,
     style: Style,
     explode: bool,
-    schema: Option<&'p RefOr<Schema>>,
+    schema: Option<&'p RefOr<Schema, SchemaRef>>,
     content: Option<&'p BTreeMap<String, RefOr<MediaType>>>,
 }
 
 /// What kind of value the schema says this parameter holds.
 enum Shape<'s> {
     Primitive(Primitive),
-    Array(Option<&'s RefOr<Schema>>),
-    Object(Option<&'s BTreeMap<String, RefOr<Schema>>>),
+    Array(Option<&'s RefOr<Schema, SchemaRef>>),
+    Object(Option<&'s BTreeMap<String, RefOr<Schema, SchemaRef>>>),
     /// A schema this module does not read structurally — a composition,
     /// a `$ref` that does not resolve, or no schema at all.
     Opaque,
@@ -112,7 +112,7 @@ impl<'r> Extracted<'r> {
 /// becoming a two-item array.
 pub(crate) fn read_form_body(
     text: &str,
-    properties: Option<&BTreeMap<String, RefOr<Schema>>>,
+    properties: Option<&BTreeMap<String, RefOr<Schema, SchemaRef>>>,
     encoding: Option<&BTreeMap<String, Encoding>>,
     spec: &Spec,
 ) -> Result<Value, String> {
@@ -272,7 +272,7 @@ fn validate_as_content(
 /// Turn schema failures into validation errors.
 fn report_failures(
     value: &Value,
-    declared: &RefOr<Schema>,
+    declared: &RefOr<Schema, SchemaRef>,
     spec: &Spec,
     push: &mut impl FnMut(String, ErrorKind),
 ) {
@@ -301,7 +301,7 @@ impl<'p> Described<'p> {
     fn form_field(
         name: &'p str,
         encoding: Option<&Encoding>,
-        schema: Option<&'p RefOr<Schema>>,
+        schema: Option<&'p RefOr<Schema, SchemaRef>>,
     ) -> Self {
         let style = match encoding.and_then(|encoding| encoding.style.as_ref()) {
             Some(InQueryStyle::SpaceDelimited) => Style::SpaceDelimited,
@@ -700,7 +700,7 @@ impl<'p> Described<'p> {
 /// the property schema that names it.
 fn object_from(
     pairs: Vec<(String, String)>,
-    properties: Option<&BTreeMap<String, RefOr<Schema>>>,
+    properties: Option<&BTreeMap<String, RefOr<Schema, SchemaRef>>>,
     spec: &Spec,
 ) -> Result<Value, String> {
     let mut object = serde_json::Map::new();
@@ -714,7 +714,7 @@ fn object_from(
 /// Coerce one string through whatever schema describes it.
 pub(crate) fn coerce(
     raw: &str,
-    schema: Option<&RefOr<Schema>>,
+    schema: Option<&RefOr<Schema, SchemaRef>>,
     spec: &Spec,
 ) -> Result<Value, String> {
     match schema.map(|schema| Shape::of(schema, spec)) {
@@ -756,12 +756,59 @@ fn coerce_primitive(raw: &str, primitive: Primitive) -> Result<Value, String> {
 }
 
 impl<'s> Shape<'s> {
+    /// The shape a sibling `type` names. Nested slots are not known
+    /// here, so an array or object is shaped without them.
+    fn named(schema_type: &str) -> Self {
+        match schema_type {
+            "string" => Shape::Primitive(Primitive::String),
+            "integer" => Shape::Primitive(Primitive::Integer),
+            "number" => Shape::Primitive(Primitive::Number),
+            "boolean" => Shape::Primitive(Primitive::Boolean),
+            "null" => Shape::Primitive(Primitive::Null),
+            "array" => Shape::Array(None),
+            "object" => Shape::Object(None),
+            _ => Shape::Opaque,
+        }
+    }
+
     /// What kind of value a schema describes, as far as rebuilding a
     /// flattened parameter needs to know.
-    fn of(schema: &'s RefOr<Schema>, spec: &'s Spec) -> Self {
-        let Ok(resolved) = schema.get_item(spec) else {
-            return Shape::Opaque;
-        };
+    fn of(schema: &'s RefOr<Schema, SchemaRef>, spec: &'s Spec) -> Self {
+        // A `$ref` may narrow its target with a sibling `type` — at this
+        // hop or at any hop of a chain — and that is the type the text
+        // must be coerced to: `{"$ref": Any, "type": "integer"}` with
+        // `Any` being `{}` still wants a number.
+        let mut current = schema;
+        let mut hops = 0;
+        let mut narrowed: Option<&str> = None;
+        while let RefOr::Ref(reference) = current {
+            if let Some(Value::String(named)) = reference.siblings.get("type") {
+                narrowed = Some(named);
+                break;
+            }
+            hops += 1;
+            match crate::schema::next_hop(spec, reference.reference()) {
+                Some(next) if hops < 64 => current = next,
+                _ => break,
+            }
+        }
+        let target = schema.get_item(spec).ok().map(Shape::resolved);
+        match (narrowed, target) {
+            (None, Some(target)) => target,
+            (None, None) => Shape::Opaque,
+            // A sibling `type` that restates the target's own kind adds
+            // nothing, and the target's nested slots — an array's
+            // `items`, an object's `properties` — are what coercion
+            // needs; a sibling `type` that differs is the narrowing
+            // the author asked for.
+            (Some("array"), Some(target @ Shape::Array(_)))
+            | (Some("object"), Some(target @ Shape::Object(_))) => target,
+            (Some(named), _) => Shape::named(named),
+        }
+    }
+
+    /// The shape of a resolved, inline schema.
+    fn resolved(resolved: &'s Schema) -> Self {
         match resolved {
             Schema::Single(single) => match single.as_ref() {
                 SingleSchema::String(_) => Shape::Primitive(Primitive::String),
