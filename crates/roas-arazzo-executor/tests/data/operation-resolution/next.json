@@ -1,0 +1,4 @@
+{
+  "pets": { "get": { "operationId": "check", "servers": [{ "url": "./operation" }] } },
+  "dogs": { "get": { "operationId": "dogs" } }
+}

@@ -69,6 +69,9 @@ let loading = registry.load_sources(root, loader, &SourceLoadOptions::default())
 for diagnostic in &loading.diagnostics {
     eprintln!("{}: {diagnostic}", registry.document(diagnostic.owner)?.identity());
 }
+for diagnostic in &loading.reference_diagnostics {
+    eprintln!("{diagnostic}");
+}
 let options = Options::new().source_registry(&registry, root)?;
 let description = registry.document(root)?.arazzo().expect("an Arazzo root");
 let plan = prepare(description, &options)?;
@@ -97,6 +100,9 @@ metadata of registry-backed sources, and returns `None` for legacy sources.
 Registry-backed options (including cloned options and source aliases) share the
 loader's immutable raw value. They do not keep another full JSON copy. Arazzo also
 has its parsed typed model; API documents remain raw values with checked versions.
+The adapter retains a registry snapshot, not a live view. After changing registry
+links or overrides, construct fresh options; existing entries win on repeated
+adapter calls too.
 
 Cycles are retained as back edges, not recursively expanded documents. Shared
 dependencies reuse handles and loaded resources. The default limits are 256
@@ -117,9 +123,97 @@ Recognized versions are Arazzo 1.0/1.1, OpenAPI 2.0/3.0/3.1/3.2, and AsyncAPI
 2.6/3.0/3.1. Arazzo 1.0 retains its wire version and is upconverted for execution.
 API documents retain complete raw values and model-checked versions; loading is
 **not** API structural or schema validation. AsyncAPI loading does not enable
-broker execution. Cross-document workflow execution, external OpenAPI Path Item
-resolution, and relative API-server computation are not added by this feature.
-Document bases are distinct from API endpoint overrides.
+broker execution. External OpenAPI Path Item resolution and API-server computation
+have separate execution rules below; cross-document workflow execution remains
+unsupported.
+
+### OpenAPI operation resolution
+
+Preparation builds one borrowed operation index per needed source and retains
+resolved endpoints for repeated runs. The lazy APIs use the same resolver but
+rebuild its indexes for each request step; use preparation to reuse that work.
+Both resolve inline operations and local/external Path Item `$ref` chains while
+preserving the path where each operation is mounted.
+Source values are never rewritten and schemas are not dereferenced.
+
+| Source version | Executable methods | Server selection |
+| --- | --- | --- |
+| Swagger 2.0 | GET, PUT, POST, DELETE, OPTIONS, HEAD, PATCH | Operation/root `schemes`, root `host` and `basePath`; omitted host/scheme use the retrieval URL when available |
+| OpenAPI 3.0.x / 3.1.x | Swagger methods plus TRACE | First server at operation, Path Item, then root level; `/` when none is available |
+| OpenAPI 3.2.x | 3.1 methods plus QUERY and `additionalOperations` | Same server selection; `$self` additionally establishes document identity/reference base |
+
+An `additionalOperations` key is a case-sensitive HTTP method token, preserved in
+the request; standard methods must use their fixed fields. Unversioned
+`Options::source` values retain the legacy profile, including requiring a server
+or `host`; registry source descriptions require a supported version discriminator.
+This is operation resolution, not full OpenAPI validation or automatic parameter,
+authentication, request-body or response-schema generation.
+
+The resolver rejects duplicate operation IDs within a source, reference cycles,
+missing/malformed targets, and overlapping fields in a Path Item plus its `$ref`
+target, including `summary`, `description` and `x-*` annotations. These annotations
+do not override their referenced counterparts. Non-overlapping siblings are combined.
+Rejecting overlaps is an explicit policy for the
+[specification's undefined merge case](https://spec.openapis.org/oas/v3.1.1.html#path-item-object),
+not a claim that the specification mandates that policy. Indexing checks all
+mounted paths in a needed source; even an unrelated broken mount in that source
+prevents preparation. Qualified IDs avoid indexing unrelated sources, whereas
+bare IDs require every candidate source to establish uniqueness.
+Supplied Arazzo and AsyncAPI documents are not OpenAPI candidates and are skipped
+by bare-ID lookup. Explicitly selecting one as an HTTP operation source is still
+an error. Malformed or conflicting OpenAPI documents are never silently skipped;
+unversioned OpenAPI values retain their legacy compatibility behavior.
+
+For example, `paths: { /pets: { $ref: 'parts.yaml#/pet' } }` mounts the referenced
+item at `/pets`. An operationPath ending in `#/paths/~1pets/get` selects that mount.
+URI fragments are percent-decoded as UTF-8, then checked as JSON Pointers (only
+`~0` and `~1` escapes). Invalid escapes produce errors, not partial lookups.
+Use Arazzo's `{$sourceDescriptions.api.url}#/paths/~1pets/get` form; literal document
+URIs are a compatibility extension and match normalized identities/retrieval URLs.
+A pointer into a reusable item in the same source document also works if its
+operation has exactly one mount. Multiple mounts require a specific `/paths`
+pointer; unmounted components have no request path to infer.
+
+With `source-graph`, `load_sources` and `load_sources_async` follow reachable Path
+Item references using only the caller's registered fetchers and the existing shared
+document/depth budgets. They never follow schema, parameter, response or callback
+references. Preload standalone reference resources, without inventing an OpenAPI
+version or source alias, with:
+
+```rust,no_run
+# use roas_arazzo_executor::SourceRegistry;
+# use serde_json::json;
+# fn example(registry: &mut SourceRegistry) -> Result<(), Box<dyn std::error::Error>> {
+registry.insert_reference_document("https://example.test/parts.yaml", json!({
+    "pet": { "get": { "operationId": "findPet" } }
+}))?;
+# Ok(()) }
+```
+
+Loading failures have document/pointer/reference locations in
+`SourceLoadReport::reference_diagnostics`. Path Item cycles terminate loading and
+are rejected by operation indexing. Prepare only after loading; preparation and
+execution never fetch missing reference documents. Budgets bound loading, not
+permission to execute supplied documents. Without `source-graph`, local references
+and references to other explicitly supplied `Options::source` resources still work.
+
+Relative Server Object URLs resolve against the **retrieval URI of the document
+containing that Server Object**, including its final redirect location, never its
+`$self`. Reference identity and server origin are distinct under the
+[OpenAPI API-URL rules](https://spec.openapis.org/oas/v3.2.0.html#relative-references-in-api-urls).
+For example, a server `./v1` in a referenced item retrieved from
+`https://cdn.test/parts/item.yaml` becomes `https://cdn.test/parts/v1`, even if the
+entry API has a different identity. The mounted path is appended to that base.
+OpenAPI 3.2 retrieval aliases remain accepted as a compatibility extension;
+`retrieval_aliases` controls the stricter Arazzo identity rule only.
+
+Server variables use string defaults. An explicit absolute `base_url` override
+wins over all document servers. Without one, a relative/default server needs a
+usable HTTP(S) retrieval origin; file-based documents can supply an absolute server
+or an override. Only HTTP(S) endpoints without server query strings/fragments are
+supported. The existing empty-array policy is retained: an empty operation/Path
+Item `servers` array falls through to its parent, and the first nonempty array wins.
+This is a compatibility policy, not strict empty-array override semantics.
 
 ## Testing a workflow
 
@@ -292,8 +386,9 @@ The CLI now opts in by default, so previously skipped document defects can cause
 earlier, nonzero exit instead of a recovered success.
 
 Preparation is not input-schema validation: `plan.workflow().inputs` exposes the
-opaque schema for caller integration. It does not add XPath, AsyncAPI, external
-workflow execution, source identity loading or referenced OpenAPI resolution.
+opaque schema for caller integration. It does not add XPath, AsyncAPI or external
+workflow execution. Source identity loading is opt-in and occurs before preparation;
+referenced OpenAPI resolution uses the already-supplied document graph.
 Checked JSONPath execution supports `rfc9535`, not the alternate Goessner draft.
 Entry-workflow dependencies are supported; calls/recovery transfers to workflows
 with their own `dependsOn` are rejected by the checked path because the engine
@@ -358,6 +453,11 @@ Callers that previously expected runtime criterion errors in `Err` must now insp
 the report's outcome and criterion diagnostics; successful recovery can produce a
 successful run containing earlier failed attempts. The report fields, partial-report
 APIs, and non-exhaustive enum variants added for recovery are additive API changes.
+`OperationError` is now re-exported at the crate root and is `#[non_exhaustive]`,
+with structured document, reference, duplicate-ID and server errors. The new
+resolver rejects ambiguous or malformed operation documents that older versions
+could accept by taking the first match. Path Item overlap handling, strict pointer
+decoding and HTTP(S)-only server validation can therefore reject existing documents.
 
 ## What it does not run
 

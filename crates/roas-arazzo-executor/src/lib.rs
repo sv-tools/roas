@@ -52,6 +52,10 @@ mod criterion;
 mod expression;
 mod http;
 mod operation;
+mod operation_document;
+#[cfg(feature = "source-graph")]
+mod operation_graph;
+mod operation_index;
 mod prepare;
 mod report;
 mod run;
@@ -79,6 +83,9 @@ pub use expression::ExpressionError;
 pub use http::{
     AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, SendFuture, SleepFuture,
 };
+pub use operation::OperationError;
+#[cfg(feature = "source-graph")]
+pub use operation_graph::ReferenceDiagnostic;
 pub use prepare::{
     CONDITION_PROFILE, PreparationDiagnostic, PreparationError, PreparationIssue, PreparedWorkflow,
     prepare, required_sources,

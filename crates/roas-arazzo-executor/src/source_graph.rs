@@ -13,12 +13,17 @@ use url::Url;
 pub struct SourceLoadOptions {
     /// Existing registry documents plus distinct fetch attempts allowed per load.
     /// Failed attempts and different retrieval aliases consume a slot too.
+    /// Includes standalone OpenAPI Path Item reference resources.
     pub max_documents: usize,
     /// Root depth is zero; a direct source has depth one. Known cycle/diamond
     /// targets do not expand again or consume an additional depth allowance.
+    /// Crossing into an unknown external Path Item resource adds one level;
+    /// references within the same document do not.
     pub max_depth: usize,
     /// Only these root aliases are traversed, or all root aliases when absent.
     /// Sources of linked Arazzo documents are traversed in full.
+    /// Selected API sources also load their reachable Path Item references,
+    /// but do not load schema, parameter, response or callback references.
     pub root_sources: Option<BTreeSet<String>>,
     /// Compatibility extension: allow an Arazzo retrieval URI instead of `$self`.
     /// False by default, following identity-based referencing.
@@ -56,7 +61,10 @@ pub struct SourceCycle {
 pub struct SourceLoadReport {
     /// Located unresolved/invalid/budget-limited source edges.
     pub diagnostics: Vec<SourceDiagnostic>,
-    /// Back edges, distinct from shared diamond dependencies.
+    /// Located failures in reachable OpenAPI Path Item references.
+    pub reference_diagnostics: Vec<crate::ReferenceDiagnostic>,
+    /// Arazzo source back edges, distinct from shared diamond dependencies.
+    /// Path Item reference cycles are rejected when indexing operations instead.
     pub cycles: Vec<SourceCycle>,
     /// Distinct calls to the loader; its own cache may satisfy a call without IO.
     pub fetch_attempts: usize,
@@ -66,6 +74,8 @@ impl SourceRegistry {
     /// Load a selected source graph through an explicitly configured loader.
     /// Insert all supplied documents first. Failures retain other readable
     /// documents and are reported per edge after identity discovery completes.
+    /// Traverses source descriptions and reachable OpenAPI Path Item references,
+    /// never schemas. Only the loader's registered fetchers can perform IO.
     /// # Errors
     /// Invalid root/selection or an already-exceeded initial document budget.
     /// Source failures otherwise belong to the returned report.
@@ -76,11 +86,38 @@ impl SourceRegistry {
         options: &SourceLoadOptions,
     ) -> Result<SourceLoadReport, SourceError> {
         let mut traversal = Traversal::new(self, root, options)?;
-        while let Some(uri) = traversal.next(self) {
-            let document = loader.load_document_shared(uri.as_str());
-            traversal.accept(self, uri, document);
+        let mut references = crate::operation_graph::References::default();
+        loop {
+            let previous = traversal.attempted.len();
+            while let Some(uri) = traversal.next(self) {
+                let document = loader.load_document_shared(uri.as_str());
+                traversal.accept(self, uri, document);
+            }
+            references.seed(self, &traversal.seen);
+            while let Some(uri) = references.next(
+                self,
+                options,
+                traversal.initial_documents,
+                &mut traversal.attempted,
+                &traversal.failed,
+            ) {
+                let document = loader.load_document_shared(uri.as_str());
+                crate::operation_graph::References::accept(
+                    self,
+                    uri,
+                    document,
+                    &mut traversal.failed,
+                );
+            }
+            if previous == traversal.attempted.len() {
+                break;
+            }
+            traversal.generation += 1;
+            references.retry();
         }
-        Ok(traversal.finish(self))
+        let mut report = traversal.finish(self);
+        report.reference_diagnostics = references.finish();
+        Ok(report)
     }
 
     /// Async loading with exactly the same graph policy and diagnostics.
@@ -92,11 +129,38 @@ impl SourceRegistry {
         options: &SourceLoadOptions,
     ) -> Result<SourceLoadReport, SourceError> {
         let mut traversal = Traversal::new(self, root, options)?;
-        while let Some(uri) = traversal.next(self) {
-            let document = loader.load_document_shared_async(uri.as_str()).await;
-            traversal.accept(self, uri, document);
+        let mut references = crate::operation_graph::References::default();
+        loop {
+            let previous = traversal.attempted.len();
+            while let Some(uri) = traversal.next(self) {
+                let document = loader.load_document_shared_async(uri.as_str()).await;
+                traversal.accept(self, uri, document);
+            }
+            references.seed(self, &traversal.seen);
+            while let Some(uri) = references.next(
+                self,
+                options,
+                traversal.initial_documents,
+                &mut traversal.attempted,
+                &traversal.failed,
+            ) {
+                let document = loader.load_document_shared_async(uri.as_str()).await;
+                crate::operation_graph::References::accept(
+                    self,
+                    uri,
+                    document,
+                    &mut traversal.failed,
+                );
+            }
+            if previous == traversal.attempted.len() {
+                break;
+            }
+            traversal.generation += 1;
+            references.retry();
         }
-        Ok(traversal.finish(self))
+        let mut report = traversal.finish(self);
+        report.reference_diagnostics = references.finish();
+        Ok(report)
     }
 }
 
@@ -329,6 +393,7 @@ impl<'a> Traversal<'a> {
         });
         SourceLoadReport {
             diagnostics,
+            reference_diagnostics: Vec::new(),
             cycles: cycles(registry, self.root, &self.edges),
             fetch_attempts: self.attempted.len(),
         }

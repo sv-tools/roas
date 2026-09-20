@@ -202,7 +202,8 @@ references use `$self` when present, otherwise the retrieval location; a relativ
 `$self` first resolves against that location. HTTP redirects retain the final URL.
 `--source <name>=<path>` is an explicit root-alias override. Repeat
 `--source-document <FILE>` to preload additional possible documents by identity
-before any links are resolved, without assigning a root alias.
+before any links are resolved, without assigning a root alias. This also accepts
+complete standalone Path Item reference resources without an OpenAPI version.
 
 By default only sources needed by the selected workflow (plus explicit `--source`
 entries) are traversed. `--load-all-sources` traverses all root sources and linked
@@ -212,6 +213,21 @@ distinct loader attempts, including failures. `--source-max-depth` (default 32)
 bounds graph expansion, independently of `--max-steps`. Cycles and shared sources
 reuse document handles. These are not byte-size limits or a network sandbox;
 only enable `--load http` for documents whose referenced destinations you trust.
+
+Selected OpenAPI sources load their reachable Path Item `$ref` chains under the
+same `--load` policy and budgets; schema, parameter, response and callback references
+are not fetched. Local references and preloaded reference files need no fetcher.
+Missing targets, cycles, overlapping Path Item fields and duplicate operation IDs
+prevent checked execution when they affect a needed source. Loading diagnostics
+identify the referring document and JSON Pointer.
+
+Relative API servers use the retrieval URL of the document containing the selected
+Server Object, including redirects. OpenAPI 3.2 `$self` controls reference identity,
+not the endpoint origin. Operation/Path Item/root server precedence, variable defaults
+and absolute `--base-url` overrides are supported. For a file-based API without an
+absolute server, supply `--base-url`; a file URL is not an HTTP endpoint. See the
+[executor's operation profile](../roas-arazzo-executor/README.md#openapi-operation-resolution)
+for version-specific methods, pointer syntax and compatibility policies.
 
 An unavailable unrelated source is a located warning, not necessarily a failed run.
 Checked preparation still rejects missing required sources and an unprovable bare

@@ -1,0 +1,14 @@
+openapi: 3.2.0
+$self: https://identity.test/openapi.json
+info: { title: Referenced paths, version: '1' }
+servers:
+  - url: /root
+paths:
+  /pets:
+    $ref: parts.json#/pets
+  /dogs:
+    $ref: parts.json#/dogs
+components:
+  schemas:
+    Unused:
+      $ref: https://must-not-fetch.test/schema.json
