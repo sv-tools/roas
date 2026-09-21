@@ -1,0 +1,33 @@
+{% block doc %}{% for line in t.doc %}/// {{ line }}
+{% endfor %}/// An intersection that could not be flattened into one struct: the
+/// raw value is kept, and each part is offered as a projection of it.
+{% endblock %}{% block derives %}#[derive({{ t.derives | join(", ") }})]
+{% endblock %}{% block attrs %}#[serde(transparent)]
+{% for a in t.attrs %}{{ a }}
+{% endfor %}{% endblock %}pub struct {{ t.name }} {
+    raw: Box<serde_json::value::RawValue>,
+}
+
+impl PartialEq for {{ t.name }} {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw.get() == other.raw.get()
+    }
+}
+
+impl {{ t.name }} {
+    /// The value as it was received or built.
+    pub fn raw(&self) -> &serde_json::value::RawValue {
+        &self.raw
+    }
+
+    /// Any JSON value, unchecked against the parts.
+    pub fn from_raw(raw: Box<serde_json::value::RawValue>) -> Self {
+        Self { raw }
+    }
+{% block accessors %}{% for b in t.branches %}
+{% for line in b.doc %}    /// {{ line }}
+{% endfor %}    pub fn {{ b.accessor }}(&self) -> Option<{{ b.ty }}> {
+        serde_json::from_str(self.raw.get()).ok()
+    }
+{% endfor %}{% endblock %}}
+{% block trailing %}{% endblock %}

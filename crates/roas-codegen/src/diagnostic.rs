@@ -74,6 +74,29 @@ pub enum DiagnosticKind {
     /// An `$id` that re-bases the references beneath it. Their meaning
     /// depends on the re-basing, which is not tracked yet.
     IdRebasing { id: String },
+    /// A `$ref` to a local pointer that is not a component schema.
+    UnsupportedReferenceTarget { reference: String },
+    /// A keyword the model keeps but the generator does not handle.
+    /// Nothing is silently skipped: every one is named.
+    UnsupportedKeyword { keyword: String },
+    /// A schema no type can represent: `false`, or `not`.
+    Ungeneratable { keyword: String },
+    /// A `$schema` or `jsonSchemaDialect` other than the OAS dialect
+    /// and Draft 2020-12.
+    UnsupportedDialect { dialect: String },
+    /// The mapped numeric type narrows what the schema permits.
+    LossyNumber,
+    /// A composition that could not be proven safe and so lowers to
+    /// an open holder rather than a struct or an enum.
+    OpenComposition { keyword: String },
+    /// A typeless schema with object keywords: it permits every
+    /// instance type, so it lowers to an open holder.
+    TypelessObject,
+    /// An `enum` of numbers; the type stays the scalar.
+    NumericEnum,
+    /// A code-bearing `x-` extension left unapplied because
+    /// `allow_codegen_extensions` is off.
+    IgnoredExtension { keyword: String },
 }
 
 /// One thing the generator has to say about the description.

@@ -1,0 +1,124 @@
+{% if support.int64 or support.int32 %}/// Parse a JSON number token as the integer it denotes, if it is one:
+/// `1.0` and `1e0` are integers, `1.5` is not, and the digits are read
+/// exactly rather than through a float.
+fn integer_token(text: &str) -> Option<i128> {
+    let text = text.trim();
+    let (negative, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i32>().ok()?),
+        None => (rest, 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (mantissa, ""),
+    };
+    if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) || !frac_part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut digits = format!("{int_part}{frac_part}");
+    let mut scale = exponent - frac_part.len() as i32;
+    while scale < 0 {
+        match digits.pop() {
+            Some('0') => scale += 1,
+            _ => return None,
+        }
+    }
+    let mut value: i128 = digits.parse().ok()?;
+    for _ in 0..scale {
+        value = value.checked_mul(10)?;
+    }
+    Some(if negative { -value } else { value })
+}
+
+{% endif %}{% if support.int64 %}/// An `integer` on the wire: any JSON number token that denotes an
+/// integer, decoded exactly, held as an `i64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize)]
+#[serde(transparent)]
+pub struct Int64(pub i64);
+
+impl<'de> Deserialize<'de> for Int64 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
+        integer_token(raw.get())
+            .and_then(|v| i64::try_from(v).ok())
+            .map(Int64)
+            .ok_or_else(|| serde::de::Error::custom(format!("`{}` is not an integer in the int64 range", raw.get())))
+    }
+}
+
+impl From<i64> for Int64 {
+    fn from(value: i64) -> Self {
+        Int64(value)
+    }
+}
+
+impl From<Int64> for i64 {
+    fn from(value: Int64) -> Self {
+        value.0
+    }
+}
+
+{% endif %}{% if support.int32 %}/// An `integer` with `format: int32` on the wire, decoded exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize)]
+#[serde(transparent)]
+pub struct Int32(pub i32);
+
+impl<'de> Deserialize<'de> for Int32 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
+        integer_token(raw.get())
+            .and_then(|v| i32::try_from(v).ok())
+            .map(Int32)
+            .ok_or_else(|| serde::de::Error::custom(format!("`{}` is not an integer in the int32 range", raw.get())))
+    }
+}
+
+impl From<i32> for Int32 {
+    fn from(value: i32) -> Self {
+        Int32(value)
+    }
+}
+
+impl From<Int32> for i32 {
+    fn from(value: Int32) -> Self {
+        value.0
+    }
+}
+
+{% endif %}{% if support.double_option %}/// Optional and nullable: absent, `null` and present are three states.
+mod double_option {
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        T: serde::Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Some(<Option<T> as serde::Deserialize>::deserialize(deserializer)?))
+    }
+}
+
+{% endif %}{% if support.reject_null %}/// Optional but not nullable: an explicit `null` is rejected.
+mod reject_null {
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        T: serde::Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    {
+        <T as serde::Deserialize>::deserialize(deserializer).map(Some)
+    }
+}
+
+{% endif %}{% if support.require_present %}/// Required and nullable: `null` is accepted, a missing member is not.
+mod require_present {
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        T: serde::Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    {
+        <Option<T> as serde::Deserialize>::deserialize(deserializer)
+    }
+}
+
+{% endif %}

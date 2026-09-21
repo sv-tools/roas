@@ -1,0 +1,35 @@
+{% block doc %}{% for line in t.doc %}/// {{ line }}
+{% endfor %}{% if t.exclusive %}/// Exactly one of the branches should match, which cannot be decided
+/// from the wire shape alone; the raw value is kept and each branch is
+/// offered through an accessor, never selected first-match-wins.
+{% else %}/// Any number of the branches may match; the raw value is kept and
+/// each branch is offered through an accessor.
+{% endif %}{% endblock %}{% block derives %}#[derive({{ t.derives | join(", ") }})]
+{% endblock %}{% block attrs %}#[serde(transparent)]
+{% for a in t.attrs %}{{ a }}
+{% endfor %}{% endblock %}pub struct {{ t.name }} {
+    raw: Box<serde_json::value::RawValue>,
+}
+
+impl PartialEq for {{ t.name }} {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw.get() == other.raw.get()
+    }
+}
+
+impl {{ t.name }} {
+    /// The value as it was received or built.
+    pub fn raw(&self) -> &serde_json::value::RawValue {
+        &self.raw
+    }
+{% block accessors %}{% for b in t.branches %}
+{% for line in b.doc %}    /// {{ line }}
+{% endfor %}    pub fn {{ b.accessor }}(&self) -> Option<{{ b.ty }}> {
+        serde_json::from_str(self.raw.get()).ok()
+    }
+
+    pub fn {{ b.constructor }}(value: &{{ b.ty }}) -> Result<Self, serde_json::Error> {
+        Ok(Self { raw: serde_json::value::to_raw_value(value)? })
+    }
+{% endfor %}{% endblock %}}
+{% block trailing %}{% endblock %}

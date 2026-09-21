@@ -1,0 +1,4 @@
+{% block doc %}{% for line in v.doc %}    /// {{ line }}
+{% endfor %}{% endblock %}{% block attrs %}{% for a in v.attrs %}    {{ a }}
+{% endfor %}{% endblock %}{% block decl %}    {{ v.name }}{% if v.ty %}({{ v.ty }}){% endif %},
+{% endblock %}
