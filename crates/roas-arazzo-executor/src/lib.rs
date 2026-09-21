@@ -43,14 +43,18 @@
 //! ## What it does not do yet
 //!
 //! AsyncAPI steps (`channelPath` / `action`), XPath criteria and
-//! selectors, `inputs` schema validation, and parallel `dependsOn`
+//! selectors, and parallel `dependsOn`
 //! execution. Unsupported execution capabilities are reported when reached, or
-//! statically by preparation. Input schemas remain opaque for caller validation;
-//! a prepared plan does not certify input-schema conformance.
+//! statically by preparation. The optional `input-validation` feature supports
+//! offline JSON Schema 2020-12 when [`Options::input_validation`] enables it.
+//! Plans compile schemas; each run validates its actual bound inputs at entry.
 
 mod criterion;
 mod expression;
 mod http;
+mod input;
+#[cfg(feature = "input-validation")]
+mod input_catalog;
 mod operation;
 mod operation_document;
 #[cfg(feature = "source-graph")]
@@ -83,6 +87,7 @@ pub use expression::ExpressionError;
 pub use http::{
     AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, SendFuture, SleepFuture,
 };
+pub use input::{InputError, InputValidation, InputViolation};
 pub use operation::OperationError;
 #[cfg(feature = "source-graph")]
 pub use operation_graph::ReferenceDiagnostic;

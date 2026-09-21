@@ -49,6 +49,10 @@ impl Default for Limits {
 pub struct Options {
     pub(crate) workflow: Option<String>,
     inputs: Map<String, Value>,
+    pub(crate) invalid_inputs: bool,
+    pub(crate) input_validation: crate::InputValidation,
+    pub(crate) input_schema_base: Option<url::Url>,
+    pub(crate) schema_documents: BTreeMap<url::Url, Value>,
     pub(crate) sources: BTreeMap<String, Source>,
     pub(crate) base_urls: BTreeMap<String, String>,
     #[cfg(feature = "source-graph")]
@@ -92,7 +96,8 @@ impl Options {
         self
     }
 
-    /// Set one workflow input.
+    /// Set one workflow input. This does not clear an earlier non-object
+    /// [`Self::inputs`] batch error; replace that batch with a JSON object first.
     #[must_use]
     pub fn input(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
         self.inputs.insert(name.into(), value.into());
@@ -100,10 +105,16 @@ impl Options {
     }
 
     /// Set every input at once, from a JSON object.
+    /// A non-object is rejected by preparation/start, even when schema validation
+    /// is disabled. A later object batch replaces it and clears that error.
     #[must_use]
     pub fn inputs(mut self, inputs: Value) -> Self {
-        if let Value::Object(inputs) = inputs {
-            self.inputs = inputs;
+        match inputs {
+            Value::Object(inputs) => {
+                self.inputs = inputs;
+                self.invalid_inputs = false;
+            }
+            _ => self.invalid_inputs = true,
         }
         self
     }
@@ -309,6 +320,7 @@ pub struct Run<'d> {
     taken: usize,
     report: Option<Box<ExecutionReport>>,
     halted: bool,
+    input_schemas: crate::input::InputSchemas,
 }
 
 impl<'d> Run<'d> {
@@ -344,6 +356,7 @@ impl<'d> Run<'d> {
         prepared: Option<&'d crate::PreparedWorkflow<'d>>,
         root_inputs: Map<String, Value>,
     ) -> Result<Self, ExecutionError> {
+        options.check_inputs()?;
         let wanted = match &options.workflow {
             Some(id) => description
                 .workflows
@@ -374,12 +387,25 @@ impl<'d> Run<'d> {
             Some(prepared) => prepared.queue.clone(),
             None => ordered_workflows(description, wanted)?,
         };
+        let mut input_schemas = crate::input::InputSchemas::default();
+        let initial_inputs = Value::Object(root_inputs.clone());
+        // Fail before any dependency can send when the selected workflow (or a
+        // root dependency) cannot accept the shared initial argument object.
+        for workflow in &queue {
+            match prepared {
+                Some(prepared) => prepared.input_schemas.validate(workflow, &initial_inputs)?,
+                None => {
+                    input_schemas.compile(description, options, workflow)?;
+                    input_schemas.validate(workflow, &initial_inputs)?;
+                }
+            }
+        }
         let first = queue.remove(0);
         let mut run = Self {
             description,
             options,
             prepared,
-            root_inputs: root_inputs.clone(),
+            root_inputs,
             ambient: Ambient {
                 compiled: prepared.map(|prepared| &prepared.compiled),
                 sources,
@@ -409,8 +435,9 @@ impl<'d> Run<'d> {
             taken: 0,
             report: None,
             halted: false,
+            input_schemas,
         };
-        run.enter(first, Value::Object(root_inputs), None)?;
+        run.enter(first, initial_inputs, None)?;
         Ok(run)
     }
 
@@ -427,6 +454,7 @@ impl<'d> Run<'d> {
             return report.as_ref().clone();
         }
         ExecutionReport {
+            input_validation: self.options.input_validation,
             workflow_id: self
                 .options
                 .workflow
@@ -691,6 +719,20 @@ impl<'d> Run<'d> {
                 at: self.options.limits.depth,
             });
         }
+        // Caller-free entries are the initial root/dependency queue: start_inner
+        // already checked every one against the immutable root_inputs snapshot.
+        // Calls and recovery entries have newly bound arguments, even when they
+        // re-enter a workflow that was also in the initial queue.
+        if caller.is_some() {
+            match self.prepared {
+                Some(prepared) => prepared.input_schemas.validate(workflow, &inputs)?,
+                None => {
+                    self.input_schemas
+                        .compile(self.description, self.options, workflow)?;
+                    self.input_schemas.validate(workflow, &inputs)?;
+                }
+            }
+        }
         self.frames.push(Frame {
             workflow,
             inputs,
@@ -750,6 +792,7 @@ impl<'d> Run<'d> {
             // only a dependency of the one that was asked for.
             if self.queue.is_empty() {
                 self.report = Some(Box::new(ExecutionReport {
+                    input_validation: self.options.input_validation,
                     workflow_id: frame.workflow.workflow_id.clone(),
                     outcome: frame.outcome,
                     outputs,

@@ -385,14 +385,78 @@ preparing a plan. For v1.0, upconvert to a retained v1.1 description before prep
 The CLI now opts in by default, so previously skipped document defects can cause an
 earlier, nonzero exit instead of a recovered success.
 
-Preparation is not input-schema validation: `plan.workflow().inputs` exposes the
-opaque schema for caller integration. It does not add XPath, AsyncAPI or external
-workflow execution. Source identity loading is opt-in and occurs before preparation;
+Input-schema compilation is optional; see the input-validation policy below.
+Preparation does not add XPath, AsyncAPI or external workflow execution.
+Source identity loading is opt-in and occurs before preparation;
 referenced OpenAPI resolution uses the already-supplied document graph.
 Checked JSONPath execution supports `rfc9535`, not the alternate Goessner draft.
 Entry-workflow dependencies are supported; calls/recovery transfers to workflows
 with their own `dependsOn` are rejected by the checked path because the engine
 does not yet schedule those nested dependencies.
+
+### Workflow input validation
+
+Enable the `input-validation` Cargo feature and explicitly select the policy:
+
+```rust
+use roas_arazzo_executor::{InputValidation, Options};
+
+let options = Options::new()
+    .input_validation(InputValidation::Draft202012)
+    .input("petId", "7");
+```
+
+Library defaults remain `InputValidation::Disabled`; enabling a Cargo feature
+through dependency unification does not change existing callers. Requesting
+validation without the feature fails explicitly. The configured mode is available
+from `Options::input_validation_mode()`, `PreparedWorkflow::input_validation()`
+and `ExecutionReport::input_validation`. Disabled runs do not certify conformance.
+
+`prepare` compiles schemas, not input instances. `start`, `execute`, and
+`start_with_inputs` validate the actual input object each time. Initial root and
+dependency inputs are checked before **any** request; workflow calls and recovery
+transfers validate their explicit bound arguments before the child sends anything.
+Invalid child inputs are terminal engine errors, not response-criterion failures:
+`onFailure` cannot turn them into a success. Partial reports retain completed
+parent attempts, without inventing an attempt for a rejected child. The same
+entry checks apply to lazy, prepared, sync, async, and v1.0-upconverted runs.
+
+The profile is JSON Schema 2020-12, including local reusable inputs, JSON Pointer
+references, `$id`, `$anchor`, recursive schemas and schema-valued applicators.
+There is no coercion, default insertion, or format assertion (`format` remains
+an annotation). Other explicitly declared dialects in selected schemas are
+rejected. Numeric values retain `serde_json`'s normal representation; this is not
+arbitrary-precision JSON.
+
+Resolution is **offline**. Supply complete resources with
+`Options::schema_document(uri, value)` or through a source registry (including
+`insert_reference_document`). Legacy absolute `Options::source` documents are
+also available. `input_schema_base(retrieval_uri)` supplies an Arazzo retrieval
+base without the registry. `$self` resolves against retrieval and becomes the
+document base; nested schema `$id` establishes its own scope. Without either an
+absolute `$self` or retrieval metadata, an isolated internal base permits local
+references only; supply a real base for relative external references. Endpoint
+base-URL overrides do not affect schema resolution.
+
+The schema catalog discovers embedded input/schema identities and anchors without
+compiling unused schemas. Compilation selects each reachable workflow input and
+the reusable inputs, OpenAPI component schemas, and standalone schema documents
+reached through its references. Unused components/documents cannot fail a run just
+because they declare another dialect or refer to an unavailable resource. Selection
+is by schema root, not by individual assertion: the entire definition tree within
+a selected root is checked, and its references must resolve. Conflicting claims on
+a selected identity, invalid URI scopes and unsupported dialects are errors.
+No schema reference starts a file or network fetch, including when other
+dependencies enable the backend's fetch features. A private normalized indexing
+view preserves schema URI scope across Arazzo/OpenAPI container fields; supplied
+documents and runtime expression contexts are unchanged. Compilation caches
+belong to each prepared plan (or lazy run), not a process-global cache.
+
+`ExecutionError::Input` distinguishes malformed configuration/schema failures
+from `InputError::Invalid`, which carries all instance violations with schema and
+instance locations. Displayed instance values are masked. Schema processing is
+not a CPU/memory sandbox: use trusted schemas and bound input/document sizes in
+the calling application.
 
 ### Criterion recovery and partial reports
 
@@ -459,13 +523,18 @@ resolver rejects ambiguous or malformed operation documents that older versions
 could accept by taking the first match. Path Item overlap handling, strict pointer
 decoding and HTTP(S)-only server validation can therefore reject existing documents.
 
+`Options::inputs` no longer silently ignores non-object values: preparation or
+start reports `InputError::NotObject`, even with schema validation disabled.
+Passing a subsequent object batch replaces the inputs and clears that error.
+The CLI now validates input schemas by default; `--skip-input-validation` is the
+explicit compatibility opt-out. `arazzo validate` remains structural validation.
+
 ## What it does not run
 
 Each of these is reported where it is met, never passed over — a run should not look successful because something was skipped.
 
 - **AsyncAPI steps** (`channelPath` / `action` / `correlationId`): they need a broker client, not an HTTP one.
 - **XPath** criteria and selectors: JSON Pointer and JSONPath are supported.
-- **`inputs` schema validation**: inputs are passed through as given.
 - **Parallel execution**: `dependsOn` orders steps and workflows; they still run one at a time.
 
 ## Safety rails

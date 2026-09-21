@@ -124,7 +124,8 @@ pub(crate) struct Compiled<'d> {
 ///
 /// Preparation validates all document structure and the selected workflow's
 /// potential calls, actions and dependencies. It performs no network IO and does
-/// not evaluate input schemas or response-dependent expressions. Every run owns
+/// not evaluate input instances or response-dependent expressions. When enabled,
+/// input schemas are compiled here and enforced on each workflow entry. Every run owns
 /// its mutable inputs, history, outputs, retry budgets and timers.
 ///
 /// ```no_run
@@ -138,6 +139,7 @@ pub(crate) struct Compiled<'d> {
 /// ```
 #[derive(Debug)]
 pub struct PreparedWorkflow<'d> {
+    pub(crate) input_schemas: crate::input::InputSchemas,
     pub(crate) description: &'d Description,
     pub(crate) options: &'d Options,
     pub(crate) compiled: Compiled<'d>,
@@ -149,11 +151,16 @@ pub struct PreparedWorkflow<'d> {
 }
 
 impl PreparedWorkflow<'_> {
-    /// The selected workflow, including its opaque `inputs` schema for caller
-    /// validation. This API does not claim JSON Schema validation support.
+    /// The selected workflow, including its declared `inputs` schema.
     #[must_use]
     pub fn workflow(&self) -> &Workflow {
         self.selected
+    }
+
+    /// Whether starts and workflow entries validate their bound inputs.
+    #[must_use]
+    pub fn input_validation(&self) -> crate::InputValidation {
+        self.options.input_validation_mode()
     }
 
     /// The fixed grammar/truthiness profile used to compile and execute this plan.
@@ -236,6 +243,7 @@ pub fn prepare<'d>(
         options,
         selected,
         compiled: compiler.compiled,
+        input_schemas: compiler.input_schemas,
         queue,
         orders: compiler.orders,
         endpoints: compiler.endpoints,
@@ -275,6 +283,7 @@ fn compile<'d>(
         description,
         options,
         compiled: Compiled::default(),
+        input_schemas: crate::input::InputSchemas::default(),
         diagnostics: Vec::new(),
         pending: BTreeSet::new(),
         visited: BTreeSet::new(),
@@ -285,6 +294,9 @@ fn compile<'d>(
         resolve_operations,
         operations: crate::operation_index::Resolver::new(options),
     };
+    if let Err(error) = options.check_inputs() {
+        compiler.error(&Site::root("options.inputs"), error);
+    }
     if let Err(error) = description.validate(options.validation) {
         for error in error.errors {
             let site = compiler.model_site(&error.path);
@@ -413,6 +425,7 @@ impl<'d> Site<'d> {
 }
 
 struct Compiler<'d> {
+    input_schemas: crate::input::InputSchemas,
     description: &'d Description,
     options: &'d Options,
     compiled: Compiled<'d>,
@@ -506,6 +519,15 @@ impl<'d> Compiler<'d> {
     fn workflow(&mut self, index: usize) {
         let workflow = &self.description.workflows[index];
         let site = Site::workflow(index, workflow);
+        // required_sources runs before documents are supplied; only full
+        // preparation can compile schemas against the completed resource set.
+        if self.resolve_operations
+            && let Err(error) = self
+                .input_schemas
+                .compile(self.description, self.options, workflow)
+        {
+            self.error(&site.field("inputs"), error);
+        }
         for (index, id) in workflow.depends_on.iter().enumerate() {
             self.target(id, &site.item("dependsOn", index), false);
         }
