@@ -235,6 +235,32 @@ pub(crate) struct OperationContext {
 }
 
 impl SourceRegistry {
+    #[cfg(feature = "input-validation")]
+    pub(crate) fn schema_documents(&self) -> Vec<(&Url, &Value, &Url)> {
+        let mut documents: Vec<_> = self
+            .identities
+            .iter()
+            .chain(&self.retrievals)
+            .map(|(uri, id)| {
+                (
+                    uri,
+                    self.documents[id.0].value(),
+                    self.documents[id.0].base_uri(),
+                )
+            })
+            .collect();
+        documents.extend(
+            self.reference_documents
+                .iter()
+                .map(|(uri, doc)| (uri, &doc.document, &doc.retrieval_uri)),
+        );
+        documents.extend(self.reference_aliases.iter().filter_map(|(alias, target)| {
+            self.operation_document(target)
+                .map(|(value, base)| (alias, value, base))
+        }));
+        documents
+    }
+
     /// Empty registry; no fetching or ambient file/network policy.
     pub fn new() -> Self {
         Self::default()
@@ -483,7 +509,7 @@ impl SourceRegistry {
 
     /// Supply a complete JSON/YAML reference resource without assigning a source
     /// alias. Versioned documents use normal registration; standalone Path Item
-    /// containers retain their raw value and retrieval URI. They cannot be used
+    /// containers and input schemas retain their raw value and retrieval URI. They cannot be used
     /// as Arazzo source descriptions without a supported version discriminator.
     /// # Errors
     /// Invalid URI/version or conflicting document content/identity.

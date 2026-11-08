@@ -18,6 +18,8 @@ all-features = true
 
 [features]
 default = []
+# Offline JSON Schema 2020-12 workflow-input validation (explicitly enabled in Options).
+input-validation = ["dep:jsonschema"]
 # Accept an Arazzo v1.0 description, upconverting it to v1.1 first.
 # Without this only v1.1 descriptions can be executed.
 v1_0 = ["roas-arazzo/v1_0"]
@@ -29,6 +31,7 @@ source-graph = ["dep:roas", "dep:roas-asyncapi", "roas-arazzo/v1_0"]
 
 [dependencies]
 enumset.workspace = true
+jsonschema = { workspace = true, optional = true }
 roas = { workspace = true, optional = true, features = ["v2", "v3_0", "v3_1", "v3_2"] }
 roas-asyncapi = { workspace = true, optional = true, features = ["v2_6", "v3_0", "v3_1"] }
 roas-arazzo = { version = "0.3", path = "../roas-arazzo", features = ["v1_1"] }

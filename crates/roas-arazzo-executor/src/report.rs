@@ -153,6 +153,8 @@ impl StepRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExecutionReport {
+    /// Configured input-validation policy; disabled runs do not certify conformance.
+    pub input_validation: crate::InputValidation,
     /// The workflow that was asked for.
     pub workflow_id: String,
     /// How it finished.
@@ -241,6 +243,9 @@ pub struct ExecutionFailure {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ExecutionError {
+    /// Input configuration, schema compilation, or workflow-entry validation failed.
+    #[error(transparent)]
+    Input(#[from] crate::InputError),
     /// The description holds no workflow by that name.
     #[error("the description has no workflow `{0}`")]
     UnknownWorkflow(String),
@@ -338,6 +343,7 @@ mod tests {
     #[test]
     fn a_report_reads_as_what_happened() {
         let report = ExecutionReport {
+            input_validation: crate::InputValidation::Disabled,
             workflow_id: "buyPet".to_owned(),
             outcome: Outcome::Succeeded,
             outputs: BTreeMap::from([("pet".to_owned(), json!({ "id": 7 }))]),
@@ -358,6 +364,7 @@ mod tests {
         failed.attempt = 2;
         failed.action = Some("retry".to_owned());
         let report = ExecutionReport {
+            input_validation: crate::InputValidation::Disabled,
             workflow_id: "buyPet".to_owned(),
             outcome: Outcome::Failed,
             outputs: BTreeMap::new(),
@@ -395,6 +402,7 @@ mod tests {
         assert_eq!(record.url(), None);
 
         let report = ExecutionReport {
+            input_validation: crate::InputValidation::Disabled,
             workflow_id: "buyPet".to_owned(),
             outcome: Outcome::Succeeded,
             outputs: BTreeMap::new(),

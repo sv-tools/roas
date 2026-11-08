@@ -197,6 +197,25 @@ It needs the source descriptions the steps point at: name them with `--source <n
 
 The description is validated before anything is sent — a run makes real requests, and a description that does not hold together should not make them. `--ignore <CHECK>` lets one pass, as `arazzo validate --ignore` does.
 
+`arazzo run` also validates workflow inputs against JSON Schema 2020-12 by
+default. Missing required inputs and wrong types stop before the affected
+workflow sends a request, including workflow calls and recovery transfers.
+Initial root/dependency inputs are checked before any request. There is no
+coercion or default insertion, and `format` is an annotation. For a string
+containing digits, use `--input 'petId="7"'`, not `--input petId=7`.
+
+Schemas are compiled during preparation and references resolve only from supplied
+documents. Repeat `--schema URI=FILE` to supply external resources under their
+declared retrieval URIs, e.g. `--schema https://example.com/input.json=./input.json`.
+`--source-document FILE` also accepts schema documents (using the file retrieval
+URI and schema `$id`). `$id`, `$anchor`, relative references and reusable Arazzo
+inputs are supported; `--load http`/`--load file` never implicitly fetch schema
+references. `--skip-input-validation` explicitly restores pass-through behavior
+and prints a warning unless `--quiet` is set. `arazzo validate` still checks model
+structure, not runtime input conformance. See the
+[executor profile](../roas-arazzo-executor/README.md#workflow-input-validation)
+for reference-catalog checks, diagnostics and limits.
+
 Source loading uses document-local aliases and Arazzo `$self` identities. Relative
 references use `$self` when present, otherwise the retrieval location; a relative
 `$self` first resolves against that location. HTTP redirects retain the final URL.

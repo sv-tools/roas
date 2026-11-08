@@ -105,6 +105,9 @@ exceptions = [
     # license with no copyleft term; it is allowed here rather than
     # workspace-wide so the next Zlib crate is still a deliberate decision.
     { allow = ["Zlib"], crate = "foldhash" },
+    # JSON Schema's URI implementation uses MIT No Attribution. Keep the
+    # reviewed exception limited to this dependency rather than the workspace.
+    { allow = ["MIT-0"], crate = "borrow-or-share" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,
