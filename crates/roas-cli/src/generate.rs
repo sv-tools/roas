@@ -163,6 +163,30 @@ fn default_label(source: &InputSource) -> String {
     }
 }
 
+/// A Rust module name from a label: lowercase, `-` to `_`, never empty or
+/// digit-led.
+fn module_from_label(label: &str) -> String {
+    let mut module: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while module.contains("__") {
+        module = module.replace("__", "_");
+    }
+    let module = module.trim_matches('_').to_owned();
+    match module.chars().next() {
+        None => "api".to_owned(),
+        Some(c) if c.is_ascii_digit() => format!("m_{module}"),
+        Some(_) => module,
+    }
+}
+
 fn show(paths: &[PathBuf]) -> String {
     paths
         .iter()
@@ -200,11 +224,17 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         Some(path) => ConfigFile::from_path(path)?,
         None => ConfigFile::default(),
     };
-    let flags = ConfigFile {
+    let label = args.label.clone().unwrap_or_else(|| default_label(&source));
+    let mut flags = ConfigFile {
         target: args.target.map(Target::from),
         allow_codegen_extensions: args.allow_codegen_extensions.then_some(true),
         ..Default::default()
     };
+    // The generated file is named after the label unless the configuration
+    // names the module, so descriptions sharing a directory do not collide.
+    if file.rust.module.is_none() {
+        flags.rust.module = Some(module_from_label(&label));
+    }
     let config = file.merge(flags).build()?;
     let target = config.target;
 
@@ -232,7 +262,6 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         );
     }
 
-    let label = args.label.clone().unwrap_or_else(|| default_label(&source));
     if args.check {
         let report = check(&generation, &args.out, target, &label)?;
         if report.is_clean() {
@@ -259,6 +288,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
 
     let mut write_options = WriteOptions::new(label);
     write_options.overwrite_unowned = args.force;
+    write_options.allow_partial = args.allow_partial;
     let report = write(&generation, &args.out, target, &write_options)?;
     for path in &report.kept_edited {
         eprintln!(
@@ -352,7 +382,7 @@ mod tests {
         std::fs::write(&spec, PET).unwrap();
         let out = dir.0.join("out");
         run_generate(args(&spec, &out)).unwrap();
-        let code = std::fs::read_to_string(out.join("types.rs")).unwrap();
+        let code = std::fs::read_to_string(out.join("pet_store.rs")).unwrap();
         assert!(code.contains("pub struct Pet {"), "{code}");
         assert!(out.join(".roas-codegen-pet-store-rust.json").exists());
 
@@ -360,7 +390,7 @@ mod tests {
         check_args.check = true;
         run_generate(check_args).unwrap();
 
-        std::fs::write(out.join("types.rs"), "edited").unwrap();
+        std::fs::write(out.join("pet_store.rs"), "edited").unwrap();
         let mut check_args = args(&spec, &out);
         check_args.check = true;
         let error = run_generate(check_args).unwrap_err().to_string();
@@ -385,7 +415,7 @@ mod tests {
         partial.allow_partial = true;
         run_generate(partial).unwrap();
         assert!(
-            std::fs::read_to_string(out.join("types.rs"))
+            std::fs::read_to_string(out.join("api.rs"))
                 .unwrap()
                 .contains("pub struct Fine {")
         );
@@ -421,7 +451,7 @@ mod tests {
         let config = dir.0.join("codegen.toml");
         std::fs::write(
             &config,
-            "target = \"rust\"\n[types.Pet]\nrename = \"Animal\"\n",
+            "target = \"rust\"\n[rust]\nmodule = \"types\"\n[types.Pet]\nrename = \"Animal\"\n",
         )
         .unwrap();
         let out = dir.0.join("out");
@@ -463,6 +493,28 @@ mod tests {
         no_target.target = None;
         let error = format!("{:#}", run_generate(no_target).unwrap_err());
         assert!(error.contains("target"), "{error}");
+    }
+
+    #[test]
+    fn two_descriptions_share_one_directory() {
+        let dir = TempDir::new("shared");
+        let pets = dir.0.join("pets.json");
+        let billing = dir.0.join("billing.json");
+        std::fs::write(&pets, PET).unwrap();
+        std::fs::write(&billing, PET).unwrap();
+        let out = dir.0.join("out");
+        run_generate(args(&pets, &out)).unwrap();
+        run_generate(args(&billing, &out)).unwrap();
+        assert!(out.join("pets.rs").exists() && out.join("billing.rs").exists());
+        assert!(out.join(".roas-codegen-pets-rust.json").exists());
+        assert!(out.join(".roas-codegen-billing-rust.json").exists());
+    }
+
+    #[test]
+    fn module_names_come_from_labels() {
+        assert_eq!(module_from_label("Pet-Store-v2"), "pet_store_v2");
+        assert_eq!(module_from_label("2024-api"), "m_2024_api");
+        assert_eq!(module_from_label("--"), "api");
     }
 
     #[test]

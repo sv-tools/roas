@@ -23,8 +23,8 @@ pub(crate) struct Output {
 pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, GenerateError> {
     let built = view::build(ir, config, source)?;
     let rendered = render::render_module(&built.file)?;
-    let path = "types.rs";
-    format::validate(&rendered, path)?;
+    let path = format!("{}.rs", config.rust.module);
+    format::validate(&rendered, &path)?;
     let contents = format::format(&rendered);
     Ok(Output {
         files: vec![GeneratedFile {

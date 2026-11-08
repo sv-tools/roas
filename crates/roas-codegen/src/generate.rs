@@ -79,6 +79,39 @@ pub enum GenerateError {
     Unsupported(String),
 }
 
+/// How the generated header names its source: the document's file name,
+/// never its full location. Output must be identical in every checkout,
+/// and an absolute path would also leak the machine it was generated on.
+fn source_name(uri: &url::Url) -> String {
+    uri.path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|name| !name.is_empty())
+        .map(percent_decode)
+        .unwrap_or_else(|| match uri.scheme() {
+            "stdin" => "standard input".to_owned(),
+            _ => uri.host_str().unwrap_or("the description").to_owned(),
+        })
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&text[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Generate from a validated document.
 pub fn generate(
     document: &ValidatedSourceDocument,
@@ -189,7 +222,7 @@ pub fn generate(
     diagnostics.append(&mut ir.diagnostics);
 
     let output = match config.target {
-        Target::Rust => rust::emit(&ir, config, document.uri().as_str())?,
+        Target::Rust => rust::emit(&ir, config, &source_name(document.uri()))?,
         Target::Go => return Err(GenerateError::Unsupported("the Go backend".into())),
     };
     diagnostics.extend(output.diagnostics);

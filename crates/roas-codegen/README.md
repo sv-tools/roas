@@ -77,6 +77,8 @@ Names are suggested by the schema — a component name, a `title`, or the positi
 
 ## Configuration
 
+The Rust output is one module, `<rust.module>.rs`, `types.rs` by default; targets sharing a directory need different module names.
+
 `ConfigFile` is what a TOML file may say: everything optional, unknown keys rejected, relative paths resolved against the file's own directory. `Config` is what generation consumes, and `ConfigFile::build` is the one place a missing `target` is refused.
 
 ```toml
@@ -124,7 +126,8 @@ assert!(check(generation, out, Target::Rust, "petstore")?.is_clean());
 ```
 
 - **Only owned files change.** A path another target's manifest owns is refused, and so is an existing file no manifest owns unless `overwrite_unowned` is set. Two targets with different labels can share a directory.
-- **Every check runs before the first write.** Each file is written to a temporary sibling and renamed into place, and the manifest is written last, so an interrupted run is completed by the next one.
+- **Ownership is claimed before anything is written.** Every check runs first, including that no path goes through a symbolic link. A pending manifest owning the previous and the new files is written, each file is written to a temporary sibling and renamed into place, and the final manifest replaces the pending one, so an interrupted run is completed by the next one.
+- **Errors stop the write.** A generation carrying `Error` diagnostics is refused unless `allow_partial` is set, and even then files the previous run wrote are kept rather than removed.
 - **Stale files are removed only if unedited.** A file the previous run wrote and this one does not is deleted when it still holds the generated content, and kept and reported otherwise.
 
 The `roas` command line wraps all of this as `roas openapi generate`, with `--check` for CI.

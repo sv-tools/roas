@@ -84,6 +84,9 @@ pub struct TypeConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct RustConfigFile {
+    /// The generated module's name: the file is `<module>.rs`. Default
+    /// `types`. Targets sharing an output directory need different ones.
+    pub module: Option<String>,
     pub crate_name: Option<String>,
     pub edition: Option<String>,
     /// Derives added to every generated container.
@@ -170,6 +173,7 @@ impl ConfigFile {
             .allow_codegen_extensions
             .or(self.allow_codegen_extensions);
         self.template_dir = over.template_dir.or(self.template_dir);
+        self.rust.module = over.rust.module.or(self.rust.module);
         self.rust.crate_name = over.rust.crate_name.or(self.rust.crate_name);
         self.rust.edition = over.rust.edition.or(self.rust.edition);
         self.rust.derives.extend(over.rust.derives);
@@ -194,6 +198,19 @@ impl ConfigFile {
             allow_codegen_extensions: self.allow_codegen_extensions.unwrap_or(false),
             template_dir: self.template_dir,
             rust: RustConfig {
+                module: match self.rust.module {
+                    Some(module) => {
+                        let valid = module.starts_with(|c: char| c.is_ascii_lowercase())
+                            && module
+                                .bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+                        if !valid {
+                            return Err(ConfigError::InvalidModule(module));
+                        }
+                        module
+                    }
+                    None => "types".to_owned(),
+                },
                 crate_name: self.rust.crate_name,
                 edition: self.rust.edition.unwrap_or_else(|| "2024".to_owned()),
                 derives: self.rust.derives,
@@ -211,6 +228,8 @@ impl ConfigFile {
 /// Rust settings, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustConfig {
+    /// The generated module's name; the file is `<module>.rs`.
+    pub module: String,
     pub crate_name: Option<String>,
     pub edition: String,
     pub derives: Vec<String>,
@@ -264,6 +283,10 @@ pub enum ConfigError {
         "no target language: set `target = \"rust\"` or `target = \"go\"` in the configuration, or pass `--target`"
     )]
     MissingTarget,
+    #[error(
+        "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`"
+    )]
+    InvalidModule(String),
 }
 
 #[cfg(test)]

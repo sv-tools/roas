@@ -630,3 +630,38 @@ fn third_review_regressions() {
         g.files[0].contents
     );
 }
+
+#[test]
+fn the_header_names_the_file_not_its_location() {
+    let raw = serde_json::json!({
+        "openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "components": {"schemas": {"Pet": {"type": "object", "properties": {"a": {"type": "string"}}}}}
+    });
+    let header = |uri: &str| {
+        let doc = SourceDocument::parse(
+            Input::Json(serde_json::to_vec(&raw).unwrap()),
+            Url::parse(uri).unwrap(),
+        )
+        .unwrap();
+        let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
+        let code = generate(&doc, &rust_config("")).unwrap().files[0]
+            .contents
+            .clone();
+        code.lines()
+            .find(|l| l.starts_with("//! Types generated from"))
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        header("file:///home/alice/repo/specs/pet%20store.json"),
+        "//! Types generated from `pet store.json`."
+    );
+    assert_eq!(
+        header("file:///ci/build/specs/pet%20store.json"),
+        header("file:///home/alice/repo/specs/pet%20store.json")
+    );
+    assert_eq!(
+        header("stdin:///"),
+        "//! Types generated from `standard input`."
+    );
+}

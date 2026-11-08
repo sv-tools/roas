@@ -143,12 +143,12 @@ roas openapi convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-m
 Generates Rust types from a description of any version, using [`roas-codegen`](https://crates.io/crates/roas-codegen). JSON input keeps numbers exactly as written; the description is validated first, with external references skipped and reported.
 
 ```shell
-roas openapi generate --target rust --out src/api spec.yaml       # write src/api/types.rs
+roas openapi generate --target rust --out src/api spec.yaml       # write src/api/spec.rs
 roas openapi generate --config codegen.toml --out src/api spec.yaml
 roas openapi generate --target rust --out src/api --check spec.yaml  # CI: fail if out of date
 ```
 
-Files are written under a manifest in the output directory, named after `--label` (the input file's name by default) and the language. Only files the manifest owns are changed or removed, so generated code can sit beside hand-written modules, and several descriptions can share one directory with different labels. An existing file no manifest owns is refused unless `--force` is passed.
+The generated module is named after `--label`, which defaults to the input file's name: `petstore.yaml` becomes `petstore.rs`, and `rust.module` in the configuration overrides it. Files are written under a manifest in the output directory, named after the label and the language. Only files the manifest owns are changed or removed, so generated code can sit beside hand-written modules, and several descriptions can share one directory. An existing file no manifest owns is refused unless `--force` is passed, and nothing is ever written through a symbolic link. The generated header names the input file, not its location, so `--check` gives the same answer in every checkout.
 
 Diagnostics go to stderr. An error suppresses the affected types; by default it also leaves the output directory untouched, and `--allow-partial` writes what could be generated. `--strict` treats every warning as an error. `--allow-codegen-extensions` applies `x-rust-attrs` from the description, which is otherwise ignored because a description is often written by someone else. `--ignore` skips `roas` validation checks as in `openapi validate`.
 
