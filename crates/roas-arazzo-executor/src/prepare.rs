@@ -608,7 +608,8 @@ impl<'d> Compiler<'d> {
                 workflow,
             )
         {
-            self.error(&site.field("inputs"), error);
+            let identity = self.documents.get(self.current).identity;
+            self.error(&site.field("inputs"), error.in_document(identity));
         }
         for (index, id) in workflow.depends_on.iter().enumerate() {
             self.target(id, &site.item("dependsOn", index), false);

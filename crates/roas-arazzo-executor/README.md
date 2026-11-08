@@ -582,11 +582,15 @@ explicit compatibility opt-out. `arazzo validate` remains structural validation.
 External workflow references (`$sourceDescriptions.<name>.<workflowId>`) used to
 fail with `ExecutionError::Unsupported`. They now resolve through a source registry
 and fail with the new `ExecutionError::ExternalWorkflow` when the source is
-undeclared, not Arazzo, unsupplied, or lacks the workflow. `StepRecord::document`
-and `PreparationDiagnostic::document` are new fields of `#[non_exhaustive]`
-structs. Code that builds these structs or matches every enum variant must be
-updated. An unknown workflow in an external document is reported qualified by
-that document's identity. Local calls, their reports and their diagnostics are
+undeclared, not Arazzo, unsupplied, or lacks the workflow. `StepRecord::document`,
+`PreparationDiagnostic::document` and the `document` field of
+`InputError::Schema` / `InputError::Invalid` are new. Patterns that list every
+field of those variants need `..`. Code that builds these structs or matches
+every enum variant must be updated. A workflow id missing from an external
+document stays bare and is reported as `ExternalWorkflow` naming that document.
+An explicit `Options::source` entry for an Arazzo alias also decides which
+document `$sourceDescriptions.<alias>.<id>` runs. An owned value cannot hold an
+Arazzo document, so it is reported as an error. Local calls, their reports and their diagnostics are
 unchanged.
 
 ## What it does not run

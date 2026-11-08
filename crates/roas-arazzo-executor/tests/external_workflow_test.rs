@@ -881,6 +881,153 @@ fn a_workflow_missing_from_a_linked_document_is_named_with_that_document() {
 }
 
 #[test]
+fn a_local_target_missing_inside_an_external_document_keeps_the_id_bare() {
+    let mut documents = standard();
+    documents[2].1["workflows"][0]["steps"][0]["onSuccess"] =
+        json!([{ "name": "away", "type": "goto", "workflowId": "missing" }]);
+    let graph = Graph::new(&documents);
+    let error = execute(
+        &graph.description,
+        &graph.options("main"),
+        &mut Fake::new()
+            .reply(200, &ok("root"))
+            .reply(200, &ok("local"))
+            .reply(200, &ok("external")),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, ExecutionError::ExternalWorkflow { reference, reason }
+            if reference == "missing"
+                && reason == &format!("document {SHARED} has no workflow `missing`")),
+        "{error}"
+    );
+    let error = prepare(&graph.description, &graph.options("main")).unwrap_err();
+    let diagnostic = error
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.path.ends_with("onSuccess[0].workflowId"))
+        .expect("a located diagnostic");
+    assert_eq!(diagnostic.document.as_deref(), Some(SHARED));
+}
+
+#[test]
+fn explicit_sources_win_over_registry_links_for_workflow_calls_too() {
+    const OTHER: &str = "https://example.test/other/shared.arazzo.json";
+    let mut other = fixture("shared.arazzo.json");
+    other["$self"] = json!(OTHER);
+    other["workflows"][0]["steps"][0]["parameters"][1]["value"] = json!("other");
+    let mut documents = standard();
+    documents.push((OTHER, other));
+    documents.push((
+        "https://example.test/other/api.openapi.json",
+        fixture("shared-api.openapi.json"),
+    ));
+    let graph = Graph::new(&documents);
+    let other_id = graph.id(OTHER);
+
+    // Adapt once, then retarget the alias in the registry: the explicit
+    // entry from the first adaptation wins for metadata and for execution.
+    let first = graph.options("main");
+    let mut registry = graph.registry.clone();
+    registry
+        .override_source(graph.root, "shared", other_id)
+        .unwrap();
+    // Link the new target's own sources too.
+    registry
+        .load_sources(
+            graph.root,
+            &mut Loader::new(),
+            &SourceLoadOptions::default(),
+        )
+        .unwrap();
+    let options = first.source_registry(&registry, graph.root).unwrap();
+    assert_eq!(
+        options
+            .source_document("shared")
+            .unwrap()
+            .identity()
+            .as_str(),
+        SHARED
+    );
+    let mut client = Fake::new()
+        .reply(200, &ok("root"))
+        .reply(200, &ok("local"))
+        .reply(200, &ok("external"));
+    let report = prepare(&graph.description, &options)
+        .unwrap()
+        .execute(&mut client)
+        .unwrap();
+    assert_eq!(
+        urls(&client)[2],
+        "https://shared.example.test/v1/things?id=root"
+    );
+    assert_eq!(report.steps[3].document.as_deref(), Some(SHARED));
+
+    // A fresh adaptation follows the override.
+    let options = Options::new()
+        .workflow("main")
+        .input("id", "seed")
+        .source_registry(&registry, graph.root)
+        .unwrap();
+    assert_eq!(
+        options
+            .source_document("shared")
+            .unwrap()
+            .identity()
+            .as_str(),
+        OTHER
+    );
+    let mut client = Fake::new()
+        .reply(200, &ok("root"))
+        .reply(200, &ok("local"))
+        .reply(200, &ok("external"));
+    prepare(&graph.description, &options)
+        .unwrap()
+        .execute(&mut client)
+        .unwrap();
+    assert_eq!(
+        urls(&client)[2],
+        "https://shared.example.test/v1/things?id=other"
+    );
+
+    // An owned value cannot stand for an Arazzo document.
+    let options = Options::new()
+        .workflow("main")
+        .input("id", "seed")
+        .source("shared", SHARED, documents[2].1.clone())
+        .source_registry(&graph.registry, graph.root)
+        .unwrap();
+    let error = prepare(&graph.description, &options).unwrap_err();
+    assert!(
+        error.to_string().contains("given with `Options::source`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_linked_source_that_is_not_arazzo_says_so() {
+    let mut documents = standard();
+    // Untyped, so only the loaded document says what it is.
+    documents[0].1["sourceDescriptions"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("type");
+    documents[0].1 = with_workflow(
+        documents[0].1.clone(),
+        json!({ "workflowId": "wrong", "steps": [{
+            "stepId": "call", "workflowId": "$sourceDescriptions.api.child" }] }),
+    );
+    let graph = Graph::new(&documents);
+    let error = prepare(&graph.description, &graph.options("wrong")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source `api` is not an Arazzo document"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_called_external_workflow_with_its_own_dependencies_is_rejected_by_preparation() {
     let mut documents = standard();
     documents[2].1["workflows"][0]["dependsOn"] = json!(["other"]);
@@ -932,8 +1079,17 @@ mod input_validation {
         assert!(
             matches!(
                 &failure.error,
-                ExecutionError::Input(InputError::Invalid { workflow, .. }) if workflow == "child"
+                ExecutionError::Input(InputError::Invalid { workflow, document, .. })
+                    if workflow == "child" && document.as_deref() == Some(SHARED)
             ),
+            "{}",
+            failure.error
+        );
+        assert!(
+            failure
+                .error
+                .to_string()
+                .starts_with(&format!("workflow `child` of {SHARED} has invalid inputs")),
             "{}",
             failure.error
         );

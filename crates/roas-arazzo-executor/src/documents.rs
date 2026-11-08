@@ -116,7 +116,16 @@ impl<'d> Documents<'d> {
             return self
                 .position(doc, reference)
                 .map(|index| (doc, index))
-                .ok_or_else(|| ExecutionError::UnknownWorkflow(self.label(doc, reference)));
+                .ok_or_else(|| {
+                    match self.get(doc).identity {
+                        // Keep the id bare; name the external document beside it.
+                        Some(identity) => ExecutionError::ExternalWorkflow {
+                            reference: reference.to_owned(),
+                            reason: format!("document {identity} has no workflow `{reference}`"),
+                        },
+                        None => ExecutionError::UnknownWorkflow(reference.to_owned()),
+                    }
+                });
         };
         let external = |reason: String| ExecutionError::ExternalWorkflow {
             reference: reference.to_owned(),
@@ -141,10 +150,29 @@ impl<'d> Documents<'d> {
             )));
         }
         let target = self.linked(doc, alias).ok_or_else(|| {
-            external(format!(
-                "source `{alias}` was not supplied as an Arazzo document; load it into a \
-                 source registry and pass that registry with `Options::source_registry`"
-            ))
+            external(
+                match self
+                    .get(doc)
+                    .options
+                    .sources
+                    .get(alias)
+                    .map(|source| &source.data)
+                {
+                    Some(crate::operation::SourceData::Owned(_)) => format!(
+                        "source `{alias}` was given with `Options::source`, which supplies API \
+                     documents only; load the Arazzo document into a source registry and pass \
+                     it with `Options::source_registry`"
+                    ),
+                    #[cfg(feature = "source-graph")]
+                    Some(crate::operation::SourceData::Registry(_)) => {
+                        format!("source `{alias}` is not an Arazzo document")
+                    }
+                    None => format!(
+                        "source `{alias}` was not supplied as an Arazzo document; load it into a \
+                     source registry and pass that registry with `Options::source_registry`"
+                    ),
+                },
+            )
         })?;
         let index = self.position(target, workflow_id).ok_or_else(|| {
             external(format!(

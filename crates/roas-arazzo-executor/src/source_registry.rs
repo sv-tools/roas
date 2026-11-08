@@ -675,9 +675,13 @@ pub(crate) struct WorkflowDocument {
     pub links: BTreeMap<String, usize>,
 }
 
+/// `explicit` holds the owner's aliases that the caller already set in
+/// `Options::source`: they win over registry links, so workflow calls run the
+/// same document that operation lookup and `source_document` report.
 fn workflow_documents(
     registry: &Arc<SourceRegistry>,
     owner: DocumentId,
+    explicit: &BTreeMap<String, Option<DocumentId>>,
 ) -> Result<WorkflowDocuments, SourceError> {
     let mut handles = BTreeMap::from([(owner, 0)]);
     let mut order = vec![owner];
@@ -685,7 +689,11 @@ fn workflow_documents(
     let mut next = 0;
     while let Some(id) = order.get(next).copied() {
         for link in registry.sources(id)? {
-            let Some(target) = link.target else {
+            let target = match explicit.get(&link.name) {
+                Some(target) if id == owner => *target,
+                _ => link.target,
+            };
+            let Some(target) = target else {
                 continue;
             };
             if registry.document(target)?.arazzo().is_none() {
@@ -738,9 +746,32 @@ impl crate::Options {
         owner: DocumentId,
     ) -> Result<Self, SourceError> {
         registry.document(owner)?;
+        // Explicit entries keep their document: a registry-backed one by its
+        // handle in this registry, an owned value never as a workflow source.
+        let explicit = registry
+            .sources(owner)?
+            .into_iter()
+            .filter_map(|link| {
+                let source = self.sources.get(&link.name)?;
+                let target = match &source.data {
+                    crate::operation::SourceData::Registry(document) => registry
+                        .documents
+                        .iter()
+                        .position(|candidate| {
+                            Arc::ptr_eq(candidate, document)
+                                || (candidate.identity == document.identity
+                                    && candidate.value() == document.value())
+                        })
+                        .map(DocumentId),
+                    crate::operation::SourceData::Owned(_) => None,
+                };
+                Some((link.name.clone(), target))
+            })
+            .collect();
         let registry = Arc::new(registry.clone());
         let mut options = self.scoped_registry(&registry, owner)?;
-        options.workflow_documents = Some(Arc::new(workflow_documents(&registry, owner)?));
+        options.workflow_documents =
+            Some(Arc::new(workflow_documents(&registry, owner, &explicit)?));
         Ok(options)
     }
 

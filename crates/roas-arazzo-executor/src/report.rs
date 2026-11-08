@@ -83,7 +83,8 @@ pub enum Performed {
     },
     /// The step called another workflow.
     Workflow {
-        /// The workflow it called.
+        /// The workflow reference as the calling step wrote it: a local id,
+        /// or `$sourceDescriptions.<name>.<workflowId>` for an external one.
         workflow_id: String,
         /// How that workflow finished.
         outcome: Outcome,

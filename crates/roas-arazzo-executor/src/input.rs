@@ -56,20 +56,29 @@ pub enum InputError {
     #[error("input schema configuration: {0}")]
     Configuration(String),
     /// The workflow's schema could not be compiled, including unresolved references.
-    #[error("workflow `{workflow}` has an invalid input schema at {schema_path}: {message}")]
+    #[error(
+        "workflow `{workflow}`{} has an invalid input schema at {schema_path}: {message}",
+        of(document)
+    )]
     Schema {
         /// Workflow owning the schema.
         workflow: String,
+        /// Identity of the external Arazzo document declaring the workflow,
+        /// or `None` for the entry description.
+        document: Option<String>,
         /// Backend schema-error location as a JSON Pointer.
         schema_path: String,
         /// Schema compilation or reference resolution error.
         message: String,
     },
     /// Actual bound inputs failed a compiled schema. This is a terminal engine error.
-    #[error("workflow `{workflow}` has invalid inputs: {}", violations.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
+    #[error("workflow `{workflow}`{} has invalid inputs: {}", of(document), violations.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
     Invalid {
         /// Workflow whose entry was rejected.
         workflow: String,
+        /// Identity of the external Arazzo document declaring the workflow,
+        /// or `None` for the entry description.
+        document: Option<String>,
         /// All failed assertions, in deterministic location order.
         violations: Vec<InputViolation>,
     },
@@ -127,6 +136,23 @@ impl Options {
             return Err(InputError::Unavailable);
         }
         Ok(())
+    }
+}
+
+fn of(document: &Option<String>) -> String {
+    document
+        .as_deref()
+        .map(|document| format!(" of {document}"))
+        .unwrap_or_default()
+}
+
+impl InputError {
+    /// Name the external document declaring the failing workflow.
+    pub(crate) fn in_document(mut self, identity: Option<&str>) -> Self {
+        if let Self::Schema { document, .. } | Self::Invalid { document, .. } = &mut self {
+            *document = identity.map(str::to_owned);
+        }
+        self
     }
 }
 
@@ -361,6 +387,7 @@ mod backend {
                 .build(&json!({"$ref": uri.as_str()}))
                 .map_err(|error| InputError::Schema {
                     workflow: workflow.workflow_id.clone(),
+                    document: None,
                     schema_path: error.schema_path().to_string(),
                     message: error.to_string(),
                 })?;
@@ -412,6 +439,7 @@ mod backend {
             } else {
                 Err(InputError::Invalid {
                     workflow: workflow.workflow_id.clone(),
+                    document: None,
                     violations,
                 })
             }

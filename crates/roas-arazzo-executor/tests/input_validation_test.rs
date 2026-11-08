@@ -139,7 +139,7 @@ mod enabled {
             let failure = execute_with_report(&description, &options, &mut lazy).unwrap_err();
             assert!(failure.report.is_none());
             assert!(
-                matches!(&failure.error, ExecutionError::Input(InputError::Invalid { workflow, violations }) if workflow == "root" && !violations.is_empty())
+                matches!(&failure.error, ExecutionError::Input(InputError::Invalid { workflow, violations, .. }) if workflow == "root" && !violations.is_empty())
             );
             assert_eq!(
                 failure.error.to_string(),

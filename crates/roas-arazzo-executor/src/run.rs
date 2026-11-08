@@ -441,21 +441,14 @@ impl<'d> Run<'d> {
         // Fail before any dependency can send when the selected workflow (or a
         // root dependency) cannot accept the shared initial argument object.
         for (doc, workflow) in &queue {
+            let document = documents.get(*doc);
             match prepared {
-                Some(prepared) => {
-                    prepared.input_schemas[doc.0].validate(workflow, &initial_inputs)?;
-                }
-                None => {
-                    let document = documents.get(*doc);
-                    input_schemas[doc.0].compile(
-                        document.description,
-                        options,
-                        document.options,
-                        workflow,
-                    )?;
-                    input_schemas[doc.0].validate(workflow, &initial_inputs)?;
-                }
+                Some(prepared) => prepared.input_schemas[doc.0].validate(workflow, &initial_inputs),
+                None => input_schemas[doc.0]
+                    .compile(document.description, options, document.options, workflow)
+                    .and_then(|()| input_schemas[doc.0].validate(workflow, &initial_inputs)),
             }
+            .map_err(|error| error.in_document(document.identity))?;
         }
         let (doc, first) = queue.remove(0);
         let mut run = Self {
@@ -767,17 +760,17 @@ impl<'d> Run<'d> {
         // re-enter a workflow that was also in the initial queue.
         if caller.is_some() {
             match self.prepared {
-                Some(prepared) => prepared.input_schemas[doc.0].validate(workflow, &inputs)?,
-                None => {
-                    self.input_schemas[doc.0].compile(
+                Some(prepared) => prepared.input_schemas[doc.0].validate(workflow, &inputs),
+                None => self.input_schemas[doc.0]
+                    .compile(
                         document.description,
                         self.options,
                         document.options,
                         workflow,
-                    )?;
-                    self.input_schemas[doc.0].validate(workflow, &inputs)?;
-                }
+                    )
+                    .and_then(|()| self.input_schemas[doc.0].validate(workflow, &inputs)),
             }
+            .map_err(|error| error.in_document(document.identity))?;
         }
         let order = match self.prepared {
             Some(prepared) => prepared
