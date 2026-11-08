@@ -200,7 +200,8 @@ impl ConfigFile {
             rust: RustConfig {
                 module: match self.rust.module {
                     Some(module) => {
-                        let valid = module.starts_with(|c: char| c.is_ascii_lowercase())
+                        let valid = !crate::rust::naming::is_keyword(&module)
+                            && module.starts_with(|c: char| c.is_ascii_lowercase())
                             && module
                                 .bytes()
                                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
@@ -222,6 +223,36 @@ impl ConfigFile {
             substitutions: self.substitutions,
             types: self.types,
         })
+    }
+}
+
+/// A Rust module name derived from free text such as a label or a file
+/// name: lowercase, other characters to `_`, never empty, never digit-led,
+/// never a keyword. Always accepted as `rust.module`.
+pub fn rust_module_name(text: &str) -> String {
+    let mut module: String = text
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while module.contains("__") {
+        module = module.replace("__", "_");
+    }
+    let module = module.trim_matches('_').to_owned();
+    let module = match module.chars().next() {
+        None => "api".to_owned(),
+        Some(c) if c.is_ascii_digit() => format!("m_{module}"),
+        Some(_) => module,
+    };
+    if crate::rust::naming::is_keyword(&module) {
+        format!("{module}_types")
+    } else {
+        module
     }
 }
 
@@ -284,7 +315,7 @@ pub enum ConfigError {
     )]
     MissingTarget,
     #[error(
-        "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`"
+        "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`, and not a keyword"
     )]
     InvalidModule(String),
 }

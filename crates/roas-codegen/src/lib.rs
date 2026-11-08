@@ -42,7 +42,7 @@ mod write;
 
 pub use config::{
     Config, ConfigError, ConfigFile, FieldConfig, GoConfig, GoConfigFile, Layout, RustConfig,
-    RustConfigFile, Substitution, Target, TypeConfig, TypeSpelling,
+    RustConfigFile, Substitution, Target, TypeConfig, TypeSpelling, rust_module_name,
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 pub use generate::{Dependencies, GenerateError, GeneratedFile, Generation, generate};

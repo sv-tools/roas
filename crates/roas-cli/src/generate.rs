@@ -149,7 +149,7 @@ fn default_label(source: &InputSource) -> String {
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
+                c.to_ascii_lowercase()
             } else {
                 '-'
             }
@@ -160,30 +160,6 @@ fn default_label(source: &InputSource) -> String {
         "api".to_owned()
     } else {
         safe
-    }
-}
-
-/// A Rust module name from a label: lowercase, `-` to `_`, never empty or
-/// digit-led.
-fn module_from_label(label: &str) -> String {
-    let mut module: String = label
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    while module.contains("__") {
-        module = module.replace("__", "_");
-    }
-    let module = module.trim_matches('_').to_owned();
-    match module.chars().next() {
-        None => "api".to_owned(),
-        Some(c) if c.is_ascii_digit() => format!("m_{module}"),
-        Some(_) => module,
     }
 }
 
@@ -224,7 +200,12 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         Some(path) => ConfigFile::from_path(path)?,
         None => ConfigFile::default(),
     };
-    let label = args.label.clone().unwrap_or_else(|| default_label(&source));
+    // Labels name manifest files, which must not differ only in case.
+    let label = args
+        .label
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| default_label(&source));
     let mut flags = ConfigFile {
         target: args.target.map(Target::from),
         allow_codegen_extensions: args.allow_codegen_extensions.then_some(true),
@@ -233,7 +214,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     // The generated file is named after the label unless the configuration
     // names the module, so descriptions sharing a directory do not collide.
     if file.rust.module.is_none() {
-        flags.rust.module = Some(module_from_label(&label));
+        flags.rust.module = Some(roas_codegen::rust_module_name(&label));
     }
     let config = file.merge(flags).build()?;
     let target = config.target;
@@ -263,7 +244,9 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     }
 
     if args.check {
-        let report = check(&generation, &args.out, target, &label)?;
+        let mut check_options = WriteOptions::new(label.clone());
+        check_options.allow_partial = args.allow_partial;
+        let report = check(&generation, &args.out, target, &check_options)?;
         if report.is_clean() {
             eprintln!("{}: up to date", args.out.display());
             return Ok(());
@@ -422,6 +405,26 @@ mod tests {
     }
 
     #[test]
+    fn check_after_a_partial_write_is_clean() {
+        let dir = TempDir::new("partial-check");
+        let spec = dir.0.join("api.json");
+        std::fs::write(
+            &spec,
+            r##"{"openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+                "components": {"schemas": {"Bad": {"not": {"type": "string"}}, "Fine": {"type": "object", "properties": {"a": {"type": "string"}}}}}}"##,
+        )
+        .unwrap();
+        let out = dir.0.join("out");
+        let mut partial = args(&spec, &out);
+        partial.allow_partial = true;
+        run_generate(partial).unwrap();
+        let mut check = args(&spec, &out);
+        check.allow_partial = true;
+        check.check = true;
+        run_generate(check).unwrap();
+    }
+
+    #[test]
     fn strict_promotes_warnings() {
         let dir = TempDir::new("strict");
         let spec = dir.0.join("api.json");
@@ -512,16 +515,20 @@ mod tests {
 
     #[test]
     fn module_names_come_from_labels() {
-        assert_eq!(module_from_label("Pet-Store-v2"), "pet_store_v2");
-        assert_eq!(module_from_label("2024-api"), "m_2024_api");
-        assert_eq!(module_from_label("--"), "api");
+        assert_eq!(
+            roas_codegen::rust_module_name("pet-store-v2"),
+            "pet_store_v2"
+        );
+        assert_eq!(roas_codegen::rust_module_name("2024-api"), "m_2024_api");
+        assert_eq!(roas_codegen::rust_module_name("--"), "api");
+        assert_eq!(roas_codegen::rust_module_name("type"), "type_types");
     }
 
     #[test]
     fn default_label_is_a_safe_file_stem() {
         assert_eq!(
             default_label(&InputSource::File("dir/Pet Store.v2.json".into())),
-            "Pet-Store-v2"
+            "pet-store-v2"
         );
         assert_eq!(default_label(&InputSource::File("...json".into())), "api");
         assert_eq!(default_label(&InputSource::Stdin), "api");

@@ -3,7 +3,7 @@
 
 mod attrs;
 mod format;
-mod naming;
+pub(crate) mod naming;
 mod render;
 mod view;
 

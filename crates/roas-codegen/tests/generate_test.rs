@@ -664,4 +664,8 @@ fn the_header_names_the_file_not_its_location() {
         header("stdin:///"),
         "//! Types generated from `standard input`."
     );
+    assert_eq!(
+        header("file:///d/x%0A%23!%5Bdeny(warnings)%5D%0A%2F%2F!.json"),
+        "//! Types generated from `x\\n#![deny(warnings)]\\n//!.json`."
+    );
 }

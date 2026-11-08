@@ -86,7 +86,20 @@ fn source_name(uri: &url::Url) -> String {
     uri.path_segments()
         .and_then(|mut segments| segments.next_back())
         .filter(|name| !name.is_empty())
-        .map(percent_decode)
+        .map(|name| {
+            // A file name is free text: a decoded newline would end the
+            // doc comment it is quoted in and turn the rest into code.
+            percent_decode(name)
+                .chars()
+                .flat_map(|c| {
+                    if c.is_control() {
+                        c.escape_default().collect::<Vec<_>>()
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect()
+        })
         .unwrap_or_else(|| match uri.scheme() {
             "stdin" => "standard input".to_owned(),
             _ => uri.host_str().unwrap_or("the description").to_owned(),

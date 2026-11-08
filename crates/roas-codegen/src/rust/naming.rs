@@ -111,6 +111,11 @@ const KEYWORDS: &[&str] = &[
 /// Keywords that cannot be raw identifiers.
 const NOT_RAW: &[&str] = &["self", "Self", "super", "crate"];
 
+/// Whether `ident` is a Rust keyword, strict or reserved.
+pub(crate) fn is_keyword(ident: &str) -> bool {
+    KEYWORDS.contains(&ident)
+}
+
 /// Make an identifier legal: raw-prefix a keyword, suffix the few that
 /// cannot be raw.
 pub(crate) fn legal(ident: String) -> String {
