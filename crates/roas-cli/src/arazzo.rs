@@ -15,6 +15,7 @@ use roas_arazzo_executor::{
     Client, Options, SourceLoadOptions, SourceRegistry, prepare, required_sources,
 };
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use url::Url;
 
@@ -625,23 +626,38 @@ fn sources(
     for (name, id) in supplied {
         registry.override_source(root, &name, id)?;
     }
-    let needed = required_sources(
-        description,
-        &options.clone().source_registry(&registry, root)?,
-    )?;
-    let mut selection = needed;
-    selection.extend(
-        args.source
-            .iter()
-            .filter_map(|source| source.split_once('=').map(|(name, _)| name.to_owned())),
-    );
-    let mut load_options = SourceLoadOptions::default();
-    load_options.root_sources = (!args.load_all_sources).then_some(selection);
-    load_options.max_documents = args.source_max_documents;
-    load_options.max_depth = args.source_max_depth;
-    load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
+    let explicit: BTreeSet<String> = args
+        .source
+        .iter()
+        .filter_map(|source| source.split_once('=').map(|(name, _)| name.to_owned()))
+        .collect();
     let mut loader = build_loader(&args.load).unwrap_or_default();
-    let report = registry.load_sources(root, &mut loader, &load_options)?;
+    // Loading an external Arazzo document can reveal calls back into this
+    // one, whose workflows may need entry sources nobody asked for yet: load
+    // again until the required selection stops growing.
+    let mut selection = explicit;
+    let report = loop {
+        let needed = required_sources(
+            description,
+            &options.clone().source_registry(&registry, root)?,
+        )?;
+        selection.extend(needed);
+        let mut load_options = SourceLoadOptions::default();
+        load_options.root_sources = (!args.load_all_sources).then(|| selection.clone());
+        load_options.max_documents = args.source_max_documents;
+        load_options.max_depth = args.source_max_depth;
+        load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
+        let report = registry.load_sources(root, &mut loader, &load_options)?;
+        let grown = required_sources(
+            description,
+            &options.clone().source_registry(&registry, root)?,
+        )?;
+        // Each further pass strictly grows the selection of declared aliases,
+        // so this terminates.
+        if args.load_all_sources || grown.is_subset(&selection) {
+            break report;
+        }
+    };
     let diagnostics = report
         .diagnostics
         .iter()
@@ -1126,6 +1142,55 @@ mod tests {
         let asked = join.join().unwrap();
         assert_eq!(asked.len(), 1);
         assert!(asked[0].starts_with("GET /things?id=7 "), "{asked:?}");
+    }
+
+    #[test]
+    fn selective_loading_follows_calls_back_into_the_entry_document() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        // `helper` is reached only through the external document, and is the
+        // only user of the entry's `extra` source.
+        let entry = TempFile::write("back-entry.json", &json!({}));
+        let entry_name = entry.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::write(
+            "back-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [{ "name": "root", "url": entry_name, "type": "arazzo" }],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        std::fs::write(
+            &entry.0,
+            serde_json::to_string(&json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": child_name, "type": "arazzo" },
+                    { "name": "extra", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "buyPet", "steps": [{
+                        "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                    { "workflowId": "helper", "steps": [{
+                        "stepId": "get", "operationId": "$sourceDescriptions.extra.getThing",
+                        "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = run_args(&entry, &api, &base);
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.base_url = vec![format!("extra={base}")];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        let asked = join.join().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].starts_with("GET /things?id=1 "), "{asked:?}");
     }
 
     #[test]
