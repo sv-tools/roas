@@ -742,6 +742,8 @@ fn v1_0_and_v1_1_documents_combine_after_independent_upconversion() {
             .unwrap();
         assert!(report.is_success(), "{report}");
         assert_eq!(report.outputs["value"], "value");
+        // The v1.0 convenience wrapper upconverts the entry the same way.
+        #[cfg(feature = "v1_0")]
         if root_version == "1.0.1" {
             let v1_0: roas_arazzo::v1_0::Description = serde_json::from_value(
                 graph.registry.document(graph.root).unwrap().value().clone(),
@@ -859,6 +861,23 @@ fn an_unsupplied_or_mistyped_workflow_source_is_named_before_any_request() {
         "{error}"
     );
     assert!(required_sources(&description, &options("mistyped")).is_err());
+}
+
+#[test]
+fn a_workflow_missing_from_a_linked_document_is_named_with_that_document() {
+    let mut documents = standard();
+    documents[0].1 = with_workflow(
+        documents[0].1.clone(),
+        json!({ "workflowId": "typo", "steps": [{
+            "stepId": "call", "workflowId": "$sourceDescriptions.shared.chlid" }] }),
+    );
+    let graph = Graph::new(&documents);
+    let options = graph.options("typo");
+    let expected = format!("document {SHARED} has no workflow `chlid`");
+    let error = prepare(&graph.description, &options).unwrap_err();
+    assert!(error.to_string().contains(&expected), "{error}");
+    let error = execute(&graph.description, &options, &mut Fake::new()).unwrap_err();
+    assert!(error.to_string().contains(&expected), "{error}");
 }
 
 #[test]

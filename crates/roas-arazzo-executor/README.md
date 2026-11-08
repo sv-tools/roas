@@ -124,8 +124,58 @@ Recognized versions are Arazzo 1.0/1.1, OpenAPI 2.0/3.0/3.1/3.2, and AsyncAPI
 API documents retain complete raw values and model-checked versions; loading is
 **not** API structural or schema validation. AsyncAPI loading does not enable
 broker execution. External OpenAPI Path Item resolution and API-server computation
-have separate execution rules below; cross-document workflow execution remains
-unsupported.
+have separate execution rules below; workflows of linked Arazzo documents are
+callable as described next.
+
+### Workflows of external Arazzo documents
+
+A step, `dependsOn` entry, or `goto` / `retry` action names a workflow of another
+Arazzo document as `$sourceDescriptions.<name>.<workflowId>`, where `<name>` is an
+Arazzo source of the document that writes the reference:
+
+```json
+{ "stepId": "lookup", "workflowId": "$sourceDescriptions.shared.findPet",
+  "parameters": [{ "name": "petId", "value": "$inputs.petId" }] }
+```
+
+External documents come from the source registry: `Options::source_registry`
+indexes every Arazzo document reachable from the owner through linked Arazzo
+sources (including links back to the owner, which name the entry description).
+Without a registry, or before the source is linked, the reference fails with
+`ExecutionError::ExternalWorkflow` naming the missing alias. `required_sources`
+lists the entry's Arazzo aliases that the selected workflow reaches, and graph
+loading traverses each linked Arazzo document's own sources in full.
+
+The called workflow runs on the same engine as a local call, in its own
+document's scope:
+
+- Its components, `$self`, `$sourceDescriptions`, operation sources and
+  `$workflows.<id>` are those of the document that declares it. Two documents
+  may both have a workflow `child`, a step `get` and a source `api`; neither
+  shadows the other.
+- Arguments are bound in the caller's scope, then validated against the callee's
+  input schema (resolved against the callee's document) before it sends anything.
+- `Options::source` / `Options::base_url` apply to the entry description only.
+  Use `SourceRegistry::override_base_url(document, alias, url)` for another
+  document's source; it applies to that document alone.
+- Input binding, output projection, criteria, timeouts, retry detours and `goto`
+  handoff follow the local-call rules unchanged.
+- `StepRecord::document` carries the declaring document's canonical identity for
+  steps of external workflows (`None` for the entry description), and the calling
+  step's `Performed::Workflow` names the reference as written.
+  `PreparationDiagnostic::document` locates findings the same way.
+
+Preparation compiles the statically reachable workflow graph across documents and
+structurally validates every external document it enters. A `dependsOn` cycle,
+whether within one document or through several, fails preparation. Recursive
+calls (`a` calls `b` calls `a`) are not static errors; they stop at the
+workflow-depth limit with a partial report. Source-graph cycles are harmless data,
+and `goto` loops stop at the step limit. Calls to external workflows with their
+own `dependsOn` are rejected, as for local calls.
+
+Each Arazzo document is upconverted independently: a v1.0 entry may call a v1.1
+document and vice versa, and every document runs under the same condition profile
+and v1.1 execution model.
 
 ### OpenAPI operation resolution
 
@@ -241,7 +291,7 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 
 ## What it runs
 
-- **Steps** that name an operation by `operationId` (bare, or `$sourceDescriptions.<name>.<id>`) or by `operationPath`, and steps that call another `workflowId`.
+- **Steps** that name an operation by `operationId` (bare, or `$sourceDescriptions.<name>.<id>`) or by `operationPath`, and steps that call another `workflowId` — of the same document, or of an external Arazzo document as `$sourceDescriptions.<name>.<workflowId>` (the `source-graph` feature).
 - **Parameters** in `path`, `query`, `querystring`, `header` and `cookie`, from the workflow and the step, with `$components.parameters` references and their `value` overrides.
 - **Request bodies**, with runtime expressions anywhere inside the payload and `replacements` by JSON Pointer or JSONPath.
 - **Criteria** — `simple` conditions (comparisons, `!`, `&&`, `||`, parentheses, property access and indexing), `regex`, and `jsonpath`. Pattern conditions interpolate `{$expressions}` before evaluation; simple conditions parse runtime expressions directly. A `jsonpath` condition passes on a non-empty nodelist, whatever the node holds.
@@ -386,7 +436,7 @@ The CLI now opts in by default, so previously skipped document defects can cause
 earlier, nonzero exit instead of a recovered success.
 
 Input-schema compilation is optional; see the input-validation policy below.
-Preparation does not add XPath, AsyncAPI or external workflow execution.
+Preparation does not add XPath or AsyncAPI execution.
 Source identity loading is opt-in and occurs before preparation;
 referenced OpenAPI resolution uses the already-supplied document graph.
 Checked JSONPath execution supports `rfc9535`, not the alternate Goessner draft.
@@ -528,6 +578,16 @@ start reports `InputError::NotObject`, even with schema validation disabled.
 Passing a subsequent object batch replaces the inputs and clears that error.
 The CLI now validates input schemas by default; `--skip-input-validation` is the
 explicit compatibility opt-out. `arazzo validate` remains structural validation.
+
+External workflow references (`$sourceDescriptions.<name>.<workflowId>`) used to
+fail with `ExecutionError::Unsupported`. They now resolve through a source registry
+and fail with the new `ExecutionError::ExternalWorkflow` when the source is
+undeclared, not Arazzo, unsupplied, or lacks the workflow. `StepRecord::document`
+and `PreparationDiagnostic::document` are new fields of `#[non_exhaustive]`
+structs. Code that builds these structs or matches every enum variant must be
+updated. An unknown workflow in an external document is reported qualified by
+that document's identity. Local calls, their reports and their diagnostics are
+unchanged.
 
 ## What it does not run
 
