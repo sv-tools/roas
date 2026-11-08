@@ -103,7 +103,7 @@ attrs = ['#[validate(length(min = 1))]']
 
 Types and fields are addressed by the names in the description, never by the generated identifiers. User attributes are parsed as Rust, and the serde keys that carry the wire contract — `default`, `skip_serializing_if`, `deserialize_with`, `rename`, `flatten` and the container-level equivalents — are refused by name rather than silently doubled. `x-rust-attrs` in a description is code from whoever wrote the description, so it is applied only under `allow_codegen_extensions = true`.
 
-Generated Rust is validated with `syn` before it is returned and formatted with `rustfmt` when one is on the path.
+Generated Rust is validated with `syn` before it is returned and formatted with `rustfmt` when one is on the path. `rustfmt` always runs with an empty configuration, so a `rustfmt.toml` nearby never changes the output; when it cannot run, the output is unformatted and a warning says so.
 
 ## Input and fidelity
 
@@ -121,13 +121,15 @@ use roas_codegen::{Target, WriteOptions, check, write};
 let out = std::path::Path::new("src/api");
 let report = write(generation, out, Target::Rust, &WriteOptions::new("petstore"))?;
 println!("{} written, {} removed", report.written.len(), report.removed.len());
-assert!(check(generation, out, Target::Rust, "petstore")?.is_clean());
+assert!(check(generation, out, Target::Rust, &WriteOptions::new("petstore"))?.is_clean());
 # Ok(()) }
 ```
 
 - **Only owned files change.** A path another target's manifest owns is refused, and so is an existing file no manifest owns unless `overwrite_unowned` is set. Two targets with different labels can share a directory.
 - **Ownership is claimed before anything is written.** Every check runs first, including that no path goes through a symbolic link. A pending manifest owning the previous and the new files is written, each file is written to a temporary sibling and renamed into place, and the final manifest replaces the pending one, so an interrupted run is completed by the next one.
 - **Errors stop the write.** A generation carrying `Error` diagnostics is refused unless `allow_partial` is set, and even then files the previous run wrote are kept rather than removed.
+- **Labels belong to one description.** The manifest records the description's file name, and a different description under the same label is refused, so two `openapi.yaml` files from different folders cannot overwrite each other.
+- **One run at a time.** A lock file in the output directory spans the run. Ownership is compared case-insensitively, and nothing below the output directory is reached through a symbolic link.
 - **Stale files are removed only if unedited.** A file the previous run wrote and this one does not is deleted when it still holds the generated content, and kept and reported otherwise.
 
 The `roas` command line wraps all of this as `roas openapi generate`, with `--check` for CI.

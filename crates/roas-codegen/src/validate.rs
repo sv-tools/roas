@@ -8,6 +8,20 @@ use roas::validation::{Options, Validate, ValidationError};
 use std::fmt;
 use thiserror::Error;
 
+/// The `roas` validation checks that say nothing about the schemas being
+/// generated: unused components, undeclared tags, empty titles, versions
+/// and response descriptions, duplicate operation ids, malformed URLs.
+/// Generation starts from this set; a caller adds to it.
+pub fn generation_options() -> EnumSet<Options> {
+    roas::validation::IGNORE_UNUSED
+        | Options::IgnoreMissingTags
+        | Options::IgnoreNonUniqOperationIDs
+        | Options::IgnoreEmptyInfoTitle
+        | Options::IgnoreEmptyInfoVersion
+        | Options::IgnoreEmptyResponseDescription
+        | Options::IgnoreInvalidUrls
+}
+
 /// Validate a document with `roas`, skipping external references.
 ///
 /// The result is the only way to obtain a [`ValidatedSourceDocument`],

@@ -18,6 +18,8 @@ pub(crate) struct Output {
     pub files: Vec<GeneratedFile>,
     pub dependencies: Vec<RustDependency>,
     pub diagnostics: Vec<Diagnostic>,
+    /// `rustfmt` ran and formatted the output.
+    pub formatted: bool,
 }
 
 pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, GenerateError> {
@@ -25,7 +27,10 @@ pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, Gen
     let rendered = render::render_module(&built.file)?;
     let path = format!("{}.rs", config.rust.module);
     format::validate(&rendered, &path)?;
-    let contents = format::format(&rendered);
+    let (contents, formatted) = match format::format(&rendered) {
+        Some(formatted) => (formatted, true),
+        None => (rendered, false),
+    };
     Ok(Output {
         files: vec![GeneratedFile {
             path: path.into(),
@@ -33,5 +38,6 @@ pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, Gen
         }],
         dependencies: built.dependencies,
         diagnostics: built.diagnostics,
+        formatted,
     })
 }

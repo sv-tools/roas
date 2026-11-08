@@ -48,5 +48,5 @@ pub use diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 pub use generate::{Dependencies, GenerateError, GeneratedFile, Generation, generate};
 pub use rust::RustDependency;
 pub use source::{Fidelity, Input, SourceDocument, SourceError, SourceVersion};
-pub use validate::{SourceValidationError, ValidatedSourceDocument, validate};
+pub use validate::{SourceValidationError, ValidatedSourceDocument, generation_options, validate};
 pub use write::{CheckReport, WriteError, WriteOptions, WriteReport, check, manifest_name, write};

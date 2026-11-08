@@ -29,6 +29,9 @@ pub struct Dependencies {
 /// generator had to say, and the dependency list.
 #[derive(Debug, Clone)]
 pub struct Generation {
+    /// The description's file name, as the generated header quotes it.
+    /// The writer records it so two descriptions cannot share a label.
+    pub source: String,
     pub files: Vec<GeneratedFile>,
     pub diagnostics: Vec<Diagnostic>,
     pub dependencies: Dependencies,
@@ -179,6 +182,7 @@ pub fn generate(
             message: format!("`jsonSchemaDialect: {dialect}` is not a dialect this generator understands, so no schema is generated; only the OAS dialect and Draft 2020-12 are"),
         });
         return Ok(Generation {
+            source: source_name(document.uri()),
             files: Vec::new(),
             diagnostics,
             dependencies: Dependencies::default(),
@@ -239,6 +243,15 @@ pub fn generate(
         Target::Go => return Err(GenerateError::Unsupported("the Go backend".into())),
     };
     diagnostics.extend(output.diagnostics);
+    if !output.formatted {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Unformatted,
+            schema_id: SchemaId::new(document.uri().clone(), ""),
+            pointer: String::new(),
+            message: "rustfmt could not be run, so the output is not formatted; it differs from a formatted run".into(),
+        });
+    }
     diagnostics.sort_by(|a, b| {
         a.pointer
             .cmp(&b.pointer)
@@ -247,6 +260,7 @@ pub fn generate(
     });
     diagnostics.dedup();
     Ok(Generation {
+        source: source_name(document.uri()),
         files: output.files,
         diagnostics,
         dependencies: Dependencies {

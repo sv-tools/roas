@@ -8,8 +8,16 @@
 //!   — so the next run finds it, and two targets can share a directory:
 //!   `petstore` Rust and `billing` Rust each keep their own manifest.
 //! - **Nothing is taken that is not owned.** A path another target's
-//!   manifest owns is refused. So is an existing file no manifest owns,
-//!   unless the caller allows overwriting it.
+//!   manifest owns is refused, compared case-insensitively since the disk
+//!   may be. So is an existing file no manifest owns, unless the caller
+//!   allows overwriting it. One run at a time: a lock file in the output
+//!   directory spans the whole run, so two targets cannot both pass the
+//!   ownership checks and then race.
+//! - **Nothing below the output directory is followed.** A symbolic link
+//!   as the output directory or on any generated path is refused. The
+//!   path *to* the output directory is the caller's choice and is used as
+//!   given: refusing links there would reject ordinary layouts, such as
+//!   macOS's `/tmp`.
 //! - **Ownership is claimed before anything is written.** Every check runs
 //!   first. Then a pending manifest is written that owns both the previous
 //!   run's files and this run's, each file is written to a temporary
@@ -88,7 +96,7 @@ pub struct CheckReport {
     /// Owned by the previous run and no longer generated.
     pub stale: Vec<PathBuf>,
     /// The manifest is absent, or differs from the one a [`write()`]
-    /// would leave.
+    /// would leave in anything but the writer's version.
     pub manifest_outdated: bool,
 }
 
@@ -125,6 +133,18 @@ pub enum WriteError {
     #[error("{0} is a symbolic link; generated files are never written through one")]
     Symlink(PathBuf),
     #[error(
+        "{0} exists: another generation is writing to this directory, or one was interrupted; remove the file if no generation is running"
+    )]
+    Locked(PathBuf),
+    #[error(
+        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; give this description its own label"
+    )]
+    SourceMismatch {
+        label: String,
+        previous: String,
+        current: String,
+    },
+    #[error(
         "the generation has {0} error diagnostic(s); nothing written (allow a partial write to override)"
     )]
     HasErrors(usize),
@@ -145,15 +165,58 @@ pub enum WriteError {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct Manifest {
     generator: String,
+    /// The roas-codegen version that wrote it. Informational: it is not
+    /// compared, so a patch upgrade with identical output changes nothing.
     version: String,
     label: String,
     language: String,
+    /// The description's file name; two descriptions may not share a label.
+    #[serde(default)]
+    source: String,
     files: BTreeMap<String, String>,
+}
+
+impl Manifest {
+    /// Equal in everything that matters: all but the writer's version.
+    fn same_as(&self, other: &Manifest) -> bool {
+        self.generator == other.generator
+            && self.label == other.label
+            && self.language == other.language
+            && self.source == other.source
+            && self.files == other.files
+    }
 }
 
 const MANIFEST_PREFIX: &str = ".roas-codegen-";
 const MANIFEST_SUFFIX: &str = ".json";
 const TMP_MARKER: &str = ".roas-tmp-";
+const LOCK_FILE: &str = ".roas-codegen.lock";
+
+/// Holds the output directory's lock for one run; removes it when dropped.
+struct DirLock(PathBuf);
+
+impl DirLock {
+    fn acquire(out_dir: &Path) -> Result<DirLock, WriteError> {
+        let path = out_dir.join(LOCK_FILE);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => Ok(DirLock(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(WriteError::Locked(path))
+            }
+            Err(e) => Err(WriteError::Io { path, source: e }),
+        }
+    }
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 fn language(target: Target) -> &'static str {
     match target {
@@ -275,7 +338,7 @@ fn other_owners(out_dir: &Path, ours: &str) -> Result<BTreeMap<String, PathBuf>,
         let path = entry.path();
         if let Some(manifest) = read_manifest(&path)? {
             for file in manifest.files.keys() {
-                owners.insert(file.clone(), PathBuf::from(&name));
+                owners.insert(file.to_ascii_lowercase(), PathBuf::from(&name));
             }
         }
     }
@@ -290,6 +353,7 @@ fn planned(generation: &Generation) -> Result<BTreeMap<String, &str>, WriteError
         let name = key.rsplit('/').next().unwrap_or(&key);
         if (name.starts_with(MANIFEST_PREFIX) && name.ends_with(MANIFEST_SUFFIX))
             || name.contains(TMP_MARKER)
+            || name.eq_ignore_ascii_case(LOCK_FILE)
         {
             return Err(WriteError::ReservedPath(file.path.clone()));
         }
@@ -386,17 +450,44 @@ fn error_count(generation: &Generation) -> usize {
 }
 
 /// The manifest exactly as it is written, so a check can compare bytes.
-fn manifest_text(label: &str, target: Target, files: BTreeMap<String, String>) -> String {
-    let manifest = Manifest {
+fn manifest_for(
+    label: &str,
+    target: Target,
+    source: &str,
+    files: BTreeMap<String, String>,
+) -> Manifest {
+    Manifest {
         generator: "roas-codegen".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         label: label.to_owned(),
         language: language(target).into(),
+        source: source.to_owned(),
         files,
-    };
-    let mut text = serde_json::to_string_pretty(&manifest).expect("a manifest serializes");
+    }
+}
+
+fn manifest_text(manifest: &Manifest) -> String {
+    let mut text = serde_json::to_string_pretty(manifest).expect("a manifest serializes");
     text.push('\n');
     text
+}
+
+/// Refuse a run whose description differs from the one that owns the
+/// label: two descriptions with the same file name in different folders
+/// would otherwise overwrite each other's output without a word.
+fn check_source(
+    previous: &Manifest,
+    generation: &Generation,
+    label: &str,
+) -> Result<(), WriteError> {
+    if !previous.source.is_empty() && previous.source != generation.source {
+        return Err(WriteError::SourceMismatch {
+            label: label.to_owned(),
+            previous: previous.source.clone(),
+            current: generation.source.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Write `content` to `path` through a temporary sibling and a rename.
@@ -465,14 +556,18 @@ pub fn write(
     }
     let manifest_file = manifest_name(&options.label, target)?;
     check_out_dir(out_dir)?;
+    fs::create_dir_all(out_dir).map_err(io(out_dir))?;
+    check_out_dir(out_dir)?;
+    let _lock = DirLock::acquire(out_dir)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
+    check_source(&previous, generation, &options.label)?;
     let others = other_owners(out_dir, &manifest_file)?;
     let planned = planned(generation)?;
 
     // Every check before the first write.
     for path in planned.keys() {
-        if let Some(manifest) = others.get(path) {
+        if let Some(manifest) = others.get(&path.to_ascii_lowercase()) {
             return Err(WriteError::OwnedByOther {
                 path: PathBuf::from(path),
                 manifest: manifest.clone(),
@@ -502,11 +597,11 @@ pub fn write(
     // Claim ownership of everything this run may touch before touching it.
     let mut pending = previous.files.clone();
     pending.extend(hashes.clone());
+    let pending = manifest_for(&options.label, target, &generation.source, pending);
     fs::create_dir_all(out_dir).map_err(io(out_dir))?;
-    write_atomic(
-        &manifest_path,
-        manifest_text(&options.label, target, pending).as_bytes(),
-    )?;
+    if !pending.same_as(&previous) {
+        write_atomic(&manifest_path, manifest_text(&pending).as_bytes())?;
+    }
 
     let mut report = WriteReport {
         manifest: PathBuf::from(&manifest_file),
@@ -541,9 +636,10 @@ pub fn write(
             }
         }
     }
-    let text = manifest_text(&options.label, target, owned);
-    if fs::read(&manifest_path).ok().as_deref() != Some(text.as_bytes()) {
-        write_atomic(&manifest_path, text.as_bytes())?;
+    let final_manifest = manifest_for(&options.label, target, &generation.source, owned);
+    let on_disk = read_manifest(&manifest_path)?;
+    if !on_disk.is_some_and(|m| m.same_as(&final_manifest)) {
+        write_atomic(&manifest_path, manifest_text(&final_manifest).as_bytes())?;
     }
     Ok(report)
 }
@@ -567,6 +663,7 @@ pub fn check(
     check_out_dir(out_dir)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
+    check_source(&previous, generation, &options.label)?;
     let planned = planned(generation)?;
     check_path(out_dir, &manifest_file)?;
     for path in planned.keys().chain(previous.files.keys()) {
@@ -594,9 +691,9 @@ pub fn check(
             report.stale.push(PathBuf::from(path));
         }
     }
-    let expected = manifest_text(&options.label, target, owned);
+    let expected = manifest_for(&options.label, target, &generation.source, owned);
     report.manifest_outdated =
-        fs::read(&manifest_path).ok().as_deref() != Some(expected.as_bytes());
+        !read_manifest(&manifest_path)?.is_some_and(|m| m.same_as(&expected));
     Ok(report)
 }
 
@@ -630,6 +727,7 @@ mod tests {
 
     fn generation(files: &[(&str, &str)]) -> Generation {
         Generation {
+            source: "test.json".into(),
             files: files
                 .iter()
                 .map(|(p, c)| GeneratedFile {
@@ -816,7 +914,7 @@ mod tests {
             .collect();
         fs::write(
             dir.join(manifest_name(label, Target::Rust).unwrap()),
-            manifest_text(label, Target::Rust, files),
+            manifest_text(&manifest_for(label, Target::Rust, "test.json", files)),
         )
         .unwrap();
     }
@@ -967,15 +1065,22 @@ mod tests {
         write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
         let path = dir.0.join(".roas-codegen-api-rust.json");
         let text = fs::read_to_string(&path).unwrap();
+        // Another writer version with identical output: nothing to do.
         fs::write(&path, text.replace(env!("CARGO_PKG_VERSION"), "0.0.0-old")).unwrap();
         assert!(
-            !check(&g, &dir.0, Target::Rust, &WriteOptions::new("api"))
+            check(&g, &dir.0, Target::Rust, &WriteOptions::new("api"))
                 .unwrap()
                 .is_clean()
         );
         write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
         assert!(
-            check(&g, &dir.0, Target::Rust, &WriteOptions::new("api"))
+            fs::read_to_string(&path).unwrap().contains("0.0.0-old"),
+            "not rewritten"
+        );
+        // A real difference in ownership is still outdated.
+        fs::write(&path, text.replace("fnv1a64:", "fnv1a64:0")).unwrap();
+        assert!(
+            !check(&g, &dir.0, Target::Rust, &WriteOptions::new("api"))
                 .unwrap()
                 .is_clean()
         );
@@ -1160,5 +1265,100 @@ mod tests {
             Err(WriteError::Symlink(_))
         ));
         assert!(fs::read_dir(&real).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_label_owned_by_another_description_is_refused() {
+        let dir = TempDir::new("source");
+        write(
+            &generation(&[("openapi.rs", "pets")]),
+            &dir.0,
+            Target::Rust,
+            &WriteOptions::new("openapi"),
+        )
+        .unwrap();
+        let mut billing = generation(&[("openapi.rs", "billing")]);
+        billing.source = "other.json".into();
+        for result in [
+            write(
+                &billing,
+                &dir.0,
+                Target::Rust,
+                &WriteOptions::new("openapi"),
+            )
+            .map(|_| ()),
+            check(
+                &billing,
+                &dir.0,
+                Target::Rust,
+                &WriteOptions::new("openapi"),
+            )
+            .map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(&error, WriteError::SourceMismatch { previous, current, .. } if previous == "test.json" && current == "other.json"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(dir.0.join("openapi.rs")).unwrap(),
+            "pets"
+        );
+    }
+
+    #[test]
+    fn one_run_at_a_time() {
+        let dir = TempDir::new("lock");
+        let lock = DirLock::acquire(&dir.0).unwrap();
+        let error = write(
+            &generation(&[("types.rs", "x")]),
+            &dir.0,
+            Target::Rust,
+            &WriteOptions::new("api"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, WriteError::Locked(_)), "{error}");
+        drop(lock);
+        write(
+            &generation(&[("types.rs", "x")]),
+            &dir.0,
+            Target::Rust,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(!dir.0.join(LOCK_FILE).exists(), "the lock is released");
+        let mut options = WriteOptions::new("api");
+        options.overwrite_unowned = true;
+        let error = write(
+            &generation(&[(LOCK_FILE, "x")]),
+            &dir.0,
+            Target::Rust,
+            &options,
+        )
+        .unwrap_err();
+        assert!(matches!(error, WriteError::ReservedPath(_)), "{error}");
+    }
+
+    #[test]
+    fn ownership_is_compared_case_insensitively() {
+        let dir = TempDir::new("case-paths");
+        write(
+            &generation(&[("Types.rs", "first")]),
+            &dir.0,
+            Target::Rust,
+            &WriteOptions::new("first"),
+        )
+        .unwrap();
+        let mut options = WriteOptions::new("second");
+        options.overwrite_unowned = true;
+        let error = write(
+            &generation(&[("types.rs", "second")]),
+            &dir.0,
+            Target::Rust,
+            &options,
+        )
+        .unwrap_err();
+        assert!(matches!(error, WriteError::OwnedByOther { .. }), "{error}");
     }
 }

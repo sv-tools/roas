@@ -177,7 +177,9 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     let document = SourceDocument::parse(input, uri)
         .with_context(|| format!("{}: cannot be read", source.display()))?;
 
-    let mut options = enumset::EnumSet::<Options>::new();
+    // Lint-only checks say nothing about the generated types, so they never
+    // block generation; `--ignore` relaxes further.
+    let mut options = roas_codegen::generation_options();
     for ignore in &args.ignore {
         options |= *ignore;
     }
@@ -234,6 +236,14 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     } else {
         errors
     };
+    let partial_failure = || {
+        anyhow!(
+            "{}: {failing} {}{}; wrote what could be generated",
+            source.display(),
+            if args.strict { "diagnostic" } else { "error" },
+            if failing == 1 { "" } else { "s" }
+        )
+    };
     if failing > 0 && !args.allow_partial {
         bail!(
             "{}: {failing} {}{}; nothing written (pass --allow-partial to write what was generated)",
@@ -244,12 +254,25 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     }
 
     if args.check {
+        if generation
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, roas_codegen::DiagnosticKind::Unformatted))
+        {
+            bail!(
+                "--check needs rustfmt: without it the output is unformatted and cannot match a formatted run"
+            );
+        }
         let mut check_options = WriteOptions::new(label.clone());
         check_options.allow_partial = args.allow_partial;
         let report = check(&generation, &args.out, target, &check_options)?;
         if report.is_clean() {
             eprintln!("{}: up to date", args.out.display());
-            return Ok(());
+            return if failing > 0 {
+                Err(partial_failure())
+            } else {
+                Ok(())
+            };
         }
         for (what, paths) in [
             ("changed", &report.changed),
@@ -300,6 +323,9 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
             })
             .collect();
         eprintln!("the generated code needs: {}", deps.join(", "));
+    }
+    if failing > 0 {
+        return Err(partial_failure());
     }
     Ok(())
 }
@@ -396,7 +422,8 @@ mod tests {
         assert!(!out.exists());
         let mut partial = args(&spec, &out);
         partial.allow_partial = true;
-        run_generate(partial).unwrap();
+        let error = run_generate(partial).unwrap_err().to_string();
+        assert!(error.contains("wrote what could be generated"), "{error}");
         assert!(
             std::fs::read_to_string(out.join("api.rs"))
                 .unwrap()
@@ -417,11 +444,13 @@ mod tests {
         let out = dir.0.join("out");
         let mut partial = args(&spec, &out);
         partial.allow_partial = true;
-        run_generate(partial).unwrap();
+        assert!(run_generate(partial).is_err());
         let mut check = args(&spec, &out);
         check.allow_partial = true;
         check.check = true;
-        run_generate(check).unwrap();
+        // Up to date, but the errors still fail the run.
+        let error = run_generate(check).unwrap_err().to_string();
+        assert!(error.contains("1 error"), "{error}");
     }
 
     #[test]
@@ -522,6 +551,52 @@ mod tests {
         assert_eq!(roas_codegen::rust_module_name("2024-api"), "m_2024_api");
         assert_eq!(roas_codegen::rust_module_name("--"), "api");
         assert_eq!(roas_codegen::rust_module_name("type"), "type_types");
+    }
+
+    #[test]
+    fn lint_only_checks_do_not_block_generation() {
+        let dir = TempDir::new("lint");
+        let spec = dir.0.join("api.json");
+        std::fs::write(
+            &spec,
+            r##"{"openapi": "3.2.0", "info": {"title": "", "version": "1"},
+                "paths": {"/p": {"get": {"tags": ["pets"], "responses": {"200": {"description": "ok"}}}}},
+                "components": {"schemas": {"Extra": {"type": "object", "properties": {"a": {"type": "string"}}}}}}"##,
+        )
+        .unwrap();
+        let out = dir.0.join("out");
+        let mut plain = args(&spec, &out);
+        plain.ignore.clear();
+        run_generate(plain).unwrap();
+        assert!(
+            std::fs::read_to_string(out.join("api.rs"))
+                .unwrap()
+                .contains("pub struct Extra {")
+        );
+    }
+
+    #[test]
+    fn a_label_shared_by_two_descriptions_is_refused() {
+        let dir = TempDir::new("stems");
+        std::fs::create_dir_all(dir.0.join("pets")).unwrap();
+        std::fs::create_dir_all(dir.0.join("billing")).unwrap();
+        let pets = dir.0.join("pets/pets.json");
+        let billing = dir.0.join("billing/billing.json");
+        std::fs::write(&pets, PET).unwrap();
+        std::fs::write(&billing, PET.replace("Pet", "Invoice")).unwrap();
+        let out = dir.0.join("out");
+        let mut first = args(&pets, &out);
+        first.label = Some("api".into());
+        run_generate(first).unwrap();
+        let mut second = args(&billing, &out);
+        second.label = Some("api".into());
+        let error = format!("{:#}", run_generate(second).unwrap_err());
+        assert!(error.contains("its own label"), "{error}");
+        assert!(
+            std::fs::read_to_string(out.join("api.rs"))
+                .unwrap()
+                .contains("pub struct Pet {")
+        );
     }
 
     #[test]
