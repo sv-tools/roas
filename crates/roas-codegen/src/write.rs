@@ -298,6 +298,23 @@ fn planned(generation: &Generation) -> Result<BTreeMap<String, &str>, WriteError
     Ok(out)
 }
 
+/// The output directory itself must not be a symbolic link, or every
+/// check below it would vouch for a directory somewhere else.
+fn check_out_dir(out_dir: &Path) -> Result<(), WriteError> {
+    match fs::symlink_metadata(out_dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(WriteError::Symlink(out_dir.to_path_buf()))
+        }
+        Ok(meta) if !meta.is_dir() => Err(WriteError::NotADirectory(out_dir.to_path_buf())),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(WriteError::Io {
+            path: out_dir.to_path_buf(),
+            source: e,
+        }),
+    }
+}
+
 /// Refuse a path that would be written through a symbolic link, or whose
 /// parent is something other than a directory — checked before anything
 /// is written, so the failure cannot strand a half-written run.
@@ -391,9 +408,36 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}{TMP_MARKER}{}", std::process::id()));
+    // The temporary file is created exclusively under a name nobody can
+    // predict: `create_new` refuses an existing path, symlink included, so
+    // a planted link can never redirect the write.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (tmp, mut file) = loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_file_name(format!(
+            ".{name}{TMP_MARKER}{}-{nanos:x}-{n}",
+            std::process::id()
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(WriteError::Io {
+                    path: tmp,
+                    source: e,
+                });
+            }
+        }
+    };
     let result = (|| {
-        let mut file = fs::File::create(&tmp).map_err(io(&tmp))?;
         file.write_all(content).map_err(io(&tmp))?;
         file.sync_all().map_err(io(&tmp))?;
         fs::rename(&tmp, path).map_err(io(path))
@@ -420,6 +464,7 @@ pub fn write(
         return Err(WriteError::HasErrors(errors));
     }
     let manifest_file = manifest_name(&options.label, target)?;
+    check_out_dir(out_dir)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     let others = other_owners(out_dir, &manifest_file)?;
@@ -519,6 +564,7 @@ pub fn check(
         return Err(WriteError::HasErrors(errors));
     }
     let manifest_file = manifest_name(&options.label, target)?;
+    check_out_dir(out_dir)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     let planned = planned(generation)?;
@@ -1058,5 +1104,61 @@ mod tests {
             write(&g, &out, Target::Rust, &WriteOptions::new("api")),
             Err(WriteError::Symlink(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_temporary_symlink_is_never_followed() {
+        let root = TempDir::new("tmp-symlink");
+        let out = root.0.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let victim = root.0.join("victim.txt");
+        fs::write(&victim, "precious").unwrap();
+        // Plant links under every name the old scheme would have used.
+        for name in ["types.rs", ".roas-codegen-api-rust.json"] {
+            std::os::unix::fs::symlink(
+                &victim,
+                out.join(format!(".{name}{TMP_MARKER}{}", std::process::id())),
+            )
+            .unwrap();
+        }
+        write(
+            &generation(&[("types.rs", "generated")]),
+            &out,
+            Target::Rust,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        assert_eq!(
+            fs::read_to_string(out.join("types.rs")).unwrap(),
+            "generated"
+        );
+        assert!(
+            !fs::symlink_metadata(out.join("types.rs"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_output_directory_that_is_a_symlink_is_refused() {
+        let root = TempDir::new("out-symlink");
+        let real = root.0.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = root.0.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let g = generation(&[("types.rs", "x")]);
+        assert!(matches!(
+            write(&g, &link, Target::Rust, &WriteOptions::new("api")),
+            Err(WriteError::Symlink(_))
+        ));
+        assert!(matches!(
+            check(&g, &link, Target::Rust, &WriteOptions::new("api")),
+            Err(WriteError::Symlink(_))
+        ));
+        assert!(fs::read_dir(&real).unwrap().next().is_none());
     }
 }
