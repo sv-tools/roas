@@ -151,10 +151,14 @@ pub(crate) struct InputSchemas {
 }
 
 impl InputSchemas {
+    /// `options` carries the run-wide policy and explicit schema resources;
+    /// `scope` is the declaring document's own sources and registry owner
+    /// (the same value for the entry description).
     pub(crate) fn compile(
         &mut self,
         description: &Description,
         options: &Options,
+        scope: &Options,
         workflow: &Workflow,
     ) -> Result<(), InputError> {
         options.check_inputs()?;
@@ -165,7 +169,7 @@ impl InputSchemas {
         #[cfg(feature = "input-validation")]
         {
             if self.backend.is_none() {
-                self.backend = Some(backend::Schemas::new(description, options)?);
+                self.backend = Some(backend::Schemas::new(description, options, scope)?);
             }
             self.backend
                 .as_mut()
@@ -174,7 +178,7 @@ impl InputSchemas {
         }
         #[cfg(not(feature = "input-validation"))]
         {
-            let _ = description;
+            let _ = (description, scope);
             Err(InputError::Unavailable)
         }
     }
@@ -220,11 +224,14 @@ mod backend {
         pub(super) fn new(
             description: &Description,
             options: &Options,
+            scope: &Options,
         ) -> Result<Self, InputError> {
-            let retrieval = options.input_schema_base.clone();
+            // An explicit schema base names the entry description's location;
+            // an external document's comes from its own registry entry.
+            let retrieval = scope.input_schema_base.clone();
             #[cfg(feature = "source-graph")]
             let retrieval = retrieval.or_else(|| {
-                options.registry.as_ref().and_then(|context| {
+                scope.registry.as_ref().and_then(|context| {
                     context
                         .registry
                         .document(context.owner)
@@ -234,12 +241,12 @@ mod backend {
             });
             let mut documents = BTreeMap::new();
             #[cfg(feature = "source-graph")]
-            if let Some(context) = &options.registry {
+            if let Some(context) = &scope.registry {
                 for (uri, value, base) in context.registry.schema_documents() {
                     documents.insert(uri.clone(), (base.clone(), value.clone()));
                 }
             }
-            for source in options.sources.values() {
+            for source in scope.sources.values() {
                 #[cfg(feature = "source-graph")]
                 if matches!(source.data, crate::operation::SourceData::Registry(_)) {
                     continue;
@@ -761,7 +768,7 @@ mod tests {
         let options = Options::new().input_validation(InputValidation::Draft202012);
         let mut schemas = InputSchemas::default();
         schemas
-            .compile(&description, &options, &description.workflows[0])
+            .compile(&description, &options, &options, &description.workflows[0])
             .unwrap();
         assert!(
             schemas

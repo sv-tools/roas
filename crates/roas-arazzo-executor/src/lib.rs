@@ -50,6 +50,7 @@
 //! Plans compile schemas; each run validates its actual bound inputs at entry.
 
 mod criterion;
+mod documents;
 mod expression;
 mod http;
 mod input;

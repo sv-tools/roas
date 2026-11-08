@@ -1,6 +1,7 @@
 //! Strict, IO-free preparation. Runtime values never participate in compilation.
 
 use crate::criterion::{self, Condition};
+use crate::documents::{Doc, Documents};
 use crate::expression;
 use crate::operation::{self, Endpoint};
 use crate::run::{self, ParameterTemplate};
@@ -43,6 +44,9 @@ pub enum PreparationIssue {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PreparationDiagnostic {
+    /// Canonical identity of the external Arazzo document `path` is in, or
+    /// `None` for the entry description.
+    pub document: Option<String>,
     /// Invocation context, including when `path` names a reusable component.
     pub workflow_id: Option<String>,
     /// Absent for workflow-wide actions, workflow outputs and root findings.
@@ -65,6 +69,9 @@ impl PreparationDiagnostic {
 
 impl fmt::Display for PreparationDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(document) = &self.document {
+            write!(f, "{document} ")?;
+        }
         write!(f, "{}", self.path)?;
         if let Some(offset) = self.offset {
             write!(f, " at byte {offset}")?;
@@ -123,7 +130,9 @@ pub(crate) struct Compiled<'d> {
 /// An immutable checked plan borrowing its description and configuration.
 ///
 /// Preparation validates all document structure and the selected workflow's
-/// potential calls, actions and dependencies. It performs no network IO and does
+/// potential calls, actions and dependencies, including workflows of external
+/// Arazzo documents reached through `$sourceDescriptions.<name>.<workflowId>`
+/// (each of those documents is structurally validated too). It performs no network IO and does
 /// not evaluate input instances or response-dependent expressions. When enabled,
 /// input schemas are compiled here and enforced on each workflow entry. Every run owns
 /// its mutable inputs, history, outputs, retry budgets and timers.
@@ -139,13 +148,14 @@ pub(crate) struct Compiled<'d> {
 /// ```
 #[derive(Debug)]
 pub struct PreparedWorkflow<'d> {
-    pub(crate) input_schemas: crate::input::InputSchemas,
+    /// Per document, indexed by [`Doc`].
+    pub(crate) input_schemas: Vec<crate::input::InputSchemas>,
     pub(crate) description: &'d Description,
     pub(crate) options: &'d Options,
     pub(crate) compiled: Compiled<'d>,
-    pub(crate) queue: Vec<&'d Workflow>,
-    pub(crate) orders: BTreeMap<&'d str, Vec<usize>>,
-    pub(crate) endpoints: BTreeMap<(&'d str, &'d str), Endpoint>,
+    pub(crate) queue: Vec<(Doc, &'d Workflow)>,
+    pub(crate) orders: BTreeMap<(Doc, &'d str), Vec<usize>>,
+    pub(crate) endpoints: BTreeMap<(Doc, &'d str, &'d str), Endpoint>,
     selected: &'d Workflow,
     diagnostics: Vec<PreparationDiagnostic>,
 }
@@ -254,6 +264,9 @@ pub fn prepare<'d>(
 /// Source names potentially needed by the selected workflow's execution closure.
 /// A bare operation ID requires every non-Arazzo source to prove uniqueness;
 /// qualified IDs and operation paths require only their named sources.
+/// An Arazzo source named by a `$sourceDescriptions.<name>.<workflowId>` call,
+/// dependency or action target is required too; the sources of that external
+/// document are its own and are not listed (graph loading traverses them in full).
 /// This performs structural/static checks but no IO or operation lookup. After
 /// supplying these sources, call [`prepare`] to resolve and check their contents.
 /// # Errors
@@ -271,7 +284,7 @@ pub fn required_sources(
 struct Compilation<'d> {
     compiler: Compiler<'d>,
     selected: &'d Workflow,
-    queue: Vec<&'d Workflow>,
+    queue: Vec<(Doc, &'d Workflow)>,
 }
 
 fn compile<'d>(
@@ -279,30 +292,30 @@ fn compile<'d>(
     options: &'d Options,
     resolve_operations: bool,
 ) -> Result<Compilation<'d>, PreparationError> {
+    let documents = Documents::new(description, options);
     let mut compiler = Compiler {
-        description,
+        input_schemas: (0..documents.len())
+            .map(|_| crate::input::InputSchemas::default())
+            .collect(),
+        documents,
+        current: Doc::ENTRY,
         options,
         compiled: Compiled::default(),
-        input_schemas: crate::input::InputSchemas::default(),
         diagnostics: Vec::new(),
         pending: BTreeSet::new(),
         visited: BTreeSet::new(),
+        validated: BTreeSet::from([Doc::ENTRY]),
         orders: BTreeMap::new(),
         endpoints: BTreeMap::new(),
         reads: BTreeMap::new(),
         required_sources: BTreeSet::new(),
         resolve_operations,
-        operations: crate::operation_index::Resolver::new(options),
+        operations: BTreeMap::new(),
     };
     if let Err(error) = options.check_inputs() {
         compiler.error(&Site::root("options.inputs"), error);
     }
-    if let Err(error) = description.validate(options.validation) {
-        for error in error.errors {
-            let site = compiler.model_site(&error.path);
-            compiler.finding(&site, None, PreparationIssue::Model(error));
-        }
-    }
+    compiler.validate_model();
     let selected = match &options.workflow {
         Some(id) => description
             .workflows
@@ -312,10 +325,14 @@ fn compile<'d>(
     };
     let mut queue = Vec::new();
     if let Some(index) = selected {
-        compiler.pending.insert(index);
-        match run::ordered_workflows(description, &description.workflows[index]) {
+        compiler.pending.insert((Doc::ENTRY, index));
+        match run::ordered_workflows(
+            &compiler.documents,
+            Doc::ENTRY,
+            &description.workflows[index],
+        ) {
             Ok(ordered) => queue = ordered,
-            Err(error) => compiler.error(
+            Err(error) => compiler.dependency_error(
                 &Site::workflow(index, &description.workflows[index]).field("dependsOn"),
                 error,
             ),
@@ -326,13 +343,18 @@ fn compile<'d>(
             ExecutionError::UnknownWorkflow(options.workflow.clone().unwrap_or_default()),
         );
     }
-    while let Some(index) = compiler.pending.pop_first() {
-        if compiler.visited.insert(index) {
+    while let Some((doc, index)) = compiler.pending.pop_first() {
+        if compiler.visited.insert((doc, index)) {
+            compiler.current = doc;
+            if compiler.validated.insert(doc) {
+                compiler.validate_model();
+            }
             compiler.workflow(index);
         }
     }
     compiler.diagnostics.sort_by_cached_key(|diagnostic| {
         (
+            diagnostic.document.clone(),
             path_order(&diagnostic.path),
             diagnostic.path.clone(),
             diagnostic.workflow_id.clone(),
@@ -425,19 +447,26 @@ impl<'d> Site<'d> {
 }
 
 struct Compiler<'d> {
-    input_schemas: crate::input::InputSchemas,
-    description: &'d Description,
+    input_schemas: Vec<crate::input::InputSchemas>,
+    documents: Documents<'d>,
+    /// The document whose workflow is being compiled; sites, references,
+    /// components and sources are all relative to it.
+    current: Doc,
+    /// Run-wide configuration: the entry document's options.
     options: &'d Options,
     compiled: Compiled<'d>,
     diagnostics: Vec<PreparationDiagnostic>,
-    pending: BTreeSet<usize>,
-    visited: BTreeSet<usize>,
-    orders: BTreeMap<&'d str, Vec<usize>>,
-    endpoints: BTreeMap<(&'d str, &'d str), Endpoint>,
-    reads: BTreeMap<(&'d str, &'d str), BTreeSet<String>>,
+    pending: BTreeSet<(Doc, usize)>,
+    visited: BTreeSet<(Doc, usize)>,
+    /// Documents already structurally validated.
+    validated: BTreeSet<Doc>,
+    orders: BTreeMap<(Doc, &'d str), Vec<usize>>,
+    endpoints: BTreeMap<(Doc, &'d str, &'d str), Endpoint>,
+    reads: BTreeMap<(Doc, &'d str, &'d str), BTreeSet<String>>,
+    /// Entry-document aliases only.
     required_sources: BTreeSet<String>,
     resolve_operations: bool,
-    operations: crate::operation_index::Resolver<'d>,
+    operations: BTreeMap<Doc, crate::operation_index::Resolver<'d>>,
 }
 
 fn checked_selector_kind(kind: &roas_arazzo::v1_1::SelectorType) -> Result<Language, SelectError> {
@@ -451,6 +480,53 @@ fn checked_selector_kind(kind: &roas_arazzo::v1_1::SelectorType) -> Result<Langu
 }
 
 impl<'d> Compiler<'d> {
+    fn description(&self) -> &'d Description {
+        self.documents.get(self.current).description
+    }
+
+    /// The current document's own sources, base URLs and registry owner.
+    fn scope(&self) -> &'d Options {
+        self.documents.get(self.current).options
+    }
+
+    fn operations(&mut self) -> &mut crate::operation_index::Resolver<'d> {
+        let options = self.scope();
+        self.operations
+            .entry(self.current)
+            .or_insert_with(|| crate::operation_index::Resolver::new(options))
+    }
+
+    fn validate_model(&mut self) {
+        if let Err(error) = self.description().validate(self.options.validation) {
+            for error in error.errors {
+                let site = self.model_site(&error.path);
+                self.finding(&site, None, PreparationIssue::Model(error));
+            }
+        }
+    }
+
+    /// An Arazzo alias of the current document that no supplied document
+    /// backs yet: listing it is what [`required_sources`] is for.
+    fn unsupplied_external(&self, reference: &str) -> Option<&'d str> {
+        let alias = Documents::alias(reference)?;
+        let source = self
+            .description()
+            .source_descriptions
+            .iter()
+            .find(|source| source.name == alias)?;
+        (source.type_.is_none_or(|kind| kind == SourceType::Arazzo)
+            && self.documents.linked(self.current, alias).is_none())
+        .then_some(source.name.as_str())
+    }
+
+    /// `dependsOn` ordering errors. Before sources are supplied, an external
+    /// dependency cannot be ordered yet; [`Self::target`] lists its source.
+    fn dependency_error(&mut self, site: &Site<'d>, error: ExecutionError) {
+        if self.resolve_operations || !matches!(error, ExecutionError::ExternalWorkflow { .. }) {
+            self.error(site, error);
+        }
+    }
+
     fn model_site(&self, path: &str) -> Site<'d> {
         let mut site = Site::root(path);
         if let Some(rest) = path.strip_prefix("#.workflows[")
@@ -458,7 +534,7 @@ impl<'d> Compiler<'d> {
             && let Some(workflow) = index
                 .parse::<usize>()
                 .ok()
-                .and_then(|index| self.description.workflows.get(index))
+                .and_then(|index| self.description().workflows.get(index))
         {
             site.workflow = Some(workflow);
             if let Some(rest) = rest.strip_prefix(".steps[")
@@ -475,6 +551,7 @@ impl<'d> Compiler<'d> {
 
     fn finding(&mut self, site: &Site<'d>, offset: Option<usize>, issue: PreparationIssue) {
         self.diagnostics.push(PreparationDiagnostic {
+            document: self.documents.get(self.current).identity.map(str::to_owned),
             workflow_id: site.workflow.map(|workflow| workflow.workflow_id.clone()),
             step_id: site.step.map(|step| step.step_id.clone()),
             path: site.path.clone(),
@@ -494,46 +571,52 @@ impl<'d> Compiler<'d> {
     }
 
     fn target(&mut self, id: &str, site: &Site<'d>, invocation: bool) {
-        if id.starts_with('$') {
-            self.error(
-                site,
-                ExecutionError::Unsupported(format!(
-                    "external workflow `{id}` is not supported by this executor"
-                )),
-            );
-        } else if let Some(index) = self
-            .description
-            .workflows
-            .iter()
-            .position(|workflow| workflow.workflow_id == id)
+        let unsupplied = self.unsupplied_external(id);
+        if self.current == Doc::ENTRY
+            && let Some(alias) = Documents::alias(id)
+            && self.description().source_descriptions.iter().any(|source| {
+                source.name == alias && source.type_.is_none_or(|kind| kind == SourceType::Arazzo)
+            })
         {
-            if invocation && !self.description.workflows[index].depends_on.is_empty() {
-                self.error(site, ExecutionError::Unsupported(format!("called workflow `{id}` declares dependsOn; dependency scheduling for nested calls is not supported")));
+            self.required_sources.insert(alias.into());
+        }
+        match self.documents.resolve(self.current, id) {
+            Ok((doc, index)) => {
+                if invocation && !self.documents.workflow(doc, index).depends_on.is_empty() {
+                    self.error(site, ExecutionError::Unsupported(format!("called workflow `{id}` declares dependsOn; dependency scheduling for nested calls is not supported")));
+                }
+                self.pending.insert((doc, index));
             }
-            self.pending.insert(index);
-        } else {
-            self.error(site, ExecutionError::UnknownWorkflow(id.into()));
+            // Listed above; the caller supplies it before full preparation.
+            Err(_) if unsupplied.is_some() && !self.resolve_operations => {}
+            Err(error) => self.error(site, error),
         }
     }
 
     fn workflow(&mut self, index: usize) {
-        let workflow = &self.description.workflows[index];
+        let description = self.description();
+        let workflow = &description.workflows[index];
         let site = Site::workflow(index, workflow);
         // required_sources runs before documents are supplied; only full
         // preparation can compile schemas against the completed resource set.
         if self.resolve_operations
-            && let Err(error) = self
-                .input_schemas
-                .compile(self.description, self.options, workflow)
+            && let scope = self.scope()
+            && let Err(error) = self.input_schemas[self.current.0].compile(
+                description,
+                self.options,
+                scope,
+                workflow,
+            )
         {
             self.error(&site.field("inputs"), error);
         }
         for (index, id) in workflow.depends_on.iter().enumerate() {
             self.target(id, &site.item("dependsOn", index), false);
         }
-        // Dependency cycles in a called/recovery workflow are invalid too.
-        if let Err(error) = run::ordered_workflows(self.description, workflow) {
-            self.error(&site.field("dependsOn"), error);
+        // Dependency cycles in a called/recovery workflow are invalid too,
+        // including cycles that pass through another document.
+        if let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow) {
+            self.dependency_error(&site.field("dependsOn"), error);
         }
         self.success_actions(&workflow.success_actions, &site, "successActions");
         self.failure_actions(&workflow.failure_actions, &site, "failureActions");
@@ -548,22 +631,15 @@ impl<'d> Compiler<'d> {
             if let Some(id) = &step.workflow_id {
                 self.target(id, &step_site.field("workflowId"), true);
             } else {
-                let missing = self
-                    .description
-                    .source_descriptions
-                    .iter()
-                    .filter(|source| {
-                        source.type_ != Some(SourceType::Arazzo)
-                            && !self.options.sources.contains_key(&source.name)
-                    })
-                    .map(|source| source.name.clone())
-                    .collect::<Vec<_>>();
+                let missing = run::unsupplied(self.documents.get(self.current));
                 self.operation_sources(step, &step_site);
                 if self.resolve_operations {
-                    match self.operations.resolve(step, &missing) {
+                    match self.operations().resolve(step, &missing) {
                         Ok(endpoint) => {
-                            self.endpoints
-                                .insert((&workflow.workflow_id, &step.step_id), endpoint);
+                            self.endpoints.insert(
+                                (self.current, &workflow.workflow_id, &step.step_id),
+                                endpoint,
+                            );
                         }
                         Err(error) => self.error(
                             &step_site.field(if step.operation_path.is_some() {
@@ -577,10 +653,11 @@ impl<'d> Compiler<'d> {
                 }
             }
             let path = self.parameters(&site, &step_site);
-            if let Some(endpoint) = self
-                .endpoints
-                .get(&(workflow.workflow_id.as_str(), step.step_id.as_str()))
-                && let Err(reason) = run::url(endpoint, &path, &BTreeMap::new(), None)
+            if let Some(endpoint) = self.endpoints.get(&(
+                self.current,
+                workflow.workflow_id.as_str(),
+                step.step_id.as_str(),
+            )) && let Err(reason) = run::url(endpoint, &path, &BTreeMap::new(), None)
             {
                 self.error(
                     &step_site,
@@ -618,15 +695,20 @@ impl<'d> Compiler<'d> {
                 }
             }
         }
+        let current = self.current;
         match run::order_steps(workflow, |step| {
             Ok(self
                 .reads
-                .get(&(workflow.workflow_id.as_str(), step.step_id.as_str()))
+                .get(&(
+                    current,
+                    workflow.workflow_id.as_str(),
+                    step.step_id.as_str(),
+                ))
                 .cloned()
                 .unwrap_or_default())
         }) {
             Ok(order) => {
-                self.orders.insert(&workflow.workflow_id, order);
+                self.orders.insert((current, &workflow.workflow_id), order);
             }
             Err(error) => self.error(&site.field("steps"), error),
         }
@@ -652,7 +734,7 @@ impl<'d> Compiler<'d> {
                     step: Some(step),
                     ..base.item("parameters", index)
                 };
-                match run::parameter_templates(std::slice::from_ref(entry), self.description) {
+                match run::parameter_templates(std::slice::from_ref(entry), self.description()) {
                     Ok(templates) => {
                         for template in templates {
                             if overrides {
@@ -687,7 +769,7 @@ impl<'d> Compiler<'d> {
 
     fn need_source(&mut self, name: &str, site: &Site<'d>) {
         match self
-            .description
+            .description()
             .source_descriptions
             .iter()
             .find(|source| source.name == name)
@@ -704,7 +786,11 @@ impl<'d> Compiler<'d> {
                 )
             }
             Some(_) => {
-                self.required_sources.insert(name.into());
+                // An external document's sources are its own; graph loading
+                // traverses them in full once the document is selected.
+                if self.current == Doc::ENTRY {
+                    self.required_sources.insert(name.into());
+                }
             }
             None => self.error(
                 site,
@@ -738,9 +824,9 @@ impl<'d> Compiler<'d> {
                     &site,
                     ExecutionError::Unsupported("dynamic operation IDs are not supported".into()),
                 );
-            } else {
+            } else if self.current == Doc::ENTRY {
                 self.required_sources.extend(
-                    self.description
+                    self.description()
                         .source_descriptions
                         .iter()
                         .filter(|source| source.type_ != Some(SourceType::Arazzo))
@@ -766,27 +852,28 @@ impl<'d> Compiler<'d> {
             {
                 self.need_source(name, &site);
             } else {
-                let supplied = self.operations.matching_sources(document);
+                let supplied = self.operations().matching_sources(document);
                 let base = self
-                    .description
+                    .description()
                     .self_
                     .as_deref()
                     .and_then(|base| url::Url::parse(base).ok());
                 #[cfg(feature = "source-graph")]
                 let base = self
-                    .options
+                    .scope()
                     .registry
                     .as_ref()
                     .and_then(|context| context.registry.document(context.owner).ok())
                     .map(|owner| owner.base_uri().clone())
                     .or(base);
-                let matching = self
-                    .description
+                let description = self.description();
+                let operations = self.operations();
+                let matching = description
                     .source_descriptions
                     .iter()
                     .filter(|source| {
                         supplied.contains(&source.name)
-                            || self.operations.declared_source_matches(
+                            || operations.declared_source_matches(
                                 &source.name,
                                 &source.url,
                                 document,
@@ -831,7 +918,7 @@ impl<'d> Compiler<'d> {
     fn arguments(&mut self, parameters: &'d [ReusableOr<Parameter>], site: &Site<'d>) {
         for (index, entry) in parameters.iter().enumerate() {
             let site = site.item("parameters", index);
-            match run::parameter_templates(std::slice::from_ref(entry), self.description) {
+            match run::parameter_templates(std::slice::from_ref(entry), self.description()) {
                 Ok(parameters) => {
                     for parameter in parameters {
                         let site = if parameter.overridden.is_some() {
@@ -873,7 +960,7 @@ impl<'d> Compiler<'d> {
     ) {
         for (index, entry) in actions.iter().enumerate() {
             let site = site.item(field, index);
-            match run::success_action(entry, self.description) {
+            match run::success_action(entry, self.description()) {
                 Ok(action) => {
                     let site = site.component(entry);
                     self.action_target(
@@ -897,7 +984,7 @@ impl<'d> Compiler<'d> {
     ) {
         for (index, entry) in actions.iter().enumerate() {
             let site = site.item(field, index);
-            match run::failure_action(entry, self.description) {
+            match run::failure_action(entry, self.description()) {
                 Ok(action) => {
                     let site = site.component(entry);
                     self.action_target(
@@ -1081,84 +1168,83 @@ impl<'d> Compiler<'d> {
     }
 
     fn reference(&mut self, parsed: &Expression<'_>, site: &Site<'d>, offset: usize) {
-        let error = match parsed.root {
-            Root::Steps => {
-                let id = parsed.parts[0];
-                if !site
-                    .workflow
-                    .is_some_and(|workflow| workflow.steps.iter().any(|step| step.step_id == id))
-                {
-                    Some(expression::undeclared_step(parsed.text, id).into())
-                } else {
-                    if let (Some(workflow), Some(step)) = (site.workflow, site.step)
-                        && step.step_id != id
-                    {
-                        self.reads
-                            .entry((&workflow.workflow_id, &step.step_id))
-                            .or_default()
-                            .insert(id.into());
+        let error =
+            match parsed.root {
+                Root::Steps => {
+                    let id = parsed.parts[0];
+                    if !site.workflow.is_some_and(|workflow| {
+                        workflow.steps.iter().any(|step| step.step_id == id)
+                    }) {
+                        Some(expression::undeclared_step(parsed.text, id).into())
+                    } else {
+                        if let (Some(workflow), Some(step)) = (site.workflow, site.step)
+                            && step.step_id != id
+                        {
+                            self.reads
+                                .entry((self.current, &workflow.workflow_id, &step.step_id))
+                                .or_default()
+                                .insert(id.into());
+                        }
+                        None
                     }
-                    None
                 }
-            }
-            Root::Workflows
-                if !self
-                    .description
-                    .workflows
-                    .iter()
-                    .any(|workflow| workflow.workflow_id == parsed.parts[0]) =>
-            {
-                Some(expression::undeclared_workflow(parsed.text, parsed.parts[0]).into())
-            }
-            Root::Message => Some(ExpressionError::Unsupported(parsed.text.into()).into()),
-            Root::Sources
-                if !self
-                    .description
-                    .source_descriptions
-                    .iter()
-                    .any(|source| source.name == parsed.parts[0]) =>
-            {
-                Some(
+                Root::Workflows
+                    if !self
+                        .description()
+                        .workflows
+                        .iter()
+                        .any(|workflow| workflow.workflow_id == parsed.parts[0]) =>
+                {
+                    Some(expression::undeclared_workflow(parsed.text, parsed.parts[0]).into())
+                }
+                Root::Message => Some(ExpressionError::Unsupported(parsed.text.into()).into()),
+                Root::Sources
+                    if !self
+                        .description()
+                        .source_descriptions
+                        .iter()
+                        .any(|source| source.name == parsed.parts[0]) =>
+                {
+                    Some(
+                        ExpressionError::Missing {
+                            expression: parsed.text.into(),
+                            what: "a source description not declared by this document".into(),
+                        }
+                        .into(),
+                    )
+                }
+                Root::Self_ if self.description().self_.is_none() => Some(
                     ExpressionError::Missing {
                         expression: parsed.text.into(),
-                        what: "a source description not declared by this document".into(),
+                        what: "`$self`, which this description does not set".into(),
                     }
                     .into(),
-                )
-            }
-            Root::Self_ if self.description.self_.is_none() => Some(
-                ExpressionError::Missing {
-                    expression: parsed.text.into(),
-                    what: "`$self`, which this description does not set".into(),
+                ),
+                Root::Components if parsed.parts.len() >= 2 => {
+                    let exists =
+                        self.description().components.as_ref().is_some_and(
+                            |components| match parsed.parts[0] {
+                                "parameters" => components.parameters.contains_key(parsed.parts[1]),
+                                "successActions" => {
+                                    components.success_actions.contains_key(parsed.parts[1])
+                                }
+                                "failureActions" => {
+                                    components.failure_actions.contains_key(parsed.parts[1])
+                                }
+                                "inputs" => components.inputs.contains_key(parsed.parts[1]),
+                                _ => false,
+                            },
+                        );
+                    (!exists).then(|| {
+                        ExpressionError::Missing {
+                            expression: parsed.text.into(),
+                            what: "a component not declared by this document".into(),
+                        }
+                        .into()
+                    })
                 }
-                .into(),
-            ),
-            Root::Components if parsed.parts.len() >= 2 => {
-                let exists = self
-                    .description
-                    .components
-                    .as_ref()
-                    .is_some_and(|components| match parsed.parts[0] {
-                        "parameters" => components.parameters.contains_key(parsed.parts[1]),
-                        "successActions" => {
-                            components.success_actions.contains_key(parsed.parts[1])
-                        }
-                        "failureActions" => {
-                            components.failure_actions.contains_key(parsed.parts[1])
-                        }
-                        "inputs" => components.inputs.contains_key(parsed.parts[1]),
-                        _ => false,
-                    });
-                (!exists).then(|| {
-                    ExpressionError::Missing {
-                        expression: parsed.text.into(),
-                        what: "a component not declared by this document".into(),
-                    }
-                    .into()
-                })
-            }
-            _ => None,
-        };
+                _ => None,
+            };
         if let Some(error) = error {
             self.finding(site, Some(offset), PreparationIssue::Execution(error));
         }

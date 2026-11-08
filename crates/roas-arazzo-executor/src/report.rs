@@ -94,6 +94,10 @@ pub enum Performed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StepRecord {
+    /// Canonical identity of the external Arazzo document that declares the
+    /// workflow, or `None` for the entry description. Same-named workflows
+    /// and steps of different documents are told apart by this field.
+    pub document: Option<String>,
     /// The workflow the step belongs to.
     pub workflow_id: String,
     /// The step's id.
@@ -189,6 +193,9 @@ impl fmt::Display for ExecutionReport {
                     outcome,
                 } => write!(f, "- {} → workflow `{workflow_id}` {outcome}", step.step_id)?,
             }
+            if let Some(document) = &step.document {
+                write!(f, " (workflow `{}` of {document})", step.workflow_id)?;
+            }
             if step.attempt > 1 {
                 write!(f, " (attempt {})", step.attempt)?;
             }
@@ -260,6 +267,15 @@ pub enum ExecutionError {
     /// `dependsOn` describes a circle.
     #[error("`dependsOn` is circular: {0}")]
     Circular(String),
+    /// A `$sourceDescriptions.<name>.<workflowId>` reference names no
+    /// workflow of a supplied Arazzo document.
+    #[error("workflow reference `{reference}` cannot be resolved: {reason}")]
+    ExternalWorkflow {
+        /// The reference as written.
+        reference: String,
+        /// Why it names nothing runnable.
+        reason: String,
+    },
     /// The step's operation could not be found.
     #[error(transparent)]
     Operation(#[from] OperationError),
@@ -319,6 +335,7 @@ mod tests {
 
     fn record(step_id: &str, status: u16, passed: bool) -> StepRecord {
         StepRecord {
+            document: None,
             workflow_id: "buyPet".to_owned(),
             step_id: step_id.to_owned(),
             attempt: 1,
@@ -381,6 +398,7 @@ mod tests {
     #[test]
     fn a_step_that_called_a_workflow_reads_as_what_it_called() {
         let record = StepRecord {
+            document: None,
             workflow_id: "buyPet".to_owned(),
             step_id: "authenticate".to_owned(),
             attempt: 1,

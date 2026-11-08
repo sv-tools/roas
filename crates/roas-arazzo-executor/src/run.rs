@@ -6,6 +6,7 @@
 //! network at all.
 
 use crate::criterion::{self, CriterionError};
+use crate::documents::{Doc, Document, Documents};
 use crate::expression::{self, Exchange, ExpressionError, Scope, StepState, WorkflowState};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::operation::{self, Source};
@@ -57,6 +58,9 @@ pub struct Options {
     pub(crate) base_urls: BTreeMap<String, String>,
     #[cfg(feature = "source-graph")]
     pub(crate) registry: Option<crate::source_registry::OperationContext>,
+    #[cfg(feature = "source-graph")]
+    pub(crate) workflow_documents:
+        Option<std::sync::Arc<crate::source_registry::WorkflowDocuments>>,
     pub(crate) validation: enumset::EnumSet<roas_arazzo::validation::ValidationOptions>,
     pub(crate) portability_lints: bool,
     headers: Vec<(String, String)>,
@@ -235,6 +239,9 @@ enum Then {
 
 /// One workflow in progress.
 struct Frame<'d> {
+    /// The document declaring `workflow`, whose scope its expressions,
+    /// components, sources and workflow references resolve in.
+    doc: Doc,
     workflow: &'d Workflow,
     inputs: Value,
     /// Step indices in the order `dependsOn` puts them.
@@ -284,8 +291,8 @@ struct Pending {
     started: Instant,
 }
 
-/// The parts of the description every expression can see, whichever
-/// workflow is running.
+/// The parts of one document every expression in it can see, whichever of
+/// its workflows is running.
 struct Ambient<'d> {
     compiled: Option<&'d crate::prepare::Compiled<'d>>,
     /// `sourceDescriptions` as JSON, for `$sourceDescriptions.…`.
@@ -298,29 +305,82 @@ struct Ambient<'d> {
     workflows: BTreeSet<String>,
 }
 
+impl<'d> Ambient<'d> {
+    fn of(description: &Description, compiled: Option<&'d crate::prepare::Compiled<'d>>) -> Self {
+        let sources = serde_json::to_value(
+            description
+                .source_descriptions
+                .iter()
+                .map(|source| (source.name.clone(), source))
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .unwrap_or(Value::Null);
+        let components = description
+            .components
+            .as_ref()
+            .and_then(|components| serde_json::to_value(components).ok())
+            .unwrap_or(Value::Null);
+        Self {
+            compiled,
+            sources,
+            components,
+            self_: description.self_.clone(),
+            workflows: description
+                .workflows
+                .iter()
+                .map(|workflow| workflow.workflow_id.clone())
+                .collect(),
+        }
+    }
+}
+
 /// A workflow run, one request at a time.
 pub struct Run<'d> {
     description: &'d Description,
     options: &'d Options,
-    ambient: Ambient<'d>,
+    documents: Documents<'d>,
+    /// Per document, built when one of its workflows is first entered.
+    ambients: Vec<Option<Ambient<'d>>>,
     prepared: Option<&'d crate::PreparedWorkflow<'d>>,
     root_inputs: Map<String, Value>,
     frames: Vec<Frame<'d>>,
     /// Workflows still to run — dependencies first, then the one asked
     /// for.
-    queue: Vec<&'d Workflow>,
-    finished: BTreeMap<String, WorkflowState>,
+    queue: Vec<(Doc, &'d Workflow)>,
+    /// Finished workflows, per document: `$workflows.<id>` names a workflow
+    /// of the document the expression is written in.
+    finished: Vec<BTreeMap<String, WorkflowState>>,
     pending: Option<Pending>,
     wait: Option<Duration>,
     records: Vec<StepRecord>,
-    /// Source descriptions the run was not given, and which could hold
-    /// an operation — a bare `operationId` cannot be shown to be unique
-    /// while one of these is missing.
-    unsupplied: Vec<String>,
     taken: usize,
     report: Option<Box<ExecutionReport>>,
     halted: bool,
-    input_schemas: crate::input::InputSchemas,
+    /// Per document; validators are keyed by workflow id within it.
+    input_schemas: Vec<crate::input::InputSchemas>,
+}
+
+/// The ambient scope of a document that has an entered workflow.
+fn ambient<'a, 'd>(ambients: &'a [Option<Ambient<'d>>], doc: Doc) -> &'a Ambient<'d> {
+    ambients[doc.0]
+        .as_ref()
+        .expect("a document's ambient scope exists once a workflow of it is entered")
+}
+
+/// Source descriptions a document was not given, and which could hold an
+/// operation — a bare `operationId` cannot be shown to be unique while one of
+/// these is missing.
+pub(crate) fn unsupplied(document: &Document<'_>) -> Vec<String> {
+    document
+        .description
+        .source_descriptions
+        .iter()
+        // An Arazzo document holds workflows, not operations, so its absence
+        // cannot make an operation ambiguous.
+        .filter(|source| source.type_ != Some(SourceType::Arazzo))
+        .filter(|source| !document.options.sources.contains_key(&source.name))
+        .map(|source| source.name.clone())
+        .collect()
 }
 
 impl<'d> Run<'d> {
@@ -369,75 +429,54 @@ impl<'d> Run<'d> {
                 .ok_or_else(|| ExecutionError::UnknownWorkflow(String::new()))?,
         };
 
-        let sources = serde_json::to_value(
-            description
-                .source_descriptions
-                .iter()
-                .map(|source| (source.name.clone(), source))
-                .collect::<BTreeMap<_, _>>(),
-        )
-        .unwrap_or(Value::Null);
-        let components = description
-            .components
-            .as_ref()
-            .and_then(|components| serde_json::to_value(components).ok())
-            .unwrap_or(Value::Null);
-
+        let documents = Documents::new(description, options);
         let mut queue = match prepared {
             Some(prepared) => prepared.queue.clone(),
-            None => ordered_workflows(description, wanted)?,
+            None => ordered_workflows(&documents, Doc::ENTRY, wanted)?,
         };
-        let mut input_schemas = crate::input::InputSchemas::default();
+        let mut input_schemas: Vec<_> = (0..documents.len())
+            .map(|_| crate::input::InputSchemas::default())
+            .collect();
         let initial_inputs = Value::Object(root_inputs.clone());
         // Fail before any dependency can send when the selected workflow (or a
         // root dependency) cannot accept the shared initial argument object.
-        for workflow in &queue {
+        for (doc, workflow) in &queue {
             match prepared {
-                Some(prepared) => prepared.input_schemas.validate(workflow, &initial_inputs)?,
+                Some(prepared) => {
+                    prepared.input_schemas[doc.0].validate(workflow, &initial_inputs)?;
+                }
                 None => {
-                    input_schemas.compile(description, options, workflow)?;
-                    input_schemas.validate(workflow, &initial_inputs)?;
+                    let document = documents.get(*doc);
+                    input_schemas[doc.0].compile(
+                        document.description,
+                        options,
+                        document.options,
+                        workflow,
+                    )?;
+                    input_schemas[doc.0].validate(workflow, &initial_inputs)?;
                 }
             }
         }
-        let first = queue.remove(0);
+        let (doc, first) = queue.remove(0);
         let mut run = Self {
             description,
             options,
             prepared,
             root_inputs,
-            ambient: Ambient {
-                compiled: prepared.map(|prepared| &prepared.compiled),
-                sources,
-                components,
-                self_: description.self_.clone(),
-                workflows: description
-                    .workflows
-                    .iter()
-                    .map(|workflow| workflow.workflow_id.clone())
-                    .collect(),
-            },
+            ambients: (0..documents.len()).map(|_| None).collect(),
+            finished: vec![BTreeMap::new(); documents.len()],
+            documents,
             frames: Vec::new(),
             queue,
-            finished: BTreeMap::new(),
             pending: None,
             wait: None,
             records: Vec::new(),
-            unsupplied: description
-                .source_descriptions
-                .iter()
-                // An Arazzo document holds workflows, not operations, so
-                // its absence cannot make an operation ambiguous.
-                .filter(|source| source.type_ != Some(SourceType::Arazzo))
-                .filter(|source| !options.sources.contains_key(&source.name))
-                .map(|source| source.name.clone())
-                .collect(),
             taken: 0,
             report: None,
             halted: false,
             input_schemas,
         };
-        run.enter(first, initial_inputs, None)?;
+        run.enter(doc, first, initial_inputs, None)?;
         Ok(run)
     }
 
@@ -632,6 +671,7 @@ impl<'d> Run<'d> {
         // before output evaluation or action selection can stop the engine.
         let record = self.records.len();
         self.records.push(StepRecord {
+            document: self.documents.get(frame.doc).identity.map(str::to_owned),
             workflow_id,
             step_id: step_id.clone(),
             attempt: done.attempt,
@@ -658,8 +698,8 @@ impl<'d> Run<'d> {
                 frame,
                 &ahead,
                 done.exchange.as_ref(),
-                &self.finished,
-                &self.ambient,
+                &self.finished[frame.doc.0],
+                ambient(&self.ambients, frame.doc),
             );
 
             // Criteria, where a step states them, are the whole
@@ -706,9 +746,10 @@ impl<'d> Run<'d> {
         self.apply(action)
     }
 
-    /// Push a frame for `workflow`.
+    /// Push a frame for `workflow`, declared by document `doc`.
     fn enter(
         &mut self,
+        doc: Doc,
         workflow: &'d Workflow,
         inputs: Value,
         caller: Option<(String, Then)>,
@@ -719,33 +760,46 @@ impl<'d> Run<'d> {
                 at: self.options.limits.depth,
             });
         }
+        let document = *self.documents.get(doc);
         // Caller-free entries are the initial root/dependency queue: start_inner
         // already checked every one against the immutable root_inputs snapshot.
         // Calls and recovery entries have newly bound arguments, even when they
         // re-enter a workflow that was also in the initial queue.
         if caller.is_some() {
             match self.prepared {
-                Some(prepared) => prepared.input_schemas.validate(workflow, &inputs)?,
+                Some(prepared) => prepared.input_schemas[doc.0].validate(workflow, &inputs)?,
                 None => {
-                    self.input_schemas
-                        .compile(self.description, self.options, workflow)?;
-                    self.input_schemas.validate(workflow, &inputs)?;
+                    self.input_schemas[doc.0].compile(
+                        document.description,
+                        self.options,
+                        document.options,
+                        workflow,
+                    )?;
+                    self.input_schemas[doc.0].validate(workflow, &inputs)?;
                 }
             }
         }
+        let order = match self.prepared {
+            Some(prepared) => prepared
+                .orders
+                .get(&(doc, workflow.workflow_id.as_str()))
+                .cloned()
+                .ok_or_else(|| {
+                    ExecutionError::Unsupported("workflow is outside the prepared plan".into())
+                })?,
+            None => ordered_steps(workflow, document.description)?,
+        };
+        if self.ambients[doc.0].is_none() {
+            self.ambients[doc.0] = Some(Ambient::of(
+                document.description,
+                self.prepared.map(|prepared| &prepared.compiled),
+            ));
+        }
         self.frames.push(Frame {
+            doc,
             workflow,
             inputs,
-            order: match self.prepared {
-                Some(prepared) => prepared
-                    .orders
-                    .get(workflow.workflow_id.as_str())
-                    .cloned()
-                    .ok_or_else(|| {
-                        ExecutionError::Unsupported("workflow is outside the prepared plan".into())
-                    })?,
-                None => ordered_steps(workflow, self.description)?,
-            },
+            order,
             at: 0,
             steps: BTreeMap::new(),
             outputs: BTreeMap::new(),
@@ -769,7 +823,13 @@ impl<'d> Run<'d> {
     fn leave(&mut self) -> Result<(), ExecutionError> {
         let frame = self.frames.pop().expect("a frame to leave");
         let outputs = {
-            let scope = scope(&frame, &frame.steps, None, &self.finished, &self.ambient);
+            let scope = scope(
+                &frame,
+                &frame.steps,
+                None,
+                &self.finished[frame.doc.0],
+                ambient(&self.ambients, frame.doc),
+            );
             if frame.outcome == Outcome::Succeeded {
                 evaluate_outputs(&frame.workflow.outputs, &scope)?
             } else {
@@ -779,7 +839,7 @@ impl<'d> Run<'d> {
                 evaluate_what_ran(&frame.workflow.outputs, &scope)?
             }
         };
-        self.finished.insert(
+        self.finished[frame.doc.0].insert(
             frame.workflow.workflow_id.clone(),
             WorkflowState {
                 inputs: frame.inputs.clone(),
@@ -799,9 +859,9 @@ impl<'d> Run<'d> {
                     steps: std::mem::take(&mut self.records),
                 }));
             } else {
-                let next = self.queue.remove(0);
+                let (doc, next) = self.queue.remove(0);
                 let inputs = Value::Object(self.root_inputs.clone());
-                self.enter(next, inputs, None)?;
+                self.enter(doc, next, inputs, None)?;
             }
             return Ok(());
         };
@@ -854,7 +914,12 @@ impl<'d> Run<'d> {
                         default_pass: frame.outcome != Outcome::Failed && !timed_out,
                         attempt,
                         performed: Performed::Workflow {
-                            workflow_id: frame.workflow.workflow_id.clone(),
+                            // The reference as the calling step wrote it: a
+                            // local id, or `$sourceDescriptions.<name>.<id>`.
+                            workflow_id: parent.workflow.steps[index]
+                                .workflow_id
+                                .clone()
+                                .unwrap_or_else(|| frame.workflow.workflow_id.clone()),
                             outcome: frame.outcome,
                         },
                         elapsed,
@@ -864,51 +929,58 @@ impl<'d> Run<'d> {
         }
     }
 
-    /// A step that calls a workflow.
+    /// A step that calls a workflow, of this document or of another
+    /// Arazzo document it names as a source.
     fn call(&mut self, index: usize) -> Result<(), ExecutionError> {
         let frame = self.frames.last().expect("a frame to call from");
         let step = &frame.workflow.steps[index];
         let step_id = step.step_id.clone();
         let wanted = step.workflow_id.clone().unwrap_or_default();
-        if wanted.starts_with('$') {
-            return Err(ExecutionError::Unsupported(format!(
-                "step `{step_id}` calls `{wanted}`, and this executor runs only workflows of the description it was given"
-            )));
-        }
-        let workflow = self
-            .description
-            .workflows
-            .iter()
-            .find(|workflow| workflow.workflow_id == wanted)
-            .ok_or_else(|| ExecutionError::UnknownWorkflow(wanted.clone()))?;
+        let (doc, at) = self.documents.resolve(frame.doc, &wanted)?;
+        let workflow = self.documents.workflow(doc, at);
+        let description = self.documents.get(frame.doc).description;
 
         // A workflow step's parameters are the workflow's inputs.
         // "When the step... specifies a `workflowId`, then all
         // parameters map to workflow inputs", and a workflow's own
         // parameters are "applicable for all steps described under this
         // workflow... can be overridden at the step level but cannot be
-        // removed there" — so both lists go, the step's last.
-        let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
+        // removed there" — so both lists go, the step's last. They are
+        // evaluated in the caller's document; the callee sees only them.
+        let scope = scope(
+            frame,
+            &frame.steps,
+            None,
+            &self.finished[frame.doc.0],
+            ambient(&self.ambients, frame.doc),
+        );
         let mut inputs = Map::new();
-        for parameter in effective_parameters(frame.workflow, step, self.description)? {
+        for parameter in effective_parameters(frame.workflow, step, description)? {
             let parameter = parameter.resolve(&scope)?;
             inputs.insert(parameter.name, parameter.value);
         }
         let inputs = Value::Object(inputs);
-        self.enter(workflow, inputs, Some((step_id, Then::Advance)))
+        self.enter(doc, workflow, inputs, Some((step_id, Then::Advance)))
     }
 
     /// The inputs a called workflow starts with: the caller's own,
     /// with whatever parameters were passed to it written over them.
     fn arguments(&self, arguments: &[ReusableOr<Parameter>]) -> Result<Value, ExecutionError> {
         let frame = self.frames.last().expect("a frame to pass arguments from");
-        let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
+        let scope = scope(
+            frame,
+            &frame.steps,
+            None,
+            &self.finished[frame.doc.0],
+            ambient(&self.ambients, frame.doc),
+        );
         // A called workflow starts with what it was passed and nothing
         // else: only the parameters are forwarded, not the caller's
         // whole input context, so a child reading `$inputs.x` is asking
         // for something the calling step gave it.
         let mut inputs = Map::new();
-        for parameter in parameters(arguments, self.description, &scope)? {
+        let description = self.documents.get(frame.doc).description;
+        for parameter in parameters(arguments, description, &scope)? {
             inputs.insert(parameter.name, parameter.value);
         }
         Ok(Value::Object(inputs))
@@ -918,21 +990,34 @@ impl<'d> Run<'d> {
     fn build(&self, index: usize) -> Result<(HttpRequest, Exchange), ExecutionError> {
         let frame = self.frames.last().expect("a frame to build in");
         let step = &frame.workflow.steps[index];
+        let document = self.documents.get(frame.doc);
         let endpoint = match self.prepared {
             Some(prepared) => prepared
                 .endpoints
-                .get(&(frame.workflow.workflow_id.as_str(), step.step_id.as_str()))
+                .get(&(
+                    frame.doc,
+                    frame.workflow.workflow_id.as_str(),
+                    step.step_id.as_str(),
+                ))
                 .cloned()
                 .ok_or_else(|| {
                     ExecutionError::Unsupported("operation is outside the prepared plan".into())
                 })?,
-            None => crate::operation_index::Resolver::new(self.options)
-                .resolve(step, &self.unsupplied)?,
+            // A step's operation is one of its own document's sources, with
+            // that document's base-URL overrides.
+            None => crate::operation_index::Resolver::new(document.options)
+                .resolve(step, &unsupplied(document))?,
         };
-        let scope = scope(frame, &frame.steps, None, &self.finished, &self.ambient);
+        let scope = scope(
+            frame,
+            &frame.steps,
+            None,
+            &self.finished[frame.doc.0],
+            ambient(&self.ambients, frame.doc),
+        );
 
         // The workflow's parameters first, so a step's own override them.
-        let resolved = effective_parameters(frame.workflow, step, self.description)?
+        let resolved = effective_parameters(frame.workflow, step, document.description)?
             .into_iter()
             .map(|parameter| parameter.resolve(&scope))
             .collect::<Result<Vec<_>, _>>()?;
@@ -1030,7 +1115,14 @@ impl<'d> Run<'d> {
     ) -> Result<Action, ExecutionError> {
         let frame = self.frames.last().expect("a frame to decide in");
         let step = &frame.workflow.steps[index];
-        let scope = scope(frame, &frame.steps, exchange, &self.finished, &self.ambient);
+        let description = self.documents.get(frame.doc).description;
+        let scope = scope(
+            frame,
+            &frame.steps,
+            exchange,
+            &self.finished[frame.doc.0],
+            ambient(&self.ambients, frame.doc),
+        );
         let outcomes = &mut self.records[record].action_criteria;
 
         if passed {
@@ -1040,7 +1132,7 @@ impl<'d> Run<'d> {
                 .iter()
                 .chain(frame.workflow.success_actions.iter());
             for action in actions {
-                let action = success_action(action, self.description)?;
+                let action = success_action(action, description)?;
                 if !holds(&action.name, &action.criteria, &scope, outcomes)? {
                     continue;
                 }
@@ -1061,7 +1153,7 @@ impl<'d> Run<'d> {
             .iter()
             .chain(frame.workflow.failure_actions.iter());
         for (at, action) in actions.enumerate() {
-            let action = failure_action(action, self.description)?;
+            let action = failure_action(action, description)?;
             if !holds(&action.name, &action.criteria, &scope, outcomes)? {
                 continue;
             }
@@ -1162,14 +1254,10 @@ impl<'d> Run<'d> {
                     }
                     // The same, for a workflow.
                     (None, Some(workflow_id)) => {
-                        let workflow = self
-                            .description
-                            .workflows
-                            .iter()
-                            .find(|workflow| workflow.workflow_id == workflow_id)
-                            .ok_or_else(|| ExecutionError::UnknownWorkflow(workflow_id.clone()))?;
+                        let (doc, at) = self.documents.resolve(frame.doc, &workflow_id)?;
+                        let workflow = self.documents.workflow(doc, at);
                         let inputs = self.arguments(&arguments)?;
-                        self.enter(workflow, inputs, Some((step_id, Then::Retry)))
+                        self.enter(doc, workflow, inputs, Some((step_id, Then::Retry)))
                     }
                     // Nothing named: this step, again.
                     (None, None) => Ok(()),
@@ -1189,14 +1277,10 @@ impl<'d> Run<'d> {
             } => {
                 let index = frame.order[frame.at];
                 let step_id = frame.workflow.steps[index].step_id.clone();
-                let workflow = self
-                    .description
-                    .workflows
-                    .iter()
-                    .find(|workflow| workflow.workflow_id == workflow_id)
-                    .ok_or_else(|| ExecutionError::UnknownWorkflow(workflow_id.clone()))?;
+                let (doc, at) = self.documents.resolve(frame.doc, &workflow_id)?;
+                let workflow = self.documents.workflow(doc, at);
                 let inputs = self.arguments(&arguments)?;
-                self.enter(workflow, inputs, Some((step_id, Then::EndCaller)))
+                self.enter(doc, workflow, inputs, Some((step_id, Then::EndCaller)))
             }
             Action::Goto { .. } => Ok(()),
         }
@@ -1635,40 +1719,59 @@ fn encode(text: &str) -> String {
 /// The workflows to run, in an order that respects `dependsOn`, ending
 /// with the one that was asked for.
 pub(crate) fn ordered_workflows<'d>(
-    description: &'d Description,
+    documents: &Documents<'d>,
+    doc: Doc,
     wanted: &'d Workflow,
-) -> Result<Vec<&'d Workflow>, ExecutionError> {
+) -> Result<Vec<(Doc, &'d Workflow)>, ExecutionError> {
     let mut ordered = Vec::new();
     let mut visiting = BTreeSet::new();
     let mut done = BTreeSet::new();
-    visit(description, wanted, &mut ordered, &mut visiting, &mut done)?;
+    visit(
+        documents,
+        doc,
+        wanted,
+        &mut ordered,
+        &mut visiting,
+        &mut done,
+    )?;
     Ok(ordered)
 }
 
+/// `dependsOn` may name `$sourceDescriptions.<name>.<workflowId>`, so the
+/// walk is over (document, workflow) pairs: a dependency cycle through
+/// another document is still a cycle, while two documents' same-named
+/// workflows are different nodes.
 fn visit<'d>(
-    description: &'d Description,
+    documents: &Documents<'d>,
+    doc: Doc,
     workflow: &'d Workflow,
-    ordered: &mut Vec<&'d Workflow>,
-    visiting: &mut BTreeSet<String>,
-    done: &mut BTreeSet<String>,
+    ordered: &mut Vec<(Doc, &'d Workflow)>,
+    visiting: &mut BTreeSet<(Doc, String)>,
+    done: &mut BTreeSet<(Doc, String)>,
 ) -> Result<(), ExecutionError> {
-    if done.contains(&workflow.workflow_id) {
+    let key = (doc, workflow.workflow_id.clone());
+    if done.contains(&key) {
         return Ok(());
     }
-    if !visiting.insert(workflow.workflow_id.clone()) {
-        return Err(ExecutionError::Circular(workflow.workflow_id.clone()));
+    if !visiting.insert(key.clone()) {
+        return Err(ExecutionError::Circular(
+            documents.label(doc, &workflow.workflow_id),
+        ));
     }
-    for id in &workflow.depends_on {
-        let dependency = description
-            .workflows
-            .iter()
-            .find(|candidate| &candidate.workflow_id == id)
-            .ok_or_else(|| ExecutionError::UnknownWorkflow(id.clone()))?;
-        visit(description, dependency, ordered, visiting, done)?;
+    for reference in &workflow.depends_on {
+        let (target, at) = documents.resolve(doc, reference)?;
+        visit(
+            documents,
+            target,
+            documents.workflow(target, at),
+            ordered,
+            visiting,
+            done,
+        )?;
     }
-    visiting.remove(&workflow.workflow_id);
-    done.insert(workflow.workflow_id.clone());
-    ordered.push(workflow);
+    visiting.remove(&key);
+    done.insert(key);
+    ordered.push((doc, workflow));
     Ok(())
 }
 
