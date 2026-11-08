@@ -1,0 +1,4 @@
+{% block doc %}{% for line in f.doc %}    /// {{ line }}
+{% endfor %}{% endblock %}{% block attrs %}{% for a in f.attrs %}    {{ a }}
+{% endfor %}{% endblock %}{% block decl %}    pub {{ f.name }}: {{ f.ty }},
+{% endblock %}

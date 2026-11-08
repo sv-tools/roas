@@ -1,0 +1,6 @@
+{% block doc %}{% for line in t.doc %}/// {{ line }}
+{% endfor %}{% endblock %}{% block derives %}#[derive({{ t.derives | join(", ") }})]
+{% endblock %}{% block attrs %}{% for a in t.attrs %}{{ a }}
+{% endfor %}{% endblock %}pub struct {{ t.name }} {
+{% block fields %}{% for f in t.fields %}{% include "builtin/rust/field.rs.jinja" %}{% endfor %}{% endblock %}}
+{% block trailing %}{% endblock %}

@@ -1,0 +1,26 @@
+{% block doc %}{% for line in t.doc %}/// {{ line }}
+{% endfor %}/// Selected by `{{ t.tag }}`. Serialization writes the variant as it is;
+/// deserialization reads `{{ t.tag }}` first and then decodes the whole
+/// value as that variant, so the variant type keeps its own `{{ t.tag }}`.
+{% endblock %}{% block derives %}#[derive({{ t.derives | join(", ") }})]
+{% endblock %}{% block attrs %}#[serde(untagged)]
+{% for a in t.attrs %}{{ a }}
+{% endfor %}{% endblock %}pub enum {{ t.name }} {
+{% block variants %}{% for v in t.variants %}{% include "builtin/rust/variant.rs.jinja" %}{% endfor %}{% endblock %}}
+
+impl<'de> Deserialize<'de> for {{ t.name }} {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Tag<'a> {
+            #[serde(rename = {{ t.tag | tojson }}, borrow)]
+            tag: std::borrow::Cow<'a, str>,
+        }
+        let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
+        let tag: Tag<'_> = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+        match tag.tag.as_ref() {
+{% for v in t.variants %}            {{ v.value | tojson }} => serde_json::from_str(raw.get()).map(Self::{{ v.name }}).map_err(serde::de::Error::custom),
+{% endfor %}            other => Err(serde::de::Error::unknown_variant(other, &[{% for v in t.variants %}{{ v.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}])),
+        }
+    }
+}
+{% block trailing %}{% endblock %}

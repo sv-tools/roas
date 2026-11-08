@@ -1,0 +1,6 @@
+{% block doc %}{% for line in t.doc %}/// {{ line }}
+{% endfor %}{% endblock %}{% if t.kind == "alias" %}pub type {{ t.name }} = {{ t.inner }};
+{% else %}{% block derives %}#[derive({{ t.derives | join(", ") }})]
+{% endblock %}{% block attrs %}{% for a in t.attrs %}{{ a }}
+{% endfor %}{% endblock %}pub struct {{ t.name }}(pub {{ t.inner }});
+{% endif %}{% block trailing %}{% endblock %}

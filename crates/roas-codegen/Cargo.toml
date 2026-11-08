@@ -10,9 +10,9 @@ keywords = ["openapi", "codegen", "swagger", "rust", "golang"]
 description = "Generate Rust and Go types from OpenAPI 2.0 / 3.0 / 3.1 / 3.2 descriptions"
 readme = "README.md"
 categories = ["development-tools", "web-programming"]
-# `templates/` will join this list when the default templates land; it is
-# not `src`, so an explicit include is what keeps it in the package.
-include = ["src", "Cargo.toml", "README.md"]
+# `templates/` is not under `src`, so an explicit include is what keeps
+# the embedded defaults in the published package.
+include = ["src", "templates", "Cargo.toml", "README.md"]
 publish = true
 
 [package.metadata.docs.rs]
@@ -40,6 +40,9 @@ serde_yaml_ng.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 url.workspace = true
+minijinja.workspace = true
+include_dir.workspace = true
+syn.workspace = true
 
 [dev-dependencies]
 enumset.workspace = true
