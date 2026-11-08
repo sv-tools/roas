@@ -1,0 +1,6 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Shared API", "version": "1" },
+  "servers": [{ "url": "https://shared.example.test/v1" }],
+  "paths": { "/things": { "get": { "operationId": "getThing" } } }
+}

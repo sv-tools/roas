@@ -1,0 +1,6 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Entry API", "version": "1" },
+  "servers": [{ "url": "https://entry.example.test" }],
+  "paths": { "/things": { "get": { "operationId": "getThing" } } }
+}

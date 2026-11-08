@@ -260,7 +260,10 @@ pub(crate) struct ArazzoRunArgs {
 
     /// Send a source description's requests somewhere else, e.g.
     /// `--base-url petStore=http://127.0.0.1:8080` (repeatable) —
-    /// whatever its document says.
+    /// whatever its document says. A dotted name reaches a source of an
+    /// external Arazzo document by its alias path, e.g.
+    /// `--base-url shared.petStore=…` for the `petStore` source of the
+    /// document the entry calls `shared`; it applies to that document only.
     #[arg(long, value_name = "NAME=URL")]
     base_url: Vec<String>,
 
@@ -506,6 +509,11 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     }
     for base_url in &args.base_url {
         let (name, url) = split_pair(base_url, "--base-url")?;
+        // Source names cannot contain dots: a dotted name is an alias path
+        // into an external Arazzo document, applied once it is loaded.
+        if name.contains('.') {
+            continue;
+        }
         // Silently ignoring a typo would send the request to whatever
         // the document says — production, most likely.
         if !description
@@ -651,11 +659,51 @@ fn sources(
         })
         .chain(report.reference_diagnostics.iter().map(ToString::to_string))
         .collect::<Vec<_>>();
+    scoped_base_urls(&mut registry, root, &args.base_url)?;
     let any = registry
         .sources(root)?
         .iter()
         .any(|source| source.target.is_some());
     Ok((options.source_registry(&registry, root)?, any, diagnostics))
+}
+
+/// `--base-url a.b.api=URL`: follow loaded Arazzo aliases `a`, then `b`, and
+/// override `api` for that document only. Plain names are options of the entry.
+fn scoped_base_urls(
+    registry: &mut SourceRegistry,
+    root: roas_arazzo_executor::DocumentId,
+    base_urls: &[String],
+) -> Result<()> {
+    for base_url in base_urls {
+        let (path, url) = split_pair(base_url, "--base-url")?;
+        let Some((documents, name)) = path.rsplit_once('.') else {
+            continue;
+        };
+        let mut owner = root;
+        for alias in documents.split('.') {
+            owner = registry
+                .source(owner, alias)
+                .and_then(|link| link.target)
+                .filter(|target| {
+                    registry
+                        .document(*target)
+                        .is_ok_and(|document| document.arazzo().is_some())
+                })
+                .ok_or_else(|| {
+                    anyhow!(
+                        "`--base-url {path}=…`: `{alias}` names no loaded Arazzo source description"
+                    )
+                })?;
+        }
+        if registry.source(owner, name).is_none() {
+            bail!(
+                "`--base-url {path}=…`: `{name}` names no source description of {}",
+                registry.document(owner)?.identity()
+            );
+        }
+        registry.override_base_url(owner, name, url)?;
+    }
+    Ok(())
 }
 
 /// What a relative source description URL is resolved against.
@@ -1021,6 +1069,86 @@ mod tests {
         )];
         run_arazzo(ArazzoCommand::Run(args.into())).unwrap();
         assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    /// An entry whose only step calls a workflow of another Arazzo document,
+    /// which calls the API through its own `api` source.
+    fn external_workflow() -> (TempFile, TempFile, TempFile) {
+        let api = TempFile::write(
+            "external-api.json",
+            &json!({
+                "openapi": "3.1.0", "info": { "title": "A", "version": "1" },
+                "servers": [{ "url": "https://production.example.invalid" }],
+                "paths": { "/things": { "get": { "operationId": "getThing" } } }
+            }),
+        );
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::write(
+            "external-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [{ "name": "api", "url": api_name, "type": "openapi" }],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                    "parameters": [{ "name": "id", "in": "query", "value": "$inputs.id" }],
+                    "outputs": { "name": "$response.body#/name" } }],
+                    "outputs": { "name": "$steps.get.outputs.name" } }]
+            }),
+        );
+        let entry = TempFile::write(
+            "external-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": "https://example.invalid/shared.arazzo.json", "type": "arazzo" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.shared.child",
+                    "parameters": [{ "name": "id", "value": "$inputs.petId" }] }],
+                    "outputs": { "name": "$steps.call.outputs.name" } }]
+            }),
+        );
+        (entry, child, api)
+    }
+
+    #[test]
+    fn run_executes_a_workflow_of_a_supplied_external_document() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (entry, child, api) = external_workflow();
+        let mut args = run_args(&entry, &api, &base);
+        args.source = vec![format!("shared={}", child.0.display())];
+        // The child's own source is loaded beside it, and only its
+        // requests are redirected.
+        args.load = vec![LoaderKind::File];
+        args.base_url = vec![format!("shared.api={base}")];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        let asked = join.join().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].starts_with("GET /things?id=7 "), "{asked:?}");
+    }
+
+    #[test]
+    fn run_refuses_a_scoped_base_url_that_names_nothing() {
+        let (entry, child, api) = external_workflow();
+        for (base_url, expected) in [
+            (
+                "ghost.api=http://127.0.0.1:9",
+                "`--base-url ghost.api=…`: `ghost` names no loaded Arazzo source description",
+            ),
+            (
+                "shared.nope=http://127.0.0.1:9",
+                "`--base-url shared.nope=…`: `nope` names no source description of file://",
+            ),
+        ] {
+            let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+            args.source = vec![format!("shared={}", child.0.display())];
+            args.load = vec![LoaderKind::File];
+            args.base_url = vec![base_url.to_owned()];
+            args.quiet = true;
+            let error = run_arazzo_run(args).unwrap_err().to_string();
+            assert!(error.starts_with(expected), "{error}");
+        }
     }
 
     #[test]

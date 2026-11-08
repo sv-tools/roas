@@ -1,0 +1,88 @@
+{
+  "arazzo": "1.1.0",
+  "info": {
+    "title": "Entry",
+    "version": "1"
+  },
+  "sourceDescriptions": [
+    {
+      "name": "shared",
+      "url": "shared/shared.arazzo.json",
+      "type": "arazzo"
+    },
+    {
+      "name": "api",
+      "url": "api.openapi.json",
+      "type": "openapi"
+    }
+  ],
+  "workflows": [
+    {
+      "workflowId": "main",
+      "steps": [
+        {
+          "stepId": "get",
+          "operationId": "$sourceDescriptions.api.getThing",
+          "parameters": [
+            {
+              "name": "id",
+              "in": "query",
+              "value": "$inputs.id"
+            }
+          ],
+          "outputs": {
+            "value": "$response.body#/value"
+          }
+        },
+        {
+          "stepId": "local",
+          "workflowId": "child",
+          "parameters": [
+            {
+              "name": "id",
+              "value": "local-{$steps.get.outputs.value}"
+            }
+          ]
+        },
+        {
+          "stepId": "external",
+          "workflowId": "$sourceDescriptions.shared.child",
+          "parameters": [
+            {
+              "name": "id",
+              "value": "$steps.get.outputs.value"
+            }
+          ]
+        }
+      ],
+      "outputs": {
+        "local": "$steps.local.outputs.value",
+        "external": "$steps.external.outputs.value",
+        "origin": "$steps.external.outputs.origin",
+        "finished": "$workflows.child.outputs.value"
+      }
+    },
+    {
+      "workflowId": "child",
+      "steps": [
+        {
+          "stepId": "get",
+          "operationId": "$sourceDescriptions.api.getThing",
+          "parameters": [
+            {
+              "name": "id",
+              "in": "query",
+              "value": "$inputs.id"
+            }
+          ],
+          "outputs": {
+            "value": "$response.body#/value"
+          }
+        }
+      ],
+      "outputs": {
+        "value": "$steps.get.outputs.value"
+      }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "arazzo": "1.1.0",
+  "$self": "https://example.test/shared/shared.arazzo.json",
+  "info": { "title": "Shared", "version": "1" },
+  "sourceDescriptions": [
+    { "name": "api", "url": "api.openapi.json", "type": "openapi" }
+  ],
+  "components": {
+    "parameters": {
+      "tenant": { "name": "X-Tenant", "in": "header", "value": "shared" }
+    },
+    "successActions": {
+      "done": { "name": "done", "type": "end", "criteria": [{ "condition": "$statusCode == 200" }] }
+    }
+  },
+  "workflows": [
+    {
+      "workflowId": "child",
+      "steps": [
+        {
+          "stepId": "get",
+          "operationId": "$sourceDescriptions.api.getThing",
+          "parameters": [
+            { "reference": "$components.parameters.tenant" },
+            { "name": "id", "in": "query", "value": "$inputs.id" }
+          ],
+          "onSuccess": [{ "reference": "$components.successActions.done" }],
+          "outputs": { "value": "$response.body#/value", "origin": "$self" }
+        },
+        {
+          "stepId": "never",
+          "operationId": "$sourceDescriptions.api.getThing",
+          "parameters": [{ "name": "id", "in": "query", "value": "unreachable" }]
+        }
+      ],
+      "outputs": {
+        "value": "$steps.get.outputs.value",
+        "origin": "$steps.get.outputs.origin",
+        "api": "$sourceDescriptions.api.url"
+      }
+    }
+  ]
+}
