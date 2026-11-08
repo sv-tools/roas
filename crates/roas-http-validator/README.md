@@ -13,7 +13,7 @@ Validates HTTP requests against an [OpenAPI](https://spec.openapis.org/oas/lates
 use roas_http_validator::{RequestView, Validator};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-let spec = serde_yaml_ng::from_str(include_str!("petstore.openapi.yaml"))?;
+let spec = serde_saphyr::from_str(include_str!("petstore.openapi.yaml"))?;
 let validator = Validator::new(spec);
 
 let request = RequestView::new("GET", "/pets").with_query("limit=1000");

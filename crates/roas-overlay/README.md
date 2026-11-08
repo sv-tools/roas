@@ -49,7 +49,7 @@ assert_eq!(target["info"]["description"], "Patched.");
 assert!(target["paths"].as_object().unwrap().is_empty());
 ```
 
-YAML overlays work the same way — parse with `serde_yaml_ng` (or any other YAML crate) into `Overlay`.
+YAML overlays work the same way — parse with `serde-saphyr` (or any other YAML crate) into `Overlay`.
 
 ## Apply algorithm
 

@@ -12,7 +12,7 @@
 //!     future is awaited. Off by default; enabling it pulls in `tokio` with
 //!     `fs` + `rt` features.
 //!   * `yaml` — parse YAML file bodies in addition to JSON. Selection is by
-//!     file path extension (`.yaml` / `.yml`). Pulls in `serde_yaml_ng`.
+//!     file path extension (`.yaml` / `.yml`). Pulls in `serde-saphyr`.
 
 #[cfg(feature = "async")]
 use roas::loader::{AsyncResourceFetcher, FetchFuture};
@@ -119,16 +119,112 @@ fn is_yaml(uri: &Url) -> bool {
 
 #[cfg(feature = "yaml")]
 fn parse_yaml(uri: &Url, bytes: &[u8]) -> Result<Value, LoaderError> {
-    serde_yaml_ng::from_slice(bytes).map_err(|yaml_err| LoaderError::Parse {
-        uri: uri.as_str().to_string(),
-        source: serde_json::Error::custom(yaml_err.to_string()),
+    serde_saphyr::from_slice_with_options(bytes, yaml_options()).map_err(|yaml_err| {
+        LoaderError::Parse {
+            uri: uri.as_str().to_string(),
+            source: serde_json::Error::custom(yaml_err.to_string()),
+        }
     })
+}
+
+/// How every YAML body is read. The same settings are used by each roas
+/// crate that reads YAML, so a document means the same thing to all of them.
+///
+/// - YAML 1.2 booleans only: `yes` / `on` / `no` / `off` stay strings.
+/// - `017` and `1_000` stay strings rather than becoming numbers.
+/// - `.inf` / `.nan` pass through (a `serde_json::Value` holds them as `null`).
+/// - `<<: *anchor` merge keys are expanded.
+/// - A duplicate mapping key is an error rather than a silent last-wins.
+///
+/// The default [`serde_saphyr::Budget`] stays on: it rejects alias bombs and
+/// pathologically deep or large documents before they are materialised.
+#[cfg(feature = "yaml")]
+fn yaml_options() -> serde_saphyr::Options {
+    serde_saphyr::options! {
+        strict_booleans: true,
+        leading_zero_numbers_as_strings: true,
+        underscored_numbers_as_strings: true,
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
+        merge_keys: serde_saphyr::MergeKeyPolicy::Merge,
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+    }
 }
 
 #[cfg(not(feature = "yaml"))]
 #[allow(dead_code)]
 fn parse_yaml(_uri: &Url, _bytes: &[u8]) -> Result<Value, LoaderError> {
     unreachable!("parse_yaml is only reached when the `yaml` feature is enabled")
+}
+
+#[cfg(all(test, feature = "yaml"))]
+mod yaml_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse(yaml: &str) -> Result<Value, String> {
+        let uri = Url::parse("file:///spec.yaml").unwrap();
+        parse_yaml(&uri, yaml.as_bytes()).map_err(|e| match e {
+            LoaderError::Parse { source, .. } => source.to_string(),
+            other => panic!("unexpected error: {other}"),
+        })
+    }
+
+    /// Each scalar whose meaning depends on the YAML options, next to what
+    /// it must read as.
+    #[test]
+    fn yaml_scalars_read_as_yaml_1_2() {
+        for (scalar, expected) in [
+            ("yes", json!("yes")),
+            ("on", json!("on")),
+            ("no", json!("no")),
+            ("off", json!("off")),
+            ("true", json!(true)),
+            ("False", json!(false)),
+            ("017", json!("017")),
+            ("1_000", json!("1_000")),
+            ("17", json!(17)),
+            ("0x11", json!(17)),
+            ("1.5", json!(1.5)),
+            (".inf", json!(null)),
+            ("3.1.0", json!("3.1.0")),
+        ] {
+            assert_eq!(
+                parse(&format!("v: {scalar}\n")).unwrap(),
+                json!({ "v": expected }),
+                "{scalar}",
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_merge_keys_expand_through_an_anchor() {
+        let yaml = "base: &base { type: string, minLength: 1 }\n\
+                    name:\n  <<: *base\n  minLength: 3\n";
+        assert_eq!(
+            parse(yaml).unwrap(),
+            json!({
+                "base": { "type": "string", "minLength": 1 },
+                "name": { "type": "string", "minLength": 3 },
+            }),
+        );
+    }
+
+    #[test]
+    fn yaml_duplicate_key_is_an_error() {
+        let err = parse("a: 1\na: 2\n").unwrap_err();
+        assert!(err.contains("duplicate mapping key"), "{err}");
+    }
+
+    #[test]
+    fn yaml_alias_bomb_is_rejected_by_the_budget() {
+        let mut yaml = String::from("l0: &l0 [lol, lol, lol, lol, lol, lol, lol, lol, lol, lol]\n");
+        for i in 1..10 {
+            let prev = format!("*l{}", i - 1);
+            yaml.push_str(&format!("l{i}: &l{i} [{}]\n", vec![prev; 10].join(", ")));
+        }
+        let err = parse(&yaml).unwrap_err();
+        assert!(err.contains("budget breached"), "{err}");
+    }
 }
 
 #[cfg(test)]

@@ -66,7 +66,7 @@
 //! # }
 //! ```
 //!
-//! YAML documents work the same way — parse with `serde_yaml_ng` (or
+//! YAML documents work the same way — parse with `serde-saphyr` (or
 //! any other YAML crate) into a version module's `Document`.
 //!
 //! ## Scope
@@ -109,6 +109,9 @@
 )]
 
 pub mod common;
+
+#[cfg(test)]
+mod test_yaml;
 pub mod validation;
 
 #[cfg(feature = "v2_6")]

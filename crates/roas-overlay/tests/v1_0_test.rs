@@ -4,6 +4,9 @@
 
 #![cfg(feature = "v1_0")]
 
+#[path = "support/yaml.rs"]
+mod yaml;
+
 use enumset::EnumSet;
 use roas_overlay::apply::{Apply, ApplyErrorKind, ApplyOptions};
 use roas_overlay::v1_0::Overlay;
@@ -27,7 +30,7 @@ fn load_yaml(name: &str) -> serde_json::Value {
     let path = data_dir().join(name);
     let s =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    serde_yaml_ng::from_str(&s).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+    yaml::from_str(&s).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
 fn load_overlay_json(name: &str) -> Overlay {

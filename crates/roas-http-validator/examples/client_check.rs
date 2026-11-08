@@ -13,6 +13,11 @@
 //! non-streaming reqwest body is already bytes in memory, so there is
 //! nothing to buffer and nothing for the caller to decide.
 
+// The YAML reader the examples and tests share, with the options every
+// roas crate reads YAML with.
+#[path = "support/yaml.rs"]
+mod yaml;
+
 use roas_http_validator::{RoutingError, ToRequestView, Validator};
 
 const PETSTORE: &str = r#"
@@ -46,7 +51,7 @@ paths:
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let validator = Validator::new(serde_yaml_ng::from_str(PETSTORE)?);
+    let validator = Validator::new(yaml::from_str(PETSTORE)?);
     let client = reqwest::blocking::Client::new();
 
     let calls = [

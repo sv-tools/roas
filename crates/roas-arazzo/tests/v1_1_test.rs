@@ -3,6 +3,9 @@
 
 #![cfg(feature = "v1_1")]
 
+#[path = "../src/test_yaml.rs"]
+mod yaml;
+
 use enumset::EnumSet;
 use roas_arazzo::v1_1::{Description, SourceType, StepAction, ValueOrSelector};
 use roas_arazzo::validation::Validate;
@@ -24,7 +27,7 @@ fn load_json(name: &str) -> Description {
 }
 
 fn load_yaml(name: &str) -> Description {
-    serde_yaml_ng::from_str(&read(name)).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+    yaml::from_str(&read(name)).unwrap_or_else(|e| panic!("parse {name}: {e}"))
 }
 
 #[test]
@@ -113,7 +116,7 @@ fn an_async_step_may_not_name_an_operation_by_path() {
     // What the published example got wrong: the schema's
     // `asyncapi-step-object` is `operationId` or `channelPath`.
     let mut document: serde_json::Value =
-        serde_yaml_ng::from_str(&read("spec_example.yaml")).expect("the fixture");
+        yaml::from_str(&read("spec_example.yaml")).expect("the fixture");
     let step = &mut document["workflows"][0]["steps"][2];
     let named = step["operationId"].take();
     step.as_object_mut().expect("a step").remove("operationId");

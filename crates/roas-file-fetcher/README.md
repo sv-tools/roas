@@ -13,7 +13,7 @@ Filesystem [`ResourceFetcher`](https://docs.rs/roas/latest/roas/loader/trait.Res
 
 - (default) Sync-only, JSON bodies, no tokio dep.
 - `async` — also expose `AsyncFileFetcher`, backed by `tokio::fs::read`, for `Loader::register_async_fetcher`. Requires an active tokio runtime when the returned future is awaited. Pulls in `tokio` with `fs` + `rt` features.
-- `yaml` — accept YAML file bodies in addition to JSON. Selection is by file path extension (`.yaml` / `.yml`). Pulls in `serde_yaml_ng`.
+- `yaml` — accept YAML file bodies in addition to JSON. Selection is by file path extension (`.yaml` / `.yml`). Pulls in `serde-saphyr`.
 
 ```toml
 [dependencies]

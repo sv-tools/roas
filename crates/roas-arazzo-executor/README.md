@@ -14,8 +14,8 @@ use roas_arazzo::v1_1::Description;
 use roas_arazzo_executor::{Client, Options, execute};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-let description: Description = serde_yaml_ng::from_str(include_str!("buy_pet.arazzo.yaml"))?;
-let openapi = serde_yaml_ng::from_str(include_str!("petstore.openapi.yaml"))?;
+let description: Description = serde_saphyr::from_str(include_str!("buy_pet.arazzo.yaml"))?;
+let openapi = serde_saphyr::from_str(include_str!("petstore.openapi.yaml"))?;
 
 let options = Options::new()
     .workflow("buyPet")

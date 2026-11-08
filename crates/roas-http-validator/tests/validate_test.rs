@@ -1,12 +1,15 @@
 //! End-to-end: a description in, a request in, a verdict out.
 
+#[path = "../examples/support/yaml.rs"]
+mod yaml;
+
 use roas_http_validator::{ErrorKind, Location, Options, RequestView, RoutingError, Validator};
 use serde_json::json;
 
 /// The shared fixture — a templated path, a concrete path beside it,
 /// parameters in four locations, and a JSON body.
 fn petstore() -> Validator {
-    let spec = serde_yaml_ng::from_str(include_str!("data/petstore.openapi.yaml"))
+    let spec = yaml::from_str(include_str!("data/petstore.openapi.yaml"))
         .expect("the description must parse");
     Validator::new(spec)
 }
@@ -464,7 +467,7 @@ fn a_media_type_that_cannot_be_read_is_reported_as_unchecked() {
 
 #[test]
 fn skipping_the_body_leaves_it_unjudged() {
-    let spec = serde_yaml_ng::from_str(include_str!("data/petstore.openapi.yaml"))
+    let spec = yaml::from_str(include_str!("data/petstore.openapi.yaml"))
         .expect("the description must parse");
     let validator = Validator::with_options(spec, Options::new().skip_body());
     let request = RequestView::new("POST", "/pets").with_header("X-Request-Id", "abc-123");
@@ -493,7 +496,7 @@ fn an_undescribed_query_parameter_is_reported_only_when_asked_for() {
 
 #[test]
 fn a_base_path_option_overrides_what_the_servers_say() {
-    let spec = serde_yaml_ng::from_str(include_str!("data/petstore.openapi.yaml"))
+    let spec = yaml::from_str(include_str!("data/petstore.openapi.yaml"))
         .expect("the description must parse");
     let validator = Validator::with_options(spec, Options::new().base_path("/api"));
     let request = RequestView::new("GET", "/api/pets/7");
@@ -2029,7 +2032,7 @@ fn a_definite_difference_settles_a_comparison_an_unreadable_number_cannot() {
 
 /// The same body schema, written as YAML rather than JSON.
 fn body_schema_yaml(schema: &str) -> Validator {
-    let spec = serde_yaml_ng::from_str(&format!(
+    let spec = yaml::from_str(&format!(
         "openapi: 3.2.0\n\
          info: {{ title: t, version: '1' }}\n\
          paths:\n  \

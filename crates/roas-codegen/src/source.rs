@@ -11,7 +11,7 @@ use url::Url;
 ///
 /// The variant records *where the numbers came from*, because exactness
 /// cannot be reconstructed after the fact: only [`Input::Json`], which
-/// this crate parses itself, can yield [`Fidelity::Exact`]. A YAML
+/// this crate parses itself, can yield [`Fidelity::Exact`]. The YAML
 /// reader rounds through `f64`, and a ready-made `Value` has unknown
 /// provenance whatever its caller believes about it. There is
 /// deliberately no way to assert exactness on a `Value`.
@@ -19,7 +19,10 @@ use url::Url;
 pub enum Input {
     /// JSON text. The only way to obtain exact numbers.
     Json(Vec<u8>),
-    /// YAML text. Numbers are read through `f64`.
+    /// YAML text, read with `serde-saphyr`. An integer within the 64-bit
+    /// range is kept exactly; any other number — one with a fraction or an
+    /// exponent, or an integer past `u64::MAX` or below `i64::MIN` — is
+    /// read through `f64`.
     Yaml(Vec<u8>),
     /// An already-parsed value of unknown provenance.
     Value(serde_json::Value),
@@ -92,8 +95,10 @@ impl fmt::Display for SourceVersion {
 pub enum SourceError {
     #[error("the input is not valid JSON")]
     Json(#[source] serde_json::Error),
+    /// The YAML reader rejected the input: a syntax error, a duplicate
+    /// mapping key, or a document past the reader's size and alias budget.
     #[error("the input is not valid YAML")]
-    Yaml(#[source] serde_yaml_ng::Error),
+    Yaml(#[source] serde_saphyr::Error),
     #[error("a description must be a JSON object")]
     NotAnObject,
     #[error("neither `swagger` nor `openapi` is present, so the version is unknown")]
@@ -147,7 +152,7 @@ impl SourceDocument {
                 (value, fidelity)
             }
             Input::Yaml(bytes) => (
-                serde_yaml_ng::from_slice(&bytes).map_err(SourceError::Yaml)?,
+                parse_yaml(&bytes).map_err(SourceError::Yaml)?,
                 Fidelity::F64,
             ),
             Input::Value(value) => (value, Fidelity::Unknown),
@@ -216,5 +221,95 @@ impl SourceDocument {
     /// `discriminator` that 3.0 drops cannot be recovered afterwards.
     pub fn normalization(&self) -> &[Diagnostic] {
         &self.normalization
+    }
+}
+
+/// Read YAML with the options every roas crate uses, so a document means
+/// the same thing here as in the fetchers and the CLI.
+///
+/// - YAML 1.2 booleans only: `yes` / `on` / `no` / `off` stay strings.
+/// - `017` and `1_000` stay strings rather than becoming numbers.
+/// - `.inf` / `.nan` pass through (a `serde_json::Value` holds them as `null`).
+/// - `<<: *anchor` merge keys are expanded.
+/// - A duplicate mapping key is an error rather than a silent last-wins.
+///
+/// The default [`serde_saphyr::Budget`] stays on: it rejects alias bombs and
+/// pathologically deep or large documents before they are materialised.
+fn parse_yaml(bytes: &[u8]) -> Result<serde_json::Value, serde_saphyr::Error> {
+    let options = serde_saphyr::options! {
+        strict_booleans: true,
+        leading_zero_numbers_as_strings: true,
+        underscored_numbers_as_strings: true,
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
+        merge_keys: serde_saphyr::MergeKeyPolicy::Merge,
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+    };
+    serde_saphyr::from_slice_with_options(bytes, options)
+}
+
+#[cfg(test)]
+mod yaml_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn parse(yaml: &str) -> Result<Value, String> {
+        parse_yaml(yaml.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    /// Each scalar whose meaning depends on the YAML options, next to what
+    /// it must read as.
+    #[test]
+    fn yaml_scalars_read_as_yaml_1_2() {
+        for (scalar, expected) in [
+            ("yes", json!("yes")),
+            ("on", json!("on")),
+            ("no", json!("no")),
+            ("off", json!("off")),
+            ("true", json!(true)),
+            ("False", json!(false)),
+            ("017", json!("017")),
+            ("1_000", json!("1_000")),
+            ("17", json!(17)),
+            ("0x11", json!(17)),
+            ("1.5", json!(1.5)),
+            (".inf", json!(null)),
+            ("3.1.0", json!("3.1.0")),
+        ] {
+            assert_eq!(
+                parse(&format!("v: {scalar}\n")).unwrap(),
+                json!({ "v": expected }),
+                "{scalar}",
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_merge_keys_expand_through_an_anchor() {
+        let yaml = "base: &base { type: string, minLength: 1 }\n\
+                    name:\n  <<: *base\n  minLength: 3\n";
+        assert_eq!(
+            parse(yaml).unwrap(),
+            json!({
+                "base": { "type": "string", "minLength": 1 },
+                "name": { "type": "string", "minLength": 3 },
+            }),
+        );
+    }
+
+    #[test]
+    fn yaml_duplicate_key_is_an_error() {
+        let err = parse("a: 1\na: 2\n").unwrap_err();
+        assert!(err.contains("duplicate mapping key"), "{err}");
+    }
+
+    #[test]
+    fn yaml_alias_bomb_is_rejected_by_the_budget() {
+        let mut yaml = String::from("l0: &l0 [lol, lol, lol, lol, lol, lol, lol, lol, lol, lol]\n");
+        for i in 1..10 {
+            let prev = format!("*l{}", i - 1);
+            yaml.push_str(&format!("l{i}: &l{i} [{}]\n", vec![prev; 10].join(", ")));
+        }
+        let err = parse(&yaml).unwrap_err();
+        assert!(err.contains("budget breached"), "{err}");
     }
 }

@@ -5,6 +5,11 @@
 //! cargo run -p roas-http-validator --example validate
 //! ```
 
+// The YAML reader the examples and tests share, with the options every
+// roas crate reads YAML with.
+#[path = "support/yaml.rs"]
+mod yaml;
+
 use roas_http_validator::{Options, RequestView, RoutingError, Validator};
 
 const PETSTORE: &str = r#"
@@ -62,7 +67,7 @@ paths:
 "#;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let spec = serde_yaml_ng::from_str(PETSTORE)?;
+    let spec = yaml::from_str(PETSTORE)?;
 
     // Built once and kept: preparing a validator walks the description,
     // while judging a request is a match and a few schema checks.
