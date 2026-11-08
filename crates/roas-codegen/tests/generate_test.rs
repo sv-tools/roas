@@ -434,13 +434,74 @@ fn review_regressions() {
     );
     assert!(g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "dependentRequired")), "{:?}", g.diagnostics);
 
-    // A `const` that is not a proven tag is reported.
+    // A string `const` is enforced by the type, as a one-value enum; a
+    // non-string `const` is reported.
     let g = generate(
-        &document(serde_json::json!({"Fixed": {"type": "object", "properties": {"kind": {"type": "string", "const": "fixed"}}}})),
+        &document(
+            serde_json::json!({"Fixed": {"type": "object", "properties": {
+                "kind": {"type": "string", "const": "fixed"},
+                "n": {"type": "integer", "minimum": 0, "maximum": 9, "const": 1}
+            }}}),
+        ),
+        &rust_config(""),
+    )
+    .unwrap();
+    assert!(
+        g.files[0].contents.contains("pub enum FixedKind {"),
+        "{}",
+        g.files[0].contents
+    );
+    let consts = g.diagnostics.iter().filter(|d| matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "const")).count();
+    assert_eq!(consts, 1, "{:?}", g.diagnostics);
+
+    // `const` on a composition is reported, not dropped.
+    let g = generate(
+        &document(serde_json::json!({"One": {"allOf": [{"type": "integer", "minimum": 0, "maximum": 9}], "const": 1}})),
         &rust_config(""),
     )
     .unwrap();
     assert!(g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "const")), "{:?}", g.diagnostics);
+
+    // A helper module name is reserved against a configured rename.
+    let g = generate(
+        &document(pet()),
+        &rust_config("[types.Pet]\nrename = \"double_option\"\n"),
+    )
+    .unwrap();
+    assert!(
+        g.files[0].contents.contains("pub struct double_option2 {"),
+        "{}",
+        g.files[0].contents
+    );
+
+    // A multi-line title stays inside the doc comment.
+    let g = generate(
+        &document(serde_json::json!({"Pet": {"title": "First\npub struct Injected;", "type": "object", "properties": {"a": {"type": "string"}}}})),
+        &rust_config(""),
+    )
+    .unwrap();
+    let code = &g.files[0].contents;
+    assert!(code.contains("/// pub struct Injected;"), "{code}");
+    assert!(
+        !code.lines().any(|l| l.trim() == "pub struct Injected;"),
+        "{code}"
+    );
+
+    // A nullable branch cannot be proven tagged.
+    let g = generate(
+        &document(serde_json::json!({
+            "Cat": {"type": ["object", "null"], "required": ["petType"], "properties": {"petType": {"type": "string", "const": "Cat"}}},
+            "Dog": {"type": "object", "required": ["petType"], "properties": {"petType": {"type": "string", "const": "Dog"}}},
+            "Pet": {"oneOf": [{"$ref": "#/components/schemas/Cat"}, {"$ref": "#/components/schemas/Dog"}], "discriminator": {"propertyName": "petType"}}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    assert!(
+        g.files[0].contents.contains("pub struct Pet {"),
+        "{}",
+        g.files[0].contents
+    );
 
     // Integer bounds beyond the mapped width still warn; bounds inside it do not.
     let lossy = |schema: serde_json::Value| {
@@ -461,5 +522,14 @@ fn review_regressions() {
     ));
     assert!(!lossy(
         serde_json::json!({"type": "integer", "minimum": 0, "maximum": 100})
+    ));
+    assert!(lossy(
+        serde_json::json!({"type": "integer", "minimum": 0, "maximum": 9223372036854775808u64})
+    ));
+    assert!(!lossy(
+        serde_json::json!({"type": "integer", "minimum": -9223372036854775808i64, "maximum": 9223372036854775807i64})
+    ));
+    assert!(!lossy(
+        serde_json::json!({"type": "integer", "minimum": -1.5, "maximum": 9.2e18})
     ));
 }

@@ -371,6 +371,7 @@ impl Translator<'_> {
             Schema::Not(not) => {
                 let mut front = self.leaf(pointer, Kind::Not);
                 front.unsupported = catch_all_keywords(&not.extensions, &mut front.extensions);
+                front.const_value = const_of(&not.extensions);
                 front
             }
             Schema::AllOf(all) => self.all_of(all, pointer),
@@ -423,6 +424,7 @@ impl Translator<'_> {
         let mut front = self.leaf(pointer, Kind::AllOf { branches });
         front.unsupported = catch_all_keywords(&all.extensions, &mut front.extensions);
         front.dialect = dialect_of(&all.extensions);
+        front.const_value = const_of(&all.extensions);
         front
     }
 
@@ -431,6 +433,7 @@ impl Translator<'_> {
         let mut front = self.leaf(pointer, Kind::AnyOf { branches });
         front.unsupported = catch_all_keywords(&any.extensions, &mut front.extensions);
         front.dialect = dialect_of(&any.extensions);
+        front.const_value = const_of(&any.extensions);
         front
     }
 
@@ -445,6 +448,7 @@ impl Translator<'_> {
         );
         front.unsupported = catch_all_keywords(&one.extensions, &mut front.extensions);
         front.dialect = dialect_of(&one.extensions);
+        front.const_value = const_of(&one.extensions);
         front
     }
 
@@ -547,6 +551,16 @@ impl Translator<'_> {
         front.unsupported = catch_all_keywords(&s.extensions, &mut front.extensions);
         front.dialect = dialect_of(&s.extensions);
         front.const_value = const_of(&s.extensions);
+        // A string `const` is a one-value enum: representing it that way
+        // makes the generated type enforce it, which also keeps the pin
+        // of a discriminated branch in the branch's own type.
+        if let Some(Value::String(only)) = &front.const_value
+            && let Kind::String { enum_values, .. } = &mut front.kind
+            && enum_values.as_ref().is_none_or(|v| v.contains(only))
+        {
+            *enum_values = Some(vec![only.clone()]);
+            front.const_value = None;
+        }
         front
     }
 

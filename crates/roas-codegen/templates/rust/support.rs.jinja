@@ -8,7 +8,19 @@ fn integer_token(text: &str) -> Option<i128> {
         None => (false, text),
     };
     let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
-        Some((m, e)) => (m, e.parse::<i32>().ok()?),
+        Some((m, e)) => {
+            // Saturate an exponent too long for `i32`: zero is still an
+            // integer, and anything else is out of range either way.
+            let (negative, digits) = match e.strip_prefix('-') {
+                Some(d) => (true, d),
+                None => (false, e.strip_prefix('+').unwrap_or(e)),
+            };
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let magnitude = digits.parse::<i32>().unwrap_or(i32::MAX);
+            (m, if negative { -magnitude } else { magnitude })
+        }
         None => (rest, 0),
     };
     let (int_part, frac_part) = match mantissa.split_once('.') {

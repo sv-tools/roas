@@ -267,6 +267,10 @@ impl Builder<'_> {
             "Copy",
             "From",
             "Into",
+            "double_option",
+            "reject_null",
+            "require_present",
+            "integer_token",
         ] {
             allocator.reserve(reserved);
         }
@@ -448,7 +452,7 @@ impl Builder<'_> {
             .as_deref()
             .filter(|t| !t.trim().is_empty() && def.component.as_deref() != Some(t))
         {
-            doc.push(title.trim().to_owned());
+            doc.extend(title.trim().lines().map(|l| l.trim_end().to_owned()));
             doc.push(String::new());
         }
         doc.extend(Self::doc(

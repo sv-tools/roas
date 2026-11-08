@@ -62,6 +62,11 @@ fn main() {
     assert_eq!((c.n, c.m), (Some(Int64(0)), Some(Int32(0))));
     must_fail::<Counter>(r#"{"n":1e2147483647}"#, "far beyond int64");
     must_fail::<Counter>(r#"{"n":1.5e-2147483648}"#, "exponent at the i32 edge");
+    let c: Counter = serde_json::from_str(r#"{"n":0e99999999999,"m":0.0e-99999999999}"#).unwrap();
+    assert_eq!((c.n, c.m), (Some(Int64(0)), Some(Int32(0))));
+    must_fail::<Counter>(r#"{"n":1e99999999999}"#, "far beyond int64");
+    // The `const` pin lives in the branch type too.
+    must_fail::<Cat>(r#"{"petType":"Dog"}"#, "Cat pins petType to Cat");
     let c: Counter = serde_json::from_str(r#"{"n":1.20e1}"#).unwrap();
     assert_eq!(c.n, Some(Int64(12)));
     let c: Counter = serde_json::from_str(r#"{"n":9007199254740993}"#).unwrap();
@@ -82,7 +87,7 @@ fn main() {
     let built = Loose::from_loose_variant_2(&true).unwrap();
     assert_eq!(built.as_loose_variant_2(), Some(true));
     // composed open: projections over the same raw value.
-    let composed: Composed = serde_json::from_str(r#"{"petType":"Pet","n":1}"#).unwrap();
+    let composed: Composed = serde_json::from_str(r#"{"petType":"Cat","n":1}"#).unwrap();
     assert!(composed.as_cat().is_some());
     assert_eq!(composed, composed.clone());
     // cycles through Box.
@@ -94,7 +99,7 @@ fn main() {
     // a newtype over a list, and a type alias.
     let ids: Ids = serde_json::from_str(r#"["a","b"]"#).unwrap();
     assert_eq!(ids.0.len(), 2);
-    let _: Alias = serde_json::from_str(r#"{"petType":"Pet"}"#).unwrap();
+    let _: Alias = serde_json::from_str(r#"{"petType":"Cat"}"#).unwrap();
     println!("generated code behaves");
 }
 "##;

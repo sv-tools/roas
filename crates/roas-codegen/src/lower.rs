@@ -906,6 +906,11 @@ impl<'a> Lowerer<'a> {
                 None => component.clone(),
             };
             let schema = self.resolve_object(slot)?;
+            // A nullable branch admits `null`, which carries no tag.
+            if schema.nullable || self.component_nullable(&RefTarget::Component(component.clone()))
+            {
+                return None;
+            }
             let Kind::Object {
                 properties,
                 required,
@@ -1034,20 +1039,40 @@ impl<'a> Lowerer<'a> {
     fn number_diagnostics(&mut self, schema: &FrontSchema, integer: bool) {
         let c = &schema.constraints;
         if integer {
-            let (lo, hi) = match &schema.kind {
+            let (lo, hi): (i128, i128) = match &schema.kind {
                 Kind::Integer {
                     width: Some(IntWidth::Int32),
                     ..
-                } => (i32::MIN as f64, i32::MAX as f64),
-                _ => (i64::MIN as f64, i64::MAX as f64),
+                } => (i32::MIN.into(), i32::MAX.into()),
+                _ => (i64::MIN.into(), i64::MAX.into()),
             };
-            // A bound fits when it lies inside the mapped type's range;
-            // compared as `f64`, which is exact at the edges that matter
-            // and errs toward warning beyond them.
+            // A bound fits when it lies inside the mapped type's range,
+            // compared exactly: integers as `i128`, and a fractional bound
+            // against the range edges, both of which (`-2^63`, `2^63`,
+            // `±2^31`) are exact in `f64`.
             let fits = |n: &Option<serde_json::Number>, below: bool| {
-                n.as_ref()
-                    .and_then(serde_json::Number::as_f64)
-                    .is_some_and(|v| if below { v >= lo } else { v <= hi })
+                let Some(n) = n.as_ref() else { return false };
+                let exact = n
+                    .as_i64()
+                    .map(i128::from)
+                    .or_else(|| n.as_u64().map(i128::from));
+                match (exact, n.as_f64()) {
+                    (Some(v), _) => {
+                        if below {
+                            v >= lo
+                        } else {
+                            v <= hi
+                        }
+                    }
+                    (None, Some(v)) => {
+                        if below {
+                            v >= lo as f64
+                        } else {
+                            v < (hi + 1) as f64
+                        }
+                    }
+                    (None, None) => false,
+                }
             };
             let bounded_below = fits(&c.minimum, true) || fits(&c.exclusive_minimum, true);
             let bounded_above = fits(&c.maximum, false) || fits(&c.exclusive_maximum, false);
