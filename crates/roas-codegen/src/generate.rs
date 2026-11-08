@@ -102,6 +102,18 @@ pub fn generate(
             "`exact_numbers` decimal wrappers".into(),
         ));
     }
+    // Settings the configuration accepts but this release cannot honour
+    // are refused, never silently ignored.
+    if config.validation {
+        return Err(GenerateError::Unsupported(
+            "`validation = true` (generated validation)".into(),
+        ));
+    }
+    if config.template_dir.is_some() {
+        return Err(GenerateError::Unsupported(
+            "`template_dir` (user template overrides)".into(),
+        ));
+    }
     if config.layout != Layout::OneFilePerModule {
         return Err(GenerateError::Unsupported(
             "`layout = \"file_per_type\"`".into(),

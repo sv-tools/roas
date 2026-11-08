@@ -38,6 +38,7 @@ mod report;
 mod rust;
 mod source;
 mod validate;
+mod write;
 
 pub use config::{
     Config, ConfigError, ConfigFile, FieldConfig, GoConfig, GoConfigFile, Layout, RustConfig,
@@ -48,3 +49,4 @@ pub use generate::{Dependencies, GenerateError, GeneratedFile, Generation, gener
 pub use rust::RustDependency;
 pub use source::{Fidelity, Input, SourceDocument, SourceError, SourceVersion};
 pub use validate::{SourceValidationError, ValidatedSourceDocument, validate};
+pub use write::{CheckReport, WriteError, WriteOptions, WriteReport, check, manifest_name, write};

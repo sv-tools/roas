@@ -109,17 +109,25 @@ Generated Rust is validated with `syn` before it is returned and formatted with 
 
 The URI is required. Every schema identity is the document URI plus a JSON Pointer, so input with no natural URI — stdin, say — takes a synthetic one such as `stdin:///`.
 
-## Configuration
+## Writing files
 
-`ConfigFile` is what a TOML file may say: everything optional, unknown keys rejected, relative paths resolved against the file's own directory. `Config` is what generation consumes, and `ConfigFile::build` is the one place a missing `target` is refused.
+`generate` never touches disk. `write` puts a `Generation` into a directory under a manifest — `.roas-codegen-<label>-<language>.json` — that records each file it owns with a content hash, and `check` compares the directory with a generation without writing anything.
 
-```toml
-target = "rust"
-validation = true
-
-[types.Pet.fields.tag]
-attrs = ['#[validate(length(min = 1))]']
+```rust
+use roas_codegen::{Target, WriteOptions, check, write};
+# fn run(generation: &roas_codegen::Generation) -> Result<(), Box<dyn std::error::Error>> {
+let out = std::path::Path::new("src/api");
+let report = write(generation, out, Target::Rust, &WriteOptions::new("petstore"))?;
+println!("{} written, {} removed", report.written.len(), report.removed.len());
+assert!(check(generation, out, Target::Rust, "petstore")?.is_clean());
+# Ok(()) }
 ```
+
+- **Only owned files change.** A path another target's manifest owns is refused, and so is an existing file no manifest owns unless `overwrite_unowned` is set. Two targets with different labels can share a directory.
+- **Every check runs before the first write.** Each file is written to a temporary sibling and renamed into place, and the manifest is written last, so an interrupted run is completed by the next one.
+- **Stale files are removed only if unedited.** A file the previous run wrote and this one does not is deleted when it still holds the generated content, and kept and reported otherwise.
+
+The `roas` command line wraps all of this as `roas openapi generate`, with `--check` for CI.
 
 ## License
 

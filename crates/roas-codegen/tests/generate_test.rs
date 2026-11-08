@@ -311,6 +311,17 @@ fn codegen_extensions_are_gated() {
 }
 
 #[test]
+fn settings_this_release_cannot_honour_are_refused() {
+    for toml in ["validation = true\n", "template_dir = \"tpl\"\n"] {
+        let error = generate(&document(pet()), &rust_config(toml)).unwrap_err();
+        assert!(
+            matches!(error, GenerateError::Unsupported(_)),
+            "{toml}: {error}"
+        );
+    }
+}
+
+#[test]
 fn unsupported_configuration_is_refused_up_front() {
     let error = generate(
         &document(pet()),

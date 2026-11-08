@@ -63,6 +63,7 @@ use std::path::{Path, PathBuf};
 
 mod arazzo;
 mod asyncapi;
+mod generate;
 mod openapi;
 mod overlay;
 mod preview;

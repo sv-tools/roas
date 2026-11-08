@@ -49,6 +49,7 @@ only where a flag documents a machine-readable format.
 ```shell
 roas openapi validate [FILE]               # parse + validate an OpenAPI spec
 roas openapi convert --to v3_2 [FILE]      # upconvert across versions
+roas openapi generate --target rust -o DIR [FILE]  # generate Rust types
 roas openapi preview [FILE]                # open the spec in a browser via Redoc
 roas overlay validate [FILE]               # validate an OpenAPI Overlay document
 roas overlay convert --to v1_1 [FILE]      # upconvert an overlay
@@ -136,6 +137,22 @@ roas openapi convert --to v3_2 --apply patch.yaml spec.json
 roas openapi convert --to v3_2 --merge layer.yaml --apply patch.yaml --collapse spec.json
 roas openapi convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-match spec.json
 ```
+
+### `openapi generate`
+
+Generates Rust types from a description of any version, using [`roas-codegen`](https://crates.io/crates/roas-codegen). JSON input keeps numbers exactly as written; the description is validated first, with external references skipped and reported.
+
+```shell
+roas openapi generate --target rust --out src/api spec.yaml       # write src/api/types.rs
+roas openapi generate --config codegen.toml --out src/api spec.yaml
+roas openapi generate --target rust --out src/api --check spec.yaml  # CI: fail if out of date
+```
+
+Files are written under a manifest in the output directory, named after `--label` (the input file's name by default) and the language. Only files the manifest owns are changed or removed, so generated code can sit beside hand-written modules, and several descriptions can share one directory with different labels. An existing file no manifest owns is refused unless `--force` is passed.
+
+Diagnostics go to stderr. An error suppresses the affected types; by default it also leaves the output directory untouched, and `--allow-partial` writes what could be generated. `--strict` treats every warning as an error. `--allow-codegen-extensions` applies `x-rust-attrs` from the description, which is otherwise ignored because a description is often written by someone else. `--ignore` skips `roas` validation checks as in `openapi validate`.
+
+`--config` takes the TOML file described in the [`roas-codegen` README](https://crates.io/crates/roas-codegen): type substitutions, renames, extra attributes, a header. Flags override it.
 
 ### `overlay`
 
