@@ -2063,25 +2063,20 @@ fn a_yaml_description_keeps_integer_bounds_well_past_a_double() {
     assert!(errors(&past_i64, &posted(b"9223372036854775808")).is_empty());
     assert_eq!(errors(&past_i64, &posted(b"9223372036854775809")).len(), 1);
 
-    // The limit is `i128`'s range, and it is the validator's own — both
-    // stop in the same place, so a bound YAML cannot carry is one this
-    // crate could not have decided either way.
-    let at_the_edge = body_schema_yaml(&format!("{{ type: integer, maximum: {} }}", i128::MAX));
-    assert!(errors(&at_the_edge, &posted(b"1")).is_empty());
-    let widest = i128::MAX.to_string();
-    assert!(
-        errors(
-            &at_the_edge,
-            &RequestView::new("POST", "/x")
-                .with_header("content-type", "application/json")
-                .with_body(widest.as_bytes())
-        )
-        .is_empty(),
-        "the bound survived YAML at its widest",
+    // 2^64 - 1: `u64::MAX`, the widest integer the YAML reader keeps
+    // as an integer. One past it is a request over the bound.
+    let at_the_edge = body_schema_yaml(&format!("{{ type: integer, maximum: {} }}", u64::MAX));
+    assert!(errors(&at_the_edge, &posted(b"18446744073709551615")).is_empty());
+    assert_eq!(
+        errors(&at_the_edge, &posted(b"18446744073709551616")).len(),
+        1
     );
 
-    // And past it, reported rather than decided — by either route,
-    // though for different reasons. YAML turns 39 nines into `1e39`,
+    // Between `u64::MAX` and `i128::MAX` a YAML bound is rounded; see
+    // `a_yaml_integer_bound_past_64_bits_is_rounded_before_the_crate_sees_it`.
+    // Past what this crate can hold at all, it is reported rather than
+    // decided — by either route, though for different reasons. YAML
+    // turns 39 nines into `1e39`,
     // which is holdable but cannot be scaled against a small number;
     // JSON keeps the digits, which are more than can be held. Both say
     // so rather than comparing against something else.
@@ -2128,12 +2123,41 @@ fn a_yaml_description_keeps_ordinary_decimal_bounds() {
 
 /// Characterization, not aspiration.
 ///
-/// `serde_yaml_ng` reads a scalar through an `f64` before `serde_json`
-/// is involved, so a fractional literal carrying more precision than a
-/// double is already rounded when `roas` builds the `Spec` — upstream
-/// of anything this crate or `exact-numbers` can reach. This pins where
-/// that boundary is, and will fail if the YAML parser ever stops losing
-/// it, which is the point.
+/// The YAML reader (`serde-saphyr`) reads a scalar with a decimal point
+/// through an `f64` before `serde_json` is involved, so a fractional
+/// literal carrying more precision than a double is already rounded when
+/// `roas` builds the `Spec` — upstream of anything this crate or
+/// `exact-numbers` can reach. This pins where that boundary is, and will
+/// fail if the YAML parser ever stops losing it, which is the point.
+/// Characterization, not aspiration.
+///
+/// The YAML reader keeps an integer exactly only while it fits `u64` (or
+/// `i64` when negative); a wider one goes through an `f64`, the same as a
+/// fraction. `2^64 + 1` therefore arrives as `1.8446744073709552e19` —
+/// `18446744073709552000` — and because that still fits, the verdict that
+/// follows is definite and wrong rather than reported. JSON keeps the
+/// digits. This will fail if the YAML reader ever starts carrying 128-bit
+/// integers, which is the point.
+#[test]
+fn a_yaml_integer_bound_past_64_bits_is_rounded_before_the_crate_sees_it() {
+    let from_yaml = body_schema_yaml("{ type: integer, maximum: 18446744073709551617 }");
+    let from_json = body_schema_text(r#"{"type":"integer","maximum":18446744073709551617}"#);
+
+    // Both agree on the bound itself.
+    assert!(errors(&from_yaml, &posted(b"18446744073709551617")).is_empty());
+    assert!(errors(&from_json, &posted(b"18446744073709551617")).is_empty());
+
+    // And disagree one past it: JSON kept `…617`, YAML rounded it up.
+    assert_eq!(
+        errors(&from_json, &posted(b"18446744073709551618")).len(),
+        1
+    );
+    assert!(
+        errors(&from_yaml, &posted(b"18446744073709551618")).is_empty(),
+        "known limit: the YAML parser rounded the bound",
+    );
+}
+
 #[test]
 fn a_yaml_fractional_bound_past_a_double_is_rounded_before_the_crate_sees_it() {
     let from_yaml = body_schema_yaml("{ type: integer, maximum: 9007199254740993.5 }");
