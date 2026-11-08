@@ -19,7 +19,16 @@ fn integer_token(text: &str) -> Option<i128> {
         return None;
     }
     let mut digits = format!("{int_part}{frac_part}");
-    let mut scale = exponent - frac_part.len() as i32;
+    // Zero is an integer whatever its exponent, and handling it first
+    // keeps a huge exponent on it from costing anything.
+    if digits.bytes().all(|b| b == b'0') {
+        return Some(0);
+    }
+    let mut scale = exponent.checked_sub(i32::try_from(frac_part.len()).ok()?)?;
+    // A non-zero value scaled past 38 digits overflows `i128` anyway.
+    if scale > 38 {
+        return None;
+    }
     while scale < 0 {
         match digits.pop() {
             Some('0') => scale += 1,

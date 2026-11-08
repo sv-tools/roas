@@ -14,6 +14,8 @@ use std::process::Command;
 use url::Url;
 
 const MAIN: &str = r##"
+// The binary exercises only part of the generated public API.
+#[allow(dead_code)]
 mod types;
 use types::*;
 
@@ -55,6 +57,13 @@ fn main() {
     must_fail::<Counter>(r#"{"n":1.5}"#, "not an integer");
     must_fail::<Counter>(r#"{"n":1.00000000000000000001}"#, "not an integer, however close");
     must_fail::<Counter>(r#"{"m":3000000000}"#, "outside int32");
+    // Bounded work and exact answers at the edges of the token grammar.
+    let c: Counter = serde_json::from_str(r#"{"n":0e2147483647,"m":0e-5}"#).unwrap();
+    assert_eq!((c.n, c.m), (Some(Int64(0)), Some(Int32(0))));
+    must_fail::<Counter>(r#"{"n":1e2147483647}"#, "far beyond int64");
+    must_fail::<Counter>(r#"{"n":1.5e-2147483648}"#, "exponent at the i32 edge");
+    let c: Counter = serde_json::from_str(r#"{"n":1.20e1}"#).unwrap();
+    assert_eq!(c.n, Some(Int64(12)));
     let c: Counter = serde_json::from_str(r#"{"n":9007199254740993}"#).unwrap();
     assert_eq!(c.n, Some(Int64(9007199254740993)));
     assert_eq!(round_trip::<Counter>(r#"{"n":-7}"#), r#"{"n":-7}"#);

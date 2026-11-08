@@ -105,7 +105,7 @@ const KEYWORDS: &[&str] = &[
     "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
     "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
     "while", "async", "await", "dyn", "gen", "abstract", "become", "box", "do", "final", "macro",
-    "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "union", "raw", "safe",
 ];
 
 /// Keywords that cannot be raw identifiers.
@@ -183,6 +183,7 @@ mod tests {
     fn keywords_are_made_legal() {
         assert_eq!(legal("type".into()), "r#type");
         assert_eq!(legal("match".into()), "r#match");
+        assert_eq!(legal("union".into()), "r#union");
         assert_eq!(legal("self".into()), "self_");
         assert_eq!(legal("name".into()), "name");
     }

@@ -368,3 +368,98 @@ fn dump_worked_example_when_requested() {
     let generation = generate(&document(pet()), &rust_config("")).unwrap();
     std::fs::write(path, &generation.files[0].contents).unwrap();
 }
+
+#[test]
+fn review_regressions() {
+    // A component `$ref` with siblings is the intersection holder, not itself.
+    let g = generate(
+        &document(serde_json::json!({
+            "Pet": {"type": "object", "properties": {"name": {"type": "string"}}},
+            "Short": {"$ref": "#/components/schemas/Pet", "maxProperties": 3}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    let code = &g.files[0].contents;
+    assert!(code.contains("pub struct Short {"), "{code}");
+    assert!(!code.contains("Short(pub Short)"), "{code}");
+
+    // `union` is a keyword; backend-owned names do not collide with components.
+    let g = generate(
+        &document(serde_json::json!({
+            "String": {"type": "object", "properties": {"union": {"type": "string"}}},
+            "Serialize": {"type": "string"}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    let code = &g.files[0].contents;
+    assert!(code.contains("pub r#union: Option<String>,"), "{code}");
+    assert!(code.contains("pub struct String2 {"), "{code}");
+    assert!(code.contains("pub struct Serialize2("), "{code}");
+
+    // `x-rust-attrs` goes through the ownership check: the serde key is dropped.
+    let g = generate(
+        &document(serde_json::json!({
+            "Pet": {"type": "object", "properties": {"name": {"type": "string", "x-rust-attrs": ["#[serde(default)]", "#[doc(hidden)]"]}}}
+        })),
+        &rust_config("allow_codegen_extensions = true\n"),
+    )
+    .unwrap();
+    let code = &g.files[0].contents;
+    assert!(code.contains("#[doc(hidden)]"), "{code}");
+    assert!(!code.contains("#[serde(default)]"), "{code}");
+    assert!(g.diagnostics.iter().any(|d| matches!(
+        d.kind,
+        DiagnosticKind::IgnoredExtension { .. }
+    ) && d.message.contains("default")));
+
+    // An allOf branch with an unsupported keyword is not flattened.
+    let g = generate(
+        &document(serde_json::json!({
+            "Both": {"allOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}, "dependentRequired": {"a": ["b"]}},
+                {"type": "object", "properties": {"b": {"type": "string"}}}
+            ]}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    assert!(
+        g.diagnostics.iter().any(
+            |d| matches!(&d.kind, DiagnosticKind::OpenComposition { keyword } if keyword == "allOf")
+        ),
+        "{:?}",
+        g.diagnostics
+    );
+    assert!(g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "dependentRequired")), "{:?}", g.diagnostics);
+
+    // A `const` that is not a proven tag is reported.
+    let g = generate(
+        &document(serde_json::json!({"Fixed": {"type": "object", "properties": {"kind": {"type": "string", "const": "fixed"}}}})),
+        &rust_config(""),
+    )
+    .unwrap();
+    assert!(g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "const")), "{:?}", g.diagnostics);
+
+    // Integer bounds beyond the mapped width still warn; bounds inside it do not.
+    let lossy = |schema: serde_json::Value| {
+        generate(
+            &document(serde_json::json!({"N": schema})),
+            &rust_config(""),
+        )
+        .unwrap()
+        .diagnostics
+        .iter()
+        .any(|d| matches!(d.kind, DiagnosticKind::LossyNumber))
+    };
+    assert!(lossy(
+        serde_json::json!({"type": "integer", "minimum": -1e30, "maximum": 1e30})
+    ));
+    assert!(lossy(
+        serde_json::json!({"type": "integer", "format": "int32", "minimum": 0, "maximum": 5000000000u64})
+    ));
+    assert!(!lossy(
+        serde_json::json!({"type": "integer", "minimum": 0, "maximum": 100})
+    ));
+}

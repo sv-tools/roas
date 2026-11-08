@@ -43,6 +43,9 @@ pub(crate) struct Lowerer<'a> {
     /// The named types being lowered, innermost last; an error inside
     /// one marks it.
     owners: Vec<SchemaId>,
+    /// Discriminator properties a tagged union provably consumes: their
+    /// `const` is represented, by the union.
+    proven_tags: BTreeSet<SchemaId>,
 }
 
 pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
@@ -51,6 +54,7 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
         config,
         ir: Ir::default(),
         owners: Vec::new(),
+        proven_tags: BTreeSet::new(),
         component_ids: front
             .components
             .iter()
@@ -58,6 +62,11 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
             .collect(),
     };
     lowerer.ir.components = lowerer.component_ids.clone();
+    let mut tags = BTreeSet::new();
+    for slot in front.components.values() {
+        lowerer.collect_proven_tags(slot, &mut tags);
+    }
+    lowerer.proven_tags = tags;
     for (name, slot) in &front.components {
         lowerer.component(name, slot);
     }
@@ -149,6 +158,19 @@ impl<'a> Lowerer<'a> {
                 description,
             } => {
                 let lowered = self.reference(id, target, siblings.as_deref(), &[name.to_owned()]);
+                // With asserting siblings, `reference` already registered the
+                // intersection holder under this id; name it after the
+                // component instead of wrapping it in itself.
+                if siblings.is_some()
+                    && let Some(def) = self.ir.types.get_mut(id)
+                {
+                    def.component = Some(name.to_owned());
+                    def.suggested_name = vec![name.to_owned()];
+                    if def.description.is_none() {
+                        def.description = description.clone();
+                    }
+                    return;
+                }
                 let kind = match &lowered.ty {
                     TypeRef::Named(_) if siblings.is_none() => TypeKind::Alias(lowered.ty.clone()),
                     _ => TypeKind::Newtype(lowered.ty.clone()),
@@ -747,10 +769,8 @@ impl<'a> Lowerer<'a> {
                 || schema.constraints.property_names
                 || schema.constraints.min_properties.is_some()
                 || schema.constraints.max_properties.is_some()
-                || schema
-                    .unsupported
-                    .iter()
-                    .any(|k| k == "unevaluatedProperties")
+                || !schema.unsupported.is_empty()
+                || schema.const_value.is_some()
             {
                 return None;
             }
@@ -951,25 +971,93 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// A `const` on a required string property is how a discriminated
-    /// branch pins its tag; that use is represented, by the union.
+    /// A `const` that pins the tag of a branch in a proven tagged union
+    /// is represented, by the union. Any other `const` is not enforced.
     fn const_is_tag(&self, schema: &FrontSchema) -> bool {
-        matches!(
-            (&schema.kind, &schema.const_value),
-            (Kind::String { .. }, Some(Value::String(_)))
-        )
+        self.proven_tags.contains(&schema.id)
+    }
+
+    /// Walk every schema reachable from `slot` and record the tag
+    /// property of each `oneOf` whose discriminator is proven.
+    fn collect_proven_tags(&self, slot: &Slot, out: &mut BTreeSet<SchemaId>) {
+        let schema = match slot {
+            Slot::Inline(schema) => schema,
+            Slot::Ref { siblings, .. } => match siblings {
+                Some(siblings) => siblings,
+                None => return,
+            },
+        };
+        match &schema.kind {
+            Kind::OneOf {
+                branches,
+                discriminator,
+            } => {
+                if let Some(discriminator) = discriminator
+                    && let Some(proven) = self.safe_one_of(branches, discriminator)
+                {
+                    for (_, branch) in proven {
+                        if let Some(object) = self.resolve_object(branch)
+                            && let Kind::Object { properties, .. } = &object.kind
+                            && let Some(Slot::Inline(tag)) =
+                                properties.get(&discriminator.property_name)
+                        {
+                            out.insert(tag.id.clone());
+                        }
+                    }
+                }
+                for branch in branches {
+                    self.collect_proven_tags(branch, out);
+                }
+            }
+            Kind::AllOf { branches } | Kind::AnyOf { branches } | Kind::TypeUnion { branches } => {
+                for branch in branches {
+                    self.collect_proven_tags(branch, out);
+                }
+            }
+            Kind::Array { items: Some(items) } => self.collect_proven_tags(items, out),
+            Kind::Object {
+                properties,
+                additional,
+                ..
+            } => {
+                for property in properties.values() {
+                    self.collect_proven_tags(property, out);
+                }
+                if let FrontAdditional::Schema(value) = additional {
+                    self.collect_proven_tags(value, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn number_diagnostics(&mut self, schema: &FrontSchema, integer: bool) {
         let c = &schema.constraints;
-        let bounded_below = c.minimum.is_some() || c.exclusive_minimum.is_some();
-        let bounded_above = c.maximum.is_some() || c.exclusive_maximum.is_some();
-        if integer && !(bounded_below && bounded_above) {
-            self.warn(
-                DiagnosticKind::LossyNumber,
-                &schema.id,
-                "`integer` is unbounded in JSON Schema and is mapped to a fixed-width integer; values outside its range are rejected at decode".into(),
-            );
+        if integer {
+            let (lo, hi) = match &schema.kind {
+                Kind::Integer {
+                    width: Some(IntWidth::Int32),
+                    ..
+                } => (i32::MIN as f64, i32::MAX as f64),
+                _ => (i64::MIN as f64, i64::MAX as f64),
+            };
+            // A bound fits when it lies inside the mapped type's range;
+            // compared as `f64`, which is exact at the edges that matter
+            // and errs toward warning beyond them.
+            let fits = |n: &Option<serde_json::Number>, below: bool| {
+                n.as_ref()
+                    .and_then(serde_json::Number::as_f64)
+                    .is_some_and(|v| if below { v >= lo } else { v <= hi })
+            };
+            let bounded_below = fits(&c.minimum, true) || fits(&c.exclusive_minimum, true);
+            let bounded_above = fits(&c.maximum, false) || fits(&c.exclusive_maximum, false);
+            if !(bounded_below && bounded_above) {
+                self.warn(
+                    DiagnosticKind::LossyNumber,
+                    &schema.id,
+                    "`integer` is unbounded in JSON Schema, or bounded beyond the mapped fixed-width integer; values outside that range are rejected at decode".into(),
+                );
+            }
         }
         if !integer && c.multiple_of.is_some() {
             self.warn(
@@ -1002,6 +1090,33 @@ impl<'a> Lowerer<'a> {
             })
             .collect();
         let component = tarjan(&edges);
+        // A cycle made only of aliases has no type to box: `type A = B;
+        // type B = A;` cannot compile. Refuse it.
+        let mut members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (i, &c) in component.iter().enumerate() {
+            members.entry(c).or_default().push(i);
+        }
+        for nodes in members.values() {
+            let cyclic = nodes.len() > 1 || edges[nodes[0]].contains(&nodes[0]);
+            let aliases_only = nodes
+                .iter()
+                .all(|&i| matches!(self.ir.types[&ids[i]].kind, TypeKind::Alias(_)));
+            if cyclic && aliases_only {
+                for &i in nodes {
+                    let id = ids[i].clone();
+                    self.diagnose(
+                        Severity::Error,
+                        DiagnosticKind::ReferenceCycle,
+                        &id,
+                        None,
+                        "this schema is a `$ref` that leads back to itself through other bare references; no type can be generated for it".into(),
+                    );
+                    if let Some(def) = self.ir.types.get_mut(&id) {
+                        def.has_error = true;
+                    }
+                }
+            }
+        }
         // Self-loops and same-component edges get boxed.
         for (i, id) in ids.iter().enumerate() {
             let same: BTreeSet<usize> = edges[i]
@@ -1341,6 +1456,33 @@ mod tests {
         assert!(ir.diagnostics.iter().any(
             |d| matches!(&d.kind, DiagnosticKind::OpenComposition { keyword } if keyword == "oneOf")
         ));
+    }
+
+    #[test]
+    fn alias_only_cycles_are_refused() {
+        let ir = lower_json(serde_json::json!({
+            "A": {"$ref": "#/components/schemas/B"},
+            "B": {"$ref": "#/components/schemas/A"},
+            "Me": {"$ref": "#/components/schemas/Me"},
+            "Fine": {"type": "string"}
+        }));
+        let suppressed: BTreeSet<&str> =
+            ir.suppressed.iter().map(|id| id.pointer.as_str()).collect();
+        assert_eq!(
+            suppressed,
+            BTreeSet::from([
+                "/components/schemas/A",
+                "/components/schemas/B",
+                "/components/schemas/Me"
+            ])
+        );
+        assert_eq!(
+            ir.diagnostics
+                .iter()
+                .filter(|d| matches!(d.kind, DiagnosticKind::ReferenceCycle))
+                .count(),
+            3
+        );
     }
 
     #[test]

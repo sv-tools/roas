@@ -97,6 +97,9 @@ pub enum DiagnosticKind {
     /// A code-bearing `x-` extension left unapplied because
     /// `allow_codegen_extensions` is off.
     IgnoredExtension { keyword: String },
+    /// A component that is a bare `$ref` leading back to itself through
+    /// other bare references: nothing to generate.
+    ReferenceCycle,
 }
 
 /// One thing the generator has to say about the description.

@@ -240,7 +240,34 @@ impl Builder<'_> {
 
     fn allocate_type_names(&mut self) {
         let mut allocator = Allocator::default();
-        for reserved in ["Int64", "Int32", "Nullable"] {
+        // Names the generated code itself uses unqualified: its own
+        // helpers, the prelude types it spells, and its imports.
+        for reserved in [
+            "Int64",
+            "Int32",
+            "Nullable",
+            "String",
+            "Option",
+            "Some",
+            "None",
+            "Vec",
+            "Box",
+            "Result",
+            "Ok",
+            "Err",
+            "Self",
+            "Serialize",
+            "Deserialize",
+            "Default",
+            "Clone",
+            "Debug",
+            "PartialEq",
+            "Eq",
+            "Hash",
+            "Copy",
+            "From",
+            "Into",
+        ] {
             allocator.reserve(reserved);
         }
         for id in &self.ir.order {
@@ -355,6 +382,7 @@ impl Builder<'_> {
         &mut self,
         extensions: &BTreeMap<String, serde_json::Value>,
         at: &SchemaId,
+        field: bool,
     ) -> Vec<String> {
         let Some(value) = extensions.get("x-rust-attrs") else {
             return Vec::new();
@@ -369,14 +397,40 @@ impl Builder<'_> {
             });
             return Vec::new();
         }
-        match value {
+        let attrs: Vec<String> = match value {
             serde_json::Value::String(s) => vec![s.clone()],
             serde_json::Value::Array(items) => items
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect(),
             _ => Vec::new(),
+        };
+        // Code from the description passes the same checks as code from
+        // the configuration: valid Rust, and no backend-owned serde key.
+        // A failing one is dropped with a warning rather than failing the
+        // whole generation, since the description is not the user's file.
+        let mut kept = Vec::new();
+        for attr in attrs {
+            let one = std::slice::from_ref(&attr);
+            let checked = if field {
+                check_field_attrs(one, &at.pointer)
+            } else {
+                check_container_attrs(one, &at.pointer)
+            };
+            match checked {
+                Ok(()) => kept.push(attr),
+                Err(error) => self.diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    kind: DiagnosticKind::IgnoredExtension {
+                        keyword: "x-rust-attrs".into(),
+                    },
+                    schema_id: at.clone(),
+                    pointer: format!("{}/x-rust-attrs", at.pointer),
+                    message: format!("`x-rust-attrs` entry not applied: {error}"),
+                }),
+            }
         }
+        kept
     }
 
     fn type_view(&mut self, def: &TypeDef) -> Result<Option<TypeView>, GenerateError> {
@@ -423,7 +477,7 @@ impl Builder<'_> {
             .unwrap_or_default();
         check_container_attrs(&user_attrs, &raw_name)?;
         attrs.extend(user_attrs);
-        attrs.extend(self.codegen_attrs(&def.extensions, &def.id));
+        attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
         let mut derives: Vec<String> = ["Debug", "Clone", "PartialEq"]
             .iter()
             .map(|s| (*s).to_owned())
@@ -514,7 +568,7 @@ impl Builder<'_> {
                     attrs.extend(user_attrs);
                     let mut at = def.id.clone();
                     at.pointer = format!("{}/properties/{}", def.id.pointer, field.raw_name);
-                    attrs.extend(self.codegen_attrs(&field.extensions, &at));
+                    attrs.extend(self.codegen_attrs(&field.extensions, &at, true));
                     view.fields.push(FieldView {
                         name,
                         raw_name: field.raw_name.clone(),
