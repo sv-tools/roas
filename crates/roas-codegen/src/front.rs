@@ -5,7 +5,7 @@
 //! directly, so a second description language — AsyncAPI — needs a
 //! second translation into it, not a second lowering.
 
-use crate::diagnostic::{SchemaId, push_token};
+use crate::diagnostic::{SchemaId, push_token, source_of, synthetic};
 use roas::common::bool_or::BoolOr;
 use roas::common::formats::{IntegerFormat, NumberFormat, SchemaType, StringFormat};
 use roas::common::reference::RefOr;
@@ -357,7 +357,7 @@ impl Translator<'_> {
     }
 
     fn type_written(&self, pointer: &str) -> bool {
-        let source = (self.source_pointer)(pointer);
+        let source = (self.source_pointer)(&source_of(pointer));
         self.raw
             .pointer(&source)
             .and_then(Value::as_object)
@@ -487,7 +487,19 @@ impl Translator<'_> {
             }
             map.insert("type".to_owned(), Value::String(schema_type.to_string()));
             let schema: Schema = serde_json::from_value(Value::Object(map)).ok()?;
-            Some(self.schema(&schema, pointer.clone()))
+            // Several members are several schemas, each with an identity of
+            // its own; a lone member is the schema itself.
+            let at = if restrict {
+                synthetic(&pointer, &schema_type.to_string())
+            } else {
+                pointer.clone()
+            };
+            let mut member = self.schema(&schema, at);
+            // The member's `type` was written, as part of the list.
+            if let Kind::Object { typeless, .. } = &mut member.kind {
+                *typeless = false;
+            }
+            Some(member)
         };
         let mut front = match members.as_slice() {
             [] => self.leaf(pointer.clone(), Kind::Null),
@@ -499,6 +511,19 @@ impl Translator<'_> {
                     .map(|schema| Slot::Inline(Box::new(schema)))
                     .collect();
                 let mut front = self.leaf(pointer.clone(), Kind::TypeUnion { branches });
+                // A keyword that applies to none of the member types is read
+                // by no branch; report it on the union rather than lose it.
+                front.unsupported = object
+                    .keys()
+                    .filter(|key| {
+                        key.as_str() != "type"
+                            && !key.starts_with("x-")
+                            && !COMMON_KEYWORDS.contains(&key.as_str())
+                            && !SILENT_KEYWORDS.contains(&key.as_str())
+                            && !many.iter().any(|t| keywords_for(t).contains(&key.as_str()))
+                    })
+                    .cloned()
+                    .collect();
                 front.title = multi.title.clone();
                 front.description = multi.description.clone();
                 front.deprecated = multi.deprecated.unwrap_or(false);

@@ -29,5 +29,10 @@ impl {{ t.name }} {
 {% endfor %}    pub fn {{ b.accessor }}(&self) -> Option<{{ b.ty }}> {
         serde_json::from_str(self.raw.get()).ok()
     }
+
+    /// Build from one part; the other parts are not checked.
+    pub fn {{ b.constructor }}(value: &{{ b.ty }}) -> Result<Self, serde_json::Error> {
+        Ok(Self { raw: serde_json::value::to_raw_value(value)? })
+    }
 {% endfor %}{% endblock %}}
 {% block trailing %}{% endblock %}

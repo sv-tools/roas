@@ -533,3 +533,89 @@ fn review_regressions() {
         serde_json::json!({"type": "integer", "minimum": -1.5, "maximum": 9.2e18})
     ));
 }
+
+#[test]
+fn third_review_regressions() {
+    // A newline in a pattern stays inside the doc comment.
+    let g = generate(
+        &document(serde_json::json!({"Pet": {"type": "object", "properties": {"a": {"type": "string", "pattern": "a\nfn injected() {}"}}}})),
+        &rust_config(""),
+    )
+    .unwrap();
+    let code = &g.files[0].contents;
+    assert!(
+        !code
+            .lines()
+            .any(|l| l.trim_start().starts_with("fn injected")),
+        "{code}"
+    );
+    assert!(
+        code.contains(r"`pattern`: `a\nfn injected() {}`."),
+        "{code}"
+    );
+
+    // Each member of a multi-type union is its own type.
+    let g = generate(
+        &document(serde_json::json!({"V": {"type": ["object", "string"], "properties": {"a": {"type": "string"}}, "maxLength": 3}})),
+        &rust_config(""),
+    )
+    .unwrap();
+    let code = &g.files[0].contents;
+    assert!(code.contains("pub struct V {"), "{code}");
+    assert!(code.contains("pub struct VObject {"), "{code}");
+    assert!(code.contains("pub a: Option<String>,"), "{code}");
+    assert!(
+        code.contains("pub fn as_v_object(&self) -> Option<VObject>"),
+        "{code}"
+    );
+    assert!(
+        code.contains("pub fn as_v_string(&self) -> Option<String>"),
+        "{code}"
+    );
+    assert!(
+        g.diagnostics.iter().all(|d| !d.pointer.contains('~')),
+        "{:?}",
+        g.diagnostics
+    );
+
+    // A keyword that fits no member is reported.
+    let g = generate(
+        &document(serde_json::json!({"W": {"type": ["string", "integer"], "minimum": 0, "maximum": 9, "contains": {"type": "string"}}})),
+        &rust_config(""),
+    )
+    .unwrap();
+    assert!(g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "contains") && d.pointer == "/components/schemas/W"), "{:?}", g.diagnostics);
+
+    // Attributes on an alias are kept, through a transparent newtype.
+    let components = serde_json::json!({
+        "Pet": {"type": "object", "properties": {"a": {"type": "string"}}},
+        "Animal": {"$ref": "#/components/schemas/Pet"}
+    });
+    let g = generate(
+        &document(components.clone()),
+        &rust_config("[types.Animal]\nattrs = ['#[doc(hidden)]']\n"),
+    )
+    .unwrap();
+    let code = &g.files[0].contents;
+    assert!(code.contains("#[doc(hidden)]"), "{code}");
+    assert!(code.contains("pub struct Animal(pub Pet);"), "{code}");
+    let g = generate(&document(components), &rust_config("")).unwrap();
+    assert!(g.files[0].contents.contains("pub type Animal = Pet;"));
+
+    // Composed holders have constructors as well as accessors.
+    let g = generate(
+        &document(serde_json::json!({
+            "Pet": {"type": "object", "properties": {"a": {"type": "string"}}},
+            "Strict": {"allOf": [{"$ref": "#/components/schemas/Pet"}, {"type": "object", "additionalProperties": false}]}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    assert!(
+        g.files[0]
+            .contents
+            .contains("pub fn from_pet(value: &Pet) -> Result<Self, serde_json::Error>"),
+        "{}",
+        g.files[0].contents
+    );
+}

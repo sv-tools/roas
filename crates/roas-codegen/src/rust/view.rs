@@ -101,7 +101,7 @@ fn constraint_notes(c: &Constraints) -> Vec<String> {
         push("maxLength", v.to_string());
     }
     if let Some(v) = &c.pattern {
-        push("pattern", format!("`{v}`"));
+        push("pattern", format!("`{}`", v.escape_debug()));
     }
     if let Some(v) = &c.minimum {
         push("minimum", v.to_string());
@@ -379,7 +379,11 @@ impl Builder<'_> {
             }
             lines.extend(notes);
         }
+        // Every entry becomes exactly one `///` line.
         lines
+            .into_iter()
+            .flat_map(|l| l.split(['\n', '\r']).map(str::to_owned).collect::<Vec<_>>())
+            .collect()
     }
 
     fn codegen_attrs(
@@ -673,9 +677,19 @@ impl Builder<'_> {
                 view.inner = self.spell(inner)?;
             }
             TypeKind::Alias(inner) => {
-                view.kind = "alias";
-                view.derives.clear();
                 view.inner = self.spell(inner)?;
+                if view.attrs.is_empty() {
+                    view.kind = "alias";
+                    view.derives.clear();
+                } else {
+                    // A type alias cannot carry most attributes, and a derive
+                    // on one does not compile; a transparent newtype carries
+                    // them all.
+                    view.kind = "newtype";
+                    view.derives
+                        .extend(["Serialize".to_owned(), "Deserialize".to_owned()]);
+                    view.attrs.push("#[serde(transparent)]".to_owned());
+                }
             }
         }
         Ok(true)

@@ -127,6 +127,26 @@ impl fmt::Display for Diagnostic {
 }
 
 /// Escape one reference token per RFC 6901 and append it to `pointer`.
+/// Mark a pointer as one of several readings of the same source
+/// schema — a `type: [a, b]` member — with a segment that can never
+/// appear in a real JSON Pointer: an unescaped `~` not followed by `0`
+/// or `1` is invalid there.
+pub(crate) fn synthetic(pointer: &str, label: &str) -> String {
+    format!("{pointer}/~{label}")
+}
+
+/// The source location of a possibly synthetic pointer: every synthetic
+/// segment removed.
+pub(crate) fn source_of(pointer: &str) -> String {
+    pointer
+        .split('/')
+        .filter(|segment| {
+            !(segment.starts_with('~') && !segment.starts_with("~0") && !segment.starts_with("~1"))
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 pub(crate) fn push_token(pointer: &mut String, token: &str) {
     pointer.push('/');
     for c in token.chars() {

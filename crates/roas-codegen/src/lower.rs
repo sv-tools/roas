@@ -2,7 +2,7 @@
 //! classes, nullability, cycles, and every diagnostic the schema earns.
 
 use crate::config::Config;
-use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity, source_of};
 use crate::front::{
     Additional as FrontAdditional, FloatWidth, Front, FrontSchema, IntWidth, Kind, RefTarget, Slot,
 };
@@ -88,9 +88,9 @@ impl<'a> Lowerer<'a> {
             severity,
             kind,
             schema_id: at.clone(),
-            pointer: pointer
-                .map(str::to_owned)
-                .unwrap_or_else(|| at.pointer.clone()),
+            // Diagnostics point into the source document, so a synthetic
+            // member segment is dropped from the reported location.
+            pointer: source_of(pointer.unwrap_or(&at.pointer)),
             message,
         });
     }

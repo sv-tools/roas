@@ -89,6 +89,8 @@ fn main() {
     // composed open: projections over the same raw value.
     let composed: Composed = serde_json::from_str(r#"{"petType":"Cat","n":1}"#).unwrap();
     assert!(composed.as_cat().is_some());
+    let cat: Cat = serde_json::from_str(r#"{"petType":"Cat"}"#).unwrap();
+    assert!(Composed::from_cat(&cat).unwrap().as_cat().is_some());
     assert_eq!(composed, composed.clone());
     // cycles through Box.
     let node: Node = serde_json::from_str(r#"{"next":{"done":null}}"#).unwrap();
