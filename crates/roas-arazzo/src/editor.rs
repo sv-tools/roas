@@ -7,10 +7,13 @@
 //! where the source map can place it.
 //!
 //! - Text that is not JSON or YAML gets a located syntax error. The text up
-//!   to the line of the error is read again, so a YAML description usually
-//!   still has an outline of everything above that line; the outline is then
-//!   marked incomplete ([`Document::is_complete`]) and the description is not
-//!   checked further.
+//!   to the line of the error is read again, up to 16 lines back, so a YAML
+//!   description usually still has an outline of everything above that line;
+//!   the outline is then marked incomplete ([`Document::is_complete`]) and
+//!   the description is not checked further.
+//! - [`Document::read`] tells JSON from YAML by the first character;
+//!   [`Document::read_as`] reads one [`Format`] as strictly as the roas CLI
+//!   reads a file of that format.
 //! - Text that reads in full is checked part by part: `arazzo`, `$self`,
 //!   `info`, each source description, each workflow and `components`, so a
 //!   broken workflow does not hide another. When every part fits the model,
@@ -41,6 +44,16 @@ pub enum Severity {
     Error,
     /// Valid, but something is probably not what was meant.
     Warning,
+}
+
+/// The format to read text as; see [`Document::read_as`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Format {
+    /// JSON, as `serde_json` reads it.
+    Json,
+    /// YAML, as `serde-saphyr` reads it.
+    Yaml,
 }
 
 /// A finding about the text.
@@ -154,6 +167,8 @@ pub struct ComponentOutline {
 #[derive(Clone, Debug)]
 pub struct Document {
     text: String,
+    /// Where each line of `text` starts.
+    lines: Vec<usize>,
     map: Option<SourceMap>,
     version: Option<String>,
     outline: Option<Outline>,
@@ -193,26 +208,99 @@ impl Document {
     /// # }
     /// ```
     pub fn read(text: impl Into<String>, options: EnumSet<ValidationOptions>) -> Self {
-        let text = text.into();
+        Self::read_with(text.into(), None, options)
+    }
+
+    /// Read `text` as `format`, as strictly as the roas CLI reads a file
+    /// of that format: JSON with `serde_json`, YAML with `serde-saphyr`.
+    /// Text that is not valid in `format` is an error; when it still reads
+    /// as YAML, that gives the outline, and the description is not checked
+    /// further.
+    ///
+    /// ```
+    /// # #[cfg(feature = "v1_1")] {
+    /// use roas_arazzo::editor::{Document, Format};
+    ///
+    /// // A trailing comma: not JSON, though YAML can read it.
+    /// let text = r#"{"arazzo": "1.1.0", "info": {"title": "T", "version": "1"},}"#;
+    /// let document = Document::read_as(text, Format::Json, Default::default());
+    /// assert!(document.has_errors() && !document.is_complete());
+    /// assert_eq!(document.outline().unwrap().title.as_deref(), Some("T"));
+    /// # }
+    /// ```
+    pub fn read_as(
+        text: impl Into<String>,
+        format: Format,
+        options: EnumSet<ValidationOptions>,
+    ) -> Self {
+        Self::read_with(text.into(), Some(format), options)
+    }
+
+    fn read_with(
+        text: String,
+        format: Option<Format>,
+        options: EnumSet<ValidationOptions>,
+    ) -> Self {
         let mut diagnostics = Vec::new();
-        let (value, read) = match crate::source_map::parse::value(&text) {
-            Ok(value) => (Some(value), text.len()),
-            Err(error) => {
-                let at = error_offset(&text, &error);
-                let position = position_in(&text, at);
-                diagnostics.push(Diagnostic {
-                    severity: Severity::Error,
-                    path: None,
-                    range: Some(SourceRange {
-                        start: position,
-                        end: position_in(&text, next_char(&text, position.offset)),
-                    }),
-                    message: reason(&error),
-                });
-                recover(&text, position.offset)
-            }
+        let json = match format {
+            Some(Format::Json) => true,
+            Some(Format::Yaml) => false,
+            None => text
+                .trim_start_matches('\u{feff}')
+                .trim_start()
+                .starts_with(['{', '[']),
         };
-        let complete = read == text.len() && value.is_some();
+        // Whether what was read is the text as its format reads it.
+        let mut strict = true;
+        let mut syntax = |offset: usize, severity: Severity, message: String| {
+            let position = position_in(&text, offset);
+            diagnostics.push(Diagnostic {
+                severity,
+                path: None,
+                range: Some(SourceRange {
+                    start: position,
+                    end: position_in(&text, next_char(&text, position.offset)),
+                }),
+                message,
+            });
+            position.offset
+        };
+        let yaml = |text: &str| crate::source_map::parse::yaml(text);
+        let (value, read) = match json.then(|| serde_json::from_str::<Value>(&text)) {
+            Some(Ok(value)) => (Some(value), text.len()),
+            Some(Err(error)) => {
+                let at = json_offset(&text, error.line(), error.column());
+                let reason = json_reason(&error);
+                match yaml(&text) {
+                    // Sniffed as JSON, but YAML: say so, and go on as YAML.
+                    Ok(value) if format.is_none() => {
+                        syntax(
+                            at,
+                            Severity::Warning,
+                            format!("not JSON ({reason}); read as YAML"),
+                        );
+                        (Some(value), text.len())
+                    }
+                    Ok(value) => {
+                        syntax(at, Severity::Error, reason);
+                        strict = false;
+                        (Some(value), text.len())
+                    }
+                    Err(_) => {
+                        let at = syntax(at, Severity::Error, reason);
+                        recover(&text, at)
+                    }
+                }
+            }
+            None => match yaml(&text) {
+                Ok(value) => (Some(value), text.len()),
+                Err(error) => {
+                    let at = syntax(error_offset(&text, &error), Severity::Error, reason(&error));
+                    recover(&text, at)
+                }
+            },
+        };
+        let complete = strict && read == text.len() && value.is_some();
         let map = value
             .as_ref()
             .and_then(|_| SourceMap::parse(&text[..read]).ok());
@@ -233,6 +321,7 @@ impl Document {
             checks.description(value, options);
         }
         Self {
+            lines: line_starts(&text),
             text,
             map,
             version,
@@ -267,9 +356,11 @@ impl Document {
         self.outline.as_ref()
     }
 
-    /// Whether the whole text was read. When it was not, the outline is
-    /// that of the text before the syntax error, and the description was
-    /// not checked any further.
+    /// Whether the whole text was read in its format, so the description
+    /// was checked. When it was not, the outline is that of what could
+    /// still be read — the text before the syntax error, or, for text that
+    /// is not the JSON [`Document::read_as`] was asked for, the text read as
+    /// YAML — and nothing was checked further.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.complete
@@ -294,7 +385,9 @@ impl Document {
     /// an LSP client counts them (zero-based there: subtract one).
     #[must_use]
     pub fn utf16_column(&self, position: SourcePosition) -> usize {
-        crate::source_map::utf16_column(&self.text, position)
+        let offset = position.offset.min(self.text.len());
+        let line = self.lines.partition_point(|&start| start <= offset);
+        crate::source_map::utf16_from(&self.text, self.lines[line - 1], offset)
     }
 }
 
@@ -314,7 +407,7 @@ fn recover(text: &str, offset: usize) -> (Option<Value>, usize) {
         if cut == 0 {
             break;
         }
-        if let Ok(value) = crate::source_map::parse::value(&text[..cut]) {
+        if let Ok(value) = crate::source_map::parse::yaml(&text[..cut]) {
             return (Some(value), cut);
         }
         line -= 1;
@@ -347,6 +440,26 @@ fn reason(error: &serde_saphyr::Error) -> String {
         _ => reason,
     }
     .to_owned()
+}
+
+/// The byte offset of a `serde_json` error: its line counts `\n` only,
+/// and its one-based column counts bytes.
+fn json_offset(text: &str, line: usize, column: usize) -> usize {
+    let start: usize = text
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum();
+    (start + column.saturating_sub(1)).min(text.len())
+}
+
+/// A `serde_json` error's reason, without the location the range gives.
+fn json_reason(error: &serde_json::Error) -> String {
+    let shown = error.to_string();
+    shown
+        .rsplit_once(" at line ")
+        .map_or(shown.as_str(), |(reason, _)| reason)
+        .to_owned()
 }
 
 /// Where in `text` a syntax error is.
@@ -549,19 +662,9 @@ impl Checks<'_> {
             if key {
                 map.locate_key(&path)
             } else {
-                map.locate(&path)
+                nearest(map, &path)
             }
         });
-        self.record(severity, path, range, message);
-    }
-
-    fn record(
-        &mut self,
-        severity: Severity,
-        path: String,
-        range: Option<SourceRange>,
-        message: String,
-    ) {
         self.diagnostics.push(Diagnostic {
             severity,
             path: Some(path),
@@ -627,9 +730,8 @@ impl Checks<'_> {
         match serde_path_to_error::deserialize::<_, T>(value) {
             Ok(_) => true,
             Err(error) => {
-                let (path, ends) = join(path, error.path());
-                let range = self.map.and_then(|map| nearest(map, &path, &ends));
-                self.record(Severity::Error, path, range, error.into_inner().to_string());
+                let path = join(path, error.path());
+                self.push(Severity::Error, path, false, error.into_inner().to_string());
                 false
             }
         }
@@ -679,9 +781,8 @@ impl Checks<'_> {
         let description = match serde_path_to_error::deserialize::<_, M>(value) {
             Ok(description) => description,
             Err(error) => {
-                let (path, ends) = join("#", error.path());
-                let range = self.map.and_then(|map| nearest(map, &path, &ends));
-                self.record(Severity::Error, path, range, error.into_inner().to_string());
+                let path = join("#", error.path());
+                self.push(Severity::Error, path, false, error.into_inner().to_string());
                 return;
             }
         };
@@ -713,15 +814,11 @@ impl Checks<'_> {
     }
 }
 
-/// `base` followed by the model-style rendering of `path`, and where
-/// each of its fields ends, outermost first. `base` is a path this module
-/// builds, of plain names and indices.
-fn join(base: &str, path: &serde_path_to_error::Path) -> (String, Vec<usize>) {
+/// `base` followed by the model-style rendering of `path`.
+fn join(base: &str, path: &serde_path_to_error::Path) -> String {
     use serde_path_to_error::Segment;
     let mut joined = base.to_owned();
-    let mut ends: Vec<usize> = base.match_indices(['.', '[']).map(|(at, _)| at).collect();
     for segment in path.iter() {
-        ends.push(joined.len());
         match segment {
             Segment::Seq { index } => joined.push_str(&format!("[{index}]")),
             // An externally tagged variant is a member named after it.
@@ -732,16 +829,22 @@ fn join(base: &str, path: &serde_path_to_error::Path) -> (String, Vec<usize>) {
             Segment::Unknown => break,
         }
     }
-    ends.push(joined.len());
-    ends.dedup();
-    (joined, ends)
+    joined
 }
 
-/// Where `path` is written, or the nearest enclosing field that is, by
-/// the field ends [`join`] recorded: a missing field is reported at the
-/// object that lacks it, and a member name with a dot is never split.
-fn nearest(map: &SourceMap, path: &str, ends: &[usize]) -> Option<SourceRange> {
-    ends.iter().rev().find_map(|&end| map.locate(&path[..end]))
+/// Where `path` is written, or, when it is not, where the nearest
+/// enclosing field is: a missing field is reported at the object that
+/// lacks it. A path that names two places locates nothing, so a member
+/// name with a dot is never mistaken for a parent and child.
+fn nearest(map: &SourceMap, path: &str) -> Option<SourceRange> {
+    let mut path = path;
+    loop {
+        match map.places(path) {
+            0 => path = &path[..path.rfind(['.', '['])?],
+            1 => return map.locate(path),
+            _ => return None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1101,15 +1204,14 @@ workflows:
 
     #[test]
     fn a_path_not_written_is_located_at_its_nearest_written_parent() {
-        let map = SourceMap::parse("a:\n  b: 1\n").unwrap();
+        let map = SourceMap::parse("a:\n  b: 1\nc.d: 1\nc:\n  d: 2\n").unwrap();
         let b = map.locate("#.a.b").unwrap();
-        assert_eq!(nearest(&map, "#.a.b", &[1, 3, 5]), Some(b));
-        assert_eq!(
-            nearest(&map, "#.a.b.c[0].d", &[1, 3, 5, 7, 10, 12]),
-            Some(b)
-        );
-        assert_eq!(nearest(&map, "#.z", &[1, 3]), map.locate("#"));
-        assert_eq!(nearest(&map, "nothing", &[7]), None);
+        assert_eq!(nearest(&map, "#.a.b"), Some(b));
+        assert_eq!(nearest(&map, "#.a.b.c[0].d"), Some(b));
+        assert_eq!(nearest(&map, "#.z"), map.locate("#"));
+        // `#.c.d` names two places: neither is guessed.
+        assert_eq!(nearest(&map, "#.c.d.e"), None);
+        assert_eq!(nearest(&map, "nothing"), None);
     }
 
     #[cfg(feature = "v1_1")]
@@ -1124,8 +1226,9 @@ workflows:
         let document = read(&text);
         let found = found(&document);
         assert_eq!(found[0].1, Some("#.components.parameters.a.b"), "{found:?}");
-        // Not the unrelated `a` on line 21: the `parameters` map it is in.
-        assert_eq!(found[0].2, Some((21, 5)), "{found:?}");
+        // The path names two places, so neither is guessed; in particular
+        // not the unrelated parameter `a`.
+        assert_eq!(found[0].2, None, "{found:?}");
     }
 
     #[cfg(feature = "v1_1")]
@@ -1181,6 +1284,61 @@ workflows:
     }
 
     #[test]
+    fn json_that_is_not_strict_json() {
+        let text = "{\"arazzo\": \"1.1.0\",\n \"info\": {\"title\": 'T'}}";
+        // Sniffed: YAML reads it, and a warning says it is not JSON.
+        let document = read(text);
+        let first = &document.diagnostics()[0];
+        assert_eq!(first.severity, Severity::Warning);
+        assert!(
+            first.message.starts_with("not JSON (expected value)"),
+            "{first:?}"
+        );
+        assert_eq!(first.range.unwrap().start.line, 2);
+        assert!(document.is_complete());
+        // Asked for JSON: an error, with the YAML outline and no checks.
+        let document = Document::read_as(text, Format::Json, EnumSet::empty());
+        assert_eq!(document.diagnostics().len(), 1);
+        assert_eq!(document.diagnostics()[0].message, "expected value");
+        assert!(!document.is_complete());
+        assert_eq!(document.outline().unwrap().title.as_deref(), Some("T"));
+        // Neither JSON nor YAML: the JSON error, and what recovery finds.
+        let document = Document::read_as("{\n\"a\": [\n", Format::Json, EnumSet::empty());
+        assert!(document.outline().is_none());
+        assert_eq!(document.diagnostics()[0].severity, Severity::Error);
+        // A byte-order mark is no JSON, as the CLI reads JSON.
+        let document = Document::read_as("\u{feff}{}", Format::Json, EnumSet::empty());
+        assert!(!document.is_complete());
+    }
+
+    #[test]
+    fn yaml_asked_for_is_read_as_yaml_even_when_it_looks_like_json() {
+        // Duplicate keys: JSON keeps the last, YAML refuses them.
+        let text = "{\"arazzo\": \"1.0.0\", \"arazzo\": \"1.1.0\"}";
+        assert_eq!(read(text).version(), Some("1.1.0"));
+        let document = Document::read_as(text, Format::Yaml, EnumSet::empty());
+        assert!(!document.is_complete());
+        assert!(document.has_errors());
+    }
+
+    #[cfg(feature = "v1_1")]
+    #[test]
+    fn a_validation_finding_about_a_missing_field_is_located_at_its_object() {
+        let text = VALID.replace(
+            "      - stepId: find\n        operationId: findPet\n",
+            "      - stepId: find\n        channelPath: '{$sourceDescriptions.api.url}#/channels/a'\n",
+        );
+        let document = read(&text);
+        let action = document
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.path.as_deref() == Some("#.workflows[0].steps[0].action"))
+            .unwrap_or_else(|| panic!("{:?}", document.diagnostics()));
+        // The step that lacks it.
+        assert_eq!(action.range.unwrap().start.line, 13);
+    }
+
+    #[test]
     fn a_bare_carriage_return_ends_a_line() {
         let document = read("a: b\rc: '😀x'\r");
         let map = document.source_map().unwrap();
@@ -1214,13 +1372,13 @@ workflows:
 
     #[test]
     fn a_syntax_reason_without_its_location() {
-        let error = crate::source_map::parse::value("a: [").unwrap_err();
+        let error = crate::source_map::parse::yaml("a: [").unwrap_err();
         assert!(!reason(&error).starts_with("error"), "{}", reason(&error));
         assert!(!reason(&error).contains('\n'));
         // A message without a location prefix is kept as it is.
-        let error = crate::source_map::parse::value("a: 1\na: 2\n").unwrap_err();
+        let error = crate::source_map::parse::yaml("a: 1\na: 2\n").unwrap_err();
         assert!(!reason(&error).is_empty());
-        let error = crate::source_map::parse::value("a: 1\rb: [1\r").unwrap_err();
+        let error = crate::source_map::parse::yaml("a: 1\rb: [1\r").unwrap_err();
         assert!(!reason(&error).contains(" at line "), "{}", reason(&error));
     }
 

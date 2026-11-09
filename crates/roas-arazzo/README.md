@@ -99,6 +99,7 @@ Behind the `editor` feature, `editor::Document::read(text, options)` reads text 
 
 - Text that is not JSON or YAML gets a located syntax error, and the text above the error is read again, up to 16 lines back, so a YAML description usually keeps the outline of everything before it. The outline is then marked incomplete (`is_complete()`), and nothing further is checked.
 - Text that reads in full is checked part by part — `arazzo`, `$self`, `info`, each source description, each workflow, `components` — so one broken workflow does not hide another. When every part fits the model, the description is validated and its unknown members are listed as warnings.
+- `read` tells JSON from YAML by the first character, and warns when text that looks like JSON is only YAML; `read_as(text, Format::Json | Format::Yaml, options)` reads one format as strictly as the roas CLI reads a file of it.
 - `utf16_column(position)` gives the one-based column in UTF-16 code units; an LSP client counts from zero, so subtract one.
 
 Nothing a `Document` returns can be run: it never hands out a typed `Description`, and its outline is plain strings and ranges. To execute a description, deserialize it the strict way.

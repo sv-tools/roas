@@ -38,17 +38,10 @@ impl SourceMap {
     }
 }
 
-/// The value of JSON or YAML `text`, read as the roas CLI reads it: text
-/// that is JSON with `serde_json`, which keeps the last of duplicate keys,
-/// and anything else as YAML, refusing keys that collide as JSON strings.
+/// The value of YAML `text`, read as the roas CLI reads YAML: keys that
+/// collide as JSON strings are refused.
 #[cfg(feature = "editor")]
-pub(crate) fn value(text: &str) -> Result<serde_json::Value, serde_saphyr::Error> {
-    let start = text.trim_start_matches('\u{feff}').trim_start();
-    if start.starts_with(['{', '['])
-        && let Ok(value) = serde_json::from_str(start)
-    {
-        return Ok(value);
-    }
+pub(crate) fn yaml(text: &str) -> Result<serde_json::Value, serde_saphyr::Error> {
     serde_saphyr::from_str_with_options::<crate::yaml_value::JsonValue>(text, options(64))
         .map(crate::yaml_value::JsonValue::into_inner)
 }

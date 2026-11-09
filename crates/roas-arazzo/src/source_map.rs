@@ -79,22 +79,16 @@ pub(crate) fn line_starts(text: &str) -> Vec<usize> {
 
 /// The one-based line of `offset` in `text`, and the byte offset that
 /// line starts at, as [`line_starts`] counts lines.
+#[cfg(feature = "editor")]
 pub(crate) fn line_of(text: &str, offset: usize) -> (usize, usize) {
     let starts = line_starts(text);
     let line = starts.partition_point(|&start| start <= offset);
     (line, starts[line - 1])
 }
 
-/// The one-based UTF-16 column of `position` in `text`: the code units
-/// between the start of its line (after a byte-order mark) and it, plus one.
-pub(crate) fn utf16_column(text: &str, position: SourcePosition) -> usize {
-    let offset = position.offset.min(text.len());
-    utf16_from(text, line_of(text, offset).1, offset)
-}
-
 /// The one-based UTF-16 column of `offset` on the line starting at
 /// `start`; a byte-order mark takes no column.
-fn utf16_from(text: &str, mut start: usize, offset: usize) -> usize {
+pub(crate) fn utf16_from(text: &str, mut start: usize, offset: usize) -> usize {
     if start == 0 && text.starts_with('\u{feff}') {
         start = offset.min('\u{feff}'.len_utf8());
     }
@@ -380,6 +374,18 @@ impl SourceMap {
 
     fn resolve(&self, path: &str) -> Option<(&Node, Option<&Key>)> {
         resolve(&self.root, &tokens(path)?, &self.cache)
+    }
+
+    /// How many places `path` names: `0` when it is not written, `1` when
+    /// [`SourceMap::locate`] finds it, more when it is ambiguous.
+    #[cfg(feature = "editor")]
+    pub(crate) fn places(&self, path: &str) -> usize {
+        let Some(tokens) = tokens(path) else {
+            return 0;
+        };
+        let mut found = Vec::new();
+        walk(&self.root, &tokens, None, &self.cache, &mut found);
+        found.len()
     }
 }
 
