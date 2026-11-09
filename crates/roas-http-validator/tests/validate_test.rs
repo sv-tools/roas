@@ -2131,7 +2131,18 @@ fn a_yaml_bound_past_i128_is_rounded_into_range_and_compared() {
     let from_yaml = body_schema_yaml(&format!("{{ type: integer, maximum: {bound} }}"));
     let from_json = body_schema_text(&format!(r#"{{"type":"integer","maximum":{bound}}}"#));
 
+    // Compared, not reported: a small value passes and the widest one
+    // fails against the rounded bound.
     assert!(errors(&from_yaml, &posted(b"1")).is_empty());
+    let widest = errors(
+        &from_yaml,
+        &RequestView::new("POST", "/x")
+            .with_header("content-type", "application/json")
+            .with_body(i128::MAX.to_string().as_bytes()),
+    );
+    assert_eq!(widest.len(), 1, "{widest:?}");
+    assert!(!widest[0].contains("was NOT checked"), "{widest:?}");
+
     let found = errors(&from_json, &posted(b"1"));
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("was NOT checked"), "{found:?}");

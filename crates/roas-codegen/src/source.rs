@@ -12,7 +12,7 @@ use url::Url;
 /// The variant records *where the numbers came from*, because exactness
 /// cannot be reconstructed after the fact: only [`Input::Json`], which
 /// this crate parses itself, can yield [`Fidelity::Exact`]. The YAML
-/// reader rounds through `f64`, and a ready-made `Value` has unknown
+/// reader may round through `f64`, and a ready-made `Value` has unknown
 /// provenance whatever its caller believes about it. There is
 /// deliberately no way to assert exactness on a `Value`.
 #[derive(Debug, Clone)]
@@ -234,15 +234,16 @@ impl SourceDocument {
 /// - A duplicate mapping key is an error rather than a silent last-wins.
 ///
 /// A [`serde_saphyr::Budget`] stays on, raised so large specs fit: it rejects
-/// alias bombs, nesting past 64 levels and documents past 10M nodes.
+/// alias bombs, nesting past 64 levels, and documents past 10M nodes or
+/// 64 MiB of scalar text.
 fn parse_yaml(bytes: &[u8]) -> Result<serde_json::Value, serde_saphyr::Error> {
     let options = serde_saphyr::options! {
         // Same options in every roas crate; keep the copies in step
         // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
         // from the defaults (250k nodes, 1M events), which reject ordinary
         // large specs. Depth stays at 64: deeper nesting overflows a 2 MiB
-        // thread stack in debug builds. The input-size cap and alias limits
-        // stay at their defaults and still stop an alias bomb.
+        // thread stack in debug builds. The scalar-size and alias limits stay
+        // at their defaults and still stop an alias bomb.
         budget: serde_saphyr::budget! {
             max_nodes: 10_000_000,
             max_events: 25_000_000,
@@ -314,8 +315,9 @@ mod yaml_tests {
 
     #[test]
     fn yaml_alias_bomb_is_rejected_by_the_budget() {
-        // One anchor expanded 200 times: the alias-to-anchor ratio guard
-        // stops it before anything is materialised.
+        // One anchor expanded 200 times: the alias-to-anchor ratio check
+        // rejects the document when it is finalised. Expansion while parsing
+        // is bounded separately, by the alias-replay limits.
         let yaml = format!(
             "a: &a [x, x, x, x, x, x, x, x, x, x]\nb: [{}]\n",
             vec!["*a"; 200].join(", ")
