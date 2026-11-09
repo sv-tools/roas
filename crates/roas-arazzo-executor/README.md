@@ -357,7 +357,7 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | `simple` conditions | Strings | — | Parsed under the [condition profile](#condition-profile) | Evaluated, short-circuiting |
 | `regex` criteria | Typed criterion types | — | Constant patterns compiled | Evaluated |
 | JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run does not check the version |
-| JSON Pointer selectors (v1.1) and criteria | Typed | — | Pointer syntax checked | Evaluated; the criterion type is an extension |
+| JSON Pointer selectors and criteria (v1.1) | Typed | — | Pointer syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | Preparation error | Not run |
 | Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
 | `dependsOn` | Typed | Step and workflow ids | Cycles rejected; a call, `goto` or `retry` to a workflow with its own `dependsOn` is refused | One at a time; no parallel scheduling; that call or transfer is refused when reached |
