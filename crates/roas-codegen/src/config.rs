@@ -15,6 +15,7 @@ use thiserror::Error;
 /// The language to generate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Target {
     Rust,
     Go,
@@ -23,6 +24,7 @@ pub enum Target {
 /// How generated types are spread over files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Layout {
     /// One file per module or package. The default, and the only layout
     /// under which a "footer after all generated code" means what it
@@ -36,6 +38,7 @@ pub enum Layout {
 /// How a substituted type is spelled in one language.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TypeSpelling {
     /// The type as it appears in generated code, such as
     /// `chrono::DateTime<chrono::Utc>` or `time.Time`.
@@ -48,6 +51,7 @@ pub struct TypeSpelling {
 /// A user-provided type standing in for a schema or a `format`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Substitution {
     pub rust: Option<TypeSpelling>,
     pub go: Option<TypeSpelling>,
@@ -57,6 +61,7 @@ pub struct Substitution {
 /// the description.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct FieldConfig {
     /// Extra Rust attributes, appended as separate lines.
     pub attrs: Vec<String>,
@@ -70,6 +75,7 @@ pub struct FieldConfig {
 /// the description.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TypeConfig {
     /// Extra Rust container attributes.
     pub attrs: Vec<String>,
@@ -83,7 +89,11 @@ pub struct TypeConfig {
 /// Rust settings as a file may state them.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RustConfigFile {
+    /// The generated module's name: the file is `<module>.rs`. Default
+    /// `types`. Targets sharing an output directory need different ones.
+    pub module: Option<String>,
     pub crate_name: Option<String>,
     pub edition: Option<String>,
     /// Derives added to every generated container.
@@ -93,6 +103,7 @@ pub struct RustConfigFile {
 /// Go settings as a file may state them.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct GoConfigFile {
     pub package: Option<String>,
     pub module_path: Option<String>,
@@ -102,6 +113,7 @@ pub struct GoConfigFile {
 /// validated beyond the shape.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields, rename_all = "snake_case")]
+#[non_exhaustive]
 pub struct ConfigFile {
     pub target: Option<Target>,
     pub layout: Option<Layout>,
@@ -170,6 +182,7 @@ impl ConfigFile {
             .allow_codegen_extensions
             .or(self.allow_codegen_extensions);
         self.template_dir = over.template_dir.or(self.template_dir);
+        self.rust.module = over.rust.module.or(self.rust.module);
         self.rust.crate_name = over.rust.crate_name.or(self.rust.crate_name);
         self.rust.edition = over.rust.edition.or(self.rust.edition);
         self.rust.derives.extend(over.rust.derives);
@@ -194,6 +207,15 @@ impl ConfigFile {
             allow_codegen_extensions: self.allow_codegen_extensions.unwrap_or(false),
             template_dir: self.template_dir,
             rust: RustConfig {
+                module: match self.rust.module {
+                    Some(module) => {
+                        if !is_module_name(&module) {
+                            return Err(ConfigError::InvalidModule(module));
+                        }
+                        module
+                    }
+                    None => "types".to_owned(),
+                },
                 crate_name: self.rust.crate_name,
                 edition: self.rust.edition.unwrap_or_else(|| "2024".to_owned()),
                 derives: self.rust.derives,
@@ -208,9 +230,72 @@ impl ConfigFile {
     }
 }
 
+/// A module named like a crate the user's code or the generated code
+/// names (`std`, `core`, `serde`, ...) hides that crate for every path in
+/// the file that declares it; one named `lib` or `main` would be a crate
+/// root's file. Crates a substitution imports are checked in `generate`,
+/// where the configuration is known.
+fn shadows_a_crate(module: &str) -> bool {
+    matches!(
+        module,
+        "std" | "core" | "alloc" | "proc_macro" | "test" | "serde" | "serde_json" | "lib" | "main"
+    )
+}
+
+/// A lowercase Rust module name: a letter, then letters, digits or `_`,
+/// and not a keyword, a crate's name or a Windows-reserved name. The file
+/// name the Rust backend writes.
+pub(crate) fn is_module_name(module: &str) -> bool {
+    // The module names the file: one Windows resolves elsewhere is refused.
+    crate::write::windows_safe(module)
+        && !shadows_a_crate(module)
+        && !crate::rust::naming::is_keyword(module)
+        && module.starts_with(|c: char| c.is_ascii_lowercase())
+        && module
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// A Rust module name derived from free text such as a label or a file
+/// name: lowercase, other characters to `_`, never empty, never digit-led,
+/// never a keyword. Accepted as `rust.module` unless a substitution
+/// imports or names a crate of that name, which `generate` refuses.
+pub fn rust_module_name(text: &str) -> String {
+    let mut module: String = text
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while module.contains("__") {
+        module = module.replace("__", "_");
+    }
+    let module = module.trim_matches('_').to_owned();
+    let module = match module.chars().next() {
+        None => "api".to_owned(),
+        Some(c) if c.is_ascii_digit() => format!("m_{module}"),
+        Some(_) => module,
+    };
+    if crate::rust::naming::is_keyword(&module)
+        || !crate::write::windows_safe(&module)
+        || shadows_a_crate(&module)
+    {
+        format!("{module}_types")
+    } else {
+        module
+    }
+}
+
 /// Rust settings, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RustConfig {
+    /// The generated module's name; the file is `<module>.rs`.
+    pub module: String,
     pub crate_name: Option<String>,
     pub edition: String,
     pub derives: Vec<String>,
@@ -218,6 +303,7 @@ pub struct RustConfig {
 
 /// Go settings, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GoConfig {
     pub package: String,
     pub module_path: Option<String>,
@@ -227,6 +313,7 @@ pub struct GoConfig {
 /// generator needs an answer, no `Deserialize`, no `Default` — obtained
 /// only through [`ConfigFile::build`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Config {
     pub target: Target,
     pub layout: Layout,
@@ -247,6 +334,7 @@ pub struct Config {
 
 /// Why a configuration could not be loaded or resolved.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("cannot read configuration file {path}")]
     Read {
@@ -260,10 +348,12 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-    #[error(
-        "no target language: set `target = \"rust\"` or `target = \"go\"` in the configuration, or pass `--target`"
-    )]
+    #[error("no target language: set `target`")]
     MissingTarget,
+    #[error(
+        "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`; not a keyword, a crate name such as `std` or `serde`, `lib` or `main`, or a name Windows reserves"
+    )]
+    InvalidModule(String),
 }
 
 #[cfg(test)]
@@ -381,5 +471,22 @@ mod tests {
         assert_eq!(uuid.rust.as_ref().unwrap().import.as_deref(), Some("uuid"));
         assert_eq!(uuid.go.as_ref().unwrap().name, "uuid.UUID");
         assert!(uuid.go.as_ref().unwrap().import.is_none());
+    }
+
+    #[test]
+    fn module_names_windows_resolves_elsewhere_are_avoided() {
+        assert_eq!(rust_module_name("aux"), "aux_types");
+        assert_eq!(rust_module_name("COM1"), "com1_types");
+        assert!(is_module_name(&rust_module_name("nul")));
+        assert!(!is_module_name("con"));
+    }
+
+    #[test]
+    fn module_names_never_shadow_a_crate() {
+        assert_eq!(rust_module_name("std"), "std_types");
+        assert_eq!(rust_module_name("serde"), "serde_types");
+        assert_eq!(rust_module_name("lib"), "lib_types");
+        assert!(!is_module_name("main"));
+        assert!(!is_module_name("core"));
     }
 }

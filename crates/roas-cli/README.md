@@ -49,6 +49,7 @@ only where a flag documents a machine-readable format.
 ```shell
 roas openapi validate [FILE]               # parse + validate an OpenAPI spec
 roas openapi convert --to v3_2 [FILE]      # upconvert across versions
+roas openapi generate --target rust -o DIR [FILE]  # generate Rust types
 roas openapi preview [FILE]                # open the spec in a browser via Redoc
 roas overlay validate [FILE]               # validate an OpenAPI Overlay document
 roas overlay convert --to v1_1 [FILE]      # upconvert an overlay
@@ -136,6 +137,22 @@ roas openapi convert --to v3_2 --apply patch.yaml spec.json
 roas openapi convert --to v3_2 --merge layer.yaml --apply patch.yaml --collapse spec.json
 roas openapi convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-match spec.json
 ```
+
+### `openapi generate`
+
+Generates Rust types from a description of any version, using [`roas-codegen`](https://crates.io/crates/roas-codegen). The description is validated first, with external references skipped and reported. Numbers are read as `f64` by default; a build with the `exact-numbers` feature (`cargo install roas-cli --features exact-numbers`) keeps JSON numbers without rounding them through `f64`. That feature is off by default because it changes how the other commands compare numbers.
+
+```shell
+roas openapi generate --target rust --out src/api spec.yaml       # write src/api/spec.rs
+roas openapi generate --config codegen.toml --out src/api spec.yaml
+roas openapi generate --target rust --out src/api --check spec.yaml  # CI: fail if out of date
+```
+
+The generated module is named after `--label`, which defaults to the input file's name: `petstore.yaml` becomes `petstore.rs`, and `rust.module` in the configuration overrides it. Files are written under a manifest in the output directory, named after the label and the language. Only files the manifest owns are changed or removed, so generated code can sit beside hand-written modules, and several descriptions can share one directory. An existing file no manifest owns is refused unless `--force` is passed or it already holds exactly the generated content, in which case it is adopted and later removed like any other generated file once no longer generated. The output directory must not be a symbolic link, and nothing below it is written through one. The generated header names the input file, not its location, and `rustfmt` runs with an empty configuration, so `--check` gives the same answer in every checkout with the same `roas` version, `exact-numbers` setting and `rustfmt` version; without `rustfmt`, `--check` refuses to compare. A run holds a lock on `.roas-codegen.lock` in the output directory, and a shared one in any enclosing or nested output directory it reaches. The lock files stay (they mark output directories), are safe to delete when no run is active, and belong in `.gitignore`; the `.roas-codegen-<label>-<language>.json` manifests are committed with the generated files, or `--check` in a fresh checkout reports them out of date. The container image ships without `rustfmt`, so run `generate` and `--check` where the Rust toolchain is installed. Two descriptions need different labels: reusing a label for a different file is refused. A description read from stdin or a pipe (such as `<(curl ...)`) has no recorded path, so it skips that check. After moving a description or the output directory, pass `--replace-source` once to let it keep its label. Renaming one also changes the default label: pass `--label` with the old name together with `--replace-source`, or delete the old manifest and the files it lists.
+
+Diagnostics go to stderr. An error suppresses the affected types; by default it also leaves the output directory untouched, and `--allow-partial` writes what could be generated but still exits with an error. `--strict` treats every warning as an error. Validation checks that say nothing about the generated types, such as unused components or undeclared tags, are skipped by default. `--allow-codegen-extensions` applies `x-rust-attrs` from the description, which is otherwise ignored because a description is often written by someone else. `--ignore` skips `roas` validation checks as in `openapi validate`.
+
+`--config` takes the TOML file described in the [`roas-codegen` README](https://crates.io/crates/roas-codegen): type substitutions, renames, extra attributes, a header. Flags override it.
 
 ### `overlay`
 

@@ -19,6 +19,9 @@ publish = true
 all-features = true
 
 [features]
+# Named, though empty, so CI tests the crate as it ships, not only with
+# `exact-numbers` on.
+default = []
 # Keep every number exactly as written. A Cargo feature rather than a
 # runtime setting because `serde_json/arbitrary_precision` is global to
 # the build and changes how `serde_json::Value` compares numbers; the

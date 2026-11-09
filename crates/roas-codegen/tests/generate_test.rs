@@ -19,13 +19,16 @@ fn document(components: serde_json::Value) -> roas_codegen::ValidatedSourceDocum
     validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid")
 }
 
+fn target(target: Target) -> ConfigFile {
+    let mut file = ConfigFile::default();
+    file.target = Some(target);
+    file
+}
+
 fn rust_config(toml: &str) -> roas_codegen::Config {
     ConfigFile::from_toml(toml, Path::new("/"))
         .unwrap()
-        .merge(ConfigFile {
-            target: Some(Target::Rust),
-            ..Default::default()
-        })
+        .merge(target(Target::Rust))
         .build()
         .unwrap()
 }
@@ -76,11 +79,13 @@ fn the_worked_example_generates_as_the_plan_shows() {
         !code.contains("Int64"),
         "no integer in this example:\n{code}"
     );
-    assert!(
-        generation.diagnostics.is_empty(),
-        "{:?}",
-        generation.diagnostics
-    );
+    // Unformatted only says rustfmt is not available where this runs.
+    let diagnostics: Vec<_> = generation
+        .diagnostics
+        .iter()
+        .filter(|d| !matches!(d.kind, roas_codegen::DiagnosticKind::Unformatted))
+        .collect();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let deps: Vec<&str> = generation
         .dependencies
         .rust
@@ -311,6 +316,37 @@ fn codegen_extensions_are_gated() {
 }
 
 #[test]
+fn settings_this_release_cannot_honour_are_refused() {
+    for toml in [
+        "validation = true\n",
+        "template_dir = \"tpl\"\n",
+        "[rust]\ncrate_name = \"pets\"\n",
+    ] {
+        let error = generate(&document(pet()), &rust_config(toml)).unwrap_err();
+        assert!(
+            matches!(error, GenerateError::Unsupported(_)),
+            "{toml}: {error}"
+        );
+    }
+}
+
+#[test]
+fn the_edition_must_be_a_rust_edition_and_is_recorded_with_the_target() {
+    let error = generate(
+        &document(pet()),
+        &rust_config("[rust]\nedition = \"2027\"\n"),
+    )
+    .unwrap_err();
+    assert!(matches!(error, GenerateError::Config(_)), "{error}");
+    let generation = generate(
+        &document(pet()),
+        &rust_config("[rust]\nedition = \"2021\"\n"),
+    )
+    .unwrap();
+    assert_eq!(generation.target, Target::Rust);
+}
+
+#[test]
 fn unsupported_configuration_is_refused_up_front() {
     let error = generate(
         &document(pet()),
@@ -318,12 +354,7 @@ fn unsupported_configuration_is_refused_up_front() {
     )
     .unwrap_err();
     assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
-    let go = ConfigFile {
-        target: Some(Target::Go),
-        ..Default::default()
-    }
-    .build()
-    .unwrap();
+    let go = target(Target::Go).build().unwrap();
     let error = generate(&document(pet()), &go).unwrap_err();
     assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
     let error = generate(&document(pet()), &rust_config("exact_numbers = true\n")).unwrap_err();
@@ -617,5 +648,74 @@ fn third_review_regressions() {
             .contains("pub fn from_pet(value: &Pet) -> Result<Self, serde_json::Error>"),
         "{}",
         g.files[0].contents
+    );
+}
+
+#[test]
+fn the_header_names_the_file_not_its_location() {
+    let raw = serde_json::json!({
+        "openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "components": {"schemas": {"Pet": {"type": "object", "properties": {"a": {"type": "string"}}}}}
+    });
+    let header = |uri: &str| {
+        let doc = SourceDocument::parse(
+            Input::Json(serde_json::to_vec(&raw).unwrap()),
+            Url::parse(uri).unwrap(),
+        )
+        .unwrap();
+        let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
+        let code = generate(&doc, &rust_config("")).unwrap().files[0]
+            .contents
+            .clone();
+        code.lines()
+            .find(|l| l.starts_with("//! Types generated from"))
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        header("file:///home/alice/repo/specs/pet%20store.json"),
+        "//! Types generated from `pet store.json`."
+    );
+    assert_eq!(
+        header("file:///ci/build/specs/pet%20store.json"),
+        header("file:///home/alice/repo/specs/pet%20store.json")
+    );
+    assert_eq!(
+        header("stdin:///"),
+        "//! Types generated from `standard input`."
+    );
+    assert_eq!(
+        header("file:///d/x%0A%23!%5Bdeny(warnings)%5D%0A%2F%2F!.json"),
+        "//! Types generated from `x\\n#![deny(warnings)]\\n//!.json`."
+    );
+}
+
+#[test]
+fn a_module_named_like_an_imported_crate_is_refused() {
+    let error = generate(
+        &document(pet()),
+        &rust_config(
+            "[rust]\nmodule = \"chrono\"\n[substitutions.date-time.rust]\nname = \"chrono::DateTime<chrono::Utc>\"\nimport = \"chrono\"\n",
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("substitution `date-time` imports")),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_module_named_like_a_crate_a_substitution_names_is_refused() {
+    let error = generate(
+        &document(pet()),
+        &rust_config(
+            "[rust]\nmodule = \"chrono\"\n[substitutions.date-time.rust]\nname = \"chrono::NaiveDate\"\n",
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("imports or names")),
+        "{error}"
     );
 }

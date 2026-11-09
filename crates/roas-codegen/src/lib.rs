@@ -10,14 +10,18 @@
 //! Rust backend is here; Go is next.
 //!
 //! ```no_run
-//! use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
+//! use roas_codegen::{
+//!     ConfigFile, Input, SourceDocument, Target, generate, generation_options, validate,
+//! };
 //! use url::Url;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let bytes = std::fs::read("openapi.json")?;
 //! let document = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///openapi.json")?)?;
-//! let document = validate(document, Default::default())?;
-//! let config = ConfigFile { target: Some(Target::Rust), ..Default::default() }.build()?;
+//! let document = validate(document, generation_options())?;
+//! let mut file = ConfigFile::default();
+//! file.target = Some(Target::Rust);
+//! let config = file.build()?;
 //! let generation = generate(&document, &config)?;
 //! for file in &generation.files {
 //!     println!("{}: {} bytes", file.path.display(), file.contents.len());
@@ -38,14 +42,16 @@ mod report;
 mod rust;
 mod source;
 mod validate;
+mod write;
 mod yaml_value;
 
 pub use config::{
     Config, ConfigError, ConfigFile, FieldConfig, GoConfig, GoConfigFile, Layout, RustConfig,
-    RustConfigFile, Substitution, Target, TypeConfig, TypeSpelling,
+    RustConfigFile, Substitution, Target, TypeConfig, TypeSpelling, rust_module_name,
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 pub use generate::{Dependencies, GenerateError, GeneratedFile, Generation, generate};
 pub use rust::RustDependency;
 pub use source::{Fidelity, Input, SourceDocument, SourceError, SourceVersion};
-pub use validate::{SourceValidationError, ValidatedSourceDocument, validate};
+pub use validate::{SourceValidationError, ValidatedSourceDocument, generation_options, validate};
+pub use write::{CheckReport, WriteError, WriteOptions, WriteReport, check, manifest_name, write};

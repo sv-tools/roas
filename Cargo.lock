@@ -2749,6 +2749,7 @@ dependencies = [
  "roas-arazzo",
  "roas-arazzo-executor",
  "roas-asyncapi",
+ "roas-codegen",
  "roas-file-fetcher",
  "roas-http-fetcher",
  "roas-overlay",

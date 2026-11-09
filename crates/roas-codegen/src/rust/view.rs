@@ -84,9 +84,19 @@ pub(crate) struct FileView {
 
 /// A Rust dependency the generated code needs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct RustDependency {
     pub name: String,
     pub features: Vec<String>,
+}
+
+impl RustDependency {
+    pub fn new(name: impl Into<String>, features: Vec<String>) -> Self {
+        RustDependency {
+            name: name.into(),
+            features,
+        }
+    }
 }
 
 /// The constraints a schema declares, as documentation until generated

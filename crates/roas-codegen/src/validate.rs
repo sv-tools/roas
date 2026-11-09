@@ -8,6 +8,20 @@ use roas::validation::{Options, Validate, ValidationError};
 use std::fmt;
 use thiserror::Error;
 
+/// The `roas` validation checks that say nothing about the schemas being
+/// generated: unused components and path items, undeclared tags, empty
+/// titles, versions, response descriptions and external-documentation
+/// URLs, duplicate operation ids, malformed URLs.
+/// Generation starts from this set; a caller adds to it.
+pub fn generation_options() -> EnumSet<Options> {
+    roas::validation::IGNORE_UNUSED
+        | roas::validation::IGNORE_EMPTY_REQUIRED_FIELDS
+        | Options::IgnoreUnusedPathItems
+        | Options::IgnoreMissingTags
+        | Options::IgnoreNonUniqOperationIDs
+        | Options::IgnoreInvalidUrls
+}
+
 /// Validate a document with `roas`, skipping external references.
 ///
 /// The result is the only way to obtain a [`ValidatedSourceDocument`],
@@ -74,6 +88,7 @@ impl std::ops::Deref for ValidatedSourceDocument {
 /// consumed, so it can be inspected or validated again with other
 /// options. Boxed, since the whole 3.2 model rides inside.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub struct SourceValidationError {
     pub document: Box<SourceDocument>,
     pub errors: Vec<ValidationError>,
@@ -92,5 +107,15 @@ impl fmt::Display for SourceValidationError {
             write!(f, "\n- {error}")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unused_path_items_are_exempt_too() {
+        let options = super::generation_options();
+        assert!(options.contains(roas::validation::Options::IgnoreUnusedPathItems));
+        assert!(options.contains(roas::validation::Options::IgnoreEmptyExternalDocumentationUrl));
     }
 }

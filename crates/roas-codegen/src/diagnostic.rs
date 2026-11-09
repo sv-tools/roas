@@ -12,6 +12,7 @@ use url::Url;
 ///
 /// [RFC 6901]: https://www.rfc-editor.org/rfc/rfc6901
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct SchemaId {
     /// The document the schema lives in.
     pub uri: Url,
@@ -42,6 +43,7 @@ impl fmt::Display for SchemaId {
 /// `Warning` changes nothing by itself, and a strict run promotes every
 /// warning to an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Severity {
     Warning,
     Error,
@@ -100,10 +102,15 @@ pub enum DiagnosticKind {
     /// A component that is a bare `$ref` leading back to itself through
     /// other bare references: nothing to generate.
     ReferenceCycle,
+    /// `rustfmt` did not format the output — not installed, failed, or
+    /// could not be set up; the message says why — so it is unformatted and
+    /// will not match a formatted run byte for byte.
+    Unformatted,
 }
 
 /// One thing the generator has to say about the description.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Diagnostic {
     pub severity: Severity,
     pub kind: DiagnosticKind,
@@ -114,6 +121,27 @@ pub struct Diagnostic {
     /// [`schema_id`](Self::schema_id): usually one keyword beneath it.
     pub pointer: String,
     pub message: String,
+}
+
+impl Diagnostic {
+    /// A diagnostic for a [`Generation`](crate::Generation) a caller builds
+    /// itself; an `Error` one makes [`write`](crate::write()) refuse unless
+    /// partial output is allowed.
+    pub fn new(
+        severity: Severity,
+        kind: DiagnosticKind,
+        schema_id: SchemaId,
+        pointer: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Diagnostic {
+            severity,
+            kind,
+            schema_id,
+            pointer: pointer.into(),
+            message: message.into(),
+        }
+    }
 }
 
 impl fmt::Display for Diagnostic {

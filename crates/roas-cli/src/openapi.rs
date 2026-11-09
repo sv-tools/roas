@@ -34,6 +34,11 @@
 //!   the input format (YAML in → YAML out, JSON in → JSON out); pass
 //!   `--output-format json|yaml` to override.
 //!
+//! - `openapi generate --out <DIR> [FILE]` — generate Rust types from
+//!   the description into a directory, under a manifest that records
+//!   which files the target owns. `--check` writes nothing and fails when
+//!   the directory is out of date. See [`crate::generate`].
+//!
 //! - `openapi preview [FILE]` — start a local HTTP server on
 //!   `127.0.0.1:<random>` that serves the spec rendered with
 //!   [Redoc](https://redocly.com/redoc) (default) or
@@ -49,6 +54,7 @@ use std::path::PathBuf;
 
 use std::fs;
 
+use crate::generate::{self, GenerateArgs};
 use crate::preview::{self, PreviewArgs};
 use crate::versioned::{self, SpecVersion, parse_value, path_looks_like_yaml};
 use crate::{
@@ -62,6 +68,8 @@ pub(crate) enum OpenApiCommand {
     Validate(ValidateArgs),
     /// Convert an OpenAPI description to a different version.
     Convert(ConvertArgs),
+    /// Generate Rust types from an OpenAPI description.
+    Generate(GenerateArgs),
     /// Preview the description in a browser, rendered with Redoc or
     /// Swagger UI.
     Preview(PreviewArgs),
@@ -71,6 +79,7 @@ pub(crate) fn run_openapi(cmd: OpenApiCommand) -> Result<()> {
     match cmd {
         OpenApiCommand::Validate(args) => run_validate(args),
         OpenApiCommand::Convert(args) => run_convert(args),
+        OpenApiCommand::Generate(args) => generate::run_generate(args),
         OpenApiCommand::Preview(args) => preview::run_preview(args),
     }
 }

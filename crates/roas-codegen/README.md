@@ -10,15 +10,19 @@ A description goes in, is version-detected, parsed, normalized to OpenAPI 3.2 an
 ## Quick start
 
 ```rust
-use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
+use roas_codegen::{
+    ConfigFile, Input, SourceDocument, Target, generate, generation_options, validate,
+};
 use url::Url;
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let bytes = std::fs::read("openapi.json")?;
 let document = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///openapi.json")?)?;
-let document = validate(document, Default::default())?;
+let document = validate(document, generation_options())?;
 
-let config = ConfigFile { target: Some(Target::Rust), ..Default::default() }.build()?;
+let mut file = ConfigFile::default();
+file.target = Some(Target::Rust);
+let config = file.build()?;
 let generation = generate(&document, &config)?;
 for file in &generation.files {
     std::fs::write(file.path.file_name().unwrap(), &file.contents)?;
@@ -29,7 +33,7 @@ for diagnostic in &generation.diagnostics {
 # Ok(()) }
 ```
 
-`generate` returns files in memory, never touching disk, together with every diagnostic and the dependency list the generated code needs — `serde` and `serde_json` with `raw_value`, plus whatever a type substitution imports. Nothing generated depends on `roas`.
+`generate` returns files in memory, writing no output files, together with every diagnostic and the dependency list the generated code needs — `serde` and `serde_json` with `raw_value`, plus whatever a type substitution imports. Nothing generated depends on `roas`.
 
 ## What the Rust output looks like
 
@@ -77,6 +81,8 @@ Names are suggested by the schema — a component name, a `title`, or the positi
 
 ## Configuration
 
+The Rust output is one module, `<rust.module>.rs`, `types.rs` by default; targets sharing a directory need different module names.
+
 `ConfigFile` is what a TOML file may say: everything optional, unknown keys rejected, relative paths resolved against the file's own directory. `Config` is what generation consumes, and `ConfigFile::build` is the one place a missing `target` is refused.
 
 ```toml
@@ -101,7 +107,7 @@ attrs = ['#[validate(length(min = 1))]']
 
 Types and fields are addressed by the names in the description, never by the generated identifiers. User attributes are parsed as Rust, and the serde keys that carry the wire contract — `default`, `skip_serializing_if`, `deserialize_with`, `rename`, `flatten` and the container-level equivalents — are refused by name rather than silently doubled. `x-rust-attrs` in a description is code from whoever wrote the description, so it is applied only under `allow_codegen_extensions = true`.
 
-Generated Rust is validated with `syn` before it is returned and formatted with `rustfmt` when one is on the path.
+Generated Rust is validated with `syn` before it is returned and formatted with `rustfmt` when one is on the path. `rustfmt` always runs with an empty configuration, so a `rustfmt.toml` nearby never changes the output; when it cannot run, the output is unformatted and a warning says so.
 
 ## Input and fidelity
 
@@ -109,17 +115,30 @@ Generated Rust is validated with `syn` before it is returned and formatted with 
 
 The URI is required. Every schema identity is the document URI plus a JSON Pointer, so input with no natural URI — stdin, say — takes a synthetic one such as `stdin:///`.
 
-## Configuration
+## Writing files
 
-`ConfigFile` is what a TOML file may say: everything optional, unknown keys rejected, relative paths resolved against the file's own directory. `Config` is what generation consumes, and `ConfigFile::build` is the one place a missing `target` is refused.
+`generate` writes no output files (it only uses a temporary directory to run `rustfmt`). `write` puts a `Generation` into a directory under a manifest — `.roas-codegen-<label>-<language>.json` — that records each file it owns with a content hash, and `check` compares the directory with a generation without writing anything.
 
-```toml
-target = "rust"
-validation = true
+```rust
+use roas_codegen::{Generation, WriteOptions, check, write};
 
-[types.Pet.fields.tag]
-attrs = ['#[validate(length(min = 1))]']
+fn save(generation: &Generation) -> Result<(), Box<dyn std::error::Error>> {
+    let out = std::path::Path::new("src/api");
+    let report = write(generation, out, &WriteOptions::new("petstore"))?;
+    println!("{} written, {} removed", report.written.len(), report.removed.len());
+    assert!(check(generation, out, &WriteOptions::new("petstore"))?.is_clean());
+    Ok(())
+}
 ```
+
+- **Only owned files change.** A path another target's manifest owns is refused, and so is an existing file no manifest owns unless `overwrite_unowned` is set or it already holds exactly the generated content, in which case it is adopted. Two targets with different labels can share a directory.
+- **Ownership is claimed before anything is written.** Every check runs first, including that no path goes through a symbolic link. A pending manifest owning the previous and the new files is written, each file is written to a temporary sibling and renamed into place, and the final manifest replaces the pending one, so an interrupted run is completed by the next one.
+- **Errors stop the write.** A generation carrying `Error` diagnostics is refused unless `allow_partial` is set, and even then files the previous run wrote are kept rather than removed.
+- **Labels belong to one description.** When `WriteOptions::source_id` is set, the manifest records it and a different source under the same label is refused. The `roas` command line sets it to the description's path relative to the output directory without a `.json`/`.yaml`/`.yml` extension, so two `openapi.yaml` files from different folders cannot overwrite each other, while converting a description from JSON to YAML keeps its label.
+- **One run at a time.** An operating-system lock on the output directory's `.roas-codegen.lock` spans the run, exclusive. Other output roots the run can reach, enclosing or nested, are locked shared, so siblings under one root run side by side while overlapping roots exclude each other. Enclosing roots are looked for up to the first shared, sticky directory such as `/tmp`, so other users' files there cannot block a run. Locks end with the process, so a killed run does not block the next; the lock files stay, as they mark the roots. Ownership is compared case-insensitively, and nothing below the output directory is reached through a symbolic link.
+- **Stale files are removed only if unedited.** A file the previous run wrote and this one does not is deleted when it still holds the generated content, and kept and reported otherwise.
+
+The `roas` command line wraps all of this as `roas openapi generate`, with `--check` for CI.
 
 ## License
 
