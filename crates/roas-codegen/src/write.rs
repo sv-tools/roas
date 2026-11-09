@@ -2057,6 +2057,11 @@ pub fn write(
     if !on_disk.is_some_and(|m| m.same_as(&final_manifest)) {
         write_atomic(&manifest_path, manifest_text(&final_manifest).as_bytes())?;
     }
+    // The manifest's own name as stored, too: under another spelling it is
+    // another target's manifest on a case-sensitive checkout.
+    if let Some(stored) = misspelled(out_dir, &manifest_file, &mut Listings::default()) {
+        respell(out_dir, &stored, &manifest_file)?;
+    }
     created.keep = true;
     Ok(report)
 }
@@ -2193,8 +2198,9 @@ pub fn check(
         owned,
     );
     expected.replacing = replacing;
-    report.manifest_outdated =
-        !read_manifest(&manifest_path)?.is_some_and(|m| m.same_as(&expected));
+    report.manifest_outdated = !read_manifest(&manifest_path)?
+        .is_some_and(|m| m.same_as(&expected))
+        || misspelled_entry(out_dir, &manifest_file, &mut Listings::default()).is_some();
     let manifest_changed = read_recorded(&manifest_path).ok().flatten() != manifest_at_start;
     if let Some(lock) = appeared(out_dir, &unlocked, manifest_changed) {
         return Err(WriteError::Locked(lock));
@@ -4634,5 +4640,35 @@ mod tests {
             check(&g, &dir.0, &WriteOptions::new("api")),
             Err(WriteError::Manifest { .. })
         ));
+    }
+
+    #[test]
+    fn a_manifest_stored_in_another_case_gets_its_own_name() {
+        let dir = TempDir::new("manifest-respell");
+        let g = generation(&[("a.rs", "a")]);
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        let ours = dir.0.join(".roas-codegen-api-rust.json");
+        let shouty = dir.0.join(".ROAS-CODEGEN-API-RUST.JSON");
+        fs::rename(&ours, &shouty).unwrap();
+        if !same_file(&shouty, &ours) {
+            return; // case-sensitive: another target's manifest now
+        }
+        assert!(
+            check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .manifest_outdated
+        );
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert!(
+            check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+        let names: Vec<String> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".json") || n.ends_with(".JSON"))
+            .collect();
+        assert_eq!(names, vec![".roas-codegen-api-rust.json".to_owned()]);
     }
 }
