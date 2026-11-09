@@ -128,158 +128,84 @@ fn walk(dir: &Path, prefix: &str, out: &mut BTreeMap<String, String>) -> Result<
     Ok(())
 }
 
-/// The statement tags of a template, `{% ... %}`, as their inner text,
-/// read the way minijinja's default syntax reads them: comments
-/// (`{# ... #}`) and `{% raw %}` sections are skipped, and a `%}` inside a
-/// quoted string does not end a tag.
-fn statements(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = source;
-    while let Some(open) = rest.find('{') {
-        let after = &rest[open + 1..];
-        if let Some(comment) = after.strip_prefix('#') {
-            rest = match comment.find("#}") {
-                Some(end) => &comment[end + 2..],
-                None => "",
-            };
-            continue;
-        }
-        let (close, inner_start) = match after.chars().next() {
-            Some('%') => ("%}", &after[1..]),
-            Some('{') => ("}}", &after[1..]),
-            _ => {
-                rest = after;
-                continue;
-            }
-        };
-        let (inner, remainder) = until_close(inner_start, close);
-        rest = remainder;
-        if close != "%}" {
-            continue;
-        }
-        let tag = inner.trim_matches(['-', '+', '~']).trim();
-        if tag == "raw" {
-            // Everything up to the matching `endraw` is text.
-            rest = skip_raw(rest);
-            continue;
-        }
-        out.push(tag.to_owned());
-    }
-    out
+/// What the block check needs from one template, read by minijinja's own
+/// parser so it agrees with the engine by construction.
+#[derive(Debug, Default, PartialEq)]
+struct Shape {
+    /// The template it extends, if any.
+    extends: Option<String>,
+    /// Blocks not nested in another block: what an extending template
+    /// fills.
+    top: Vec<String>,
+    /// Every block, nested ones included: what a descendant may fill.
+    all: Vec<String>,
 }
 
-/// The text of a tag up to `close`, honouring quoted strings, and what
-/// follows it.
-fn until_close<'s>(text: &'s str, close: &str) -> (&'s str, &'s str) {
-    let mut quote = None;
-    let mut escaped = false;
-    for (i, c) in text.char_indices() {
-        match quote {
-            Some(q) => {
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' {
-                    escaped = true;
-                } else if c == q {
-                    quote = None;
+fn shape(name: &str, source: &str) -> Result<Shape, String> {
+    use minijinja::machinery::{self, WhitespaceConfig, ast};
+    let parsed = machinery::parse(
+        source,
+        name,
+        // The default syntax, whichever shape minijinja's features give it.
+        Default::default(),
+        WhitespaceConfig::default(),
+    )
+    .map_err(|e| format!("{e:#}"))?;
+    let mut shape = Shape::default();
+    let mut parents = Vec::new();
+    fn walk<'a>(
+        statements: &'a [ast::Stmt<'a>],
+        depth: usize,
+        shape: &mut Shape,
+        parents: &mut Vec<&'a ast::Expr<'a>>,
+    ) {
+        for statement in statements {
+            match statement {
+                ast::Stmt::Template(t) => walk(&t.children, depth, shape, parents),
+                ast::Stmt::Extends(e) => parents.push(&e.name),
+                ast::Stmt::Block(b) => {
+                    if depth == 0 {
+                        shape.top.push(b.name.to_owned());
+                    }
+                    shape.all.push(b.name.to_owned());
+                    walk(&b.body, depth + 1, shape, parents);
                 }
-            }
-            None if c == '"' || c == '\'' => quote = Some(c),
-            None if text[i..].starts_with(close) => {
-                return (&text[..i], &text[i + close.len()..]);
-            }
-            None => {}
-        }
-    }
-    (text, "")
-}
-
-/// What follows the `{% endraw %}` ending a raw section. As minijinja's
-/// lexer reads it: quotes mean nothing inside, and only a tag that is
-/// `endraw` itself, whitespace control aside, ends it.
-fn skip_raw(text: &str) -> &str {
-    let mut rest = text;
-    while let Some(open) = rest.find("{%") {
-        rest = &rest[open + 2..];
-        let tag = rest.trim_start_matches(['-', '+', '~']).trim_start();
-        if let Some(after) = tag.strip_prefix("endraw") {
-            let after = after.trim_start().trim_start_matches(['-', '+', '~']);
-            if let Some(remainder) = after.strip_prefix("%}") {
-                return remainder;
+                ast::Stmt::ForLoop(f) => {
+                    walk(&f.body, depth, shape, parents);
+                    walk(&f.else_body, depth, shape, parents);
+                }
+                ast::Stmt::IfCond(i) => {
+                    walk(&i.true_body, depth, shape, parents);
+                    walk(&i.false_body, depth, shape, parents);
+                }
+                ast::Stmt::WithBlock(w) => walk(&w.body, depth, shape, parents),
+                ast::Stmt::SetBlock(s) => walk(&s.body, depth, shape, parents),
+                ast::Stmt::AutoEscape(a) => walk(&a.body, depth, shape, parents),
+                ast::Stmt::FilterBlock(f) => walk(&f.body, depth, shape, parents),
+                ast::Stmt::Macro(m) => walk(&m.body, depth, shape, parents),
+                ast::Stmt::CallBlock(c) => walk(&c.macro_decl.body, depth, shape, parents),
+                _ => {}
             }
         }
     }
-    ""
-}
-
-/// The word after `keyword` in a statement, if the statement is one.
-fn argument<'s>(statement: &'s str, keyword: &str) -> Option<&'s str> {
-    // The keyword ends where an identifier would: `extends"x"` is
-    // `extends` and `"x"`, as minijinja's lexer reads it.
-    statement
-        .strip_prefix(keyword)
-        .filter(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
-        .map(str::trim)
-}
-
-/// The names a template declares with `{% block NAME %}`, in order.
-fn blocks(source: &str) -> Vec<String> {
-    statements(source)
-        .iter()
-        .filter_map(|s| argument(s, "block"))
-        .filter_map(|rest| {
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            (!name.is_empty()).then_some(name)
-        })
-        .collect()
-}
-
-/// The blocks a template fills at its top level: a block nested inside
-/// another is a new declaration a descendant may fill, not a fill.
-fn top_level_blocks(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    for statement in statements(source) {
-        if let Some(rest) = argument(&statement, "block") {
-            if depth == 0 {
-                out.push(
-                    rest.chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect(),
-                );
-            }
-            depth += 1;
-        } else if statement == "endblock" || argument(&statement, "endblock").is_some() {
-            depth = depth.saturating_sub(1);
+    walk(std::slice::from_ref(&parsed), 0, &mut shape, &mut parents);
+    match parents.as_slice() {
+        [] => {}
+        [ast::Expr::Const(c)] if c.value.as_str().is_some() => {
+            shape.extends = c.value.as_str().map(str::to_owned);
+        }
+        // Each `extends` could pick another parent, and only one is checked.
+        [_, _, ..] => {
+            return Err("has more than one `extends`; one parent, named once, is what the block check can follow".into());
+        }
+        [_] => {
+            return Err(
+                "`extends` must name its template as one string literal, so its blocks can be checked"
+                    .into(),
+            );
         }
     }
-    out
-}
-
-/// The template a template extends. It must be named by one string
-/// literal, or its blocks could not be checked against it.
-fn extends(source: &str) -> Result<Option<String>, String> {
-    let statements = statements(source);
-    let Some(rest) = statements.iter().find_map(|s| argument(s, "extends")) else {
-        return Ok(None);
-    };
-    let literal = rest
-        .chars()
-        .next()
-        .filter(|c| *c == '"' || *c == '\'')
-        .and_then(|quote| {
-            let end = rest[1..].find(quote)?;
-            rest[end + 2..]
-                .trim()
-                .is_empty()
-                .then(|| rest[1..=end].to_owned())
-        });
-    literal.map(Some).ok_or_else(|| {
-        format!("`extends {rest}` must name its template as one string literal, so its blocks can be checked")
-    })
+    Ok(shape)
 }
 
 /// A template that extends another may only fill blocks its ancestors
@@ -296,7 +222,8 @@ fn check_blocks(
         }
     };
     for (name, source) in user {
-        let Some(mut parent) = extends(source).map_err(|e| error(format!("{name}: {e}")))? else {
+        let child = shape(name, source).map_err(|e| error(format!("{name}: {e}")))?;
+        let Some(mut parent) = child.extends else {
             continue;
         };
         let mut declared = BTreeSet::new();
@@ -312,13 +239,15 @@ fn check_blocks(
                     "{name} extends {parent:?}, which does not exist"
                 )));
             };
-            declared.extend(blocks(parent_source));
-            match extends(parent_source).map_err(|e| error(format!("{parent}: {e}")))? {
+            let parent_shape =
+                shape(&parent, parent_source).map_err(|e| error(format!("{parent}: {e}")))?;
+            declared.extend(parent_shape.all);
+            match parent_shape.extends {
                 Some(next) => parent = next,
                 None => break,
             }
         }
-        for block in top_level_blocks(source) {
+        for block in child.top {
             if !declared.contains(&block) {
                 return Err(error(format!(
                     "{name} fills block `{block}`, which no template it extends declares, so it would never apply; it declares {}",
@@ -396,9 +325,11 @@ pub(crate) fn render(
         .render(Value::from_serialize(context))
         .map_err(|e| error(format!("{e:#}")))?;
     // An override that writes the marker line itself gets it once; a line
-    // that only starts with the same text is someone else's.
-    let body = rendered
-        .strip_prefix(MARKER)
+    // that only starts with the same text is someone else's. The defaults
+    // never write it, so without overrides the output is left as it was.
+    let body = Some(rendered.as_str())
+        .filter(|_| template_dir.is_some())
+        .and_then(|rendered| rendered.strip_prefix(MARKER))
         .and_then(|rest| {
             if rest.is_empty() {
                 Some(rest)
@@ -415,35 +346,42 @@ pub(crate) fn render(
 mod tests {
     use super::*;
 
+    fn read(source: &str) -> Result<Shape, String> {
+        shape("t", source)
+    }
+
     #[test]
-    fn block_and_extends_tags_are_read() {
-        let source = "{%- extends 'builtin/rust/struct.rs.jinja' %}{% block derives -%}x{% endblock %}{%+ block attrs %}{% endblock attrs %}";
-        assert_eq!(
-            extends(source).unwrap().as_deref(),
-            Some("builtin/rust/struct.rs.jinja")
+    fn templates_are_read_as_minijinja_reads_them() {
+        let s = read("{%- extends 'builtin/rust/struct.rs.jinja' %}{% block derives -%}x{% endblock %}{%+ block attrs %}{% endblock attrs %}").unwrap();
+        assert_eq!(s.extends.as_deref(), Some("builtin/rust/struct.rs.jinja"));
+        assert_eq!(s.top, ["derives", "attrs"]);
+        assert_eq!(read("{% include \"x\" %}").unwrap().extends, None);
+        assert!(read("{% extends p %}").is_err());
+        assert!(read("{% extends \"a\" if c else \"b\" %}").is_err());
+        assert!(
+            read("{% if c %}{% extends \"a\" %}{% else %}{% extends \"b\" %}{% endif %}").is_err()
         );
-        assert_eq!(blocks(source), ["derives", "attrs"]);
-        assert_eq!(extends("{% include \"x\" %}"), Ok(None));
-        assert!(extends("{% extends p %}").is_err());
-        assert!(extends("{% extends \"a\" if c else \"b\" %}").is_err());
+        let nested = read(
+            "{% block a %}{% block b %}{% endblock %}{% endblock a %}{% block c %}{% endblock %}",
+        )
+        .unwrap();
+        assert_eq!(nested.top, ["a", "c"]);
+        assert_eq!(nested.all, ["a", "b", "c"]);
+        // Comments, raw sections, quoted and nested delimiters are text.
+        let s = read("{# {% extends 'a' %}{% block old %} #}{% extends \"b\" %}{% raw %}{% it's %}{%~ endraw %}{% block raw %}{% endraw %}{{ {'a': {}} ~ '{#' }}{% block kept %}{% endblock %}{% set x = '%}{% block fake %}' %}").unwrap();
+        assert_eq!(s.extends.as_deref(), Some("b"));
+        assert_eq!(s.top, ["kept"]);
         assert_eq!(
-            top_level_blocks(
-                "{% block a %}{% block b %}{% endblock %}{% endblock a %}{% block c %}{% endblock %}"
-            ),
-            ["a", "c"]
+            read("{%extends\"c\"%}").unwrap().extends.as_deref(),
+            Some("c")
         );
-        // Comments, raw sections and quoted `%}` are not tags.
-        let source = "{# {% extends 'a' %}{% block old %} #}{% extends \"b\" %}{% raw %}{% block raw %}{% endraw %}{{ '%}' }}{% block kept %}{% endblock %}{% set x = '%}{% block fake %}' %}";
-        assert_eq!(extends(source).unwrap().as_deref(), Some("b"));
-        // No space after the keyword is still the keyword.
-        assert_eq!(extends("{%extends\"c\"%}").unwrap().as_deref(), Some("c"));
-        assert_eq!(extends("{% extendsx \"c\" %}"), Ok(None));
-        // Quotes inside a raw section mean nothing.
         assert_eq!(
-            blocks("{% raw %}{% it's %}{% endraw %}{% block after %}{% endblock %}"),
-            ["after"]
+            read(r#"{% extends "builtin\/rust\/x.jinja" %}"#)
+                .unwrap()
+                .extends
+                .as_deref(),
+            Some("builtin/rust/x.jinja")
         );
-        assert_eq!(blocks(source), ["kept"]);
     }
 
     #[test]
@@ -452,7 +390,11 @@ mod tests {
         for (path, source) in embedded().unwrap() {
             env.get_template(&path).unwrap();
             env.get_template(&format!("builtin/{path}")).unwrap();
-            assert_eq!(extends(&source), Ok(None), "{path} extends nothing");
+            assert_eq!(
+                shape(&path, &source).unwrap().extends,
+                None,
+                "{path} extends nothing"
+            );
         }
     }
 }

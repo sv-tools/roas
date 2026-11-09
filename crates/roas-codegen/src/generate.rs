@@ -441,13 +441,7 @@ pub fn generate(
             ),
         });
     }
-    diagnostics.sort_by(|a, b| {
-        a.pointer
-            .cmp(&b.pointer)
-            .then(a.severity.cmp(&b.severity))
-            .then(a.message.cmp(&b.message))
-    });
-    diagnostics.dedup();
+    sort_diagnostics(&mut diagnostics);
     Ok(Generation {
         target: config.target,
         files,
@@ -456,22 +450,48 @@ pub fn generate(
     })
 }
 
-/// The exact context the templates receive, as JSON: the view model, the
-/// contract a template directory is written against (see
-/// [`TEMPLATE_API`](crate::TEMPLATE_API)). For writing templates; it is
+/// The context the templates receive, and what the generator said while
+/// building it — a type an `Error` suppressed is missing from `context`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct TemplateContext {
+    /// The view model as JSON: the contract a template directory is
+    /// written against (see [`TEMPLATE_API`](crate::TEMPLATE_API)).
+    pub context: serde_json::Value,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// The exact context the templates receive. For writing templates; it is
 /// what `roas openapi generate --print-context` prints.
 pub fn template_context(
     document: &ValidatedSourceDocument,
     config: &Config,
-) -> Result<serde_json::Value, GenerateError> {
+) -> Result<TemplateContext, GenerateError> {
     let prepared = prepare(document, config)?;
     let Some(ir) = prepared.ir else {
         return Err(GenerateError::NothingToGenerate(prepared.diagnostics));
     };
-    match config.target {
-        Target::Rust => rust::context(&ir, config, &prepared.source),
-        Target::Go => go::context(&ir, config, &prepared.source),
-    }
+    let (context, more) = match config.target {
+        Target::Rust => rust::context(&ir, config, &prepared.source)?,
+        Target::Go => go::context(&ir, config, &prepared.source)?,
+    };
+    let mut diagnostics = prepared.diagnostics;
+    diagnostics.extend(more);
+    sort_diagnostics(&mut diagnostics);
+    Ok(TemplateContext {
+        context,
+        diagnostics,
+    })
+}
+
+fn sort_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
+    diagnostics.sort_by(|a, b| {
+        a.pointer
+            .cmp(&b.pointer)
+            .then(a.severity.cmp(&b.severity))
+            .then(a.message.cmp(&b.message))
+    });
+    diagnostics.dedup();
 }
 
 /// The files as the templates render them, before the syntax check and

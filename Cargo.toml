@@ -34,7 +34,10 @@ serde_json_path = "0.7.2"
 serde-saphyr = { version = "2.1", default-features = false, features = ["deserialize"] }
 thiserror = "2.0.16"
 toml = "1"
-minijinja = { version = "2.24", features = ["loader", "multi_template", "preserve_order", "json"] }
+# `unstable_machinery` is minijinja's own parser, which roas-codegen uses to
+# check user templates exactly as minijinja reads them. Its interface may
+# change in any minor release, hence the `~` pin to 2.24.x.
+minijinja = { version = "~2.24", features = ["loader", "multi_template", "preserve_order", "json", "unstable_machinery"] }
 include_dir = "0.7"
 syn = { version = "3", features = ["full", "parsing"] }
 tower = { version = "0.5", default-features = false }

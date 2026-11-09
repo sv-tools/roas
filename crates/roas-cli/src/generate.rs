@@ -115,7 +115,7 @@ pub(crate) struct GenerateArgs {
 
     /// Print the JSON context the templates receive to stdout, and write
     /// nothing: the reference for writing templates.
-    #[arg(long, conflicts_with = "check")]
+    #[arg(long, conflicts_with_all = ["check", "dump_rendered"])]
     pub(crate) print_context: bool,
 
     /// Also write the files as the templates render them, before the syntax
@@ -531,7 +531,24 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
 
     if args.print_context {
         let context = roas_codegen::template_context(&document, &config)?;
-        println!("{}", serde_json::to_string_pretty(&context)?);
+        println!("{}", serde_json::to_string_pretty(&context.context)?);
+        // What was suppressed is missing from the context: say so, and
+        // fail as a generation would.
+        let mut failing = 0;
+        for diagnostic in &context.diagnostics {
+            eprintln!("{diagnostic}");
+            if args.strict || diagnostic.severity == Severity::Error {
+                failing += 1;
+            }
+        }
+        if failing > 0 {
+            bail!(
+                "{}: {failing} {}{}; the context leaves out what could not be generated",
+                source.display(),
+                if args.strict { "diagnostic" } else { "error" },
+                if failing == 1 { "" } else { "s" }
+            );
+        }
         return Ok(());
     }
     if let Some(dir) = &args.dump_rendered {
@@ -1016,6 +1033,19 @@ mod tests {
         let mut print = args(&spec, &out);
         print.print_context = true;
         run_generate(print).unwrap();
+        assert!(!out.exists());
+        // A suppressed type fails it, as a generation would.
+        let bad = dir.0.join("bad.json");
+        std::fs::write(
+            &bad,
+            r##"{"openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+                "components": {"schemas": {"Bad": {"not": {"type": "string"}}}}}"##,
+        )
+        .unwrap();
+        let mut print = args(&bad, &out);
+        print.print_context = true;
+        let error = run_generate(print).unwrap_err().to_string();
+        assert!(error.contains("leaves out"), "{error}");
         assert!(!out.exists());
         // --template-dir applies, and --dump-rendered keeps the raw text.
         let mut custom = args(&spec, &out);

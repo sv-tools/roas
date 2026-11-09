@@ -53,7 +53,8 @@ pub use config::{
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 pub use generate::{
-    Dependencies, GenerateError, GeneratedFile, Generation, generate, render, template_context,
+    Dependencies, GenerateError, GeneratedFile, Generation, TemplateContext, generate, render,
+    template_context,
 };
 pub use go::GoDependency;
 pub use go::naming::go_file_name;

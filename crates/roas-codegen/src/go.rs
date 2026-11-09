@@ -23,9 +23,11 @@ pub(crate) fn context(
     ir: &Ir,
     config: &Config,
     source: &str,
-) -> Result<serde_json::Value, GenerateError> {
+) -> Result<(serde_json::Value, Vec<Diagnostic>), GenerateError> {
     let built = view::build(ir, config, source)?;
-    serde_json::to_value(&built.file).map_err(|e| GenerateError::Template(e.to_string()))
+    let context =
+        serde_json::to_value(&built.file).map_err(|e| GenerateError::Template(e.to_string()))?;
+    Ok((context, built.diagnostics))
 }
 
 pub(crate) fn render(
