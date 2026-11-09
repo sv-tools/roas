@@ -102,8 +102,11 @@ impl Options {
     /// [`PreparationDiagnostic::span`]: crate::PreparationDiagnostic::span
     /// [`PreparationDiagnostic::position`]: crate::PreparationDiagnostic::position
     #[must_use]
-    pub fn source_map(mut self, map: roas_arazzo::source_map::SourceMap) -> Self {
-        self.source_map = Some(std::sync::Arc::new(map));
+    pub fn source_map(
+        mut self,
+        map: impl Into<std::sync::Arc<roas_arazzo::source_map::SourceMap>>,
+    ) -> Self {
+        self.source_map = Some(map.into());
         self
     }
 
@@ -113,7 +116,8 @@ impl Options {
     /// [`PreparationDiagnostic::document`]: the document's resolved
     /// `$self`, or the URI it was retrieved from (`SourceDocument::identity`
     /// with the `source-graph` feature). A later map for the same identity
-    /// replaces the earlier one.
+    /// replaces the earlier one. External documents exist only with the
+    /// `source-graph` feature; without it this map is never consulted.
     ///
     /// Set it on the options passed to [`crate::prepare`], before or after
     /// `source_registry`: every document's map is read from there.
@@ -123,10 +127,10 @@ impl Options {
     pub fn document_source_map(
         mut self,
         identity: impl Into<String>,
-        map: roas_arazzo::source_map::SourceMap,
+        map: impl Into<std::sync::Arc<roas_arazzo::source_map::SourceMap>>,
     ) -> Self {
         self.document_source_maps
-            .insert(identity.into(), std::sync::Arc::new(map));
+            .insert(identity.into(), map.into());
         self
     }
     /// Options with nothing set: the first workflow, no inputs, no

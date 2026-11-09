@@ -23,6 +23,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use url::Url;
 
 use crate::{
@@ -855,10 +856,13 @@ fn scoped(
     root: roas_arazzo_executor::DocumentId,
     texts: &Texts,
     fetched: Option<&SharedFetches>,
-    maps: &mut BTreeMap<Url, (Value, Option<SourceMap>)>,
+    maps: &mut BTreeMap<Url, (Value, Option<Arc<SourceMap>>)>,
 ) -> Result<Options> {
     let mut options = options.clone();
     let fetched = fetched.map(|fetched| fetched.borrow());
+    // The documents the executor's run table holds: those linked from the
+    // root, transitively (`source_registry`'s walk; the CLI sets no
+    // `Options::source` that could redirect an alias of the root).
     let mut seen = BTreeSet::from([root]);
     let mut next = vec![root];
     while let Some(id) = next.pop() {
@@ -876,7 +880,7 @@ fn scoped(
             // can answer two fetches differently, and only one is kept.
             let value = document.value();
             if maps.get(uri).is_none_or(|(parsed, _)| parsed != value) {
-                let map = texts
+                let mut matching = texts
                     .get(uri)
                     .into_iter()
                     .flatten()
@@ -887,12 +891,22 @@ fn scoped(
                             .into_iter()
                             .flatten(),
                     )
-                    .find(|(parsed, _)| parsed == value)
-                    .and_then(|(_, text)| SourceMap::parse(text).ok());
+                    .filter(|(parsed, _)| parsed == value)
+                    .map(|(_, text)| text.as_str())
+                    .collect::<Vec<_>>();
+                matching.sort_unstable();
+                matching.dedup();
+                // Two texts of the same value: which one it was parsed from
+                // is not known, so neither is used.
+                let map = match matching[..] {
+                    [text] => SourceMap::parse(text).ok().map(Arc::new),
+                    _ => None,
+                };
                 maps.insert(uri.clone(), (value.clone(), map));
             }
             if let Some((_, Some(map))) = maps.get(uri) {
-                options = options.document_source_map(document.identity().as_str(), map.clone());
+                options =
+                    options.document_source_map(document.identity().as_str(), Arc::clone(map));
             }
         }
     }
@@ -1944,12 +1958,31 @@ workflows:
 
     #[test]
     fn a_document_is_located_in_the_text_it_was_parsed_from() {
+        // The same final URL answers the second fetch with another
+        // document: the registered one is placed in its own text.
+        let shown = refetched(true);
+        assert!(
+            shown.contains("condition at line 13, column 65: "),
+            "{shown}"
+        );
+        // With the same document in other text, which text it was parsed
+        // from is not known: nothing is guessed.
+        let shown = refetched(false);
+        assert!(shown.contains("condition at byte 35: "), "{shown}");
+    }
+
+    /// `run` of an entry whose two sources redirect to one URL, which
+    /// answers its second fetch with its first text five lines down and,
+    /// if `retitled`, a different title.
+    fn refetched(retitled: bool) -> String {
         use std::io::{BufRead, BufReader, Write};
         use std::net::TcpListener;
         let (_, child, api) = malformed_external_workflow();
         let first = std::fs::read_to_string(&child.0).unwrap();
-        // The same final URL answers the second fetch with other text.
-        let second = format!("#\n#\n#\n#\n#\n{}", first.replace("title: C", "title: D"));
+        let mut second = format!("#\n#\n#\n#\n#\n{first}");
+        if retitled {
+            second = second.replace("title: C", "title: D");
+        }
         let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
         let base = format!("http://{}", listener.local_addr().expect("an address"));
         std::thread::spawn(move || {
@@ -2000,11 +2033,11 @@ workflows:
         let shown = format!("{:#}", run_arazzo_run(args).unwrap_err());
         assert!(
             shown.contains(&format!(
-                "{base}/b #.workflows[0].steps[0].successCriteria[0].condition \
-                 at line 13, column 65: "
+                "{base}/b #.workflows[0].steps[0].successCriteria[0].condition at "
             )),
             "{shown}"
         );
+        shown
     }
 
     #[test]
