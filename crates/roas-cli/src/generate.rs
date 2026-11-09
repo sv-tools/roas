@@ -244,14 +244,19 @@ fn show(paths: &[PathBuf]) -> String {
 
 /// The writer's errors name library options; say which flag sets them.
 fn hint(error: roas_codegen::WriteError) -> anyhow::Error {
-    let flag = match &error {
-        roas_codegen::WriteError::Unowned(_) => Some("--force"),
-        roas_codegen::WriteError::SourceMismatch { .. } => Some("--replace-source"),
-        _ => None,
-    };
-    match flag {
-        Some(flag) => anyhow!("{error} (pass {flag})"),
-        None => error.into(),
+    match &error {
+        roas_codegen::WriteError::Unowned(_) => anyhow!("{error} (pass --force)"),
+        roas_codegen::WriteError::SourceMismatch {
+            label,
+            previous,
+            current,
+            ..
+        } => anyhow!(
+            "label {label:?} belongs to output generated from {previous:?}, not {current:?}; \
+             if it is a different description, give it its own --label; \
+             if the description or the output directory moved, pass --replace-source"
+        ),
+        _ => error.into(),
     }
 }
 
@@ -702,7 +707,7 @@ mod tests {
         let mut second = args(&billing, &out);
         second.label = Some("api".into());
         let error = format!("{:#}", run_generate(second).unwrap_err());
-        assert!(error.contains("its own label"), "{error}");
+        assert!(error.contains("its own --label"), "{error}");
         assert!(
             std::fs::read_to_string(out.join("api.rs"))
                 .unwrap()
@@ -722,7 +727,7 @@ mod tests {
         let out = dir.0.join("out");
         run_generate(args(&pets, &out)).unwrap();
         let error = format!("{:#}", run_generate(args(&billing, &out)).unwrap_err());
-        assert!(error.contains("its own label"), "{error}");
+        assert!(error.contains("its own --label"), "{error}");
         assert!(
             std::fs::read_to_string(out.join("openapi.rs"))
                 .unwrap()

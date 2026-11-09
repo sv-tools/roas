@@ -119,7 +119,18 @@ fn source_name(uri: &url::Url) -> String {
             percent_decode(name)
                 .chars()
                 .flat_map(|c| {
-                    if c.is_control() {
+                    // Bidi controls reorder what a reader sees, and rustc
+                    // refuses them in comments.
+                    if c.is_control()
+                        || matches!(
+                            c,
+                            '\u{061C}'
+                                | '\u{200E}'
+                                | '\u{200F}'
+                                | '\u{202A}'..='\u{202E}'
+                                | '\u{2066}'..='\u{2069}'
+                        )
+                    {
                         c.escape_default().collect::<Vec<_>>()
                     } else {
                         vec![c]
@@ -313,4 +324,15 @@ pub fn generate(
             rust: output.dependencies,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bidi_controls_are_escaped_in_the_source_name() {
+        let uri = url::Url::parse("file:///specs/a%E2%80%AEb.json").unwrap();
+        let name = super::source_name(&uri);
+        assert!(!name.contains('\u{202E}'), "{name}");
+        assert!(name.contains("\\u{202e}"), "{name}");
+    }
 }
