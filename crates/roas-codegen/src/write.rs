@@ -227,7 +227,7 @@ const LOCK_FILE: &str = ".roas-codegen.lock";
 /// An operating-system lock on a directory's `.roas-codegen.lock`, held
 /// for one run. It ends with the process, so a killed run never blocks the
 /// next. A lock file is only ever removed by the run that created it, while
-/// holding it, when that run is refused; otherwise it stays, since its
+/// holding it, when that run is refused before writing anything; otherwise it stays, since its
 /// presence tells a run with an overlapping output root that this
 /// directory is one.
 struct DirLock {
@@ -431,7 +431,11 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> WriteError + '_ {
 /// device (`aux.rs`, `con`), which it resolves elsewhere whatever follows.
 /// Refused on every platform, as one rule.
 pub(crate) fn windows_safe(part: &str) -> bool {
-    if part.contains(':') {
+    // Characters Windows forbids in names, `:` streams among them.
+    if part
+        .bytes()
+        .any(|b| b < 0x20 || matches!(b, b':' | b'\\' | b'"' | b'*' | b'<' | b'>' | b'?' | b'|'))
+    {
         return false;
     }
     let bytes = part.as_bytes();
@@ -447,11 +451,13 @@ pub(crate) fn windows_safe(part: &str) -> bool {
         .unwrap_or(part)
         .trim_end()
         .to_ascii_lowercase();
-    let device = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
-        || ((stem.starts_with("com") || stem.starts_with("lpt"))
-            && stem.len() == 4
-            && stem.as_bytes()[3].is_ascii_digit()
-            && stem.as_bytes()[3] != b'0');
+    let device = matches!(
+        stem.as_str(),
+        "con" | "prn" | "aux" | "nul" | "conin$" | "conout$"
+    ) || ((stem.starts_with("com") || stem.starts_with("lpt"))
+        && stem.len() == 4
+        && stem.as_bytes()[3].is_ascii_digit()
+        && stem.as_bytes()[3] != b'0');
     !device
 }
 
@@ -1504,6 +1510,7 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
     // predict: `create_new` refuses an existing path, symlink included, so
     // a planted link can never redirect the write.
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut recreated = false;
     let (tmp, mut file) = loop {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1522,6 +1529,14 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
         {
             Ok(file) => break (tmp, file),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // The directory went away after it was made: a refused run that
+            // created it found it empty and removed it. Made again, once.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !recreated => {
+                recreated = true;
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(io(parent))?;
+                }
+            }
             Err(e) => {
                 return Err(WriteError::Io {
                     path: tmp,
@@ -1608,9 +1623,11 @@ pub fn write(
     };
     // One run at a time over every file this one can touch, and a lock
     // held elsewhere fails at once: runs never wait. Enclosing roots come
-    // first, before anything is created, so a run refused there cannot
-    // have made (and then remove) directories an active enclosing run is
-    // writing into. Then this run's own directory, exclusively; only after
+    // first, before anything is created, so a run refused there has made
+    // nothing to remove. (A run refused later, by a nested root's lock,
+    // can still remove an empty directory it made while an enclosing run
+    // that started after it is about to write there; that run makes the
+    // directory again.) Then this run's own directory, exclusively; only after
     // that are nested roots' lock files looked for, so of two overlapping
     // runs at least one sees the other's.
     let mut enclosing = Vec::new();
@@ -1698,6 +1715,9 @@ pub fn write(
     if !pending.same_as(&previous) {
         write_atomic(&manifest_path, manifest_text(&pending).as_bytes())?;
     }
+    // Ownership is on disk from here: a run that fails now is unfinished,
+    // not refused, so its directories and lock file stay for the next.
+    created.keep = true;
 
     let mut report = WriteReport {
         manifest: PathBuf::from(&manifest_file),
@@ -3938,7 +3958,17 @@ mod tests {
     #[test]
     fn names_windows_resolves_elsewhere_are_refused() {
         let dir = TempDir::new("windows-names");
-        for path in ["PETSTO~1.RS", "a.rs:x", "aux.rs", "sub/CON", "com1.rs"] {
+        for path in [
+            "PETSTO~1.RS",
+            "a.rs:x",
+            "aux.rs",
+            "sub/CON",
+            "com1.rs",
+            "a?b.rs",
+            "a|b.rs",
+            "a\tb.rs",
+            "CONOUT$.rs",
+        ] {
             assert!(
                 matches!(
                     write(
