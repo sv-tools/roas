@@ -84,6 +84,7 @@ pub(crate) struct FileView {
 
 /// A Rust dependency the generated code needs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct RustDependency {
     pub name: String,
     pub features: Vec<String>,

@@ -164,7 +164,7 @@ pub enum WriteError {
     )]
     ConflictingPaths(PathBuf, PathBuf),
     #[error(
-        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; if the description moved, allow replacing the recorded source or delete the label's manifest; if it is a different description, give it its own label"
+        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; if the description or the output directory moved, allow replacing the recorded source or delete the label's manifest; if it is a different description, give it its own label"
     )]
     SourceMismatch {
         label: String,
@@ -576,7 +576,11 @@ fn aliases(
         .filter(|p| !planned.contains_key(*p))
         .filter_map(|old| {
             let id = file_id(&out_dir.join(old))?;
-            ids.get(&id).map(|new| (old.clone(), (*new).clone()))
+            // Same file and same name ignoring case: a respelling. A
+            // hard link under another name is a different entry, never ours.
+            ids.get(&id)
+                .filter(|new| new.eq_ignore_ascii_case(old))
+                .map(|new| (old.clone(), (*new).clone()))
         })
         .collect()
 }
@@ -584,15 +588,13 @@ fn aliases(
 /// Give an aliased file its new spelling. Writing through the new name
 /// keeps the old directory entry's spelling on a case-insensitive disk,
 /// and an unchanged file is not written at all, so the manifest would
-/// record a name the disk does not show. Only the file name is changed;
-/// a rename that also changes a directory's case leaves that directory.
+/// record a name the disk does not show. Only the file name is respelled,
+/// inside the directory as it is spelled on disk: directories may hold
+/// other targets' files, so their case is left alone.
 fn respell(out_dir: &Path, old: &str, new: &str) -> Result<(), WriteError> {
-    let parent = |p: &str| p.rsplit_once('/').map(|(d, _)| d.to_owned());
-    if parent(old) != parent(new) {
-        return Ok(());
-    }
     let from = out_dir.join(old);
-    let to = out_dir.join(new);
+    let name = new.rsplit('/').next().unwrap_or(new);
+    let to = from.with_file_name(name);
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -647,7 +649,9 @@ fn check_ownership(
             // This target's own stale file, removed before anything is
             // written, where the new path needs a directory.
             Err(WriteError::NotADirectory(blocker))
-                if blocker.to_str().is_some_and(|b| going.contains(b)) => {}
+                if blocker
+                    .to_str()
+                    .is_some_and(|b| going.iter().any(|g| g.eq_ignore_ascii_case(b))) => {}
             other => other?,
         }
         let on_disk = out_dir.join(path);
@@ -663,21 +667,55 @@ fn check_ownership(
         }
     }
     for path in previous.files.keys() {
-        check_path(out_dir, path)?;
+        check_recorded(out_dir, path)?;
     }
     check_path(out_dir, manifest_file)
 }
 
 /// The stale files a run removes: those still holding what this target
 /// wrote. The rest were edited and are kept.
-fn going(out_dir: &Path, previous: &Manifest, removable: &[(String, String)]) -> BTreeSet<String> {
-    removable
-        .iter()
-        .filter(|(path, _)| {
-            fs::read(out_dir.join(path)).is_ok_and(|bytes| previous.wrote(path, &bytes))
-        })
-        .map(|(path, _)| path.clone())
-        .collect()
+fn going(
+    out_dir: &Path,
+    previous: &Manifest,
+    removable: &[(String, String)],
+) -> Result<BTreeSet<String>, WriteError> {
+    let mut out = BTreeSet::new();
+    for (path, _) in removable {
+        let on_disk = out_dir.join(path);
+        match fs::read(&on_disk) {
+            Ok(bytes) if previous.wrote(path, &bytes) => {
+                out.insert(path.clone());
+            }
+            Ok(_) => {}
+            Err(e) if gone(&e) => {}
+            Err(e) => {
+                return Err(WriteError::Io {
+                    path: on_disk,
+                    source: e,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A read error meaning there is no file of ours to remove.
+fn gone(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory
+    )
+}
+
+/// [`check_path`] for a path the previous manifest records. One that is
+/// now a directory, as after an interrupted run turned a file into the
+/// directory a new path needs, is no longer this target's file: it is
+/// dropped from the manifest and never deleted.
+fn check_recorded(out_dir: &Path, key: &str) -> Result<(), WriteError> {
+    match check_path(out_dir, key) {
+        Err(WriteError::NotADirectory(path)) if path == Path::new(key) => Ok(()),
+        other => other,
+    }
 }
 
 fn error_count(generation: &Generation) -> usize {
@@ -828,12 +866,12 @@ pub fn write(
     check_source(&previous, options)?;
     let planned = planned(generation)?;
     for path in previous.files.keys() {
-        check_path(out_dir, path)?;
+        check_recorded(out_dir, path)?;
     }
     let aliased = aliases(out_dir, &previous.files, &planned);
     let old_spellings: BTreeSet<String> = aliased.keys().cloned().collect();
     let (owned, removable) = outcome(&previous.files, &planned, &old_spellings, errors > 0);
-    let going = going(out_dir, &previous, &removable);
+    let going = going(out_dir, &previous, &removable)?;
     // Every check before the first write.
     check_ownership(
         out_dir,
@@ -910,7 +948,7 @@ pub fn write(
                 report.removed.push(PathBuf::from(path));
             }
             Ok(_) => report.kept_edited.push(PathBuf::from(path)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if gone(&e) => {}
             Err(e) => {
                 return Err(WriteError::Io {
                     path: on_disk,
@@ -967,13 +1005,13 @@ pub fn check(
     check_source(&previous, options)?;
     let planned = planned(generation)?;
     for path in previous.files.keys() {
-        check_path(out_dir, path)?;
+        check_recorded(out_dir, path)?;
     }
     let aliased: BTreeSet<String> = aliases(out_dir, &previous.files, &planned)
         .into_keys()
         .collect();
     let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
-    let going = going(out_dir, &previous, &removable);
+    let going = going(out_dir, &previous, &removable)?;
     check_ownership(
         out_dir,
         &manifest_file,
@@ -1008,7 +1046,7 @@ pub fn check(
     for (path, _) in removable {
         if going.contains(&path) {
             report.stale.push(PathBuf::from(path));
-        } else if out_dir.join(&path).exists() {
+        } else if out_dir.join(&path).is_file() {
             report.stale_edited.push(PathBuf::from(path));
         }
     }
@@ -2098,5 +2136,130 @@ mod tests {
             ),
             Err(WriteError::Manifest { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_under_another_name_is_not_ours() {
+        let dir = TempDir::new("hard-link");
+        write(
+            &generation(&[("old.rs", "v1")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        fs::hard_link(dir.0.join("old.rs"), dir.0.join("manual.rs")).unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("manual.rs", "v2")]),
+                &dir.0,
+                &WriteOptions::new("api")
+            ),
+            Err(WriteError::Unowned(_))
+        ));
+        assert_eq!(fs::read_to_string(dir.0.join("manual.rs")).unwrap(), "v1");
+    }
+
+    #[test]
+    fn a_recorded_file_that_became_a_directory_is_dropped() {
+        let dir = TempDir::new("became-dir");
+        let manifest = dir.0.join(".roas-codegen-api-rust.json");
+        write(
+            &generation(&[("models", "m")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        // Interrupted after models became a directory, before the final
+        // manifest: the pending one still records both.
+        fs::remove_file(dir.0.join("models")).unwrap();
+        fs::create_dir(dir.0.join("models")).unwrap();
+        fs::write(dir.0.join("models/x.rs"), "x").unwrap();
+        let mut pending = read_manifest(&manifest).unwrap().unwrap();
+        pending.files.insert("models/x.rs".into(), hash(b"x"));
+        fs::write(&manifest, manifest_text(&pending)).unwrap();
+        let next = generation(&[("models/x.rs", "x")]);
+        let report = check(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert!(
+            report.stale.is_empty() && report.stale_edited.is_empty(),
+            "{report:?}"
+        );
+        write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert!(
+            check(&next, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+        assert!(dir.0.join("models/x.rs").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_stale_file_fails_check_as_it_fails_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("unreadable");
+        write(
+            &generation(&[("a.rs", "a"), ("b.rs", "b")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let b = dir.0.join("b.rs");
+        fs::set_permissions(&b, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&b).is_ok() {
+            return; // running as root
+        }
+        let next = generation(&[("a.rs", "a")]);
+        let checked = check(&next, &dir.0, &WriteOptions::new("api"));
+        let written = write(&next, &dir.0, &WriteOptions::new("api"));
+        fs::set_permissions(&b, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(checked, Err(WriteError::Io { .. })), "{checked:?}");
+        assert!(matches!(written, Err(WriteError::Io { .. })), "{written:?}");
+    }
+
+    #[test]
+    fn a_case_variant_stale_file_gives_way_to_a_directory() {
+        let dir = TempDir::new("case-blocker");
+        write(
+            &generation(&[("Models", "m")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        if !same_file(&dir.0.join("Models"), &dir.0.join("models")) {
+            return; // case-sensitive: no blocker
+        }
+        let next = generation(&[("models/x.rs", "x")]);
+        write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert!(
+            check(&next, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+    }
+
+    #[test]
+    fn respelling_keeps_the_directory_and_fixes_the_name() {
+        let dir = TempDir::new("respell-dir");
+        write(
+            &generation(&[("Dir/A.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        if !same_file(&dir.0.join("Dir/A.rs"), &dir.0.join("dir/a.rs")) {
+            return;
+        }
+        write(
+            &generation(&[("dir/a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let names: Vec<String> = fs::read_dir(dir.0.join("Dir"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.rs".to_owned()]);
     }
 }

@@ -40,6 +40,7 @@ pub enum Fidelity {
 
 /// The OpenAPI version a description was written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum SourceVersion {
     V2,
     V3_0,
@@ -89,6 +90,7 @@ impl fmt::Display for SourceVersion {
 
 /// Why a description could not become a [`SourceDocument`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SourceError {
     #[error("the input is not valid JSON")]
     Json(#[source] serde_json::Error),

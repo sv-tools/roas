@@ -107,6 +107,7 @@ pub enum DiagnosticKind {
 
 /// One thing the generator has to say about the description.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Diagnostic {
     pub severity: Severity,
     pub kind: DiagnosticKind,

@@ -31,6 +31,7 @@ impl GeneratedFile {
 /// What the generated code depends on, computed from what was emitted.
 /// Nothing generated depends on `roas`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Dependencies {
     pub rust: Vec<RustDependency>,
 }

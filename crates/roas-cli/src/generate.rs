@@ -93,9 +93,10 @@ pub(crate) struct GenerateArgs {
     #[arg(long)]
     pub(crate) force: bool,
 
-    /// Let this description take a label recorded for a different source,
-    /// after moving or renaming it. Off by default, since such a label
-    /// probably belongs to another description.
+    /// Let this description take a label recorded for a different source:
+    /// after moving or renaming it, or moving the output directory, since
+    /// the source is recorded relative to it. Off by default, since such a
+    /// label probably belongs to another description.
     #[arg(long)]
     pub(crate) replace_source: bool,
 
