@@ -24,6 +24,7 @@ let yaml = || serde_saphyr::options! {
         max_events: 25_000_000,
         max_aliases: 1_000_000,
         max_anchors: 1_000_000,
+        max_merge_keys: 1_000_000,
         enforce_alias_anchor_ratio: false,
     },
     alias_limits: serde_saphyr::alias_limits! {

@@ -8,19 +8,21 @@ pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, serde_
     let options = serde_saphyr::options! {
         // Same options in every roas crate; keep the copies in step
         // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
-        // from the defaults (250k nodes, 1M events, 50k aliases, 50k anchors),
-        // which reject ordinary large or generated specs. Depth stays at 64: deeper nesting overflows a 2 MiB
+        // from the defaults (250k nodes, 1M events, 50k aliases, 50k anchors,
+        // 10k merge keys), which reject ordinary large or generated specs. Depth stays at 64: deeper nesting overflows a 2 MiB
         // thread stack in debug builds. The alias-to-anchor ratio check is off:
         // it rejects any document reusing one anchor 100+ times, a common
         // pattern in specs. Alias replay is raised to 10M events so a large
         // schema can be aliased thousands of times; the 1M cap on events
-        // recorded under anchors still stops an alias bomb. `!!binary` is
+        // recorded under anchors still stops an alias bomb, and also caps
+        // how large one anchored node can be. `!!binary` is
         // read as its text, as before, not decoded.
         budget: serde_saphyr::budget! {
             max_nodes: 10_000_000,
             max_events: 25_000_000,
             max_aliases: 1_000_000,
             max_anchors: 1_000_000,
+            max_merge_keys: 1_000_000,
             enforce_alias_anchor_ratio: false,
         },
         alias_limits: serde_saphyr::alias_limits! {
