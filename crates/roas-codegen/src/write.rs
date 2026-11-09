@@ -181,7 +181,9 @@ pub enum WriteError {
     OutputDirNotADirectory(PathBuf),
     #[error("{0} is a symbolic link; generated files are never written through one")]
     Symlink(PathBuf),
-    #[error("{0} is locked: another generation is writing to this directory")]
+    #[error(
+        "{0} is locked by another generation run in this directory or an overlapping one; retry when it finishes"
+    )]
     Locked(PathBuf),
     #[error(
         "generated paths {0} and {1} collide: the same file ignoring case, or a file where the other needs a directory"
@@ -258,11 +260,15 @@ const LOCK_FILE: &str = ".roas-codegen.lock";
 
 /// An operating-system lock on a directory's `.roas-codegen.lock`, held
 /// for one run. It ends with the process, so a killed run never blocks the
-/// next. The file is never removed: its presence is what tells a run with
-/// an overlapping output root that this directory is one, so it takes its
-/// own lock there too.
+/// next. A lock file is only ever removed by the run that created it, while
+/// holding it, when that run is refused; otherwise it stays, since its
+/// presence tells a run with an overlapping output root that this
+/// directory is one.
 struct DirLock {
+    /// Held for the lock; released when dropped.
     _file: fs::File,
+    /// Set when this run created the file.
+    made: Option<PathBuf>,
 }
 
 impl DirLock {
@@ -270,51 +276,97 @@ impl DirLock {
     fn acquire(out_dir: &Path) -> Result<DirLock, WriteError> {
         check_lock(out_dir)?;
         let path = out_dir.join(LOCK_FILE);
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(io(&path))?;
+        let open = |new: bool| {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(new)
+                .open(&path)
+        };
+        let (file, made) = match open(true) {
+            Ok(file) => (file, true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                (open(false).map_err(io(&path))?, false)
+            }
+            Err(source) => return Err(WriteError::Io { path, source }),
+        };
         match file.try_lock() {
-            Ok(()) => Ok(DirLock { _file: file }),
-            Err(fs::TryLockError::WouldBlock) => Err(WriteError::Locked(path)),
-            Err(fs::TryLockError::Error(source)) => Err(WriteError::Io { path, source }),
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Err(WriteError::Locked(path)),
+            Err(fs::TryLockError::Error(source)) => return Err(WriteError::Io { path, source }),
         }
+        still_there(&file, &path)?;
+        Ok(DirLock {
+            _file: file,
+            made: made.then_some(path),
+        })
     }
 
     /// Shared, on another output root this run can reach: runs under one
     /// enclosing root share it, while that root's own run, holding it
-    /// exclusively, keeps them out. Without `create`, a directory with no
-    /// lock file is no root and nothing is taken.
+    /// exclusively, keeps them out. An existing lock file is opened for
+    /// reading only. Without `create` a directory with no lock file is no
+    /// root, and one where it cannot be created is skipped: a run rooted
+    /// there takes its own lock before looking for this run's.
     fn share(dir: &Path, create: bool) -> Result<Option<DirLock>, WriteError> {
         check_lock(dir)?;
         let path = dir.join(LOCK_FILE);
-        let file = match fs::OpenOptions::new()
-            .read(true)
-            .write(create)
-            .create(create)
-            .truncate(false)
-            .open(&path)
-        {
+        let file = match fs::File::open(&path) {
             Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
             Err(e)
-                if !create
-                    && matches!(
-                        e.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                    ) =>
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
             {
-                return Ok(None);
+                if !create {
+                    return Ok(None);
+                }
+                match fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&path)
+                {
+                    Ok(file) => file,
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+                    Err(source) => return Err(WriteError::Io { path, source }),
+                }
             }
             Err(source) => return Err(WriteError::Io { path, source }),
         };
         match file.try_lock_shared() {
-            Ok(()) => Ok(Some(DirLock { _file: file })),
-            Err(fs::TryLockError::WouldBlock) => Err(WriteError::Locked(path)),
-            Err(fs::TryLockError::Error(source)) => Err(WriteError::Io { path, source }),
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Err(WriteError::Locked(path)),
+            Err(fs::TryLockError::Error(source)) => return Err(WriteError::Io { path, source }),
         }
+        still_there(&file, &path)?;
+        Ok(Some(DirLock {
+            _file: file,
+            made: None,
+        }))
+    }
+}
+
+/// A lock is only worth holding on the file the path names: one removed
+/// between this run's open and its lock (by a refused run that created it)
+/// guards nothing, so the run stops as if the lock were held.
+fn still_there(file: &fs::File, path: &Path) -> Result<(), WriteError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = file.metadata().map_err(io(path))?;
+        match fs::metadata(path) {
+            Ok(now) if now.dev() == held.dev() && now.ino() == held.ino() => Ok(()),
+            _ => Err(WriteError::Locked(path.to_path_buf())),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Ok(())
     }
 }
 
@@ -483,8 +535,28 @@ fn resolved(out_dir: &Path) -> Option<PathBuf> {
             root.extend(tail.iter().rev());
             return Some(root);
         }
-        tail.push(existing.file_name()?.to_owned());
-        existing.pop();
+        match existing.file_name() {
+            Some(name) => {
+                tail.push(name.to_owned());
+                existing.pop();
+            }
+            // `..` through a missing directory: no link can be involved
+            // there, so it is resolved by the path's text.
+            None => {
+                let mut lexical = PathBuf::new();
+                for part in std::path::absolute(probe).ok()?.components() {
+                    match part {
+                        Component::ParentDir => {
+                            lexical.pop();
+                        }
+                        Component::CurDir => {}
+                        other => lexical.push(other),
+                    }
+                }
+                lexical.extend(tail.iter().rev());
+                return resolved(&lexical);
+            }
+        }
     }
 }
 
@@ -547,12 +619,15 @@ fn other_roots<'a>(
     roots
 }
 
-/// Directories a run created, removed again with the lock file it put
-/// there (if nothing else is in them) unless the run succeeds, so a
-/// refused run leaves nothing behind.
+/// Directories a run created, removed again (if empty) unless the run
+/// succeeds, so a refused run leaves nothing behind. Lock files other runs
+/// made are never touched.
 struct Created {
     dirs: Vec<PathBuf>,
     keep: bool,
+    /// The run's own lock, released here: after its file is removed, if
+    /// the run created that file and is refused.
+    lock: Option<DirLock>,
 }
 
 impl Created {
@@ -576,11 +651,18 @@ impl Created {
 
 impl Drop for Created {
     fn drop(&mut self) {
-        if !self.keep {
-            for dir in self.dirs.iter().rev() {
-                let _ = fs::remove_file(dir.join(LOCK_FILE));
-                let _ = fs::remove_dir(dir);
-            }
+        let lock = self.lock.take();
+        if self.keep {
+            return;
+        }
+        // Still locked while removed, so no run can take it in between;
+        // a run that opened it before finds it gone and stops.
+        if let Some(path) = lock.as_ref().and_then(|l| l.made.as_ref()) {
+            let _ = fs::remove_file(path);
+        }
+        drop(lock);
+        for dir in self.dirs.iter().rev() {
+            let _ = fs::remove_dir(dir);
         }
     }
 }
@@ -1391,6 +1473,7 @@ pub fn write(
     let mut created = Created {
         dirs: Vec::new(),
         keep: false,
+        lock: None,
     };
     created.dir_all(out_dir)?;
     check_out_dir(out_dir)?;
@@ -1398,7 +1481,7 @@ pub fn write(
     // directory is locked exclusively first; only then are other roots'
     // lock files looked for, so of two overlapping runs at least one sees
     // the other's. A lock held elsewhere fails at once: runs never wait.
-    let _own = DirLock::acquire(out_dir)?;
+    created.lock = Some(DirLock::acquire(out_dir)?);
     let mut _shared = Vec::new();
     for (dir, create) in other_roots(out_dir, planned.keys()) {
         _shared.extend(DirLock::share(&dir, create)?);
@@ -3500,5 +3583,75 @@ mod tests {
             fs::read_to_string(dir.0.join("generated/a.rs")).unwrap(),
             "a"
         );
+    }
+
+    #[test]
+    fn a_refused_run_never_removes_a_lock_another_run_holds() {
+        let dir = TempDir::new("lock-race");
+        let gen_dir = dir.0.join("gen");
+        let mut loser = Created {
+            dirs: Vec::new(),
+            keep: false,
+            lock: None,
+        };
+        loser.dir_all(&gen_dir).unwrap();
+        // Another run wins the lock in the directory the loser created.
+        let winner = DirLock::acquire(&gen_dir).unwrap();
+        assert!(matches!(
+            DirLock::acquire(&gen_dir),
+            Err(WriteError::Locked(_))
+        ));
+        drop(loser);
+        assert!(gen_dir.join(LOCK_FILE).exists());
+        // Still the winner's: nobody else can take it.
+        assert!(matches!(
+            DirLock::acquire(&gen_dir),
+            Err(WriteError::Locked(_))
+        ));
+        drop(winner);
+    }
+
+    #[test]
+    fn check_sees_enclosing_owners_through_dot_dot_and_a_missing_directory() {
+        let dir = TempDir::new("dot-dot-check");
+        write(
+            &generation(&[("gen/a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        fs::remove_dir_all(dir.0.join("gen")).unwrap();
+        let out = dir.0.join("scratch/../gen");
+        let g = generation(&[("a.rs", "a")]);
+        assert!(matches!(
+            check(&g, &out, &WriteOptions::new("inner")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+        assert!(matches!(
+            write(&g, &out, &WriteOptions::new("inner")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_enclosing_lock_file_still_shares() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("ro-lock");
+        write(
+            &generation(&[("top.rs", "t")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        let lock = dir.0.join(LOCK_FILE);
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
+        let result = write(
+            &generation(&[("b.rs", "b")]),
+            &dir.0.join("b"),
+            &WriteOptions::new("b"),
+        );
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+        result.unwrap();
     }
 }
