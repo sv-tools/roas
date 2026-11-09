@@ -300,6 +300,11 @@ struct Key {
     name: String,
     start: usize,
     end: usize,
+    /// Where the member is written in its mapping: the key, or, for an
+    /// alias key or a member merged in, the `*name` that brings it there,
+    /// while `start` is at the anchor.
+    #[cfg_attr(not(feature = "editor"), allow(dead_code))]
+    written: usize,
 }
 
 impl fmt::Debug for SourceMap {
@@ -394,8 +399,9 @@ impl SourceMap {
 
     /// Where the first repeat of key `name` in a mapping starts, keys
     /// compared as JSON reads them (`1` and `'1'` repeat), in the order
-    /// JSON reading meets it: a value before the key after it. Of a repeat
-    /// merged in with `<<`, the object's own key, not the anchor's.
+    /// JSON reading meets it: a value before the key after it. Of the two,
+    /// the one written later in the mapping, where an alias key or a merge
+    /// counts at its `*name`, not at the anchor.
     #[cfg(feature = "editor")]
     pub(crate) fn repeated_key(&self, name: &str) -> Option<usize> {
         fn find(node: &Node, name: &str) -> Option<usize> {
@@ -407,11 +413,11 @@ impl SourceMap {
                             return Some(found);
                         }
                         if key.name == name {
+                            // A merge's members come after the map's own,
+                            // whatever the text order: take the later.
                             match seen {
-                                // The later in the text: a merged member
-                                // carries its anchor's span.
-                                Some(first) => return Some(key.start.max(first)),
-                                None => seen = Some(key.start),
+                                Some(first) => return Some(key.written.max(first)),
+                                None => seen = Some(key.written),
                             }
                         }
                     }
@@ -569,6 +575,7 @@ mod tests {
             name: name.into(),
             start,
             end: start + name.len(),
+            written: start,
         }
     }
 

@@ -1413,6 +1413,15 @@ workflows:
             ("a:\n  1: x\n  '1': y\nb:\n  2: p\n  '2': q\n", "1", (3, 3)),
             ("1: a\n'1':\n  2: x\n  '2': y\n", "2", (4, 3)),
             ("base: &b\n  1: x\nobj:\n  <<: *b\n  '1': y\n", "1", (5, 3)),
+            // Two merges that collide: at the later `*name`, in the object.
+            (
+                "a: &a {1: x}\nb: &b {'1': y}\nobj:\n  <<: [*a, *b]\n",
+                "1",
+                (4, 12),
+            ),
+            // An alias key after the key it repeats: at the alias.
+            ("a: &k 1\nm:\n  '1': y\n  *k : x\n", "1", (4, 3)),
+            ("a: &k 1\nm:\n  *k : x\n  '1': y\n", "1", (4, 3)),
         ] {
             let document = read(text);
             let error = &document.diagnostics()[0];

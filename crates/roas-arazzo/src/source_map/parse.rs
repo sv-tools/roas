@@ -181,7 +181,7 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
             order.sort_by_key(|&(written, index, _)| (written, index));
             let mut out: Vec<(usize, (Key, Node))> = order
                 .into_iter()
-                .map(|(_, index, (key, value))| {
+                .map(|(written, index, (key, value))| {
                     (index, {
                         let (key_start, key_end) = span(text, &key);
                         // A member merged in by `<<: *a` is referenced at the
@@ -240,6 +240,7 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
                                 name,
                                 start: key_start,
                                 end: key_end,
+                                written,
                             },
                             value,
                         )
