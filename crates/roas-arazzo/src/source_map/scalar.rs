@@ -386,13 +386,22 @@ fn block(raw: &str, start: usize, indent: usize, style: Block, out: &mut Decoded
     }
     out.end = start + raw.trim_end_matches([' ', '\t', '\n', '\r']).len();
     let normal = |body: &str| !body.is_empty() && !body.starts_with([' ', '\t']);
+    // The first non-empty line after each line, found in one pass.
+    let mut after = vec![None; lines.len()];
+    for index in (1..lines.len()).rev() {
+        after[index - 1] = if lines[index].0.is_empty() {
+            after[index]
+        } else {
+            Some(index)
+        };
+    }
     let mut index = 0;
     while index < lines.len() {
         let (body, at, newline) = lines[index];
         for (position, c) in body.char_indices() {
             out.push(c, at + position);
         }
-        let next = (index + 1..lines.len()).find(|&next| !lines[next].0.is_empty());
+        let next = after[index];
         match (style, next) {
             (Block::Folded, Some(next)) if normal(body) && normal(lines[next].0) => {
                 let empties = &lines[index + 1..next];

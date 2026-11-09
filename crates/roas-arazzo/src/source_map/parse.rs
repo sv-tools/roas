@@ -148,7 +148,10 @@ fn node(
                     // right after the key (or its `:`).
                     if value.start == value.end
                         && matches!(value.kind, Kind::Scalar(None))
-                        && text[key_end..value.start].contains(['\n', '\r'])
+                        // An alias to an empty value sits back at its anchor.
+                        && text
+                            .get(key_end..value.start)
+                            .is_some_and(|gap| gap.contains(['\n', '\r']))
                     {
                         let at = colon(text, key_end);
                         (value.start, value.end, value.text_end, value_end) = (at, at, at, at);
@@ -656,6 +659,34 @@ workflows:
         let b = map.locate("#.x.b").unwrap();
         assert_eq!((b.start.offset, b.end.offset), (15, 15));
         assert_eq!(map.locate("#.x").unwrap().end.offset, 15);
+    }
+
+    #[test]
+    fn an_alias_to_an_empty_value_stays_at_its_anchor() {
+        let map = SourceMap::parse("a: &x\nb: *x\n").unwrap();
+        assert_eq!(map.locate("#.b").unwrap().start.offset, 5);
+        // Explicit keys, and an empty block scalar as the key: none panics.
+        for text in ["a: &x\n? b\n: *x\n", "? |-\n  ", "\t? |\r\n"] {
+            let _ = SourceMap::parse(text);
+        }
+    }
+
+    /// A block of blank lines must not rescan the rest of them per line.
+    #[test]
+    fn a_long_run_of_blank_block_lines_decodes_in_linear_time() {
+        // `x`, its break (folded away under `>`), the blank lines, `y`.
+        for (style, y) in [("|", 50_002), (">", 50_001)] {
+            let text = format!("a: {style}\n  x\n{}  y\n", "\n".repeat(50_000));
+            let map = SourceMap::parse(text.clone()).unwrap();
+            let started = std::time::Instant::now();
+            let y = map.locate_in("#.a", y).unwrap();
+            assert_eq!(y.offset, text.rfind('y').unwrap(), "{style}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "{style}: {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]
