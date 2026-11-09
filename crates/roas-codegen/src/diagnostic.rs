@@ -123,6 +123,27 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+impl Diagnostic {
+    /// A diagnostic for a [`Generation`](crate::Generation) a caller builds
+    /// itself; an `Error` one makes [`write`](crate::write()) refuse unless
+    /// partial output is allowed.
+    pub fn new(
+        severity: Severity,
+        kind: DiagnosticKind,
+        schema_id: SchemaId,
+        pointer: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Diagnostic {
+            severity,
+            kind,
+            schema_id,
+            pointer: pointer.into(),
+            message: message.into(),
+        }
+    }
+}
+
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

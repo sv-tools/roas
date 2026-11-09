@@ -31,8 +31,10 @@ pub struct WriteOptions {
     /// set, a later run under the same label from a different source is
     /// refused, so two descriptions cannot overwrite each other's output.
     /// The `roas` command line uses the description's path relative to
-    /// the output directory, without a `.json`/`.yaml`/`.yml` extension, so moving between
-    /// JSON and YAML keeps the label.
+    /// the output directory, without a `.json`/`.yaml`/`.yml` extension,
+    /// so moving between JSON and YAML keeps the label. An empty id counts
+    /// as none, and switches the check off: use a non-empty one, such as
+    /// `.`, for a source that has no shorter name.
     pub source_id: Option<String>,
     /// Accept a different [`source_id`](Self::source_id) than the one the
     /// label recorded, and record the new one: the description moved or was

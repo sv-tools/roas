@@ -113,7 +113,10 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
         InputSource::File(path) => {
             let bytes =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let absolute = std::path::absolute(path)
+            // As stored on disk, so the generated header names the file the
+            // same way however its path was typed (case on macOS/Windows),
+            // just as the recorded source does.
+            let absolute = std::fs::canonicalize(path)
                 .with_context(|| format!("resolving {}", path.display()))?;
             let uri = Url::from_file_path(&absolute).map_err(|()| {
                 anyhow!("{} cannot be expressed as a file URL", absolute.display())
@@ -206,6 +209,11 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
     let common = file.iter().zip(&out).take_while(|(a, b)| a == b).count();
     let mut parts: Vec<String> = std::iter::repeat_n("..".to_owned(), out.len() - common).collect();
     parts.extend(file[common..].iter().map(|c| lossless(c.as_os_str())));
+    // Never empty: `petstore.json` beside `-o petstore` is a source too, and
+    // an empty one would switch the check off.
+    if parts.is_empty() {
+        return Some(".".to_owned());
+    }
     Some(parts.join("/"))
 }
 
@@ -982,5 +990,23 @@ mod tests {
         let through = resolve(&dir.0.join("missing/../link/out")).unwrap();
         let direct = resolve(&dir.0.join("real/deep/out")).unwrap();
         assert_eq!(through, direct);
+    }
+
+    #[test]
+    fn a_description_named_like_its_output_directory_still_has_a_source() {
+        let dir = TempDir::new("same-name");
+        let spec = dir.0.join("petstore.json");
+        std::fs::write(&spec, PET).unwrap();
+        let out = dir.0.join("petstore");
+        assert_eq!(
+            source_id(&InputSource::File(spec.clone()), &out).as_deref(),
+            Some(".")
+        );
+        run_generate(args(&spec, &out)).unwrap();
+        std::fs::create_dir_all(dir.0.join("other")).unwrap();
+        let other = dir.0.join("other/petstore.json");
+        std::fs::write(&other, PET.replace("Pet", "Invoice")).unwrap();
+        let error = format!("{:#}", run_generate(args(&other, &out)).unwrap_err());
+        assert!(error.contains("--replace-source"), "{error}");
     }
 }
