@@ -12,12 +12,14 @@
 //!   may be. So is an existing file no manifest owns, unless the caller
 //!   allows overwriting it or it already holds exactly the generated
 //!   content, in which case it is adopted under the planned spelling.
-//! - **One run at a time.** An operating-system lock spans the whole run,
-//!   taken in the output directory, in each directory below it the run
-//!   writes into, and in each enclosing directory holding a manifest, so
-//!   two targets — sharing a directory or with nested output roots —
-//!   cannot both pass the ownership checks and then race. It ends with the
-//!   process, so a killed run does not block the next.
+//! - **One run at a time.** An operating-system lock on the output
+//!   directory's `.roas-codegen.lock` spans the whole run, exclusive, so
+//!   two targets sharing a directory cannot both pass the ownership checks
+//!   and then race. Other output roots the run can reach — enclosing ones,
+//!   and nested ones it writes into — are locked shared: siblings under
+//!   one root run side by side, while overlapping roots exclude each
+//!   other. Locks end with the process, so a killed run does not block the
+//!   next; lock files stay, as they mark the roots.
 //! - **Nothing below the output directory is followed.** A symbolic link
 //!   as the output directory or on any generated path is refused. The
 //!   path *to* the output directory is the caller's choice and is used as
@@ -254,16 +256,17 @@ const MANIFEST_SUFFIX: &str = ".json";
 const TMP_MARKER: &str = ".roas-tmp-";
 const LOCK_FILE: &str = ".roas-codegen.lock";
 
-/// Holds the output directory's lock for one run; removes it when dropped.
-/// The lock is the operating system's, taken on the lock file: it ends
-/// with the process, so a killed run never blocks the next one, and a
-/// lock file left behind by one is simply reused.
+/// An operating-system lock on a directory's `.roas-codegen.lock`, held
+/// for one run. It ends with the process, so a killed run never blocks the
+/// next. The file is never removed: its presence is what tells a run with
+/// an overlapping output root that this directory is one, so it takes its
+/// own lock there too.
 struct DirLock {
-    path: PathBuf,
     _file: fs::File,
 }
 
 impl DirLock {
+    /// Exclusive, on this run's own output directory, creating the file.
     fn acquire(out_dir: &Path) -> Result<DirLock, WriteError> {
         check_lock(out_dir)?;
         let path = out_dir.join(LOCK_FILE);
@@ -275,33 +278,43 @@ impl DirLock {
             .open(&path)
             .map_err(io(&path))?;
         match file.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Err(WriteError::Locked(path)),
-            Err(fs::TryLockError::Error(source)) => return Err(WriteError::Io { path, source }),
+            Ok(()) => Ok(DirLock { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => Err(WriteError::Locked(path)),
+            Err(fs::TryLockError::Error(source)) => Err(WriteError::Io { path, source }),
         }
-        // The run that held the lock removes the file when it finishes; if
-        // that happened between this open and this lock, the lock is on a
-        // file no other run can see, so it guards nothing.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let held = file.metadata().map_err(io(&path))?;
-            match fs::metadata(&path) {
-                Ok(now) if now.dev() == held.dev() && now.ino() == held.ino() => {}
-                _ => return Err(WriteError::Locked(path)),
-            }
-        }
-        Ok(DirLock { path, _file: file })
     }
-}
 
-impl Drop for DirLock {
-    fn drop(&mut self) {
-        // Removed while still locked; the lock goes with the file handle. A
-        // run that opened it meanwhile notices by the inode check above.
-        // Without that check the file stays, reused by the next run.
-        #[cfg(unix)]
-        let _ = fs::remove_file(&self.path);
+    /// Shared, on another output root this run can reach: runs under one
+    /// enclosing root share it, while that root's own run, holding it
+    /// exclusively, keeps them out. Without `create`, a directory with no
+    /// lock file is no root and nothing is taken.
+    fn share(dir: &Path, create: bool) -> Result<Option<DirLock>, WriteError> {
+        check_lock(dir)?;
+        let path = dir.join(LOCK_FILE);
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .write(create)
+            .create(create)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(e)
+                if !create
+                    && matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+            {
+                return Ok(None);
+            }
+            Err(source) => return Err(WriteError::Io { path, source }),
+        };
+        match file.try_lock_shared() {
+            Ok(()) => Ok(Some(DirLock { _file: file })),
+            Err(fs::TryLockError::WouldBlock) => Err(WriteError::Locked(path)),
+            Err(fs::TryLockError::Error(source)) => Err(WriteError::Io { path, source }),
+        }
     }
 }
 
@@ -475,47 +488,88 @@ fn resolved(out_dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// The directories above `out_dir` that hold a manifest: enclosing output
-/// roots, whose runs can reach files in this one.
-fn enclosing_roots(out_dir: &Path) -> Vec<PathBuf> {
-    let Some(root) = resolved(out_dir) else {
-        return Vec::new();
-    };
-    let mut roots: Vec<PathBuf> = root
-        .ancestors()
-        .skip(1)
-        .filter(|dir| {
-            fs::read_dir(dir).is_ok_and(|entries| {
-                entries
-                    .flatten()
-                    .any(|e| is_manifest_name(&e.file_name().to_string_lossy()))
+/// The other output roots a run in `out_dir` can reach, each with whether
+/// its lock file may be created: enclosing directories holding a manifest
+/// (yes) or a lock file (no), and directories on the way to `keys` holding
+/// a lock file (no). Deduplicated by identity, `out_dir` itself excluded:
+/// one directory spelled two ways is locked once.
+fn other_roots<'a>(
+    out_dir: &Path,
+    keys: impl IntoIterator<Item = &'a String>,
+) -> Vec<(PathBuf, bool)> {
+    let has = |dir: &Path, manifest: bool| {
+        fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if manifest {
+                    is_manifest_name(&name)
+                } else {
+                    name == LOCK_FILE
+                }
             })
         })
-        .map(Path::to_path_buf)
-        .collect();
-    roots.reverse(); // outermost first
+    };
+    let mut roots = Vec::new();
+    if let Some(root) = resolved(out_dir) {
+        for dir in root.ancestors().skip(1) {
+            if has(dir, true) {
+                roots.push((dir.to_path_buf(), true));
+            } else if has(dir, false) {
+                roots.push((dir.to_path_buf(), false));
+            }
+        }
+    }
+    for key in keys {
+        let mut current = out_dir.to_path_buf();
+        let parts: Vec<&str> = key.split('/').collect();
+        for part in &parts[..parts.len() - 1] {
+            current.push(part);
+            if !fs::symlink_metadata(&current).is_ok_and(|m| m.is_dir()) {
+                break;
+            }
+            if has(&current, false) {
+                roots.push((current.clone(), false));
+            }
+        }
+    }
+    let mut seen = Vec::new();
+    if let Some(id) = file_id(out_dir) {
+        seen.push(id);
+    }
+    roots.retain(|(dir, _)| match file_id(dir) {
+        Some(id) if seen.contains(&id) => false,
+        Some(id) => {
+            seen.push(id);
+            true
+        }
+        None => true,
+    });
     roots
 }
 
-/// Directories a run created, removed again (if still empty) unless the
-/// run succeeds, so a refused run leaves nothing behind.
+/// Directories a run created, removed again with the lock file it put
+/// there (if nothing else is in them) unless the run succeeds, so a
+/// refused run leaves nothing behind.
 struct Created {
     dirs: Vec<PathBuf>,
     keep: bool,
 }
 
 impl Created {
-    /// Create `dir` and its missing ancestors, remembering each one.
+    /// Create `dir` and whatever leading to it is missing, remembering the
+    /// directories this made. `..` and `.` name directories made earlier
+    /// or already there, so they are created through, never remembered.
     fn dir_all(&mut self, dir: &Path) -> Result<(), WriteError> {
-        let mut missing: Vec<&Path> = dir
+        let missing: Vec<PathBuf> = dir
             .ancestors()
-            .take_while(|a| !a.as_os_str().is_empty() && fs::symlink_metadata(a).is_err())
+            .filter(|a| {
+                matches!(a.components().next_back(), Some(Component::Normal(_)))
+                    && fs::symlink_metadata(a).is_err()
+            })
+            .map(Path::to_path_buf)
             .collect();
-        missing.reverse();
-        for part in missing {
-            fs::create_dir(part).map_err(io(part))?;
-            self.dirs.push(part.to_path_buf());
-        }
+        fs::create_dir_all(dir).map_err(io(dir))?;
+        self.dirs.extend(missing.into_iter().rev());
         Ok(())
     }
 }
@@ -524,47 +578,11 @@ impl Drop for Created {
     fn drop(&mut self) {
         if !self.keep {
             for dir in self.dirs.iter().rev() {
+                let _ = fs::remove_file(dir.join(LOCK_FILE));
                 let _ = fs::remove_dir(dir);
             }
         }
     }
-}
-
-/// The directories below `out_dir` that a run's files go into, created
-/// where missing: each is where a nested output root could keep its
-/// manifest, so each is locked too. A path through a link or a file stops
-/// there; the ownership checks refuse or handle it.
-fn subdirs_to_lock(
-    out_dir: &Path,
-    planned: &BTreeMap<String, &str>,
-    created: &mut Created,
-) -> Result<Vec<PathBuf>, WriteError> {
-    let mut dirs = BTreeSet::new();
-    for key in planned.keys() {
-        let mut current = out_dir.to_path_buf();
-        let parts: Vec<&str> = key.split('/').collect();
-        for part in &parts[..parts.len() - 1] {
-            current.push(part);
-            match fs::symlink_metadata(&current) {
-                Ok(meta) if meta.is_dir() => {}
-                Ok(_) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    created.dir_all(&current)?;
-                }
-                Err(source) => {
-                    return Err(WriteError::Io {
-                        path: current,
-                        source,
-                    });
-                }
-            }
-            dirs.insert(current.clone());
-        }
-    }
-    // Outermost first, as every run takes its locks.
-    let mut dirs: Vec<PathBuf> = dirs.into_iter().collect();
-    dirs.sort_by_key(|d| d.components().count());
-    Ok(dirs)
 }
 
 fn is_manifest_name(name: &str) -> bool {
@@ -688,11 +706,29 @@ fn planned(generation: &Generation) -> Result<BTreeMap<String, &str>, WriteError
     let mut out = BTreeMap::new();
     // Compared case-insensitively throughout: the disk may be.
     let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut dirs: BTreeMap<String, (String, PathBuf)> = BTreeMap::new();
     for file in &generation.files {
         let key = key(&file.path)?;
         let lower = key.to_ascii_lowercase();
         if is_reserved(&key) {
             return Err(WriteError::ReservedPath(file.path.clone()));
+        }
+        // One spelling per directory: two would be one directory on a
+        // case-insensitive disk and two on another.
+        for (i, _) in key.match_indices('/') {
+            let (dir, dir_lower) = (&key[..i], &lower[..i]);
+            match dirs.get(dir_lower) {
+                Some((spelled, other)) if spelled != dir => {
+                    return Err(WriteError::ConflictingPaths(
+                        other.clone(),
+                        file.path.clone(),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    dirs.insert(dir_lower.to_owned(), (dir.to_owned(), file.path.clone()));
+                }
+            }
         }
         if let Some(other) = seen.insert(lower, file.path.clone()) {
             return Err(WriteError::ConflictingPaths(other, file.path.clone()));
@@ -1358,16 +1394,15 @@ pub fn write(
     };
     created.dir_all(out_dir)?;
     check_out_dir(out_dir)?;
-    // One run at a time over every file this one can touch: overlapping
-    // output roots lock each other's directories, outermost first, and a
-    // lock held elsewhere fails at once, so runs never wait on each other.
-    let mut lock_dirs = enclosing_roots(out_dir);
-    lock_dirs.push(out_dir.to_path_buf());
-    lock_dirs.extend(subdirs_to_lock(out_dir, &planned, &mut created)?);
-    let _locks = lock_dirs
-        .iter()
-        .map(|dir| DirLock::acquire(dir))
-        .collect::<Result<Vec<_>, _>>()?;
+    // One run at a time over every file this one can touch. Its own
+    // directory is locked exclusively first; only then are other roots'
+    // lock files looked for, so of two overlapping runs at least one sees
+    // the other's. A lock held elsewhere fails at once: runs never wait.
+    let _own = DirLock::acquire(out_dir)?;
+    let mut _shared = Vec::new();
+    for (dir, create) in other_roots(out_dir, planned.keys()) {
+        _shared.extend(DirLock::share(&dir, create)?);
+    }
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -1540,6 +1575,11 @@ pub fn check(
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
     let planned = planned(generation)?;
+    // The lock paths a write would take, so a directory a write refuses
+    // never checks as merely out of date.
+    for (dir, _) in other_roots(out_dir, planned.keys()) {
+        check_lock(&dir)?;
+    }
     for path in previous.files.keys() {
         check_links(out_dir, path)?;
     }
@@ -2213,8 +2253,6 @@ mod tests {
             &WriteOptions::new("api"),
         )
         .unwrap();
-        #[cfg(unix)]
-        assert!(!dir.0.join(LOCK_FILE).exists(), "the lock file is removed");
         // Released on every platform: it can be taken again.
         drop(DirLock::acquire(&dir.0).unwrap());
         let mut options = WriteOptions::new("api");
@@ -2824,8 +2862,6 @@ mod tests {
             &WriteOptions::new("api"),
         )
         .unwrap();
-        #[cfg(unix)]
-        assert!(!dir.0.join(LOCK_FILE).exists());
         drop(DirLock::acquire(&dir.0).unwrap());
     }
 
@@ -3405,6 +3441,64 @@ mod tests {
         assert!(
             matches!(&error, WriteError::Symlink(p) if p == Path::new("inner/.roas-codegen-n-rust.json")),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn sibling_roots_under_one_enclosing_root_run_side_by_side() {
+        let dir = TempDir::new("siblings");
+        write(
+            &generation(&[("top.rs", "t")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        // A sibling's run holds its shared lock on the enclosing root.
+        let sibling = DirLock::share(&dir.0, true).unwrap();
+        write(
+            &generation(&[("b.rs", "b")]),
+            &dir.0.join("b"),
+            &WriteOptions::new("b"),
+        )
+        .unwrap();
+        // The enclosing root's own run is kept out meanwhile.
+        assert!(matches!(
+            write(
+                &generation(&[("top.rs", "t")]),
+                &dir.0,
+                &WriteOptions::new("outer")
+            ),
+            Err(WriteError::Locked(_))
+        ));
+        drop(sibling);
+    }
+
+    #[test]
+    fn one_directory_spelled_two_ways_is_refused() {
+        let dir = TempDir::new("dir-spellings");
+        assert!(matches!(
+            write(
+                &generation(&[("models/a.rs", "a"), ("Models/b.rs", "b")]),
+                &dir.0,
+                &WriteOptions::new("api")
+            ),
+            Err(WriteError::ConflictingPaths(..))
+        ));
+    }
+
+    #[test]
+    fn an_output_path_through_a_missing_directory_and_dot_dot_works() {
+        let dir = TempDir::new("dot-dot");
+        let out = dir.0.join("scratch/../generated");
+        write(
+            &generation(&[("a.rs", "a")]),
+            &out,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.0.join("generated/a.rs")).unwrap(),
+            "a"
         );
     }
 }
