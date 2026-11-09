@@ -108,9 +108,13 @@ impl CheckReport {
 
 /// Why the output directory could not be written or checked.
 ///
-/// Paths of generated files (`Unowned`, `OwnedByOther`, `ReservedPath`,
-/// `IsADirectory`, and `Symlink`/`NotADirectory` below the output
-/// directory) are relative to it; the rest name the path as opened.
+/// Paths of generated files and directories are relative to the output
+/// directory: in `UnsafePath`, `NonAsciiPath`, `ConflictingPaths`,
+/// `ReservedPath`, `Unowned`, `OwnedByOther`, `IsADirectory`,
+/// `DirectorySpelling`, and `Symlink`/`NotADirectory`. A manifest in
+/// `OwnedByOther` or `OutputDirOwned` is relative to it too when it sits
+/// below it, and named as found when it sits above. The rest name the path
+/// as opened.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum WriteError {
