@@ -287,6 +287,34 @@ pub(super) fn empty_block(text: &str, at: usize) -> Option<usize> {
     header(text, at).map(|(_, end, _)| end)
 }
 
+/// Where a line's comment starts: at a `#` after white space, outside
+/// a quoted key (`"x # y": |`).
+pub(super) fn comment_start(line: &str) -> usize {
+    let mut quote = None;
+    let mut previous = ' ';
+    let mut chars = line.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match (quote, c) {
+            (None, '#') if matches!(previous, ' ' | '\t') => return at,
+            (None, '"' | '\'')
+                if matches!(previous, ' ' | '\t' | '-' | '?' | ':' | '[' | '{' | ',') =>
+            {
+                quote = Some(c);
+            }
+            (Some('"'), '\\') => {
+                chars.next();
+            }
+            (Some('\''), '\'') if chars.peek().is_some_and(|&(_, next)| next == '\'') => {
+                chars.next();
+            }
+            (Some(open), c) if c == open => quote = None,
+            _ => {}
+        }
+        previous = c;
+    }
+    line.len()
+}
+
 /// Whether the scalar whose content starts at `start` is a block scalar.
 #[cfg_attr(not(feature = "source-map"), allow(dead_code))]
 pub(super) fn is_block(text: &str, start: usize) -> bool {
@@ -312,11 +340,7 @@ fn header(text: &str, start: usize) -> Option<(Block, usize, bool)> {
         }
         end = previous;
     };
-    // A comment starts at a `#` after white space.
-    let comment = content
-        .char_indices()
-        .find(|&(at, c)| c == '#' && (at == 0 || content[..at].ends_with([' ', '\t'])))
-        .map_or(content.len(), |(at, _)| at);
+    let comment = comment_start(content);
     let head = content[..comment].trim_end();
     let from_indicator = head.rfind([' ', '\t']).map_or(0, |at| at + 1);
     let indicator = &head[from_indicator..];

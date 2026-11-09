@@ -97,8 +97,15 @@ pub struct SourceMap {
     text: String,
     /// Byte offset each line starts at; `lines[0] == 0`.
     lines: Vec<usize>,
+    /// `(byte offset, characters since its line started)` every
+    /// [`CHECKPOINT`] bytes or so along long lines, so a column is never
+    /// counted from the start of a minified document's one line.
+    checkpoints: Vec<(usize, usize)>,
     root: Node,
 }
+
+/// How far apart column checkpoints are, in bytes.
+const CHECKPOINT: usize = 1024;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "source-map"), allow(dead_code))]
@@ -195,10 +202,18 @@ impl SourceMap {
         if start == 0 && self.text.starts_with('\u{feff}') {
             start = offset.min('\u{feff}'.len_utf8());
         }
+        // Count from the nearest checkpoint on this line, if any.
+        let mut counted = 0;
+        let nearest = self.checkpoints.partition_point(|&(at, _)| at <= offset);
+        if let Some(&(at, chars)) = nearest.checked_sub(1).map(|index| &self.checkpoints[index])
+            && at > start
+        {
+            (start, counted) = (at, chars);
+        }
         SourcePosition {
             offset,
             line,
-            column: self.text[start..offset].chars().count() + 1,
+            column: counted + self.text[start..offset].chars().count() + 1,
         }
     }
 
@@ -218,8 +233,29 @@ impl SourceMap {
                 (byte == b'\n' || (byte == b'\r' && bytes.get(at + 1) != Some(&b'\n')))
                     .then_some(at + 1)
             }))
-            .collect();
-        Self { text, lines, root }
+            .collect::<Vec<_>>();
+        let mut checkpoints = Vec::new();
+        let (mut line, mut chars, mut next) = (0, 0, CHECKPOINT);
+        for (at, c) in text.char_indices() {
+            if lines.get(line + 1) == Some(&at) {
+                line += 1;
+                (chars, next) = (0, at + CHECKPOINT);
+            }
+            if at >= next {
+                checkpoints.push((at, chars));
+                next = at + CHECKPOINT;
+            }
+            // The byte-order mark takes no column.
+            if !(at == 0 && c == '\u{feff}') {
+                chars += 1;
+            }
+        }
+        Self {
+            text,
+            lines,
+            checkpoints,
+            root,
+        }
     }
 
     fn resolve(&self, path: &str) -> Option<(&Node, Option<&Key>)> {
@@ -545,6 +581,48 @@ mod tests {
         assert_eq!(
             [at(0), at(2), at(3), at(5), at(7)],
             [(1, 1), (2, 1), (2, 2), (3, 1), (4, 1)]
+        );
+    }
+
+    /// Columns on long lines come from checkpoints: they agree with
+    /// counting from the line start, across lines, multi-byte characters
+    /// and a byte-order mark.
+    #[test]
+    #[cfg(feature = "source-map")]
+    fn checkpointed_columns_agree_with_counting() {
+        let line = "é".repeat(700) + &"x".repeat(1500);
+        let map =
+            SourceMap::parse(format!("\u{feff}a: {line}\r\nb: {line}\n\rc: {line}\n")).unwrap();
+        assert!(!map.checkpoints.is_empty());
+        let raw = map.text().to_owned();
+        let starts: Vec<usize> = map.lines.clone();
+        for (offset, _) in raw.char_indices().step_by(7) {
+            let position = map.position(offset);
+            let line_start = match position.line {
+                1 => offset.min(3),
+                line => starts[line - 1],
+            };
+            let expected = raw[line_start..offset].chars().count() + 1;
+            assert_eq!(position.column, expected, "at {offset}");
+        }
+    }
+
+    /// Locating every member of a minified document is linear, not a
+    /// count from the start of its one line each time.
+    #[test]
+    #[cfg(feature = "source-map")]
+    fn many_positions_on_one_long_line_are_cheap() {
+        let text = format!("[{}]", vec![r#"{"a":"é"}"#; 50_000].join(","));
+        let map = SourceMap::parse(text).unwrap();
+        let started = std::time::Instant::now();
+        for index in (0..50_000).step_by(5) {
+            assert!(map.locate(&format!("#[{index}].a")).is_some());
+        }
+        assert_eq!(map.locate("#[49999].a").unwrap().start.column, 499_997);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
         );
     }
 

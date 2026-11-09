@@ -244,13 +244,20 @@ fn node(
 }
 
 /// An indentless sequence whose first item is empty (`a:\n- # note`,
-/// `a:\n-\n- x`) is reported at the end of that item's line, past its
-/// `-` and any comment: back up to the `-`, if only indentation is
-/// before it. Only that one line is looked at.
+/// `a:\n-\n- x`) or starts on the next line is reported at the end of
+/// its first `-` line, past the `-` and any comment: back up to the `-`,
+/// if only indentation is before it. Only that one line is looked at.
 fn empty_first_item(text: &str, kind: &Kind, first: Option<usize>, start: usize) -> Option<usize> {
     let Kind::Seq(items) = kind else { return None };
     let item = items.first()?;
-    if first != Some(start) || item.start != item.end || !matches!(item.kind, Kind::Scalar(None)) {
+    // Or reported at the line break after its `-`, its first item on the
+    // next line (`steps:\n- # login\n  stepId: a`).
+    let at_break = matches!(text.as_bytes().get(start), Some(b'\n' | b'\r'));
+    if !at_break
+        && (first != Some(start)
+            || item.start != item.end
+            || !matches!(item.kind, Kind::Scalar(None)))
+    {
         return None;
     }
     let line = text[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
@@ -275,10 +282,21 @@ fn colon(text: &str, end: usize) -> usize {
     let rest = &text[end..];
     let after = rest.trim_start_matches([' ', '\t']);
     if after.starts_with(':') {
-        end + (rest.len() - after.len()) + 1
-    } else {
-        end
+        return end + (rest.len() - after.len()) + 1;
     }
+    // An explicit `? key`'s `:` may stand on a later line: a line that
+    // starts with `: ` (or a bare `:`) is nothing else.
+    let after = rest.trim_start_matches([' ', '\t', '\n', '\r']);
+    let indicator = after
+        .strip_prefix(':')
+        .is_some_and(|value| value.is_empty() || value.starts_with([' ', '\t', '\n', '\r']));
+    if indicator && after.len() < rest.len() {
+        let line = &text[..text.len() - after.len()];
+        if line.trim_end_matches([' ', '\t']).ends_with(['\n', '\r']) {
+            return text.len() - after.len() + 1;
+        }
+    }
+    end
 }
 
 /// A flow collection's span covers only its opening `[` / `{`, and its
@@ -294,7 +312,9 @@ fn closing(text: &str, start: usize, end: usize) -> usize {
         match byte {
             b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'?' => at += 1,
             b'#' => at += text[at..].find(['\n', '\r']).unwrap_or(text.len() - at),
-            byte if byte == close => return at + 1,
+            // A merged member is measured where it is defined — perhaps
+            // inside the `<<` value, before a `}` that is not this one's.
+            byte if byte == close && !text[start..at].contains("<<") => return at + 1,
             _ => break,
         }
     }
@@ -664,6 +684,25 @@ workflows:
     }
 
     #[test]
+    fn a_hash_inside_a_quoted_key_starts_no_comment() {
+        let text = "\"x # y\": |-\nz: 1\n";
+        let map = SourceMap::parse(text).unwrap();
+        // An empty block sits at its header, on line 1 — not at `z`.
+        assert_eq!(map.locate("#.x # y").unwrap().start.line, 1);
+        assert_eq!(map.locate_in("#.x # y", 0).unwrap().line, 1);
+        let text = "'it''s # no': >\n  folded\n";
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(
+            map.locate_in("#.it's # no", 0).unwrap().offset,
+            text.find("folded").unwrap()
+        );
+        assert_eq!(
+            super::super::scalar::comment_start("a: \"b\\\" # c\" # d"),
+            13
+        );
+    }
+
+    #[test]
     fn an_empty_block_scalar_is_where_its_header_is() {
         for text in ["k: |\nz: 1\n", "k: |-  # none\n\nz: 1\n", "- >-\n- 2\n"] {
             let map = SourceMap::parse(text).unwrap();
@@ -961,6 +1000,33 @@ workflows:
             "{:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn ranges_reach_past_merges_next_line_items_and_explicit_values() {
+        for (text, path, range) in [
+            // A merged member measured at its alias inside the `<<` value.
+            ("a: &x 1\nb: {<<: {m: *x}}\n", "#.b", (11, 24)),
+            ("a: &x 1\nb: {k: 1, <<: {m: *x} }\n", "#.b", (11, 31)),
+            ("a: &x 1\nb: {<<: [{m: *x}]}\n", "#.b", (11, 26)),
+            ("a: &x 1\nb: [{<<: {m: *x}}]\n", "#.b[0]", (12, 25)),
+            // An indentless sequence whose first item starts a line later.
+            ("steps:\n- # login\n  stepId: a\n", "#.steps", (7, 28)),
+            ("steps:\n-\n  stepId: a\n", "#.steps", (7, 20)),
+            // An explicit key's `:` on the next line.
+            ("k:\n  ? a\n  :\n", "#.k", (5, 12)),
+            ("k:\n  ? a\n  : \nz: 1\n", "#.k", (5, 12)),
+            ("k:\n  a: 1\nz: 1\n", "#.k", (5, 9)),
+        ] {
+            let map = SourceMap::parse(text).unwrap();
+            let found = map.locate(path).unwrap();
+            assert_eq!(
+                (found.start.offset, found.end.offset),
+                range,
+                "{text:?} {path}: {:?}",
+                &text[found.start.offset..found.end.offset]
+            );
+        }
     }
 
     #[test]
