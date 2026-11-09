@@ -183,7 +183,13 @@ fn stored_path(path: &Path) -> std::io::Result<PathBuf> {
         .iter()
         .find(|e| {
             if cfg!(unix) {
-                single_link(&entry) && same_entry(&entry, &e.path())
+                // The same file, under this name in another case, or as its
+                // only name; never a hard link under another name.
+                same_entry(&entry, &e.path())
+                    && (single_link(&entry)
+                        || e.file_name()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&name.to_string_lossy()))
             } else {
                 // No inode to compare: Windows folds case, so the entry
                 // spelled the same ignoring case is this file.

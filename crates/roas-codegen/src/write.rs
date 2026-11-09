@@ -1583,6 +1583,16 @@ fn misspelled(out_dir: &Path, key: &str, listings: &mut Listings) -> Option<Stri
     })
 }
 
+/// Whether a previous path is, on this disk, the file a planned path names
+/// in another case: it is being written, not kept, whatever it held.
+fn is_planned_file(out_dir: &Path, planned: &BTreeMap<String, &str>, path: &str) -> bool {
+    let id = file_id(&out_dir.join(path));
+    id.is_some()
+        && planned
+            .keys()
+            .any(|p| p.eq_ignore_ascii_case(path) && file_id(&out_dir.join(p)) == id)
+}
+
 /// Directory listings, read once per run.
 #[derive(Default)]
 struct Listings(BTreeMap<PathBuf, BTreeSet<std::ffi::OsString>>);
@@ -1924,7 +1934,10 @@ pub fn write(
                     });
                 }
             }
-        } else if !shared.contains(path) && read_recorded(&on_disk)?.is_some() {
+        } else if !shared.contains(path)
+            && !is_planned_file(out_dir, &planned, path)
+            && read_recorded(&on_disk)?.is_some()
+        {
             // Once per file, whatever spellings recorded it, as check reports.
             let id = file_id(&on_disk);
             if !report.kept_edited.iter().any(|p| {
@@ -2097,7 +2110,10 @@ pub fn check(
         }
         if going.contains(&path) {
             report.stale.push(PathBuf::from(path));
-        } else if !shared.contains(&path) && read_recorded(&on_disk)?.is_some() {
+        } else if !shared.contains(&path)
+            && !is_planned_file(out_dir, &planned, &path)
+            && read_recorded(&on_disk)?.is_some()
+        {
             report.stale_edited.push(PathBuf::from(path));
         }
     }
