@@ -2012,23 +2012,35 @@ pub fn check(
     // lock file it cannot open.
     let mut _locks: Vec<DirLock> = Vec::new();
     // Where there was no lock file to hold (a fresh checkout ignores them),
-    // one appearing by the end means a write ran meanwhile.
+    // one appearing by the end may mean a write ran meanwhile.
     let mut unlocked: Vec<PathBuf> = Vec::new();
+    // Taken in `write`'s order, enclosing roots first, and all before the
+    // manifest is read: the lock paths a write would take, so a directory
+    // a write refuses never checks as merely out of date.
+    let mut enclosing = Vec::new();
+    for (dir, _) in other_roots(out_dir, std::iter::empty()) {
+        match DirLock::share(&dir, false)? {
+            Some(lock) => _locks.push(lock),
+            None => unlocked.push(dir.clone()),
+        }
+        enclosing.push(dir);
+    }
     match DirLock::share(out_dir, false)? {
         Some(lock) => _locks.push(lock),
         None => unlocked.push(out_dir.to_path_buf()),
     }
-    let manifest_path = out_dir.join(&manifest_file);
-    let previous = read_manifest(&manifest_path)?.unwrap_or_default();
-    check_source(&previous, options)?;
-    // The lock paths a write would take, so a directory a write refuses
-    // never checks as merely out of date.
     for (dir, _) in other_roots(out_dir, planned.keys()) {
+        if enclosing.contains(&dir) {
+            continue;
+        }
         match DirLock::share(&dir, false)? {
             Some(lock) => _locks.push(lock),
             None => unlocked.push(dir),
         }
     }
+    let manifest_path = out_dir.join(&manifest_file);
+    let previous = read_manifest(&manifest_path)?.unwrap_or_default();
+    check_source(&previous, options)?;
     for path in previous.files.keys() {
         check_links(out_dir, path)?;
     }
@@ -2099,13 +2111,24 @@ pub fn check(
     expected.replacing = replacing;
     report.manifest_outdated =
         !read_manifest(&manifest_path)?.is_some_and(|m| m.same_as(&expected));
-    if let Some(dir) = unlocked
-        .iter()
-        .find(|dir| fs::symlink_metadata(dir.join(LOCK_FILE)).is_ok())
-    {
-        return Err(WriteError::Locked(dir.join(LOCK_FILE)));
+    if let Some(lock) = appeared(out_dir, &unlocked) {
+        return Err(WriteError::Locked(lock));
     }
     Ok(report)
+}
+
+/// A write that ran during a `check` which had no lock file to hold there:
+/// in the output directory, any lock file that appeared; elsewhere, one
+/// still held exclusively, since a sibling run creating an enclosing root's
+/// lock file for its own shared lock touches nothing here.
+fn appeared(out_dir: &Path, unlocked: &[PathBuf]) -> Option<PathBuf> {
+    unlocked.iter().find_map(|dir| {
+        let lock = dir.join(LOCK_FILE);
+        fs::symlink_metadata(&lock).ok()?;
+        let held =
+            dir == out_dir || matches!(DirLock::share(dir, false), Err(WriteError::Locked(_)));
+        held.then_some(lock)
+    })
 }
 
 #[cfg(test)]
@@ -4483,5 +4506,25 @@ mod tests {
         write(&g, &dir.0, &forced).unwrap();
         assert!(check(&g, &dir.0, &forced).unwrap().is_clean());
         assert_eq!(fs::read_to_string(dir.0.join("backup")).unwrap(), "hand");
+    }
+
+    #[test]
+    fn a_lock_file_that_appears_during_check_is_judged_by_where_it_is() {
+        let dir = TempDir::new("appeared");
+        let out = dir.0.join("out");
+        let root = dir.0.clone();
+        fs::create_dir_all(&out).unwrap();
+        let unlocked = vec![root.clone(), out.clone()];
+        assert_eq!(appeared(&out, &unlocked), None);
+        // A sibling's shared lock file in the enclosing root: not a write.
+        fs::write(root.join(LOCK_FILE), "").unwrap();
+        assert_eq!(appeared(&out, &unlocked), None);
+        // Held exclusively there: a write of that root is running.
+        let held = DirLock::acquire(&root).unwrap();
+        assert_eq!(appeared(&out, &unlocked), Some(root.join(LOCK_FILE)));
+        drop(held);
+        // Any lock file in the output directory itself.
+        fs::write(out.join(LOCK_FILE), "").unwrap();
+        assert_eq!(appeared(&out, &unlocked), Some(out.join(LOCK_FILE)));
     }
 }
