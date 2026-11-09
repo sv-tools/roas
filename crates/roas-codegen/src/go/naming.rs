@@ -83,12 +83,83 @@ pub(crate) fn is_package_name(name: &str) -> bool {
         && name != "documentation"
 }
 
-/// A module path as `go.mod` takes one, by `go mod init`'s rules for an
-/// import path: `/`-separated elements of ASCII letters, digits, `-`, `.`,
-/// `_` and `~`, none empty, `.` or `..`, none starting or ending with a
-/// dot, and none a name Windows reserves.
+/// The standard library's top-level directories, from Go 1.27: a module
+/// whose first path element has no dot and is one of these is shadowed by
+/// or ambiguous with the standard library (`std` and `cmd` included).
+const STD_ROOTS: &[&str] = &[
+    "archive",
+    "arena",
+    "bufio",
+    "builtin",
+    "bytes",
+    "cmd",
+    "cmp",
+    "compress",
+    "container",
+    "context",
+    "crypto",
+    "database",
+    "debug",
+    "embed",
+    "encoding",
+    "errors",
+    "expvar",
+    "flag",
+    "fmt",
+    "go",
+    "hash",
+    "html",
+    "image",
+    "index",
+    "internal",
+    "io",
+    "iter",
+    "log",
+    "maps",
+    "math",
+    "mime",
+    "net",
+    "os",
+    "path",
+    "plugin",
+    "reflect",
+    "regexp",
+    "runtime",
+    "simd",
+    "slices",
+    "sort",
+    "std",
+    "strconv",
+    "strings",
+    "structs",
+    "sync",
+    "syscall",
+    "testing",
+    "text",
+    "time",
+    "unicode",
+    "unique",
+    "unsafe",
+    "uuid",
+    "vendor",
+    "weak",
+];
+
+/// A module path as `go.mod` takes one, by the `go` command's rules:
+/// `/`-separated elements of ASCII letters, digits, `-`, `.`, `_` and `~`,
+/// none empty, `.` or `..`, none starting or ending with a dot, and none a
+/// name Windows reserves; no leading dash; not `go` or `toolchain`, which
+/// are reserved; and not rooted where the standard library is.
 pub(crate) fn is_module_path(path: &str) -> bool {
+    let first = path.split('/').next().unwrap_or(path);
+    let last = path.rsplit('/').next().unwrap_or(path);
     !path.is_empty()
+        && !path.starts_with('-')
+        // The last element names the package directory, which the `go`
+        // command refuses to start with a dash.
+        && !last.starts_with('-')
+        && path != "toolchain"
+        && (first.contains('.') || !STD_ROOTS.contains(&first))
         && path.split('/').all(|element| {
             !element.is_empty()
                 && !element.starts_with('.')
@@ -96,8 +167,22 @@ pub(crate) fn is_module_path(path: &str) -> bool {
                 && element
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
-                && crate::write::windows_safe(element.split('.').next().unwrap_or(element))
+                && windows_element_ok(element)
         })
+}
+
+/// Go's own Windows rule for a path element: the part before the first dot
+/// is no device name, and does not end in `~` and digits like a short name.
+fn windows_element_ok(element: &str) -> bool {
+    const DEVICES: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    let short = element.split('.').next().unwrap_or(element);
+    let short_name = short.rsplit_once('~').is_some_and(|(_, digits)| {
+        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+    });
+    !short_name && !DEVICES.iter().any(|d| d.eq_ignore_ascii_case(short))
 }
 
 /// Operating systems and architectures `go build` knows, from
@@ -331,6 +416,20 @@ mod tests {
         assert!(!is_module_path(".hidden/x"));
         assert!(!is_module_path("a b"));
         assert!(!is_module_path("example.com/con"));
+        assert!(!is_module_path("-pets"));
+        assert!(!is_module_path("go"));
+        assert!(!is_module_path("toolchain"));
+        assert!(!is_module_path("fmt"));
+        assert!(!is_module_path("std"));
+        assert!(!is_module_path("net/pets"));
+        assert!(is_module_path("net.example/pets"));
+        assert!(is_module_path("a~b"));
+        assert!(is_module_path("example.com/a~1b"));
+        assert!(is_module_path("example.com/-x/y"));
+        assert!(!is_module_path("example.com/-x"));
+        assert!(!is_module_path("example.com/a~1"));
+        assert!(!is_module_path("example.com/a~1.b"));
+        assert!(!is_module_path("example.com/COM1.x"));
     }
 
     #[test]

@@ -28,10 +28,26 @@ pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, Gen
     if let Some(module) = &config.go.module_path {
         // A version is what a `require` line needs, and a substitution
         // names none; the module that imports one keeps its own go.mod.
-        if let Some(dependency) = built.dependencies.first() {
+        // An `extra_imports` entry is an import spec: the path is its
+        // string, quoted either way.
+        let extra = config.extra_imports.iter().filter_map(|spec| {
+            let quote = spec.find(['"', '`'])?;
+            let delimiter = &spec[quote..=quote];
+            let path = spec[quote + 1..].split(delimiter).next()?;
+            path.split('/')
+                .next()
+                .is_some_and(|first| first.contains('.'))
+                .then_some(path)
+        });
+        if let Some(import) = built
+            .dependencies
+            .iter()
+            .map(|d| d.import.as_str())
+            .chain(extra)
+            .next()
+        {
             return Err(GenerateError::Config(format!(
-                "`go.module_path` generates a go.mod, which cannot require {:?} without a version; leave it unset and declare the module in a go.mod of your own",
-                dependency.import
+                "`go.module_path` generates a go.mod, which cannot require {import:?} without a version; leave it unset and declare the module in a go.mod of your own"
             )));
         }
         files.push(GeneratedFile::new(

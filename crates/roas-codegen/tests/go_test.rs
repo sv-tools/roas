@@ -637,4 +637,19 @@ fn a_module_path_makes_the_output_a_module() {
         matches!(&error, GenerateError::Config(m) if m.contains("without a version")),
         "{error}"
     );
+    // So does an extra import from another module; the standard library is fine.
+    let toml = "extra_imports = ['_ \"github.com/google/uuid\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    let error = go(pet(), toml).unwrap().unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("github.com/google/uuid")),
+        "{error}"
+    );
+    let toml = "extra_imports = ['_ `github.com/google/uuid`']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    let error = go(pet(), toml).unwrap().unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("github.com/google/uuid")),
+        "{error}"
+    );
+    let toml = "extra_imports = ['_ \"time\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    assert!(go(pet(), toml).unwrap().is_ok());
 }
