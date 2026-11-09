@@ -1030,6 +1030,21 @@ workflows:
     }
 
     #[test]
+    fn a_byte_order_mark_hides_no_block_header() {
+        for (text, path, range) in [
+            ("\u{feff}- >-\n  abc\n- 1\n", "#[0]", (10, 13)),
+            ("\u{feff}|\n  abc\n", "#", (7, 10)),
+            ("\u{feff}- |\n- x\n", "#[0]", (6, 6)),
+        ] {
+            let map = SourceMap::parse(text).unwrap();
+            let found = map.locate(path).unwrap();
+            assert_eq!((found.start.offset, found.end.offset), range, "{text:?}");
+        }
+        let map = SourceMap::parse("\u{feff}\nx: 1\n").unwrap();
+        assert_eq!(map.locate("#.x").unwrap().start.line, 2);
+    }
+
+    #[test]
     fn a_byte_order_mark_shifts_no_column() {
         let map = SourceMap::parse("\u{feff}a: 1\nb: 2\n").unwrap();
         assert_eq!(at(&map, "#.a"), (1, 4));

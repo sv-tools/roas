@@ -330,10 +330,19 @@ fn header(text: &str, start: usize) -> Option<(Block, usize, bool)> {
     if line > 0 && !matches!(text.as_bytes()[line - 1], b'\n' | b'\r') {
         return None;
     }
-    // The last non-blank line before this one.
+    // The last non-blank line before this one; a byte-order mark is not
+    // part of the first.
+    let bom = if text.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
     let mut end = line;
     let (from, content) = loop {
-        let previous = line_start(text, end.checked_sub(1)?);
+        if bom > 0 && end <= bom {
+            return None;
+        }
+        let previous = line_start(text, end.checked_sub(1)?).max(bom);
         let content = text[previous..end].trim_end_matches(['\n', '\r']);
         if !content.trim().is_empty() {
             break (previous, content);

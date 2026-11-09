@@ -40,7 +40,9 @@
 mod parse;
 mod scalar;
 
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 /// A point in the original text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -92,7 +94,6 @@ impl std::error::Error for SourceMapError {}
 /// The locations of a document's members and values.
 ///
 /// Built from text with [`SourceMap::parse`] (feature `source-map`).
-#[derive(Clone)]
 pub struct SourceMap {
     text: String,
     /// Byte offset each line starts at; `lines[0] == 0`.
@@ -102,6 +103,74 @@ pub struct SourceMap {
     /// counted from the start of a minified document's one line.
     checkpoints: Vec<(usize, usize)>,
     root: Node,
+    /// What lookups worked out, kept so many findings in one large
+    /// string or object do not redo it each time.
+    cache: Cache,
+}
+
+/// Lazily built lookups, keyed by the address of the node they are
+/// about: the tree never changes once built.
+#[derive(Default)]
+struct Cache {
+    /// A string's decoded-to-raw offset table (`None`: not decodable).
+    decoded: Mutex<HashMap<usize, Option<Table>>>,
+    /// A large map's members by name, as indices into it.
+    members: Mutex<HashMap<usize, Index>>,
+}
+
+/// Raw offsets of a string's decoded bytes.
+type Table = Arc<[usize]>;
+/// A map's members by name, as indices into it.
+type Index = Arc<HashMap<String, Vec<usize>>>;
+
+/// Maps with fewer members are scanned rather than indexed.
+const INDEXED: usize = 16;
+
+fn address(node: &Node) -> usize {
+    std::ptr::from_ref(node) as usize
+}
+
+impl Cache {
+    fn decoded(&self, node: &Node, build: impl FnOnce() -> Option<Vec<usize>>) -> Option<Table> {
+        let mut decoded = self
+            .decoded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        decoded
+            .entry(address(node))
+            .or_insert_with(|| build().map(Arc::from))
+            .clone()
+    }
+
+    fn members(&self, node: &Node, members: &[(Key, Node)]) -> Index {
+        let mut cache = self
+            .members
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache
+            .entry(address(node))
+            .or_insert_with(|| {
+                let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+                for (at, (key, _)) in members.iter().enumerate() {
+                    index.entry(key.name.clone()).or_default().push(at);
+                }
+                Arc::new(index)
+            })
+            .clone()
+    }
+}
+
+impl Clone for SourceMap {
+    /// A clone has its own tree, so it starts with an empty cache.
+    fn clone(&self) -> Self {
+        Self {
+            text: self.text.clone(),
+            lines: self.lines.clone(),
+            checkpoints: self.checkpoints.clone(),
+            root: self.root.clone(),
+            cache: Cache::default(),
+        }
+    }
 }
 
 /// How far apart column checkpoints are, in bytes.
@@ -185,7 +254,9 @@ impl SourceMap {
         if !value.is_char_boundary(offset) {
             return None;
         }
-        let table = scalar::decode(&self.text, node.start, node.text_end, value)?;
+        let table = self.cache.decoded(node, || {
+            scalar::decode(&self.text, node.start, node.text_end, value)
+        })?;
         table.get(offset).map(|&raw| self.position(raw))
     }
 
@@ -255,11 +326,12 @@ impl SourceMap {
             lines,
             checkpoints,
             root,
+            cache: Cache::default(),
         }
     }
 
     fn resolve(&self, path: &str) -> Option<(&Node, Option<&Key>)> {
-        resolve(&self.root, &tokens(path)?)
+        resolve(&self.root, &tokens(path)?, &self.cache)
     }
 }
 
@@ -306,9 +378,13 @@ fn tokens(original: &str) -> Option<Vec<Token<'_>>> {
 /// or `[n]` (`a.b`, `items[0]`), so every split of the path into names is
 /// tried; a path more than one split resolves is ambiguous and locates
 /// nothing, rather than whichever split came first.
-fn resolve<'n>(node: &'n Node, tokens: &[Token<'_>]) -> Option<(&'n Node, Option<&'n Key>)> {
+fn resolve<'n>(
+    node: &'n Node,
+    tokens: &[Token<'_>],
+    cache: &Cache,
+) -> Option<(&'n Node, Option<&'n Key>)> {
     let mut found: Vec<(&'n Node, Option<&'n Key>)> = Vec::new();
-    walk(node, tokens, None, &mut found);
+    walk(node, tokens, None, cache, &mut found);
     match found.as_slice() {
         [only] => Some(*only),
         _ => None,
@@ -319,6 +395,7 @@ fn walk<'n>(
     node: &'n Node,
     tokens: &[Token<'_>],
     key: Option<&'n Key>,
+    cache: &Cache,
     found: &mut Vec<(&'n Node, Option<&'n Key>)>,
 ) {
     match (tokens.first(), &node.kind) {
@@ -331,10 +408,11 @@ fn walk<'n>(
                 .ok()
                 .and_then(|index| items.get(index))
             {
-                walk(item, &tokens[1..], None, found);
+                walk(item, &tokens[1..], None, cache, found);
             }
         }
         (Some(Token::Key(first)), Kind::Map(members)) => {
+            let index = (members.len() > INDEXED).then(|| cache.members(node, members));
             let mut name = String::from(*first);
             for taken in 1..=tokens.len() {
                 if taken > 1 {
@@ -350,8 +428,20 @@ fn walk<'n>(
                         }
                     }
                 }
-                for (member, child) in members.iter().filter(|(member, _)| member.name == name) {
-                    walk(child, &tokens[taken..], Some(member), found);
+                let named: Vec<&(Key, Node)> = match &index {
+                    Some(index) => index
+                        .get(&name)
+                        .into_iter()
+                        .flatten()
+                        .map(|&at| &members[at])
+                        .collect(),
+                    None => members
+                        .iter()
+                        .filter(|(member, _)| member.name == name)
+                        .collect(),
+                };
+                for (member, child) in named {
+                    walk(child, &tokens[taken..], Some(member), cache, found);
                 }
             }
         }
@@ -605,6 +695,41 @@ mod tests {
             let expected = raw[line_start..offset].chars().count() + 1;
             assert_eq!(position.column, expected, "at {offset}");
         }
+    }
+
+    /// Many findings in one long string decode it once; many findings in
+    /// one wide object look its members up by name.
+    #[test]
+    #[cfg(feature = "source-map")]
+    fn repeated_lookups_reuse_what_they_worked_out() {
+        let value = "{$statusCode.extra} ".repeat(5_000);
+        let members = (0..10_000)
+            .map(|index| {
+                format!(
+                    "\"m{index}\": \"{value_of}\"",
+                    value_of = if index == 0 { value.as_str() } else { "x" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let map = SourceMap::parse(format!("{{{members}}}")).unwrap();
+        let started = std::time::Instant::now();
+        for offset in (0..value.len()).step_by(20) {
+            assert!(map.locate_in("#.m0", offset).is_some());
+        }
+        for index in 0..10_000 {
+            assert!(map.locate(&format!("#.m{index}")).is_some());
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        // A clone starts afresh and finds the same.
+        let clone = map.clone();
+        assert_eq!(clone.locate_in("#.m0", 20), map.locate_in("#.m0", 20));
+        assert_eq!(clone.locate("#.m9999"), map.locate("#.m9999"));
+        assert_eq!(map.locate("#.missing"), None);
     }
 
     /// Locating every member of a minified document is linear, not a
