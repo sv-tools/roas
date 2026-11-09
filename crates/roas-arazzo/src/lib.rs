@@ -19,6 +19,8 @@
 //! - [`source_map`] — where a path is written in the JSON or YAML text a
 //!   description was read from (`SourceMap::parse` behind the
 //!   `source-map` feature).
+//! - [`unknown`] — the members a description's model dropped: neither
+//!   fields nor `x-` extensions (`Description::unknown_members`).
 //!
 //! ## Parsing and validating
 //!
@@ -77,6 +79,7 @@
 
 pub mod common;
 pub mod source_map;
+pub mod unknown;
 
 #[cfg(test)]
 mod test_yaml;

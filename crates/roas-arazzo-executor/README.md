@@ -422,7 +422,13 @@ and YAML folding); its display then reads `… at line 12, column 31: …` inste
 `… at byte 9`. A finding inside an external Arazzo document uses the map given for
 that document's identity with `Options::document_source_map(identity, map)`, where
 `identity` is what the finding's `document` names. Without a map, or for a value the map cannot decode exactly, nothing
-is guessed: `position` stays `None` and the byte offset is shown. Only checked
+is guessed: `position` stays `None` and the byte offset is shown. 
+Give `Options::unknown_members` what `roas_arazzo`'s `Description::unknown_members`
+listed for the description, and each member is a `PreparationIssue::UnknownMember`
+error located at its name: the specification allows only its fields and `x-`
+extensions, and a member the model dropped, such as a misspelt `successCriteria`,
+would otherwise be silently ignored by the run. External Arazzo documents in the
+`SourceRegistry` are checked the same way without being asked. Only checked
 preparation locates findings; errors of the lazy `execute` / `Run::start` path carry
 no field paths.
 

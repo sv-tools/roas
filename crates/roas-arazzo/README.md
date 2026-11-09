@@ -66,6 +66,21 @@ YAML descriptions work the same way — parse with `serde-saphyr` (or any other 
 
 `ValidationOptions` (EnumSet): `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion`. Behind the `clap` feature, the enum implements `clap::ValueEnum` so downstream CLIs can surface it directly.
 
+## Unknown members
+
+An Arazzo object holds the fields its specification defines and `x-` extensions; deserializing drops anything else without a word, so a misspelt `sucessCriteria` simply vanishes. `Description::unknown_members(&raw)` lists what was dropped from the value the description was deserialized from, each with a model-style `path` (`#.workflows[0].steps[1].sucessCriteria`) that a `SourceMap` locates with `locate_key`. A member whose value is `null`, `[]` or `{}` is not listed: a known optional field left empty is dropped the same way, so the two cannot be told apart. List a v1.0 description's members before upconverting it; `UnknownMembers::version` keeps the version it declared.
+
+```rust
+let raw = serde_json::json!({
+    "arazzo": "1.1.0",
+    "info": { "title": "T", "version": "1", "summery": "typo" },
+    "sourceDescriptions": [], "workflows": []
+});
+let description: roas_arazzo::v1_1::Description = serde_json::from_value(raw.clone()).unwrap();
+let unknown = description.unknown_members(&raw).unwrap();
+assert_eq!(unknown.members[0].path, "#.info.summery");
+```
+
 ## Source locations
 
 Behind the `source-map` feature, `source_map::SourceMap::parse(text)` reads the JSON or YAML text a description came from and answers where a diagnostic's `path` is written: `locate(path)` for the value, `locate_key(path)` for the member name, and `locate_in(path, offset)` for a byte offset inside a string value, mapped back through quotes, escapes (`\u00e9`, surrogate pairs), YAML line folding and block-scalar indentation. Positions are UTF-8 byte offsets with one-based lines and columns counted in characters; an editor speaking UTF-16 converts at its own boundary. Member names may contain dots or `[n]`; a path two members could spell (`a.b` beside `a` → `b`) locates nothing. When the raw scalar does not decode back to exactly the parsed value, `locate_in` returns `None` rather than guess. The map is a sidecar: the typed models are unchanged and stay usable without it.

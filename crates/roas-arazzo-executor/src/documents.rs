@@ -35,6 +35,8 @@ pub(crate) struct Document<'d> {
     /// Canonical identity of an external document, for reports and
     /// diagnostics. The entry description keeps its unqualified history.
     pub(crate) identity: Option<&'d str>,
+    /// What the document's model dropped, when known.
+    pub(crate) unknown: Option<&'d roas_arazzo::unknown::UnknownMembers>,
     links: Option<&'d BTreeMap<String, usize>>,
 }
 
@@ -54,6 +56,7 @@ impl<'d> Documents<'d> {
             description,
             options,
             identity: None,
+            unknown: options.unknown_members.as_ref(),
             links: None,
         }];
         #[cfg(feature = "source-graph")]
@@ -67,6 +70,7 @@ impl<'d> Documents<'d> {
                         .expect("workflow documents are Arazzo"),
                     options: &external.options,
                     identity: Some(external.document.identity().as_str()),
+                    unknown: Some(external.document.unknown_members()),
                     links: Some(&external.links),
                 });
             }

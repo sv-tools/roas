@@ -47,6 +47,35 @@ pub struct Description {
 }
 
 impl Description {
+    /// The members of `raw` that this description did not keep: neither
+    /// fields of their object nor `x-` extensions. `raw` is the value this
+    /// description was deserialized from; see [`crate::unknown`].
+    ///
+    /// ```
+    /// use roas_arazzo::v1_1::Description;
+    ///
+    /// let raw = serde_json::json!({
+    ///     "arazzo": "1.1.0",
+    ///     "info": { "title": "T", "version": "1", "summery": "typo" },
+    ///     "sourceDescriptions": [{ "name": "api", "url": "api.json" }],
+    ///     "workflows": []
+    /// });
+    /// let description: Description = serde_json::from_value(raw.clone()).unwrap();
+    /// let unknown = description.unknown_members(&raw).unwrap();
+    /// assert_eq!(unknown.version, "1.1.0");
+    /// assert_eq!(unknown.members[0].path, "#.info.summery");
+    /// ```
+    ///
+    /// # Errors
+    /// Serializing the description failed, which a description read from a
+    /// JSON value does not do.
+    pub fn unknown_members(
+        &self,
+        raw: &serde_json::Value,
+    ) -> Result<crate::unknown::UnknownMembers, serde_json::Error> {
+        Ok(crate::unknown::diff(raw, &serde_json::to_value(self)?))
+    }
+
     fn validate_inner(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         let mut ctx = Context::new(options);
 
