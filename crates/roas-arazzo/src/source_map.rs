@@ -39,7 +39,7 @@
 //! never seen as written, so an alias of it is measured on its own.
 
 #[cfg(feature = "source-map")]
-mod parse;
+pub(crate) mod parse;
 mod scalar;
 
 use std::collections::HashMap;
@@ -62,6 +62,19 @@ impl fmt::Display for SourcePosition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "line {}, column {}", self.line, self.column)
     }
+}
+
+/// The one-based UTF-16 column of `position` in `text`: the code units
+/// between the start of its line (after a byte-order mark) and it, plus one.
+pub(crate) fn utf16_column(text: &str, position: SourcePosition) -> usize {
+    let offset = position.offset.min(text.len());
+    let mut start = text[..offset].rfind('\n').map_or(0, |at| at + 1);
+    if start == 0 && text.starts_with('\u{feff}') {
+        start = offset.min('\u{feff}'.len_utf8());
+    }
+    text.get(start..offset)
+        .map_or(0, |line| line.encode_utf16().count())
+        + 1
 }
 
 /// A span of the original text, `start` inclusive and `end` exclusive.
@@ -264,6 +277,14 @@ impl SourceMap {
             scalar::decode(&self.text, node.start, node.text_end, value)
         })?;
         table.get(offset).map(|&raw| self.position(raw))
+    }
+
+    /// The one-based column of `position` counted in UTF-16 code units,
+    /// as an LSP client counts them (zero-based there: subtract one).
+    /// `position` is one of this map's.
+    #[must_use]
+    pub fn utf16_column(&self, position: SourcePosition) -> usize {
+        utf16_column(&self.text, position)
     }
 
     /// The line and column of a byte offset, clamped to the text and to

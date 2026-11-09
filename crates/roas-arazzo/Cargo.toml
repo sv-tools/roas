@@ -32,6 +32,9 @@ v1_1 = []
 clap = ["dep:clap"]
 # `source_map::SourceMap::parse`: locate fields in the original JSON / YAML text.
 source-map = ["dep:serde-saphyr"]
+# `editor::Document`: tolerant reading of damaged text for editors, never
+# executable.
+editor = ["source-map", "dep:serde_path_to_error"]
 
 [dependencies]
 clap = { workspace = true, optional = true }
@@ -39,6 +42,7 @@ enumset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr = { workspace = true, optional = true }
+serde_path_to_error = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde-saphyr.workspace = true

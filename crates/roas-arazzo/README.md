@@ -93,6 +93,25 @@ let title = map.locate("#.info.title").unwrap();
 assert_eq!((title.start.line, title.start.column), (2, 10));
 ```
 
+## Editor mode
+
+Behind the `editor` feature, `editor::Document::read(text, options)` reads text that is being typed and is wrong most of the time. It never fails: it returns an `Outline` of what the text still says — sources, workflows and their steps, components, each with its range — and every `Diagnostic` it finds, with a severity, a model-style path and a range in the text.
+
+- Text that is not JSON or YAML gets a located syntax error, and the text above the error is read again, up to 16 lines back, so a YAML description usually keeps the outline of everything before it. The outline is then marked incomplete (`is_complete()`), and nothing further is checked.
+- Text that reads in full is checked part by part — `arazzo`, `$self`, `info`, each source description, each workflow, `components` — so one broken workflow does not hide another. When every part fits the model, the description is validated and its unknown members are listed as warnings.
+- `utf16_column(position)` gives the column an LSP client counts.
+
+Nothing a `Document` returns can be run: it never hands out a typed `Description`, and its outline is plain strings and ranges. To execute a description, deserialize it the strict way.
+
+```rust
+# #[cfg(feature = "v1_1")] {
+use roas_arazzo::editor::Document;
+
+let document = Document::read("arazzo: 1.1.0\ninfo: {title: [T]}\n", Default::default());
+assert_eq!(document.diagnostics()[0].path.as_deref(), Some("#.info.title"));
+# }
+```
+
 Runtime-expression grammar, `sourceDescriptions` / `$ref` resolution, and deep JSON Schema semantics for `inputs` are out of scope for this release.
 
 ## License

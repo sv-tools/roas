@@ -21,6 +21,8 @@
 //!   `source-map` feature).
 //! - [`unknown`] — the members a description's model dropped: neither
 //!   fields nor `x-` extensions (`Description::unknown_members`).
+//! - `editor` (feature `editor`) — tolerant reading of damaged text for
+//!   editors: an outline and located diagnostics, never anything runnable.
 //!
 //! ## Parsing and validating
 //!
@@ -78,6 +80,8 @@
 #![cfg_attr(not(any(feature = "v1_0", feature = "v1_1")), allow(dead_code))]
 
 pub mod common;
+#[cfg(feature = "editor")]
+pub mod editor;
 pub mod source_map;
 pub mod unknown;
 

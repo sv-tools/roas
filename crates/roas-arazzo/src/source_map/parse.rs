@@ -29,21 +29,25 @@ impl SourceMap {
     /// ```
     pub fn parse(text: impl Into<String>) -> Result<Self, SourceMapError> {
         let text = text.into();
-        let root: Spanned<Raw> =
-            serde_saphyr::from_str_with_options(&text, options()).map_err(|error| {
-                SourceMapError {
-                    message: error.to_string(),
-                }
+        let root: Spanned<Raw> = serde_saphyr::from_str_with_options(&text, options(MAX_DEPTH))
+            .map_err(|error| SourceMapError {
+                message: error.to_string(),
             })?;
         let (root, _) = node(&text, root, false, &mut Memo::default());
         Ok(Self::new(text, root))
     }
 }
 
+/// The value of JSON or YAML `text`, read as every roas crate reads it.
+#[cfg(feature = "editor")]
+pub(crate) fn value(text: &str) -> Result<serde_json::Value, serde_saphyr::Error> {
+    serde_saphyr::from_str_with_options(text, options(64))
+}
+
 /// Nesting past this many levels is refused rather than mapped.
 const MAX_DEPTH: usize = 32;
 
-fn options() -> serde_saphyr::Options {
+fn options(max_depth: usize) -> serde_saphyr::Options {
     serde_saphyr::options! {
         // Same options in every roas crate; keep the copies in step
         // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
@@ -57,11 +61,11 @@ fn options() -> serde_saphyr::Options {
         // how large one anchored node can be. `!!binary` is
         // read as its text, as before, not decoded.
         budget: serde_saphyr::budget! {
-            // Not the 64 of the other copies: this visitor nests
-            // `Spanned` values, and a debug build overflows a 2 MiB
-            // thread stack between 40 and 50 levels. Deeper text gets no
-            // map (`SourceMapError`), never an abort.
-            max_depth: MAX_DEPTH,
+            // `MAX_DEPTH` for a map, not the 64 of the other copies: this
+            // visitor nests `Spanned` values, and a debug build overflows a
+            // 2 MiB thread stack between 40 and 50 levels. Deeper text gets
+            // no map (`SourceMapError`), never an abort.
+            max_depth: max_depth,
             max_nodes: 10_000_000,
             max_events: 25_000_000,
             max_aliases: 1_000_000,
