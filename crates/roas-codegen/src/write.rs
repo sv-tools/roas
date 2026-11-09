@@ -10,7 +10,8 @@
 //! - **Nothing is taken that is not owned.** A path another target's
 //!   manifest owns is refused, compared case-insensitively since the disk
 //!   may be. So is an existing file no manifest owns, unless the caller
-//!   allows overwriting it. One run at a time: an operating-system lock on
+//!   allows overwriting it or it already holds exactly the generated
+//!   content, in which case it is adopted under the planned spelling. One run at a time: an operating-system lock on
 //!   a file in the output directory spans the whole run, so two targets
 //!   cannot both pass the ownership checks and then race, and it ends with
 //!   the process, so a killed run does not block the next.
@@ -50,7 +51,8 @@ pub struct WriteOptions {
     /// generated files need different names.
     pub label: String,
     /// Overwrite an existing file that no manifest owns. Off by default:
-    /// such a file is probably hand-written.
+    /// such a file is probably hand-written. One that already holds exactly
+    /// the generated content is adopted either way, since nothing is lost.
     pub overwrite_unowned: bool,
     /// Write a generation that carries `Error` diagnostics. Off by
     /// default: such a generation is missing the types the errors
@@ -134,6 +136,10 @@ impl CheckReport {
 }
 
 /// Why the output directory could not be written or checked.
+///
+/// Paths of generated files (`Unowned`, `OwnedByOther`, `ReservedPath`,
+/// `IsADirectory`, and `Symlink`/`NotADirectory` below the output
+/// directory) are relative to it; the rest name the path as opened.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum WriteError {

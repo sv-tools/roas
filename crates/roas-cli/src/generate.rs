@@ -242,10 +242,15 @@ fn show(paths: &[PathBuf]) -> String {
 }
 
 /// The writer's errors name library options; say which flag sets them.
-fn hint(error: roas_codegen::WriteError) -> anyhow::Error {
+fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
+    use roas_codegen::WriteError as E;
     match &error {
-        roas_codegen::WriteError::Unowned(_) => anyhow!("{error} (pass --force)"),
-        roas_codegen::WriteError::SourceMismatch {
+        E::Unowned(_) => anyhow!("{}: {error} (pass --force)", out.display()),
+        // Their paths are relative to the output directory.
+        E::OwnedByOther { .. } | E::ReservedPath(_) | E::IsADirectory(_) => {
+            anyhow!("{}: {error}", out.display())
+        }
+        E::SourceMismatch {
             label,
             previous,
             current,
@@ -379,7 +384,8 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         check_options.source_id = source_id(&source, &args.out);
         check_options.replace_source = args.replace_source;
         check_options.overwrite_unowned = args.force;
-        let report = check(&generation, &args.out, &check_options).map_err(hint)?;
+        let report =
+            check(&generation, &args.out, &check_options).map_err(|e| hint(&args.out, e))?;
         if report.is_clean() {
             eprintln!("{}: up to date", args.out.display());
             return if failing > 0 {
@@ -415,7 +421,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     write_options.replace_source = args.replace_source;
     write_options.allow_partial = args.allow_partial;
     write_options.source_id = source_id(&source, &args.out);
-    let report = write(&generation, &args.out, &write_options).map_err(hint)?;
+    let report = write(&generation, &args.out, &write_options).map_err(|e| hint(&args.out, e))?;
     for path in &report.kept_edited {
         eprintln!(
             "warning: {} is no longer generated but was edited, so it was kept and is no longer tracked",
