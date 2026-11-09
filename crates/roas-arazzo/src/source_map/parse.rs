@@ -278,18 +278,39 @@ fn colon(text: &str, end: usize) -> usize {
 
 /// A flow collection's span covers only its opening `[` / `{`, and its
 /// members end before the closing one — or, merged in by `<<` (measured
-/// where their alias or map is), well before it. Scan from the opening
-/// delimiter to its match, stepping over quoted scalars and comments; a
-/// plain scalar holds no flow indicator, so every other bracket counts.
-/// Nested collections rescan their own text: at most [`MAX_DEPTH`] times.
+/// where their alias or map is), well before it.
 fn closing(text: &str, start: usize, end: usize) -> usize {
+    let bytes = text.as_bytes();
+    // Usually only separators, white space and comments are left between
+    // the last member and the delimiter: step over them.
+    let close = if bytes[start] == b'[' { b']' } else { b'}' };
+    let mut at = end.max(start + 1);
+    while let Some(&byte) = bytes.get(at) {
+        match byte {
+            b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'?' => at += 1,
+            b'#' => at += text[at..].find(['\n', '\r']).unwrap_or(text.len() - at),
+            byte if byte == close => return at + 1,
+            _ => break,
+        }
+    }
+    // Something else is in the way (a `<<` merge, whose members are
+    // measured where they are defined): scan the whole collection.
+    scan(text, start, end)
+}
+
+/// The end of the flow collection opening at `start`: scan from it to
+/// its match, stepping over quoted scalars and comments; a plain scalar
+/// holds no flow indicator, so every other bracket counts. Only merges
+/// get here, and nested ones rescan their own text: at most
+/// [`MAX_DEPTH`] times.
+fn scan(text: &str, start: usize, end: usize) -> usize {
     let bytes = text.as_bytes();
     let mut depth = 0usize;
     let mut at = start;
     // A quote opens a scalar only where a token starts: after a flow
     // indicator, the `: ` of a value, or the `:` of a JSON-like key
-    // (`"a":"b"`). White space keeps the state, so `b 'c` is one plain
-    // scalar; a comment needs white space before it.
+    // (`"a":"b"`), past any anchor or tag. White space keeps the state,
+    // so `b 'c` is one plain scalar; a comment needs white space before it.
     let mut token = true;
     let mut space = false;
     let mut quoted = false;
@@ -310,7 +331,15 @@ fn closing(text: &str, start: usize, end: usize) -> usize {
                 quoted = true;
             }
             b',' => token = true,
-            b' ' | b'\t' | b'\n' | b'\r' => space = true,
+            // `"a" : "b"` is still a JSON-like key's `:`.
+            b' ' | b'\t' | b'\n' | b'\r' => (space, quoted) = (true, was_quoted),
+            // An anchor or tag before a node keeps its place a token start.
+            b'&' | b'!' if token => {
+                at += text[at..]
+                    .find([' ', '\t', '\n', '\r', ',', '[', ']', '{', '}'])
+                    .unwrap_or(text.len() - at);
+                continue;
+            }
             b':' | b'?' => {
                 let next = bytes.get(at + 1).copied();
                 token = was_quoted
@@ -852,6 +881,28 @@ workflows:
             ("obj: {a: b 'c, d: e'}\n", "#.obj", (5, 21)),
             ("obj: {\"a\":'}'}\n", "#.obj", (5, 14)),
             ("obj: [a, # ] }\n  b]\n", "#.obj", (5, 19)),
+            ("obj: {\"a\" :\"}\"}\n", "#.obj", (5, 15)),
+            ("obj: {\"a\"\n  :\n  \"}\"}\n", "#.obj", (5, 20)),
+            ("a: [&s \"]\", x]\n", "#.a", (3, 14)),
+            ("a: [!!str ']', &t !!str \"[\", *t]\n", "#.a", (3, 32)),
+            ("a: [x&y, '!]']\n", "#.a", (3, 14)),
+            // Behind a trailing merge the whole collection is scanned.
+            ("obj: {a: \"<<: [x\", b: 1, <<: {m: 1}}\n", "#.obj", (5, 36)),
+            (
+                "obj: {a: '}'']', b: \"\\\"]\", <<: {m: '}'}}\n",
+                "#.obj",
+                (5, 40),
+            ),
+            ("obj: {a: b 'c, d: e', <<: {m: 1}}\n", "#.obj", (5, 33)),
+            ("obj: {\"a\" :'}', <<: {\"m\" : \"]\"}}\n", "#.obj", (5, 32)),
+            ("obj: {a: [x, # ] }\n  y], <<: {m: 1}}\n", "#.obj", (5, 36)),
+            (
+                "obj: {a: &s \"]\", <<: {m: !!str \"}\"}}\n",
+                "#.obj",
+                (5, 36),
+            ),
+            ("obj: {a: x&y, b: '!}', <<: [{m: 1}]}\n", "#.obj", (5, 36)),
+            ("obj: {a: x?y, b: x:y, <<: {m: 1}} # }\n", "#.obj", (5, 33)),
             // A one-pair map whose key is a flow sequence.
             ("k: [[a]: 1]\n", "#.k[0]", (4, 10)),
             ("k: [[a]: [b]]\n", "#.k[0]", (4, 12)),
