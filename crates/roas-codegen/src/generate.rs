@@ -3,10 +3,11 @@
 use crate::config::{Config, Layout, Target};
 use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 use crate::front::Translator;
+use crate::go::GoDependency;
 use crate::rust::RustDependency;
 use crate::source::{Fidelity, SourceVersion};
 use crate::validate::ValidatedSourceDocument;
-use crate::{lower, rust};
+use crate::{go, lower, rust};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -35,6 +36,8 @@ impl GeneratedFile {
 #[non_exhaustive]
 pub struct Dependencies {
     pub rust: Vec<RustDependency>,
+    /// Modules a Go file imports from beyond the standard library.
+    pub go: Vec<GoDependency>,
 }
 
 /// The result of a generation: files in memory, everything the
@@ -105,6 +108,10 @@ pub enum GenerateError {
     InvalidOutput { path: String, reason: String },
     #[error("not supported yet: {0}")]
     Unsupported(String),
+    /// A tool the target needs is missing or failed: generating Go needs
+    /// `gofmt`, which is also its syntax check.
+    #[error("toolchain: {0}")]
+    Toolchain(String),
 }
 
 /// The first segment of every relative path in a Rust type, such as
@@ -185,43 +192,10 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Generate from a validated document.
-pub fn generate(
-    document: &ValidatedSourceDocument,
-    config: &Config,
-) -> Result<Generation, GenerateError> {
-    if config.exact_numbers {
-        if !cfg!(feature = "exact-numbers") {
-            return Err(GenerateError::Config(
-                "`exact_numbers` requires roas-codegen built with the `exact-numbers` feature"
-                    .into(),
-            ));
-        }
-        if document.fidelity() != Fidelity::Exact {
-            return Err(GenerateError::Fidelity(format!(
-                "{} was read with {:?} fidelity; only JSON text yields exact numbers",
-                document.uri(),
-                document.fidelity()
-            )));
-        }
-        return Err(GenerateError::Unsupported(
-            "`exact_numbers` decimal wrappers".into(),
-        ));
-    }
-    // Settings the configuration accepts but this release cannot honour
-    // are refused, never silently ignored.
-    if config.validation {
-        return Err(GenerateError::Unsupported(
-            "`validation = true` (generated validation)".into(),
-        ));
-    }
-    if config.template_dir.is_some() {
-        return Err(GenerateError::Unsupported(
-            "`template_dir` (user template overrides)".into(),
-        ));
-    }
-    // `Config`'s fields are public, so what `ConfigFile::build` checked may
-    // have been changed since; the module names the file written.
+/// What `ConfigFile::build` checked may have been changed since, as
+/// `Config`'s fields are public; and some checks need the whole of it.
+fn check_rust(config: &Config) -> Result<(), GenerateError> {
+    // The module names the file written.
     if !crate::config::is_module_name(&config.rust.module) {
         return Err(GenerateError::Config(format!(
             "`rust.module = {:?}` must be a lowercase Rust module name",
@@ -257,6 +231,69 @@ pub fn generate(
             "`rust.edition = {:?}` is not a Rust edition",
             config.rust.edition
         )));
+    }
+    Ok(())
+}
+
+fn check_go(config: &Config) -> Result<(), GenerateError> {
+    if !go::naming::is_package_name(&config.go.package) {
+        return Err(GenerateError::Config(format!(
+            "`go.package = {:?}` must be a lowercase Go package name",
+            config.go.package
+        )));
+    }
+    if !go::naming::is_file_stem(&config.go.file) {
+        return Err(GenerateError::Config(format!(
+            "`go.file = {:?}` must be a lowercase file stem `go build` reads as plain source",
+            config.go.file
+        )));
+    }
+    if config.go.module_path.is_some() {
+        return Err(GenerateError::Unsupported(
+            "`go.module_path` (generating a module)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Generate from a validated document.
+pub fn generate(
+    document: &ValidatedSourceDocument,
+    config: &Config,
+) -> Result<Generation, GenerateError> {
+    if config.exact_numbers {
+        if !cfg!(feature = "exact-numbers") {
+            return Err(GenerateError::Config(
+                "`exact_numbers` requires roas-codegen built with the `exact-numbers` feature"
+                    .into(),
+            ));
+        }
+        if document.fidelity() != Fidelity::Exact {
+            return Err(GenerateError::Fidelity(format!(
+                "{} was read with {:?} fidelity; only JSON text yields exact numbers",
+                document.uri(),
+                document.fidelity()
+            )));
+        }
+        return Err(GenerateError::Unsupported(
+            "`exact_numbers` decimal wrappers".into(),
+        ));
+    }
+    // Settings the configuration accepts but this release cannot honour
+    // are refused, never silently ignored.
+    if config.validation {
+        return Err(GenerateError::Unsupported(
+            "`validation = true` (generated validation)".into(),
+        ));
+    }
+    if config.template_dir.is_some() {
+        return Err(GenerateError::Unsupported(
+            "`template_dir` (user template overrides)".into(),
+        ));
+    }
+    match config.target {
+        Target::Rust => check_rust(config)?,
+        Target::Go => check_go(config)?,
     }
     if config.layout != Layout::OneFilePerModule {
         return Err(GenerateError::Unsupported(
@@ -333,12 +370,28 @@ pub fn generate(
     }
     diagnostics.append(&mut ir.diagnostics);
 
-    let output = match config.target {
-        Target::Rust => rust::emit(&ir, config, &source_name(document.uri()))?,
-        Target::Go => return Err(GenerateError::Unsupported("the Go backend".into())),
+    let source = source_name(document.uri());
+    let (files, dependencies, unformatted) = match config.target {
+        Target::Rust => {
+            let output = rust::emit(&ir, config, &source)?;
+            diagnostics.extend(output.diagnostics);
+            let dependencies = Dependencies {
+                rust: output.dependencies,
+                go: Vec::new(),
+            };
+            (output.files, dependencies, output.unformatted)
+        }
+        Target::Go => {
+            let output = go::emit(&ir, config, &source)?;
+            diagnostics.extend(output.diagnostics);
+            let dependencies = Dependencies {
+                rust: Vec::new(),
+                go: output.dependencies,
+            };
+            (output.files, dependencies, None)
+        }
     };
-    diagnostics.extend(output.diagnostics);
-    if let Some(reason) = output.unformatted {
+    if let Some(reason) = unformatted {
         diagnostics.push(Diagnostic {
             severity: Severity::Warning,
             kind: DiagnosticKind::Unformatted,
@@ -358,11 +411,9 @@ pub fn generate(
     diagnostics.dedup();
     Ok(Generation {
         target: config.target,
-        files: output.files,
+        files,
         diagnostics,
-        dependencies: Dependencies {
-            rust: output.dependencies,
-        },
+        dependencies,
     })
 }
 

@@ -106,6 +106,9 @@ pub enum DiagnosticKind {
     /// could not be set up; the message says why — so it is unformatted and
     /// will not match a formatted run byte for byte.
     Unformatted,
+    /// A property name the target language's encoding cannot carry,
+    /// such as one a Go struct tag reserves characters of.
+    UnrepresentableName { name: String },
 }
 
 /// One thing the generator has to say about the description.

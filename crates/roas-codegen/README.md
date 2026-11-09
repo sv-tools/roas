@@ -5,7 +5,7 @@ Generates Rust and Go types from OpenAPI descriptions — every version from 2.0
 [![crates.io](https://img.shields.io/crates/v/roas-codegen.svg)](https://crates.io/crates/roas-codegen)
 [![docs.rs](https://docs.rs/roas-codegen/badge.svg)](https://docs.rs/roas-codegen)
 
-A description goes in, is version-detected, parsed, normalized to OpenAPI 3.2 and validated; every schema is lowered to a language-neutral representation where the hard decisions are already made; and a backend renders it. Rust is generated today, Go is next.
+A description goes in, is version-detected, parsed, normalized to OpenAPI 3.2 and validated; every schema is lowered to a language-neutral representation where the hard decisions are already made; and a backend renders it, in Rust or in Go.
 
 ## Quick start
 
@@ -33,7 +33,7 @@ for diagnostic in &generation.diagnostics {
 # Ok(()) }
 ```
 
-`generate` returns files in memory, writing no output files, together with every diagnostic and the dependency list the generated code needs — `serde` and `serde_json` with `raw_value`, plus whatever a type substitution imports. Nothing generated depends on `roas`.
+`generate` returns files in memory, writing no output files, together with every diagnostic and the dependency list the generated code needs — for Rust, `serde` and `serde_json` with `raw_value`, plus whatever a type substitution imports; for Go, only the modules a substitution imports, since the output uses the standard library. Nothing generated depends on `roas`.
 
 ## What the Rust output looks like
 
@@ -79,9 +79,40 @@ The decisions behind that, each one the generated code enforces rather than mere
 
 Names are suggested by the schema — a component name, a `title`, or the position such as `Pet` plus `status` — and made final by the backend after casing, keyword handling (`type` becomes `r#type`) and collision suffixes, so output is byte-for-byte deterministic.
 
+## What the Go output looks like
+
+The same schema, with the same decisions:
+
+```go
+type Pet struct {
+	// `minLength`: 1.
+	Name   string           `json:"name"`
+	Status *PetStatus       `json:"status,omitzero"`
+	Tag    Nullable[string] `json:"tag,omitzero"`
+}
+
+type PetStatus string
+
+const (
+	PetStatusAvailable PetStatus = "available"
+	PetStatusSold      PetStatus = "sold"
+)
+```
+
+The output uses `encoding/json/v2` from the standard library, so it needs Go 1.27 or later and nothing else. Struct tags cannot say what the schema says, so every generated type has its own `UnmarshalJSONFrom`:
+
+- **Presence and null are checked.** Go leaves a missing member at its zero value and stores a zero value for a JSON `null`. A struct's decoder refuses a missing required member and a `null` in a member that is not nullable, and a `null` anywhere else a schema forbids it — a list item, say — is refused too. `Nullable[T]` keeps the three states of an optional, nullable member: `omitzero` leaves out only the absent one.
+- **Unknown members.** `additionalProperties: false` is refused at decode, as in Rust; otherwise the extra members land in an `AdditionalProperties` map embedded with `json:",embed"` and are written back out.
+- **Enums check membership.** A named string type accepts any string, so its decoder accepts only the listed values.
+- **Integers read the token** into `Int64` / `Int32`, exactly as in Rust.
+- **The decoders own their options.** Each generated type decodes its members with its own null rules, so unmarshalers a caller passes with `json.WithUnmarshalers` do not reach inside generated types; a substituted type decodes by its own rules alone, as in Rust.
+- **Unions.** A tagged union is a struct holding one variant, with `As<Variant>` accessors, `<Union>From<Variant>` constructors, `Tag()` and `Value()`; it reads the tag first and then decodes the whole value as that variant. Open unions and compositions keep the raw JSON with an accessor and a constructor per branch.
+
+Go identifiers are exported and ASCII. A property name a struct tag cannot carry — one holding `,`, `\`, `'`, `"` or a backtick, or the empty name — is an `Error` that suppresses its type and whatever holds it. Generating Go needs `gofmt`, which formats the output and is its only syntax check, so without it `generate` fails with `GenerateError::Toolchain` rather than returning unchecked code.
+
 ## Configuration
 
-The Rust output is one module, `<rust.module>.rs`, `types.rs` by default; targets sharing a directory need different module names.
+The Rust output is one module, `<rust.module>.rs`, `types.rs` by default; the Go output is one file, `<go.file>.go`, also `types.go` by default, in package `go.package`, `api` by default. Targets sharing a directory need different names.
 
 `ConfigFile` is what a TOML file may say: everything optional, unknown keys rejected, relative paths resolved against the file's own directory. `Config` is what generation consumes, and `ConfigFile::build` is the one place a missing `target` is refused.
 
@@ -103,9 +134,10 @@ attrs = ['#[derive(Hash)]']
 
 [types.Pet.fields.tag]
 attrs = ['#[validate(length(min = 1))]']
+go_tags = { db = "tag" }
 ```
 
-Types and fields are addressed by the names in the description, never by the generated identifiers. User attributes are parsed as Rust, and the serde keys that carry the wire contract — `default`, `skip_serializing_if`, `deserialize_with`, `rename`, `flatten` and the container-level equivalents — are refused by name rather than silently doubled. `x-rust-attrs` in a description is code from whoever wrote the description, so it is applied only under `allow_codegen_extensions = true`.
+Types and fields are addressed by the names in the description, never by the generated identifiers. User attributes are parsed as Rust, and the serde keys that carry the wire contract — `default`, `skip_serializing_if`, `deserialize_with`, `rename`, `flatten` and the container-level equivalents — are refused by name rather than silently doubled. `x-rust-attrs` in a description is code from whoever wrote the description, so it is applied only under `allow_codegen_extensions = true`. For Go, each `extra_imports` entry is an import spec placed inside the generated `import ( ... )`, and `go_tags` adds keys to a field's struct tag; `json` is the generator's and is refused, and a Go rename must be an exported identifier.
 
 Generated Rust is validated with `syn` before it is returned and formatted with `rustfmt` when one is on the path. `rustfmt` always runs with an empty configuration, so a `rustfmt.toml` nearby never changes the output; when it cannot run, the output is unformatted and a warning says so.
 
@@ -117,7 +149,7 @@ The URI is required. Every schema identity is the document URI plus a JSON Point
 
 ## Writing files
 
-`generate` writes no output files (it only uses a temporary directory to run `rustfmt`). `write` puts a `Generation` into a directory under a manifest — `.roas-codegen-<label>-<language>.json` — that records each file it owns with a content hash, and `check` compares the directory with a generation without writing anything.
+`generate` writes no output files (it only uses a temporary directory to run `rustfmt`; `gofmt` reads and writes pipes). `write` puts a `Generation` into a directory under a manifest — `.roas-codegen-<label>-<language>.json` — that records each file it owns with a content hash, and `check` compares the directory with a generation without writing anything.
 
 ```rust
 use roas_codegen::{Generation, WriteOptions, check, write};
@@ -131,7 +163,7 @@ fn save(generation: &Generation) -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-- **Only owned files change.** A path another target's manifest owns is refused, and so is an existing file no manifest owns unless `overwrite_unowned` is set or it already holds exactly the generated content, in which case it is adopted. Two targets with different labels can share a directory.
+- **Only owned files change.** A path another target's manifest owns is refused, and so is an existing file no manifest owns unless `overwrite_unowned` is set or it already holds exactly the generated content, in which case it is adopted. Two targets with different labels can share a directory, except two Go targets: Go files in one directory are one package, where both would declare the same helpers, so a second Go manifest there is refused.
 - **Ownership is claimed before anything is written.** Every check runs first, including that no path goes through a symbolic link. A pending manifest owning the previous and the new files is written, each file is written to a temporary sibling and renamed into place, and the final manifest replaces the pending one, so an interrupted run is completed by the next one.
 - **Errors stop the write.** A generation carrying `Error` diagnostics is refused unless `allow_partial` is set, and even then files the previous run wrote are kept rather than removed.
 - **Labels belong to one description.** When `WriteOptions::source_id` is set, the manifest records it and a different source under the same label is refused. The `roas` command line sets it to the description's path relative to the output directory without a `.json`/`.yaml`/`.yml` extension, so two `openapi.yaml` files from different folders cannot overwrite each other, while converting a description from JSON to YAML keeps its label.

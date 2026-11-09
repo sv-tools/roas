@@ -6,8 +6,8 @@
 //! already made, and render. [`SourceDocument::parse`] and [`validate`]
 //! turn bytes into a [`ValidatedSourceDocument`]; [`generate`] turns that
 //! and a [`Config`] into a [`Generation`]: files in memory, every
-//! diagnostic, and the dependency list the generated code needs. The
-//! Rust backend is here; Go is next.
+//! diagnostic, and the dependency list the generated code needs, in Rust
+//! or in Go.
 //!
 //! ```no_run
 //! use roas_codegen::{
@@ -36,6 +36,7 @@ mod config;
 mod diagnostic;
 mod front;
 mod generate;
+mod go;
 mod ir;
 mod lower;
 mod report;
@@ -51,6 +52,8 @@ pub use config::{
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 pub use generate::{Dependencies, GenerateError, GeneratedFile, Generation, generate};
+pub use go::GoDependency;
+pub use go::naming::go_file_name;
 pub use rust::RustDependency;
 pub use source::{Fidelity, Input, SourceDocument, SourceError, SourceVersion};
 pub use validate::{SourceValidationError, ValidatedSourceDocument, generation_options, validate};

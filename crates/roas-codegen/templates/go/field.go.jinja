@@ -1,0 +1,3 @@
+{% block doc %}{% for line in f.doc %}	//{% if line %} {{ line }}{% endif %}
+{% endfor %}{% endblock %}{% block decl %}	{{ f.name }} {{ f.ty }} {{ f.tag }}
+{% endblock %}

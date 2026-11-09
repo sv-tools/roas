@@ -10,7 +10,7 @@
 //!   OpenAPI specs: `openapi validate` parses + validates one, `openapi
 //!   convert --to <VERSION>` upconverts one (merging, applying
 //!   overlays and collapsing on the way if asked), `openapi generate`
-//!   writes Rust types for its schemas, and `openapi preview` renders
+//!   writes Rust or Go types for its schemas, and `openapi preview` renders
 //!   one in a browser. The `openapi` module documents
 //!   each in full.
 //!

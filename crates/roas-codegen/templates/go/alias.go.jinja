@@ -1,0 +1,12 @@
+{% block doc %}{% for line in t.doc %}//{% if line %} {{ line }}{% endif %}
+{% endfor %}{% endblock %}{% if t.kind == "alias" %}type {{ t.name }} = {{ t.inner }}
+{% else %}type {{ t.name }} {{ t.inner }}
+
+func (v {{ t.name }}) MarshalJSONTo(e *jsontext.Encoder) error {
+	return json.MarshalEncode(e, {{ t.inner }}(v))
+}
+
+func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	return json.UnmarshalDecode(d, (*{{ t.inner }})(v), decodeOptions)
+}
+{% endif %}{% block trailing %}{% endblock %}

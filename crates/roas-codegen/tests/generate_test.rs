@@ -354,9 +354,6 @@ fn unsupported_configuration_is_refused_up_front() {
     )
     .unwrap_err();
     assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
-    let go = target(Target::Go).build().unwrap();
-    let error = generate(&document(pet()), &go).unwrap_err();
-    assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
     let error = generate(&document(pet()), &rust_config("exact_numbers = true\n")).unwrap_err();
     assert!(
         matches!(

@@ -101,7 +101,7 @@ impl RustDependency {
 
 /// The constraints a schema declares, as documentation until generated
 /// validation lands; the type itself does not enforce them.
-fn constraint_notes(c: &Constraints) -> Vec<String> {
+pub(crate) fn constraint_notes(c: &Constraints) -> Vec<String> {
     let mut notes = Vec::new();
     let mut push = |keyword: &str, value: String| notes.push(format!("`{keyword}`: {value}."));
     if let Some(v) = c.min_length {
@@ -170,7 +170,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         externs: BTreeMap::new(),
         diagnostics: Vec::new(),
     };
-    builder.check_selectors()?;
+    select_check(ir, config)?;
     builder.allocate_type_names();
     let mut types = Vec::new();
     for id in &ir.order {
@@ -217,37 +217,37 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     })
 }
 
-impl Builder<'_> {
-    /// Every `types.<Name>` and `fields.<prop>` in the configuration
-    /// must name something in the description.
-    fn check_selectors(&self) -> Result<(), GenerateError> {
-        for (name, type_config) in &self.config.types {
-            let Some(id) = self.ir.components.get(name) else {
+/// Every `types.<Name>` and `fields.<prop>` in the configuration must
+/// name something in the description.
+pub(crate) fn select_check(ir: &Ir, config: &Config) -> Result<(), GenerateError> {
+    for (name, type_config) in &config.types {
+        let Some(id) = ir.components.get(name) else {
+            return Err(GenerateError::UnknownSelector {
+                selector: format!("types.{name}"),
+                candidates: ir.components.keys().cloned().collect(),
+            });
+        };
+        if type_config.fields.is_empty() {
+            continue;
+        }
+        let def = &ir.types[id];
+        let fields: Vec<String> = match &def.kind {
+            TypeKind::Struct(s) => s.fields.iter().map(|f| f.raw_name.clone()).collect(),
+            _ => Vec::new(),
+        };
+        for field in type_config.fields.keys() {
+            if !fields.contains(field) {
                 return Err(GenerateError::UnknownSelector {
-                    selector: format!("types.{name}"),
-                    candidates: self.ir.components.keys().cloned().collect(),
+                    selector: format!("types.{name}.fields.{field}"),
+                    candidates: fields.clone(),
                 });
-            };
-            if type_config.fields.is_empty() {
-                continue;
-            }
-            let def = &self.ir.types[id];
-            let fields: Vec<String> = match &def.kind {
-                TypeKind::Struct(s) => s.fields.iter().map(|f| f.raw_name.clone()).collect(),
-                _ => Vec::new(),
-            };
-            for field in type_config.fields.keys() {
-                if !fields.contains(field) {
-                    return Err(GenerateError::UnknownSelector {
-                        selector: format!("types.{name}.fields.{field}"),
-                        candidates: fields.clone(),
-                    });
-                }
             }
         }
-        Ok(())
     }
+    Ok(())
+}
 
+impl Builder<'_> {
     fn allocate_type_names(&mut self) {
         let mut allocator = Allocator::default();
         // Names the generated code itself uses unqualified: its own

@@ -4,8 +4,8 @@
 mod attrs;
 mod format;
 pub(crate) mod naming;
-mod render;
-mod view;
+pub(crate) mod render;
+pub(crate) mod view;
 
 pub use view::RustDependency;
 

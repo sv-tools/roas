@@ -1,0 +1,59 @@
+{% block doc %}{% for line in t.doc %}//{% if line %} {{ line }}{% endif %}
+{% endfor %}{% endblock %}type {{ t.name }} struct {
+{% block fields %}{% for f in t.fields %}{% include "builtin/go/field.go.jinja" %}{% endfor %}{% endblock %}}
+
+// UnmarshalJSONFrom decodes {{ t.name }} in one pass, refusing what its struct
+// tags cannot: a missing required member, a null where none is allowed{% if not t.extra_ty %},
+// and a member not named above{% endif %}. A nested value keeps its own
+// type's rules.
+func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	if d.PeekKind() != '{' {
+		raw, err := d.ReadValue()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%s: want a JSON object, got %s", {{ t.name_literal }}, raw)
+	}
+	if _, err := d.ReadToken(); err != nil {
+		return err
+	}
+	*v = {{ t.name }}{}
+{% if t.required_count %}	var present [{{ t.required_count }}]bool
+{% endif %}	for d.PeekKind() != '}' {
+		token, err := d.ReadToken()
+		if err != nil {
+			return err
+		}
+		switch name := token.String(); name {
+{% for f in t.fields if not f.catch_all %}		case {{ f.literal }}:
+{% if f.non_null %}			if d.PeekKind() == 'n' {
+				if _, err := d.ReadToken(); err != nil {
+					return err
+				}
+				return fmt.Errorf("%s: member %q must not be null", {{ t.name_literal }}, name)
+			}
+{% endif %}{% if f.required_index is not none %}			present[{{ f.required_index }}] = true
+{% endif %}			if err := json.UnmarshalDecode(d, &v.{{ f.name }}, decodeOptions); err != nil {
+				return err
+			}
+{% endfor %}		default:
+{% if t.extra_ty %}			var value {{ t.extra_ty }}
+			if err := json.UnmarshalDecode(d, &value, decodeOptions); err != nil {
+				return err
+			}
+			if v.{{ t.extra_name }} == nil {
+				v.{{ t.extra_name }} = map[string]{{ t.extra_ty }}{}
+			}
+			v.{{ t.extra_name }}[name] = value
+{% else %}			return fmt.Errorf("%s: unknown member %q", {{ t.name_literal }}, name)
+{% endif %}		}
+	}
+	if _, err := d.ReadToken(); err != nil {
+		return err
+	}
+{% for f in t.fields if f.required_index is not none %}	if !present[{{ f.required_index }}] {
+		return fmt.Errorf("%s: missing required member %q", {{ t.name_literal }}, {{ f.literal }})
+	}
+{% endfor %}	return nil
+}
+{% block trailing %}{% endblock %}

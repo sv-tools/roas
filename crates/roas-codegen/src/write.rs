@@ -180,6 +180,10 @@ pub enum WriteError {
     HasErrors(usize),
     #[error("manifest {path} cannot be read: {reason}")]
     Manifest { path: PathBuf, reason: String },
+    #[error(
+        "{manifest} is another Go generation target's manifest, and Go files in one directory are one package, where both would declare the same helpers; give each description its own directory, or delete that manifest and the files it lists if the target is gone"
+    )]
+    SharedGoPackage { manifest: PathBuf },
     #[error("cannot access {path}")]
     Io {
         path: PathBuf,
@@ -810,6 +814,39 @@ fn case_variants(out_dir: &Path, rel: &str) -> Vec<String> {
         found.push(rel.to_owned());
     }
     found
+}
+
+/// Go files in one directory are one package, so two Go generation targets
+/// with files in one directory would declare the same helpers and fail to
+/// compile: a directory this generation puts a `.go` file in must hold no
+/// `.go` file another Go target's manifest owns, wherever that manifest is.
+fn check_go_package(
+    out_dir: &Path,
+    manifest_file: &str,
+    planned: &BTreeMap<String, &str>,
+) -> Result<(), WriteError> {
+    fn dir_of(key: &str) -> String {
+        key.rsplit_once('/')
+            .map_or(String::new(), |(dir, _)| dir.to_ascii_lowercase())
+    }
+    let ours: BTreeSet<String> = planned
+        .keys()
+        .filter(|key| key.to_ascii_lowercase().ends_with(".go"))
+        .map(|key| dir_of(key))
+        .collect();
+    if ours.is_empty() {
+        return Ok(());
+    }
+    let suffix = format!("-{}{MANIFEST_SUFFIX}", language(Target::Go));
+    for (path, manifest) in other_owners(out_dir, manifest_file, planned.keys())? {
+        let go_manifest = manifest
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().ends_with(&suffix));
+        if go_manifest && path.ends_with(".go") && ours.contains(&dir_of(&path)) {
+            return Err(WriteError::SharedGoPackage { manifest });
+        }
+    }
+    Ok(())
 }
 
 fn is_manifest_name(name: &str) -> bool {
@@ -1886,6 +1923,7 @@ pub fn write(
             created.shared.extend(DirLock::share(&dir, create)?);
         }
     }
+    check_go_package(out_dir, &manifest_file, &planned)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -2128,6 +2166,7 @@ pub fn check(
             None => unlocked.push(dir),
         }
     }
+    check_go_package(out_dir, &manifest_file, &planned)?;
     let manifest_path = out_dir.join(&manifest_file);
     // `None` until the manifest was read and validated: a check that fails
     // before that has no snapshot to compare, and so no change to see.
@@ -3048,6 +3087,54 @@ mod tests {
         );
         let report = write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
         assert_eq!(report.manifest, PathBuf::from(".roas-codegen-api-go.json"));
+    }
+
+    #[test]
+    fn two_go_targets_never_share_a_package() {
+        let dir = TempDir::new("go-package");
+        let go =
+            |name: &str| Generation::new(Target::Go, vec![GeneratedFile::new(name, "package x")]);
+        write(&go("pets.go"), &dir.0, &WriteOptions::new("pets")).unwrap();
+        // Rust beside it is fine, and so is the same target again.
+        write(
+            &generation(&[("pets.rs", "p")]),
+            &dir.0,
+            &WriteOptions::new("pets"),
+        )
+        .unwrap();
+        write(&go("pets.go"), &dir.0, &WriteOptions::new("pets")).unwrap();
+        for result in [
+            write(&go("billing.go"), &dir.0, &WriteOptions::new("billing")).map(|_| ()),
+            check(&go("billing.go"), &dir.0, &WriteOptions::new("billing")).map(|_| ()),
+        ] {
+            assert!(
+                matches!(&result, Err(WriteError::SharedGoPackage { manifest }) if manifest == Path::new(".roas-codegen-pets-go.json")),
+                "{result:?}"
+            );
+        }
+        assert!(!dir.0.join("billing.go").exists());
+        // In a directory of its own, it is a package of its own, whatever
+        // directory its manifest is in, and the first is still fine.
+        let nested =
+            |name: &str| Generation::new(Target::Go, vec![GeneratedFile::new(name, "package x")]);
+        write(
+            &nested("billing/billing.go"),
+            &dir.0,
+            &WriteOptions::new("billing"),
+        )
+        .unwrap();
+        write(&go("pets.go"), &dir.0, &WriteOptions::new("pets")).unwrap();
+        check(&go("pets.go"), &dir.0, &WriteOptions::new("pets")).unwrap();
+        // Two manifests side by side, files together in a subdirectory.
+        let result = write(
+            &nested("billing/more.go"),
+            &dir.0,
+            &WriteOptions::new("more"),
+        );
+        assert!(
+            matches!(&result, Err(WriteError::SharedGoPackage { manifest }) if manifest == Path::new(".roas-codegen-billing-go.json")),
+            "{result:?}"
+        );
     }
 
     #[test]

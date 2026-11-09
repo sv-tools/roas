@@ -1,0 +1,225 @@
+// decodeOptions turns a JSON null into an error wherever the Go type
+// would otherwise store its zero value, since the schema does not allow
+// null there. A substituted type is then decoded by its own rules alone,
+// and unmarshalers a caller passes do not reach into generated types.
+{% if support.refuse_null or support.refuse_null_isolated or support.isolated %}var decodeOptions = json.WithUnmarshalers(json.JoinUnmarshalers(
+{% for t in support.refuse_null %}	json.UnmarshalFromFunc(func(d *jsontext.Decoder, _ *{{ t }}) error { return refuseNull(d, {{ t | tojson }}) }),
+{% endfor %}{% for t in support.refuse_null_isolated %}	json.UnmarshalFromFunc(func(d *jsontext.Decoder, v *{{ t }}) error {
+		if err := refuseNull(d, {{ t | tojson }}); err != errors.ErrUnsupported {
+			return err
+		}
+		return json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))
+	}),
+{% endfor %}{% for t in support.isolated %}	json.UnmarshalFromFunc(func(d *jsontext.Decoder, v *{{ t }}) error {
+		return json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))
+	}),
+{% endfor %}))
+{% else %}var decodeOptions = json.JoinOptions()
+{% endif %}
+func refuseNull(d *jsontext.Decoder, typ string) error {
+	if d.PeekKind() == 'n' {
+		// Read first: a malformed literal is a syntax error, not a null.
+		if _, err := d.ReadToken(); err != nil {
+			return err
+		}
+		return fmt.Errorf("null is not a valid %s here", typ)
+	}
+	return errors.ErrUnsupported
+}
+
+{% if support.tagged %}
+// readTag reads a tagged union's discriminator, which must be a string
+// member of an object.
+func readTag(raw jsontext.Value, typ, tag string) (string, error) {
+	if raw.Kind() != '{' {
+		return "", fmt.Errorf("%s: want a JSON object, got %s", typ, raw)
+	}
+	var members map[string]jsontext.Value
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return "", err
+	}
+	member, ok := members[tag]
+	if !ok {
+		return "", fmt.Errorf("%s: missing discriminator %q", typ, tag)
+	}
+	var value string
+	if member.Kind() != '"' || json.Unmarshal(member, &value) != nil {
+		return "", fmt.Errorf("%s: discriminator %q must be a string, got %s", typ, tag, member)
+	}
+	return value, nil
+}
+{% endif %}{% if support.nullable %}
+// Nullable is a member that may be null. Set reports whether it is
+// present at all; Value is nil for an explicit null. An optional and
+// nullable member has three states — absent, null, a value — and this
+// keeps all three: omitzero leaves out only the absent one.
+type Nullable[T any] struct {
+	Set   bool
+	Value *T
+}
+
+// IsZero reports an absent member, which omitzero leaves out.
+func (n Nullable[T]) IsZero() bool { return !n.Set }
+
+func (n Nullable[T]) MarshalJSONTo(e *jsontext.Encoder) error {
+	if n.Value == nil {
+		return e.WriteToken(jsontext.Null)
+	}
+	return json.MarshalEncode(e, n.Value)
+}
+
+func (n *Nullable[T]) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	*n = Nullable[T]{Set: true}
+	if d.PeekKind() == 'n' {
+		_, err := d.ReadToken()
+		return err
+	}
+	var v T
+	if err := json.UnmarshalDecode(d, &v, decodeOptions); err != nil {
+		return err
+	}
+	n.Value = &v
+	return nil
+}
+{% endif %}{% if support.int64 or support.int32 %}
+// integerToken reads a JSON number token as the integer it denotes, if
+// it denotes one in [-limit-1, limit]: 1.0 and 1e0 are integers, 1.5 is
+// not, and the digits are read exactly rather than through a float. The
+// work is bounded by the token's length, whatever its exponent.
+func integerToken(raw jsontext.Value, limit uint64) (int64, bool) {
+	if raw.Kind() != '0' {
+		return 0, false
+	}
+	text := string(raw)
+	negative := text[0] == '-'
+	if negative {
+		text = text[1:]
+	}
+	mantissa, exponent := text, int64(0)
+	for i := 0; i < len(text); i++ {
+		if text[i] != 'e' && text[i] != 'E' {
+			continue
+		}
+		mantissa = text[:i]
+		digits := text[i+1:]
+		negativeExponent := false
+		if digits[0] == '+' || digits[0] == '-' {
+			negativeExponent = digits[0] == '-'
+			digits = digits[1:]
+		}
+		for j := 0; j < len(digits); j++ {
+			// Saturate: zero is still an integer, and anything else is
+			// out of range either way.
+			if exponent < 1<<30 {
+				exponent = exponent*10 + int64(digits[j]-'0')
+			}
+		}
+		if negativeExponent {
+			exponent = -exponent
+		}
+		break
+	}
+	whole, fraction := mantissa, ""
+	for i := 0; i < len(mantissa); i++ {
+		if mantissa[i] == '.' {
+			whole, fraction = mantissa[:i], mantissa[i+1:]
+			break
+		}
+	}
+	digits := whole + fraction
+	zero := true
+	for i := 0; i < len(digits); i++ {
+		if digits[i] != '0' {
+			zero = false
+			break
+		}
+	}
+	if zero {
+		return 0, true
+	}
+	scale := exponent - int64(len(fraction))
+	for ; scale < 0; scale++ {
+		if digits[len(digits)-1] != '0' {
+			return 0, false
+		}
+		digits = digits[:len(digits)-1]
+	}
+	// A non-zero value scaled past 19 digits is beyond any int64.
+	if scale > 19 {
+		return 0, false
+	}
+	ceiling := limit
+	if negative {
+		ceiling = limit + 1
+	}
+	var magnitude uint64
+	for i := 0; i < len(digits); i++ {
+		digit := uint64(digits[i] - '0')
+		if magnitude > (ceiling-digit)/10 {
+			return 0, false
+		}
+		magnitude = magnitude*10 + digit
+	}
+	for ; scale > 0; scale-- {
+		if magnitude > ceiling/10 {
+			return 0, false
+		}
+		magnitude *= 10
+	}
+	if negative {
+		return -int64(magnitude-1) - 1, true
+	}
+	return int64(magnitude), true
+}
+{% endif %}{% if support.int64 %}
+// Int64 is an integer on the wire: any JSON number that denotes one,
+// decoded exactly, held as an int64.
+type Int64 int64
+
+func (n *Int64) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	raw, err := d.ReadValue()
+	if err != nil {
+		return err
+	}
+	v, ok := integerToken(raw, 1<<63-1)
+	if !ok {
+		return fmt.Errorf("%s is not an integer in the int64 range", raw)
+	}
+	*n = Int64(v)
+	return nil
+}
+{% endif %}{% if support.int32 %}
+// Int32 is an integer with format int32 on the wire, decoded exactly.
+type Int32 int32
+
+func (n *Int32) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	raw, err := d.ReadValue()
+	if err != nil {
+		return err
+	}
+	v, ok := integerToken(raw, 1<<31-1)
+	if !ok {
+		return fmt.Errorf("%s is not an integer in the int32 range", raw)
+	}
+	*n = Int32(v)
+	return nil
+}
+{% endif %}{% if support.null %}
+// Null is the JSON value null, and nothing else.
+type Null struct{}
+
+func (Null) MarshalJSONTo(e *jsontext.Encoder) error {
+	return e.WriteToken(jsontext.Null)
+}
+
+func (*Null) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	raw, err := d.ReadValue()
+	if err != nil {
+		return err
+	}
+	if raw.Kind() != 'n' {
+		return fmt.Errorf("want null, got %s", raw)
+	}
+	return nil
+}
+{% endif %}
