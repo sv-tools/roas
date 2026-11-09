@@ -16,6 +16,9 @@
 //!   `Context` / `ValidationError` types.
 //! - [`v1_0`] — Arazzo v1.0 document model + `Validate` impls.
 //! - [`v1_1`] — Arazzo v1.1 document model + `Validate` impls.
+//! - [`source_map`] — where a path is written in the JSON or YAML text a
+//!   description was read from (`SourceMap::parse` behind the
+//!   `source-map` feature).
 //!
 //! ## Parsing and validating
 //!

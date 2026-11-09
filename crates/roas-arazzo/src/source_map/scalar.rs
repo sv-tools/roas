@@ -16,23 +16,18 @@ pub(super) fn decode(text: &str, start: usize, end: usize, value: &str) -> Optio
         block(raw, start, start - line_start(text, start), style, &mut out);
         return out.finish(value, true);
     }
-    let block = match raw.as_bytes().first() {
+    match raw.as_bytes().first() {
         Some(b'"') => {
             double(raw.strip_suffix('"')?, start, &mut out)?;
             out.end = end - 1;
-            false
         }
         Some(b'\'') => {
             single(raw.strip_suffix('\'')?, start, &mut out)?;
             out.end = end - 1;
-            false
         }
-        _ => {
-            plain(raw, start, &mut out);
-            false
-        }
-    };
-    out.finish(value, block)
+        _ => plain(raw, start, &mut out),
+    }
+    out.finish(value, false)
 }
 
 #[derive(Default)]

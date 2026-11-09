@@ -1342,7 +1342,14 @@ workflows:
             "unmapped.yaml",
             &LOCATED.replace("title: \"\"", "title: [\"\"]"),
         );
-        assert!(read_arazzo(&InputSource::File(unmapped.0.clone()), None).is_err());
+        let error = read_arazzo(&InputSource::File(unmapped.0.clone()), None)
+            .err()
+            .expect("a sequence is not a title")
+            .to_string();
+        assert!(
+            error.contains("#.info.title at line 3, column 10: invalid type: sequence"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1419,7 +1426,7 @@ workflows:
         let shown = format!("{error:#}");
         assert!(
             shown.contains(
-                "#.workflows[0].steps[0].successCriteria[0].condition at line 19, column "
+                "#.workflows[0].steps[0].successCriteria[0].condition at line 19, column 56: "
             ),
             "{shown}"
         );

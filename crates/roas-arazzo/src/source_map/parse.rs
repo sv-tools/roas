@@ -48,8 +48,8 @@ fn options() -> serde_saphyr::Options {
         // Same options in every roas crate; keep the copies in step
         // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
         // from the defaults (250k nodes, 1M events, 50k aliases, 50k anchors,
-        // 10k merge keys), which reject ordinary large or generated specs. Depth stays at 64: deeper nesting overflows a 2 MiB
-        // thread stack in debug builds. The alias-to-anchor ratio check is off:
+        // 10k merge keys), which reject ordinary large or generated specs; depth
+        // is limited below. The alias-to-anchor ratio check is off:
         // it rejects any document reusing one anchor 100+ times, a common
         // pattern in specs. Alias replay is raised to 10M events so a large
         // schema can be aliased thousands of times; the 1M cap on events
@@ -118,9 +118,8 @@ type Member = (Spanned<Raw>, Spanned<Raw>);
 /// What the definition pass measured, for replays to reuse.
 #[derive(Default)]
 struct Memo {
-    /// The end of each collection defined so far, by its start.
-    /// By start and whether it is a map: a sequence may start where its
-    /// first item does.
+    /// The end of each collection defined so far, by its start and
+    /// whether it is a map: a sequence may start where its first item does.
     ends: HashMap<(usize, bool), usize>,
     /// Where an empty value was placed, by where it was reported.
     placed: HashMap<usize, usize>,
@@ -130,11 +129,12 @@ struct Memo {
 /// `*name` that uses it rather than of the anchored value, so the
 /// collection holding the alias is measured where the alias is written.
 /// Inside a replayed alias (`replayed`) every node is measured at its
-/// definition: the `*name` belongs to the alias alone. `memo` holds the
-/// end measured for each collection defined so far, by its start.
+/// definition: the `*name` belongs to the alias alone. `memo` holds what
+/// the definition pass measured, for replays to reuse.
 fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (Node, usize) {
-    let alias = alias_end(text, &spanned).is_some();
-    let used = alias_end(text, &spanned).unwrap_or(0);
+    let used = alias_end(text, &spanned);
+    let alias = used.is_some();
+    let used = used.unwrap_or(0);
     let (mut start, mut end) = span(text, &spanned);
     let mut text_end = end;
     match spanned.value {
