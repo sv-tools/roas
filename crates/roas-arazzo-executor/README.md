@@ -342,7 +342,7 @@ Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0`
 
 ## Support matrix
 
-Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability the last column does not run is an error where it is met, never skipped; a check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them.
+Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (AsyncAPI steps, XPath) is an error where it is met, never skipped; `x-` extensions are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
 
 | Feature | Parsing | Reference resolution | Validation | Execution |
 | --- | --- | --- | --- | --- |
