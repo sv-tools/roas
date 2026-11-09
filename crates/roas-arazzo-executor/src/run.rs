@@ -139,8 +139,17 @@ impl Options {
         url: impl Into<String>,
         document: Value,
     ) -> Self {
+        let name = name.into();
+        // An owned value is an API document, never a workflow source: an
+        // earlier registry adaptation must not keep calling the old document.
+        #[cfg(feature = "source-graph")]
+        if let Some(table) = &mut self.workflow_documents
+            && table.entry.contains_key(&name)
+        {
+            std::sync::Arc::make_mut(table).entry.remove(&name);
+        }
         self.sources.insert(
-            name.into(),
+            name,
             Source {
                 url: url.into(),
                 data: crate::operation::SourceData::Owned(document),

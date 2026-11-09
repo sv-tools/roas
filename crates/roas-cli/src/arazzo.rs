@@ -648,10 +648,14 @@ fn sources(
         load_options.max_depth = args.source_max_depth;
         load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
         let report = registry.load_sources(root, &mut loader, &load_options)?;
-        let grown = required_sources(
+        // A static error in a newly linked document is preparation's to
+        // report, with the loading diagnostics beside it.
+        let Ok(grown) = required_sources(
             description,
             &options.clone().source_registry(&registry, root)?,
-        )?;
+        ) else {
+            break report;
+        };
         // Each further pass strictly grows the selection of declared aliases,
         // so this terminates.
         if args.load_all_sources || grown.is_subset(&selection) {
@@ -675,7 +679,14 @@ fn sources(
         })
         .chain(report.reference_diagnostics.iter().map(ToString::to_string))
         .collect::<Vec<_>>();
-    scoped_base_urls(&mut registry, root, &args.base_url)?;
+    // A missing external document is usually why an alias path names nothing.
+    scoped_base_urls(&mut registry, root, &args.base_url).map_err(|error| {
+        if diagnostics.is_empty() {
+            error
+        } else {
+            anyhow!("{error}\n{}", diagnostics.join("\n"))
+        }
+    })?;
     let any = registry
         .sources(root)?
         .iter()
@@ -1191,6 +1202,58 @@ mod tests {
         let asked = join.join().unwrap();
         assert_eq!(asked.len(), 1);
         assert!(asked[0].starts_with("GET /things?id=1 "), "{asked:?}");
+    }
+
+    /// An entry linking `shared` to `child_url`, loaded with `--load file`.
+    fn unloadable(child_url: &str, base_url: Option<&str>) -> String {
+        let (_, _, api) = external_workflow();
+        let entry = TempFile::write(
+            "unloadable-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [{ "name": "shared", "url": child_url, "type": "arazzo" }],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] }]
+            }),
+        );
+        let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.base_url = base_url.map(str::to_owned).into_iter().collect();
+        args.quiet = true;
+        run_arazzo_run(args).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn a_scoped_base_url_error_keeps_the_loading_diagnostics_that_explain_it() {
+        let error = unloadable(
+            "missing-external-document.json",
+            Some("shared.api=http://127.0.0.1:9"),
+        );
+        assert!(
+            error.starts_with("`--base-url shared.api=…`: `shared` names no loaded Arazzo"),
+            "{error}"
+        );
+        assert!(error.contains("missing-external-document.json"), "{error}");
+    }
+
+    #[test]
+    fn a_static_error_in_a_linked_document_is_reported_with_loading_diagnostics() {
+        let child = TempFile::write(
+            "broken-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "gone", "url": "gone-external-api.json", "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.gone.getThing" }],
+                    "outputs": { "x": "$steps.nope.outputs.x" } }]
+            }),
+        );
+        let error = unloadable(child.0.file_name().unwrap().to_str().unwrap(), None);
+        assert!(error.contains("$steps.nope.outputs.x"), "{error}");
+        assert!(error.contains("gone-external-api.json"), "{error}");
     }
 
     #[test]

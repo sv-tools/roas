@@ -837,7 +837,7 @@ fn an_unsupplied_or_mistyped_workflow_source_is_named_before_any_request() {
         )),
         "{error}"
     );
-    // Without a registry the same reference explains how to supply it.
+    // Without a registry the same reference names what is missing.
     let error = execute(
         &description,
         &Options::new().workflow("onlyExternal"),
@@ -845,7 +845,9 @@ fn an_unsupplied_or_mistyped_workflow_source_is_named_before_any_request() {
     )
     .unwrap_err();
     assert!(
-        error.to_string().contains("Options::source_registry"),
+        error
+            .to_string()
+            .contains("source `shared` was not supplied as an Arazzo document"),
         "{error}"
     );
 
@@ -998,6 +1000,25 @@ fn explicit_sources_win_over_registry_links_for_workflow_calls_too() {
         .source_registry(&graph.registry, graph.root)
         .unwrap();
     let error = prepare(&graph.description, &options).unwrap_err();
+    assert!(
+        error.to_string().contains("given with `Options::source`"),
+        "{error}"
+    );
+    // The same override after adaptation must not keep the old link.
+    let options = graph
+        .options("main")
+        .source("shared", SHARED, documents[2].1.clone());
+    let error = prepare(&graph.description, &options).unwrap_err();
+    assert!(
+        error.to_string().contains("given with `Options::source`"),
+        "{error}"
+    );
+    let error = execute(
+        &graph.description,
+        &options,
+        &mut Fake::new().reply(200, &ok("root")).reply(200, &ok("local")),
+    )
+    .unwrap_err();
     assert!(
         error.to_string().contains("given with `Options::source`"),
         "{error}"

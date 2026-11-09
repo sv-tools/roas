@@ -173,6 +173,12 @@ workflow-depth limit with a partial report. Source-graph cycles are harmless dat
 and `goto` loops stop at the step limit. Calls to external workflows with their
 own `dependsOn` are rejected, as for local calls.
 
+Dependencies receive the root inputs, as local dependencies do. An external
+dependency's outputs are recorded in its own document's `$workflows` namespace.
+The runtime-expression grammar has no qualified `$workflows` form, so the dependent
+cannot read them. A same-named local workflow is a different workflow: reading its
+outputs before it has run is a runtime error, as for any workflow that has not run.
+
 Each Arazzo document is upconverted independently: a v1.0 entry may call a v1.1
 document and vice versa, and every document runs under the same condition profile
 and v1.1 execution model.

@@ -95,7 +95,7 @@ impl<'d> Documents<'d> {
     /// identity outside the entry description.
     pub(crate) fn label(&self, doc: Doc, workflow_id: &str) -> String {
         match self.get(doc).identity {
-            Some(identity) => format!("{workflow_id} in {identity}"),
+            Some(identity) => format!("{workflow_id} of {identity}"),
             None => workflow_id.to_owned(),
         }
     }
@@ -167,10 +167,8 @@ impl<'d> Documents<'d> {
                     Some(crate::operation::SourceData::Registry(_)) => {
                         format!("source `{alias}` is not an Arazzo document")
                     }
-                    None => format!(
-                        "source `{alias}` was not supplied as an Arazzo document; load it into a \
-                     source registry and pass that registry with `Options::source_registry`"
-                    ),
+                    // Library callers supply it through `Options::source_registry`.
+                    None => format!("source `{alias}` was not supplied as an Arazzo document"),
                 },
             )
         })?;
