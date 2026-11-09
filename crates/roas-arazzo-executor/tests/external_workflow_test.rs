@@ -895,6 +895,50 @@ fn preparation_places_findings_in_the_text_of_the_external_document() {
 }
 
 #[test]
+fn an_unknown_member_of_an_external_document_fails_preparation() {
+    let mut documents = standard();
+    documents[2].1["workflows"][0]["steps"][0]["retryLimit"] = json!(3);
+    let graph = Graph::new(&documents);
+    let shared = graph.registry.document(graph.id(SHARED)).unwrap();
+    assert_eq!(shared.unknown_members().version, "1.1.0");
+    let error = prepare(&graph.description, &graph.options("main")).unwrap_err();
+    let found = error
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.path == "#.workflows[0].steps[0].retryLimit")
+        .unwrap_or_else(|| panic!("{error}"));
+    assert_eq!(found.document.as_deref(), Some(SHARED));
+    assert_eq!(found.workflow_id.as_deref(), Some("child"));
+    assert!(
+        matches!(&found.issue, PreparationIssue::UnknownMember { name, version, .. }
+            if name == "retryLimit" && version == "1.1.0"),
+        "{found}"
+    );
+
+    // A v1.0 document is compared with the v1.0 model, before upconversion.
+    let mut registry = SourceRegistry::new();
+    let id = registry
+        .insert(
+            "https://example.test/old.arazzo.json",
+            json!({
+                "arazzo": "1.0.1", "info": { "title": "O", "version": "1" },
+                "sourceDescriptions": [{ "name": "api", "url": "api.json" }],
+                "workflows": [{ "workflowId": "w", "steps": [{
+                    "stepId": "s", "operationId": "op", "dependsOn": ["x"] }] }]
+            }),
+        )
+        .unwrap();
+    let unknown = registry.document(id).unwrap().unknown_members();
+    assert_eq!(unknown.version, "1.0.1");
+    let paths: Vec<_> = unknown
+        .members
+        .iter()
+        .map(|member| member.path.as_str())
+        .collect();
+    assert_eq!(paths, ["#.workflows[0].steps[0].dependsOn"]);
+}
+
+#[test]
 fn an_unsupplied_or_mistyped_workflow_source_is_named_before_any_request() {
     let mut documents = standard();
     documents[0].1 = with_workflow(

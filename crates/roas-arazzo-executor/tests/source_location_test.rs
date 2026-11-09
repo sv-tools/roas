@@ -197,3 +197,37 @@ fn a_finding_about_a_members_name_is_placed_at_the_name() {
     let span = key.span.expect("located");
     assert_eq!((span.start.line, span.start.column), (24, 5), "{key}");
 }
+
+#[test]
+fn an_unknown_member_is_an_error_located_at_its_name() {
+    let text = TEXT.replace(
+        "        operationId: check\n",
+        "        operationId: check\n        timeoutMs: 5\n",
+    );
+    let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+    let description: Description = serde_json::from_value(value.clone()).unwrap();
+    let unknown = description.unknown_members(&value).unwrap();
+    let options = options()
+        .source_map(SourceMap::parse(text.clone()).unwrap())
+        .unknown_members(unknown);
+    let found = prepare(&description, &options).unwrap_err().diagnostics;
+    let member = find(&found, "#.workflows[0].steps[0].timeoutMs");
+    assert!(member.is_error());
+    assert_eq!(member.step_id.as_deref(), Some("a"));
+    let span = member.span.expect("the name is located");
+    assert_eq!((span.start.line, span.start.column), (14, 9));
+    assert_eq!(
+        member.to_string(),
+        "#.workflows[0].steps[0].timeoutMs at line 14, column 9: `timeoutMs` is not a field \
+         of Arazzo 1.1.0; an extension's name starts with `x-`"
+    );
+
+    // Unless the caller says what was dropped, nothing is known to be.
+    let found = diagnostics(&text, &self::options());
+    assert!(
+        found
+            .iter()
+            .all(|finding| !finding.path.ends_with("timeoutMs")),
+        "{found:#?}"
+    );
+}

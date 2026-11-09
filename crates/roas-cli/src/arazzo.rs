@@ -12,6 +12,7 @@ use enumset::EnumSet;
 use roas::LoadedDocument;
 use roas::loader::{Loader, LoaderError, ResourceFetcher};
 use roas_arazzo::source_map::SourceMap;
+use roas_arazzo::unknown::UnknownMembers;
 use roas_arazzo::validation::{Error as ArazzoError, Validate, ValidationError, ValidationOptions};
 use roas_arazzo::{v1_0, v1_1};
 use roas_arazzo_executor::{
@@ -73,6 +74,16 @@ impl DetectedArazzo {
             DetectedArazzo::V1_0(d) => d.validate(options),
             DetectedArazzo::V1_1(d) => d.validate(options),
         }
+    }
+
+    /// The members of `raw`, the value this description was read from,
+    /// that its model dropped.
+    pub(crate) fn unknown_members(&self, raw: &Value) -> Result<UnknownMembers> {
+        match self {
+            DetectedArazzo::V1_0(d) => d.unknown_members(raw),
+            DetectedArazzo::V1_1(d) => d.unknown_members(raw),
+        }
+        .context("listing unknown members")
     }
 
     /// Upconvert to `target`. Same-version is the identity; v1.0 → v1.1
@@ -232,6 +243,37 @@ fn located(map: Option<&SourceMap>, error: &ValidationError) -> String {
         Some(range) => format!("{} at {}: {}", error.path, range.start, error.message),
         None => error.to_string(),
     }
+}
+
+/// A warning for each member the model dropped, located in the text when
+/// the map has it, and then in the order of the text.
+fn unknown_warnings(map: Option<&SourceMap>, unknown: &UnknownMembers) -> Vec<String> {
+    let mut warnings: Vec<_> = unknown
+        .members
+        .iter()
+        .map(|member| {
+            let start = map
+                .and_then(|map| map.locate_key(&member.path))
+                .map(|range| range.start);
+            let at = start
+                .as_ref()
+                .map(|start| format!(" at {start}"))
+                .unwrap_or_default();
+            let warning = format!(
+                "warning: {}{at}: {}",
+                member.path,
+                roas_arazzo::unknown::message(
+                    &member.name,
+                    &unknown.version,
+                    member.extensions_allowed
+                )
+            );
+            // Unlocated members after the located ones, as listed.
+            (start.map_or(usize::MAX, |start| start.offset), warning)
+        })
+        .collect();
+    warnings.sort_by_key(|(offset, _)| *offset);
+    warnings.into_iter().map(|(_, warning)| warning).collect()
 }
 
 #[derive(Subcommand)]
@@ -419,15 +461,27 @@ fn run_arazzo_validate(args: ArazzoValidateArgs) -> Result<()> {
         detected,
         format: input_format,
         text,
-        ..
-    } = read_arazzo(&source, args.format)?;
+        value,
+    } = read_arazzo_as(&source, args.format, true)?;
 
     let mut options = EnumSet::<ValidationOptions>::empty();
     for ignore in &args.ignore {
         options |= *ignore;
     }
 
-    match detected.validate(options) {
+    // What the model dropped is reported, but does not fail validation:
+    // only running a workflow needs to honour every member.
+    let unknown = detected.unknown_members(&value.expect("kept for `validate`"))?;
+    let result = detected.validate(options);
+    // Built only when there is something to locate.
+    let map = (!unknown.is_empty() || result.is_err())
+        .then(|| SourceMap::parse(&text).ok())
+        .flatten();
+    for warning in unknown_warnings(map.as_ref(), &unknown) {
+        eprintln!("- {warning}");
+    }
+
+    match result {
         Ok(()) => {
             eprintln!("{}: valid {}", source.display(), detected.label());
             if args.print {
@@ -437,8 +491,6 @@ fn run_arazzo_validate(args: ArazzoValidateArgs) -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            // Built only when there is something to locate.
-            let map = SourceMap::parse(text).ok();
             for e in &err.errors {
                 eprintln!("- {}", located(map.as_ref(), e));
             }
@@ -548,6 +600,8 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
         ..
     } = read;
     let value = value.expect("kept for `run`");
+    // Against the model of the version it declares, before upconversion.
+    let unknown = detected.unknown_members(&value)?;
     // One interpreter: a v1.0 description is upconverted first.
     let description = match detected {
         DetectedArazzo::V1_1(description) => description,
@@ -584,6 +638,7 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     if let Some(map) = map {
         options = options.source_map(map);
     }
+    options = options.unknown_members(unknown);
     for schema in &args.schema {
         let (uri, path) = split_pair(schema, "--schema")?;
         let (document, _) = read_input(&InputSource::File(PathBuf::from(path)), None)
@@ -1609,6 +1664,91 @@ workflows:
             "{shown}"
         );
         assert!(!shown.contains(" at byte "), "{shown}");
+    }
+
+    #[test]
+    fn unknown_members_are_located_warnings() {
+        // `aRetry` sorts before `timeoutMs` but is written after it.
+        let text = format!(
+            "{}        aRetry: 1\n",
+            LOCATED
+                .replace("title: \"\"", "title: T\n  summery: S")
+                .replace(
+                    "        successCriteria:",
+                    "        timeoutMs: 5\n        successCriteria:",
+                )
+        );
+        let file = TempFile::text("unknown.yaml", &text);
+        let read = read_arazzo_as(&InputSource::File(file.0.clone()), None, true).unwrap();
+        let unknown = read
+            .detected
+            .unknown_members(read.value.as_ref().unwrap())
+            .unwrap();
+        let hint = "is not a field of Arazzo 1.1.0; an extension's name starts with `x-`";
+        assert_eq!(
+            unknown_warnings(read.source_map().as_ref(), &unknown),
+            [
+                format!("warning: #.info.summery at line 4, column 3: `summery` {hint}"),
+                format!(
+                    "warning: #.workflows[0].steps[0].timeoutMs at line 19, column 9: \
+                     `timeoutMs` {hint}"
+                ),
+                format!(
+                    "warning: #.workflows[0].steps[0].aRetry at line 22, column 9: `aRetry` {hint}"
+                ),
+            ]
+        );
+        // Without a map, the path alone, as listed.
+        let unlocated = unknown_warnings(None, &unknown);
+        assert!(
+            unlocated[0].starts_with("warning: #.info.summery: "),
+            "{unlocated:?}"
+        );
+        assert!(
+            unlocated[1].starts_with("warning: #.workflows[0].steps[0].aRetry: "),
+            "{unlocated:?}"
+        );
+    }
+
+    #[test]
+    fn validate_warns_about_unknown_members_but_passes() {
+        let mut doc = v1_0_doc();
+        doc["info"]["summery"] = json!("S");
+        let f = TempFile::write("unknown.json", &doc);
+        let args = ArazzoValidateArgs {
+            file: Some(f.0.clone()),
+            format: None,
+            ignore: vec![],
+            print: false,
+        };
+        run_arazzo(ArazzoCommand::Validate(args)).expect("an unknown member is a warning");
+    }
+
+    #[test]
+    fn run_refuses_an_unknown_member_and_says_where() {
+        let (_, openapi) = runnable();
+        for (arazzo, version) in [("1.1.0", "1.1.0"), ("1.0.1", "1.0.1")] {
+            let text = LOCATED
+                .replace("arazzo: 1.1.0", &format!("arazzo: {arazzo}"))
+                .replace("title: \"\"", "title: T")
+                .replace("$statusCode == 'caf\\u00e9' && (", "$statusCode == 200")
+                .replace(
+                    "        successCriteria:",
+                    "        timeoutMs: 5\n        successCriteria:",
+                );
+            let description = TempFile::text("unknown-run.yaml", &text);
+            let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
+            args.quiet = true;
+            let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
+            let shown = format!("{error:#}");
+            assert!(
+                shown.contains(&format!(
+                    "#.workflows[0].steps[0].timeoutMs at line 18, column 9: `timeoutMs` is not \
+                     a field of Arazzo {version}"
+                )),
+                "{shown}"
+            );
+        }
     }
 
     fn runnable() -> (TempFile, TempFile) {

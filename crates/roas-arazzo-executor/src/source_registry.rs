@@ -1,6 +1,7 @@
 //! Complete documents, canonical identities and document-local source aliases.
 
 use roas::{LoadedDocument, LoaderError};
+use roas_arazzo::unknown::UnknownMembers;
 use roas_arazzo::v1_1::{Description, SourceType};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,6 +60,7 @@ pub struct SourceDocument {
     model: SourceVersion,
     version: String,
     arazzo: Option<Description>,
+    unknown: UnknownMembers,
 }
 
 impl SourceDocument {
@@ -89,6 +91,12 @@ impl SourceDocument {
     /// Fully parsed Arazzo, upconverted from v1.0 where necessary.
     pub fn arazzo(&self) -> Option<&Description> {
         self.arazzo.as_ref()
+    }
+    /// The members of an Arazzo document that its model, of the version it
+    /// declares, dropped: neither fields nor `x-` extensions. Checked
+    /// preparation reports each as an error. Empty for API documents.
+    pub fn unknown_members(&self) -> &UnknownMembers {
+        &self.unknown
     }
 }
 
@@ -288,7 +296,7 @@ impl SourceRegistry {
                 Err(SourceError::Conflict(retrieval.to_string()))
             };
         }
-        let (model, version, arazzo) = parse_document(value, &retrieval)?;
+        let (model, version, arazzo, unknown) = parse_document(value, &retrieval)?;
         let declared_identity = if model == SourceVersion::OpenApi3_2 {
             value
                 .get("$self")
@@ -368,6 +376,7 @@ impl SourceRegistry {
             model,
             version,
             arazzo,
+            unknown,
         }));
         Ok(id)
     }
@@ -604,10 +613,11 @@ pub(crate) fn join(base: &Url, reference: &str) -> Result<Url, SourceError> {
         })
 }
 
-fn parse_document(
-    value: &Value,
-    uri: &Url,
-) -> Result<(SourceVersion, String, Option<Description>), SourceError> {
+/// A document's model family, version as written, Arazzo model and the
+/// members that model dropped.
+type Parsed = (SourceVersion, String, Option<Description>, UnknownMembers);
+
+fn parse_document(value: &Value, uri: &Url) -> Result<Parsed, SourceError> {
     let parse_error = |source| SourceError::Parse {
         uri: uri.to_string(),
         source,
@@ -625,15 +635,25 @@ fn parse_document(
         if version.starts_with("1.0.") {
             let document = serde_json::from_value::<roas_arazzo::v1_0::Description>(value.clone())
                 .map_err(parse_error)?;
+            // Before upconversion: the members the v1.0 model dropped.
+            let unknown = document.unknown_members(value).map_err(parse_error)?;
             return Ok((
                 SourceVersion::Arazzo1_0,
                 version.into(),
                 Some(document.into()),
+                unknown,
             ));
         }
         if version.starts_with("1.1.") {
-            let document = serde_json::from_value(value.clone()).map_err(parse_error)?;
-            return Ok((SourceVersion::Arazzo1_1, version.into(), Some(document)));
+            let document: Description =
+                serde_json::from_value(value.clone()).map_err(parse_error)?;
+            let unknown = document.unknown_members(value).map_err(parse_error)?;
+            return Ok((
+                SourceVersion::Arazzo1_1,
+                version.into(),
+                Some(document),
+                unknown,
+            ));
         }
     }
     macro_rules! version {
@@ -642,7 +662,12 @@ fn parse_document(
                 && (written == $prefix || written.starts_with(concat!($prefix, ".")))
             {
                 serde_json::from_value::<$type>(value[$key].clone()).map_err(parse_error)?;
-                return Ok((SourceVersion::$model, written.into(), None));
+                return Ok((
+                    SourceVersion::$model,
+                    written.into(),
+                    None,
+                    UnknownMembers::default(),
+                ));
             }
         };
     }

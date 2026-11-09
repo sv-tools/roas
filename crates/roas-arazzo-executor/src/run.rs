@@ -64,6 +64,7 @@ pub struct Options {
     pub(crate) validation: enumset::EnumSet<roas_arazzo::validation::ValidationOptions>,
     pub(crate) portability_lints: bool,
     pub(crate) source_map: Option<std::sync::Arc<roas_arazzo::source_map::SourceMap>>,
+    pub(crate) unknown_members: Option<roas_arazzo::unknown::UnknownMembers>,
     pub(crate) document_source_maps:
         BTreeMap<String, std::sync::Arc<roas_arazzo::source_map::SourceMap>>,
     headers: Vec<(String, String)>,
@@ -107,6 +108,19 @@ impl Options {
         map: impl Into<std::sync::Arc<roas_arazzo::source_map::SourceMap>>,
     ) -> Self {
         self.source_map = Some(map.into());
+        self
+    }
+
+    /// The members of the description that its model dropped, from
+    /// `Description::unknown_members` on the value it was read from:
+    /// [`crate::prepare`] reports each as an error, since the executor
+    /// cannot honour what an unknown member means. Without them, nothing
+    /// is known to have been dropped. External documents of a source
+    /// registry carry their own
+    /// (`SourceDocument::unknown_members`, with the `source-graph` feature).
+    #[must_use]
+    pub fn unknown_members(mut self, members: roas_arazzo::unknown::UnknownMembers) -> Self {
+        self.unknown_members = Some(members);
         self
     }
 

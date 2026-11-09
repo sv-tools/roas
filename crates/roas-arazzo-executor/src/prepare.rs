@@ -39,6 +39,19 @@ pub enum PreparationIssue {
     /// Optional advice about this executor's implementation-defined profile.
     #[error("{0}")]
     Portability(String),
+    /// A member that is neither a field of its object nor an `x-`
+    /// extension it allows: dropped on parse, so whatever it means is not
+    /// honoured.
+    #[error("{}", roas_arazzo::unknown::message(name, version, *extensions_allowed))]
+    #[non_exhaustive]
+    UnknownMember {
+        /// The member's name as written.
+        name: String,
+        /// The `arazzo` version the document declares, as written.
+        version: String,
+        /// Whether its object allows `x-` extensions.
+        extensions_allowed: bool,
+    },
 }
 
 /// A located preparation error or warning.
@@ -523,6 +536,20 @@ impl<'d> Compiler<'d> {
                 self.finding(&site, None, PreparationIssue::Model(error));
             }
         }
+        if let Some(unknown) = self.documents.get(self.current).unknown {
+            for member in &unknown.members {
+                let site = self.model_site(&member.path);
+                self.finding(
+                    &site,
+                    None,
+                    PreparationIssue::UnknownMember {
+                        name: member.name.clone(),
+                        version: unknown.version.clone(),
+                        extensions_allowed: member.extensions_allowed,
+                    },
+                );
+            }
+        }
     }
 
     /// An Arazzo alias of the current document that no supplied document
@@ -599,6 +626,7 @@ impl<'d> Compiler<'d> {
         let span = map.and_then(|map| match &issue {
             // A finding about a member's name is where the name is written.
             PreparationIssue::Model(error) if error.is_about_key() => map.locate_key(&site.path),
+            PreparationIssue::UnknownMember { .. } => map.locate_key(&site.path),
             _ => map.locate(&site.path),
         });
         let position = map
