@@ -449,10 +449,10 @@ fn reason(error: &serde_saphyr::Error) -> String {
     if too_deep(error) {
         return "nested deeper than 64 levels".to_owned();
     }
-    let shown = error.to_string();
-    if let Some(key) = json_collision(&shown) {
+    if let Some(key) = json_collision(error) {
         return format!("`{key}` is written twice in one object, once read as JSON");
     }
+    let shown = error.to_string();
     let first = shown.lines().next().unwrap_or_default();
     let first = first.strip_prefix("error: ").unwrap_or(first);
     // `…; use from_str_multiple …` is advice to a programmer, not a writer.
@@ -509,10 +509,14 @@ fn original(mut error: &serde_saphyr::Error) -> &serde_saphyr::Error {
 }
 
 /// The key of a YAML mapping whose keys collide once read as JSON, from
-/// the error `yaml_value` raises for it.
-fn json_collision(shown: &str) -> Option<&str> {
-    let (_, rest) = shown.split_once("mapping key `")?;
-    rest.rsplit_once("` appears twice once read as JSON")
+/// the error `yaml_value` raises for it: a custom message, read without
+/// the snippet that repeats it.
+fn json_collision(error: &serde_saphyr::Error) -> Option<&str> {
+    let serde_saphyr::Error::Message { msg, .. } = original(error) else {
+        return None;
+    };
+    let rest = msg.strip_prefix("mapping key `")?;
+    rest.split_once("` appears twice once read as JSON")
         .map(|(key, _)| key)
 }
 
@@ -556,10 +560,10 @@ fn json_reason(error: &serde_json::Error) -> String {
 fn error_offset(text: &str, error: &serde_saphyr::Error) -> usize {
     // Keys that differ as YAML but not as JSON: the parser places them at
     // their mapping, or nowhere at the root, but the map has both keys.
-    if json_collision(&error.to_string()).is_some()
+    if let Some(key) = json_collision(error)
         && let Some(offset) = crate::source_map::parse::map(text.to_owned())
             .ok()
-            .and_then(|map| map.repeated_key())
+            .and_then(|map| map.repeated_key(key))
     {
         return offset;
     }
@@ -1394,10 +1398,32 @@ workflows:
         let start = error.range.unwrap().start;
         assert_eq!((start.line, start.column), (4, 1));
         assert_eq!(document.outline().unwrap().title.as_deref(), Some("T"));
-        // Nested, at the second key rather than its mapping.
-        let document = read("info:\n  1: a\n  '1': b\n");
-        let start = document.diagnostics()[0].range.unwrap().start;
-        assert_eq!((start.line, start.column), (3, 3));
+        // Nested, at the second key rather than its mapping, with the same
+        // one-line message; of two collisions, at the one JSON reading meets
+        // first, a value before the key after it; through `<<`, in the
+        // object that merges.
+        for (text, key, at) in [
+            ("info:\n  1: a\n  '1': b\n", "1", (3, 3)),
+            (
+                "arazzo: 1.1.0\nworkflows:\n  - 1: a\n    '1': b\n",
+                "1",
+                (4, 5),
+            ),
+            ("a:\n  1: x\n  '1': y\n2: p\n'2': q\n", "1", (3, 3)),
+            ("a:\n  1: x\n  '1': y\nb:\n  2: p\n  '2': q\n", "1", (3, 3)),
+            ("1: a\n'1':\n  2: x\n  '2': y\n", "2", (4, 3)),
+            ("base: &b\n  1: x\nobj:\n  <<: *b\n  '1': y\n", "1", (5, 3)),
+        ] {
+            let document = read(text);
+            let error = &document.diagnostics()[0];
+            assert_eq!(
+                error.message,
+                format!("`{key}` is written twice in one object, once read as JSON"),
+                "{text}"
+            );
+            let start = error.range.unwrap().start;
+            assert_eq!((start.line, start.column), at, "{text}");
+        }
         // Nesting reached by replaying an alias, read and mapped.
         let deep = |levels: usize| {
             format!(

@@ -392,27 +392,37 @@ impl SourceMap {
         resolve(&self.root, &tokens(path)?, &self.cache)
     }
 
-    /// Where the first key that repeats an earlier one of its mapping
-    /// starts, keys compared as JSON reads them: `1` and `'1'` repeat.
+    /// Where the first repeat of key `name` in a mapping starts, keys
+    /// compared as JSON reads them (`1` and `'1'` repeat), in the order
+    /// JSON reading meets it: a value before the key after it. Of a repeat
+    /// merged in with `<<`, the object's own key, not the anchor's.
     #[cfg(feature = "editor")]
-    pub(crate) fn repeated_key(&self) -> Option<usize> {
-        let mut pending = vec![self.root.as_ref()];
-        while let Some(node) = pending.pop() {
+    pub(crate) fn repeated_key(&self, name: &str) -> Option<usize> {
+        fn find(node: &Node, name: &str) -> Option<usize> {
             match &node.kind {
                 Kind::Map(members) => {
-                    let mut seen = std::collections::HashSet::new();
+                    let mut seen = None;
                     for (key, value) in members {
-                        if !seen.insert(key.name.as_str()) {
-                            return Some(key.start);
+                        if let Some(found) = find(value, name) {
+                            return Some(found);
                         }
-                        pending.push(value);
+                        if key.name == name {
+                            match seen {
+                                // The later in the text: a merged member
+                                // carries its anchor's span.
+                                Some(first) => return Some(key.start.max(first)),
+                                None => seen = Some(key.start),
+                            }
+                        }
                     }
+                    None
                 }
-                Kind::Seq(items) => pending.extend(items),
-                Kind::Scalar(_) => {}
+                Kind::Seq(items) => items.iter().find_map(|item| find(item, name)),
+                Kind::Scalar(_) => None,
             }
         }
-        None
+        // A map is no deeper than `MAX_DEPTH`, so this recursion is bounded.
+        find(&self.root, name)
     }
 
     /// How many places `path` names: `0` when it is not written, `1` when
