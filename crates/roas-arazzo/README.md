@@ -105,12 +105,10 @@ Behind the `editor` feature, `editor::Document::read(text, options)` reads text 
 Nothing a `Document` returns can be run: it never hands out a typed `Description`, and its outline is plain strings and ranges. To execute a description, deserialize it the strict way.
 
 ```rust
-# #[cfg(feature = "v1_1")] {
 use roas_arazzo::editor::Document;
 
 let document = Document::read("arazzo: 1.1.0\ninfo: {title: [T]}\n", Default::default());
 assert_eq!(document.diagnostics()[0].path.as_deref(), Some("#.info.title"));
-# }
 ```
 
 Runtime-expression grammar, `sourceDescriptions` / `$ref` resolution, and deep JSON Schema semantics for `inputs` are out of scope for this release.

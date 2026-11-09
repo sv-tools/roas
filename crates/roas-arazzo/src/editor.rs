@@ -63,8 +63,8 @@ pub struct Diagnostic {
     /// How much it matters.
     pub severity: Severity,
     /// Model-style path of the field it is about, as validation findings
-    /// name fields (`#.workflows[0].steps[1].stepId`); `None` for a syntax
-    /// error.
+    /// name fields (`#.workflows[0].steps[1].stepId`); `None` for a finding
+    /// about the text itself rather than a field.
     pub path: Option<String>,
     /// Where it is in the text, when that is known: the field's value, or
     /// its name for a finding about the name, or the nearest enclosing
@@ -317,7 +317,7 @@ impl Document {
                 syntax(
                     error_offset(&text, &error),
                     Severity::Warning,
-                    format!("findings cannot be located: {}", reason(&error)),
+                    map_refused(&error),
                 );
                 None
             }
@@ -464,6 +464,24 @@ fn reason(error: &serde_saphyr::Error) -> String {
         _ => reason,
     }
     .to_owned()
+}
+
+/// Why the map refused text that reads, told the writer: a member written
+/// twice, or deep nesting. Anything else is YAML's limit on text that is
+/// valid JSON, such as a key longer than 1024 characters, whose reason
+/// would only mislead.
+fn map_refused(error: &serde_saphyr::Error) -> String {
+    let reason = reason(error);
+    let why = if let Some(rest) = reason.strip_prefix("duplicate mapping key: ") {
+        // `x-a, set DuplicateKeyPolicy in Options if acceptable`
+        let name = rest.split_once(", set ").map_or(rest, |(name, _)| name);
+        format!("`{name}` is written twice in one object")
+    } else if reason.contains("Depth") {
+        "it is nested deeper than 32 levels".to_owned()
+    } else {
+        return "findings cannot be located in this text".to_owned();
+    };
+    format!("findings cannot be located: {why}")
 }
 
 /// The byte offset of a `serde_json` error: its line counts `\n` only,
@@ -1250,12 +1268,9 @@ workflows:
         assert!(document.is_complete() && document.source_map().is_none());
         let found = found(&document);
         assert_eq!(found[0].0, Severity::Warning, "{found:?}");
-        assert!(
-            document.diagnostics()[0]
-                .message
-                .starts_with("findings cannot be located: duplicate"),
-            "{:?}",
-            document.diagnostics()[0]
+        assert_eq!(
+            document.diagnostics()[0].message,
+            "findings cannot be located: `title` is written twice in one object"
         );
         // At the member written twice.
         assert_eq!(found[0].2.map(|(line, _)| line), Some(2), "{found:?}");
@@ -1266,6 +1281,28 @@ workflows:
                 .any(|(severity, _, range)| *severity == Severity::Error && range.is_none()),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn a_refused_map_is_explained_in_the_writer_s_terms() {
+        let deep = format!(
+            "{{\"arazzo\": \"1.1.0\", \"x-deep\": {}1{}}}",
+            "[".repeat(40),
+            "]".repeat(40)
+        );
+        let long = format!("{{\"arazzo\": \"1.1.0\", \"x-{}\": 1}}", "k".repeat(1100));
+        for (text, expected) in [
+            (
+                deep,
+                "findings cannot be located: it is nested deeper than 32 levels",
+            ),
+            (long, "findings cannot be located in this text"),
+        ] {
+            let document = read(&text);
+            assert!(document.source_map().is_none());
+            assert_eq!(document.diagnostics()[0].severity, Severity::Warning);
+            assert_eq!(document.diagnostics()[0].message, expected);
+        }
     }
 
     #[test]
