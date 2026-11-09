@@ -439,7 +439,7 @@ fn recover(text: &str, offset: usize) -> (Option<Value>, usize) {
 /// the range already gives.
 fn reason(error: &serde_saphyr::Error) -> String {
     // The parser's own words here advise a programmer about `Options`.
-    if let serde_saphyr::Error::DuplicateMappingKey { key, .. } = error.without_snippet() {
+    if let serde_saphyr::Error::DuplicateMappingKey { key, .. } = original(error) {
         return key.as_ref().map_or_else(
             || "a member is written twice in one object".to_owned(),
             |key| format!("`{key}` is written twice in one object"),
@@ -482,9 +482,9 @@ fn reason(error: &serde_saphyr::Error) -> String {
 /// would only mislead.
 fn map_refused(error: &serde_saphyr::Error) -> String {
     if too_deep(error) {
-        "findings cannot be located: it is nested deeper than 32 levels".to_owned()
+        "findings cannot be located: nested deeper than 32 levels".to_owned()
     } else if matches!(
-        error.without_snippet(),
+        original(error),
         serde_saphyr::Error::DuplicateMappingKey { .. }
     ) {
         format!("findings cannot be located: {}", reason(error))
@@ -493,10 +493,21 @@ fn map_refused(error: &serde_saphyr::Error) -> String {
     }
 }
 
+/// The error under the snippet and alias-replay wrappers the parser puts
+/// around it.
+fn original(mut error: &serde_saphyr::Error) -> &serde_saphyr::Error {
+    while let serde_saphyr::Error::WithSnippet { error: inner, .. }
+    | serde_saphyr::Error::AliasError { error: inner, .. } = error
+    {
+        error = inner;
+    }
+    error
+}
+
 /// Whether `error` is nesting past the parser's depth limit.
 fn too_deep(error: &serde_saphyr::Error) -> bool {
     matches!(
-        error.without_snippet(),
+        original(error),
         serde_saphyr::Error::Budget {
             breach: serde_saphyr::budget::BudgetBreach::Depth { .. },
             ..
@@ -518,13 +529,18 @@ fn json_offset(text: &str, line: usize, column: usize) -> usize {
 /// A `serde_json` error's reason, without the location the range gives.
 fn json_reason(error: &serde_json::Error) -> String {
     let shown = error.to_string();
+    // As YAML words it; `serde_json` stops at 128 levels.
+    if shown.starts_with("recursion limit exceeded") {
+        return "nested deeper than 128 levels".to_owned();
+    }
     shown
         .rsplit_once(" at line ")
         .map_or(shown.as_str(), |(reason, _)| reason)
         .to_owned()
 }
 
-/// Where in `text` a syntax error is.
+/// Where in `text` a syntax error is. A key written twice through an
+/// alias is placed where the parser places it: at the anchor.
 fn error_offset(text: &str, error: &serde_saphyr::Error) -> usize {
     let Some(location) = error.location() else {
         return text.len();
@@ -1314,7 +1330,7 @@ workflows:
         for (text, expected) in [
             (
                 deep,
-                "findings cannot be located: it is nested deeper than 32 levels",
+                "findings cannot be located: nested deeper than 32 levels",
             ),
             (long, "findings cannot be located in this text"),
         ] {
@@ -1341,6 +1357,32 @@ workflows:
         assert_eq!(
             document.diagnostics()[0].message,
             "nested deeper than 64 levels"
+        );
+        // Nesting reached by replaying an alias, read and mapped.
+        let deep = |levels: usize| {
+            format!(
+                "a: &x {}1{}\nb: {}*x{}\n",
+                "[".repeat(levels),
+                "]".repeat(levels),
+                "[".repeat(10),
+                "]".repeat(10)
+            )
+        };
+        let document = read(&deep(60));
+        assert_eq!(
+            document.diagnostics()[0].message,
+            "nested deeper than 64 levels"
+        );
+        let document = read(&deep(30));
+        assert_eq!(
+            document.diagnostics()[0].message,
+            "findings cannot be located: nested deeper than 32 levels"
+        );
+        let json = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+        let document = Document::read_as(json, Format::Json, EnumSet::empty());
+        assert_eq!(
+            document.diagnostics()[0].message,
+            "nested deeper than 128 levels"
         );
         let document = read("\u{feff}{\"arazzo\": \"1.1.0\"}");
         assert_eq!(
