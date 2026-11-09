@@ -438,6 +438,16 @@ fn recover(text: &str, offset: usize) -> (Option<Value>, usize) {
 /// The reason of a syntax error, without the location and the snippet
 /// the range already gives.
 fn reason(error: &serde_saphyr::Error) -> String {
+    // The parser's own words here advise a programmer about `Options`.
+    if let serde_saphyr::Error::DuplicateMappingKey { key, .. } = error.without_snippet() {
+        return key.as_ref().map_or_else(
+            || "a member is written twice in one object".to_owned(),
+            |key| format!("`{key}` is written twice in one object"),
+        );
+    }
+    if too_deep(error) {
+        return "nested deeper than 64 levels".to_owned();
+    }
     let shown = error.to_string();
     let first = shown.lines().next().unwrap_or_default();
     let first = first.strip_prefix("error: ").unwrap_or(first);
@@ -471,17 +481,27 @@ fn reason(error: &serde_saphyr::Error) -> String {
 /// valid JSON, such as a key longer than 1024 characters, whose reason
 /// would only mislead.
 fn map_refused(error: &serde_saphyr::Error) -> String {
-    let reason = reason(error);
-    let why = if let Some(rest) = reason.strip_prefix("duplicate mapping key: ") {
-        // `x-a, set DuplicateKeyPolicy in Options if acceptable`
-        let name = rest.split_once(", set ").map_or(rest, |(name, _)| name);
-        format!("`{name}` is written twice in one object")
-    } else if reason.contains("Depth") {
-        "it is nested deeper than 32 levels".to_owned()
+    if too_deep(error) {
+        "findings cannot be located: it is nested deeper than 32 levels".to_owned()
+    } else if matches!(
+        error.without_snippet(),
+        serde_saphyr::Error::DuplicateMappingKey { .. }
+    ) {
+        format!("findings cannot be located: {}", reason(error))
     } else {
-        return "findings cannot be located in this text".to_owned();
-    };
-    format!("findings cannot be located: {why}")
+        "findings cannot be located in this text".to_owned()
+    }
+}
+
+/// Whether `error` is nesting past the parser's depth limit.
+fn too_deep(error: &serde_saphyr::Error) -> bool {
+    matches!(
+        error.without_snippet(),
+        serde_saphyr::Error::Budget {
+            breach: serde_saphyr::budget::BudgetBreach::Depth { .. },
+            ..
+        }
+    )
 }
 
 /// The byte offset of a `serde_json` error: its line counts `\n` only,
@@ -1310,6 +1330,18 @@ workflows:
         let document = read("a: 1\n---\nb: 2\n");
         let message = &document.diagnostics()[0].message;
         assert!(!message.contains("from_str_multiple"), "{message}");
+        // The parser's advice about `Options` is not for the writer, and a
+        // name is never cut short.
+        let document = read("arazzo: 1.1.0\ninfo: {\"t, set u\": a, \"t, set u\": b}\n");
+        assert_eq!(
+            document.diagnostics()[0].message,
+            "`t, set u` is written twice in one object"
+        );
+        let document = read(&format!("a: {}1{}\n", "[".repeat(70), "]".repeat(70)));
+        assert_eq!(
+            document.diagnostics()[0].message,
+            "nested deeper than 64 levels"
+        );
         let document = read("\u{feff}{\"arazzo\": \"1.1.0\"}");
         assert_eq!(
             document.diagnostics()[0].message,
