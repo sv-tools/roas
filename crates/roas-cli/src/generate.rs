@@ -260,7 +260,11 @@ fn hint(error: roas_codegen::WriteError) -> anyhow::Error {
     }
 }
 
-pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
+pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
+    // As the library reads it, so the recorded source is computed too.
+    if args.out.as_os_str().is_empty() {
+        args.out = PathBuf::from(".");
+    }
     let source = resolve_input_source(args.file.as_deref())?;
     let (input, uri) = read_description(&source, args.format)?;
     let document = SourceDocument::parse(input, uri)

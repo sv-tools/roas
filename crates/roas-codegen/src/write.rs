@@ -157,6 +157,8 @@ pub enum WriteError {
     ReservedPath(PathBuf),
     #[error("{0} is in the way: a generated path needs it to be a directory")]
     NotADirectory(PathBuf),
+    #[error("{0} is a directory where a generated file goes")]
+    IsADirectory(PathBuf),
     #[error("{0} is a symbolic link; generated files are never written through one")]
     Symlink(PathBuf),
     #[error("{0} is locked: another generation is writing to this directory")]
@@ -532,7 +534,7 @@ fn check_path(out_dir: &Path, key: &str) -> Result<(), WriteError> {
                 )));
             }
             Ok(meta) if last && meta.is_dir() => {
-                return Err(WriteError::NotADirectory(PathBuf::from(key)));
+                return Err(WriteError::IsADirectory(PathBuf::from(key)));
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -709,6 +711,8 @@ fn check_ownership(
         if !options.overwrite_unowned
             && !previous.files.contains_key(path)
             && !aliased.values().any(|new| new == path)
+            // Another spelling of one of our stale files, removed first.
+            && !is_going(out_dir, going, path)
             && on_disk.exists()
             // Already exactly what would be written: taking it over loses
             // nothing, which is how a deleted manifest is recovered.
@@ -814,7 +818,7 @@ fn read_recorded(path: &Path) -> Result<Option<Vec<u8>>, WriteError> {
 /// between its pending manifest and turning that file into a directory.
 fn check_recorded(out_dir: &Path, key: &str, going: &BTreeSet<String>) -> Result<(), WriteError> {
     match check_path(out_dir, key) {
-        Err(WriteError::NotADirectory(path)) if path == Path::new(key) => Ok(()),
+        Err(WriteError::IsADirectory(_)) => Ok(()),
         Err(WriteError::NotADirectory(blocker))
             if blocker
                 .to_str()
@@ -844,7 +848,7 @@ fn is_going(out_dir: &Path, going: &BTreeSet<String>, blocker: &str) -> bool {
 /// [`check_recorded`], once the run knows which stale files go.
 fn check_links(out_dir: &Path, key: &str) -> Result<(), WriteError> {
     match check_path(out_dir, key) {
-        Err(WriteError::NotADirectory(_)) => Ok(()),
+        Err(WriteError::NotADirectory(_) | WriteError::IsADirectory(_)) => Ok(()),
         other => other,
     }
 }
@@ -933,7 +937,6 @@ fn check_source(previous: &Manifest, options: &WriteOptions) -> Result<(), Write
     Ok(())
 }
 
-/// Write `content` to `path` through a temporary sibling and a rename.
 /// Remove the temporary files a killed run left beside the files it was
 /// writing. They hold generated content only, and with the lock held no
 /// other run can be writing them. Only directories this run writes into
@@ -968,6 +971,7 @@ fn remove_leftover_temps(
     Ok(())
 }
 
+/// Write `content` to `path` through a temporary sibling and a rename.
 fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io(parent))?;
@@ -1033,6 +1037,9 @@ pub fn write(
     }
     let target = generation.target;
     let manifest_file = manifest_name(&options.label, target)?;
+    // Refusals that need no directory come before one is created: a
+    // missing directory holds no manifest or file to refuse anything else.
+    let planned = planned(generation)?;
     check_out_dir(out_dir)?;
     fs::create_dir_all(out_dir).map_err(io(out_dir))?;
     check_out_dir(out_dir)?;
@@ -1040,7 +1047,6 @@ pub fn write(
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
-    let planned = planned(generation)?;
     for path in previous.files.keys() {
         check_links(out_dir, path)?;
     }
@@ -2679,5 +2685,57 @@ mod tests {
             ));
         }
         assert!(victim.exists());
+    }
+
+    #[test]
+    fn a_refused_write_creates_no_directory() {
+        let root = TempDir::new("no-create");
+        let out = root.0.join("new/dir");
+        assert!(
+            write(
+                &generation(&[("../a.rs", "a")]),
+                &out,
+                &WriteOptions::new("api")
+            )
+            .is_err()
+        );
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn a_directory_where_a_file_goes_is_named_as_such() {
+        let dir = TempDir::new("dir-in-way");
+        fs::create_dir(dir.0.join("a.rs")).unwrap();
+        let error = write(
+            &generation(&[("a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, WriteError::IsADirectory(_)), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_old_spelling_is_replaced_not_refused() {
+        let dir = TempDir::new("linked-respell");
+        write(
+            &generation(&[("Foo.rs", "v1")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        if !same_file(&dir.0.join("Foo.rs"), &dir.0.join("foo.rs")) {
+            return;
+        }
+        let backup = dir.0.join("backup");
+        fs::hard_link(dir.0.join("Foo.rs"), &backup).unwrap();
+        let next = generation(&[("foo.rs", "v2")]);
+        let mut opts = WriteOptions::new("api");
+        opts.overwrite_unowned = false;
+        assert!(check(&next, &dir.0, &opts).is_ok());
+        write(&next, &dir.0, &opts).unwrap();
+        assert_eq!(fs::read_to_string(dir.0.join("foo.rs")).unwrap(), "v2");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "v1");
     }
 }
