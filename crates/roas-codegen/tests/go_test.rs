@@ -438,9 +438,15 @@ fn every_single_kind_compiles_on_its_own() {
             "struct",
             serde_json::json!({"S": {"type": "object", "required": ["a"], "properties": {"a": {"type": ["string", "null"]}}}}),
         ),
+        // A substitution may be an interface, which takes no methods.
+        (
+            "interface",
+            serde_json::json!({"T": {"type": "string", "format": "thing", "minLength": 1}, "H": {"type": "object", "properties": {"t": {"$ref": "#/components/schemas/T"}, "u": {"type": "string", "format": "thing"}}}}),
+        ),
     ];
     for (tag, components) in cases {
-        let Some(generation) = go(components, "") else {
+        let toml = "[substitutions.thing.go]\nname = \"any\"\n";
+        let Some(generation) = go(components, toml) else {
             return;
         };
         let code = generation.unwrap().files.remove(0).contents;
@@ -451,4 +457,34 @@ fn every_single_kind_compiles_on_its_own() {
             panic!("{tag}: go vet failed\n{error}\n{code}");
         }
     }
+}
+
+#[test]
+fn a_substitution_spelled_like_a_null_holder_refuses_no_null() {
+    let components = serde_json::json!({
+        "Json": {},
+        "S": {"type": "object", "required": ["j"], "properties": {
+            "j": {"$ref": "#/components/schemas/Json"},
+            "l": {"type": "array", "items": {"$ref": "#/components/schemas/Json"}},
+            "names": {"type": "array", "items": {"type": ["string", "null"]}},
+            "id": {"type": "string", "format": "uuid"}
+        }}
+    });
+    let toml = "[substitutions.Json.go]\nname = \"jsontext.Value\"\n[substitutions.uuid.go]\nname = \"*string\"\n";
+    let Some(generation) = go(components, toml) else {
+        return;
+    };
+    let code = squeezed(&generation.unwrap().files[0].contents);
+    assert!(!code.contains("_ *jsontext.Value)"), "{code}");
+    assert!(!code.contains("_ **string)"), "{code}");
+    assert!(code.contains("_ *string)"), "{code}");
+    // `j` takes null as the substitution's value, as Rust's would.
+    assert!(
+        !code.contains("case \"j\":\nif d.PeekKind() == 'n'"),
+        "{code}"
+    );
+    assert!(
+        code.contains("J Nullable[jsontext.Value] `json:\"j\"`"),
+        "{code}"
+    );
 }

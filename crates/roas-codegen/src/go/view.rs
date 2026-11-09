@@ -387,8 +387,7 @@ impl Builder<'_> {
                 if let TypeKind::Extern = def.kind {
                     let component = def.component.clone().unwrap_or_default();
                     let spelled = self.extern_spelling(&component)?;
-                    self.refuse_null.insert(spelled.clone());
-                    spelled
+                    self.refused_extern(&spelled)
                 } else {
                     self.names[id].clone()
                 }
@@ -423,7 +422,7 @@ impl Builder<'_> {
             }
             TypeRef::Extern(key) => {
                 let spelled = self.extern_spelling(key)?;
-                self.refused(&spelled)
+                self.refused_extern(&spelled)
             }
         };
         Ok(spelled)
@@ -431,6 +430,19 @@ impl Builder<'_> {
 
     /// A type that stores its zero value for a JSON null, so the
     /// generated decoders refuse null for it explicitly.
+    /// A substituted type, refused null like any other — unless it is
+    /// spelled like a type the generator itself holds null in: a pointer,
+    /// `jsontext.Value`, or an interface. The refusal is per Go type, so it
+    /// would reach those positions too; such a substitution decides about
+    /// null itself, as its Rust spelling does.
+    fn refused_extern(&mut self, spelled: &str) -> String {
+        if null_holding_spelling(spelled) {
+            spelled.to_owned()
+        } else {
+            self.refused(spelled)
+        }
+    }
+
     fn refused(&mut self, spelled: &str) -> String {
         self.refuse_null.insert(spelled.to_owned());
         spelled.to_owned()
@@ -711,9 +723,18 @@ impl Builder<'_> {
             }
             TypeKind::Newtype(inner) | TypeKind::Alias(inner) => {
                 view.inner = self.spell(inner)?;
-                // Methods cannot be declared on a pointer type, and an alias
-                // keeps the methods of the type it names.
-                view.kind = if matches!(def.kind, TypeKind::Alias(_)) || view.inner.starts_with('*')
+                // Methods cannot be declared on a pointer type, nor on an
+                // interface, which a substituted type may be: the generator
+                // cannot tell. An alias keeps the methods of the type it
+                // names, so a substitution keeps its own JSON behaviour.
+                let substituted = match unboxed(inner) {
+                    TypeRef::Extern(_) => true,
+                    TypeRef::Named(id) => matches!(self.ir.types[id].kind, TypeKind::Extern),
+                    _ => false,
+                };
+                view.kind = if matches!(def.kind, TypeKind::Alias(_))
+                    || view.inner.starts_with('*')
+                    || substituted
                 {
                     "alias"
                 } else {
@@ -734,7 +755,12 @@ impl Builder<'_> {
             ty = match ty {
                 TypeRef::Any | TypeRef::Null => return true,
                 TypeRef::Boxed(inner) => inner,
+                TypeRef::Extern(key) => return self.extern_holds_null(key),
                 TypeRef::Named(id) => match &self.ir.types[id].kind {
+                    TypeKind::Extern => {
+                        let component = self.ir.types[id].component.as_deref();
+                        return self.extern_holds_null(component.unwrap_or_default());
+                    }
                     TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_) => return true,
                     TypeKind::Newtype(inner) | TypeKind::Alias(inner) => inner,
                     _ => return false,
@@ -743,6 +769,16 @@ impl Builder<'_> {
             };
         }
         false
+    }
+
+    /// A substituted type takes null as a value when it is spelled like
+    /// one that does.
+    fn extern_holds_null(&self, key: &str) -> bool {
+        self.config
+            .substitutions
+            .get(key)
+            .and_then(|s| s.go.as_ref())
+            .is_some_and(|go| null_holding_spelling(&go.name))
     }
 
     fn branches(
@@ -765,6 +801,15 @@ impl Builder<'_> {
         }
         Ok(out)
     }
+}
+
+/// A Go spelling the generator itself holds null in — a pointer,
+/// `jsontext.Value` — or an interface, which takes null as nil.
+fn null_holding_spelling(spelled: &str) -> bool {
+    spelled.starts_with('*')
+        || spelled == "jsontext.Value"
+        || spelled == "any"
+        || spelled.starts_with("interface")
 }
 
 /// The value type a pointer or a container already gives indirection to.
