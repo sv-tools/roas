@@ -234,6 +234,7 @@ struct DirLock {
     /// Held for the lock; released when dropped.
     _file: fs::File,
     /// Set when this run created the file.
+    #[cfg_attr(not(unix), allow(dead_code))]
     made: Option<PathBuf>,
 }
 
@@ -708,6 +709,9 @@ impl Drop for Created {
         }
         // Still locked while removed, so no run can take it in between;
         // a run that opened it before finds it gone and stops.
+        // Only where `still_there` can see it: elsewhere a run that opened
+        // the file first could lock a removed one, so it stays.
+        #[cfg(unix)]
         if let Some(path) = lock.as_ref().and_then(|l| l.made.as_ref()) {
             let _ = fs::remove_file(path);
         }

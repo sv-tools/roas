@@ -34,7 +34,17 @@ pub(crate) fn format(text: &str, edition: &str) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+    // rustfmt may exit before reading everything; the child is reaped
+    // either way, so a long-running caller collects no zombies.
+    let written = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    if !written {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
     let output = child.wait_with_output().ok()?;
     if !output.status.success() {
         return None;

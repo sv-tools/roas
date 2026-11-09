@@ -330,7 +330,7 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-    #[error("no target language: set `target = \"rust\"` in the configuration, or pass `--target`")]
+    #[error("no target language: set `target`")]
     MissingTarget,
     #[error(
         "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`, and not a keyword"

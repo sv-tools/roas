@@ -368,7 +368,12 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     if file.rust.module.is_none() {
         flags.rust.module = Some(roas_codegen::rust_module_name(&label));
     }
-    let config = file.merge(flags).build()?;
+    let config = file.merge(flags).build().map_err(|error| match error {
+        roas_codegen::ConfigError::MissingTarget => anyhow!(
+            "no target language: set `target = \"rust\"` in the configuration, or pass `--target rust`"
+        ),
+        other => other.into(),
+    })?;
 
     let generation = generate(&document, &config)?;
     let mut errors = 0;
