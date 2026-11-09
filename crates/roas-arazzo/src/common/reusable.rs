@@ -142,10 +142,10 @@ mod tests {
 
     #[test]
     fn round_trips_through_yaml() {
-        let v: ReusableOr<Demo> = serde_yaml_ng::from_str("name: petId\n").unwrap();
+        let v: ReusableOr<Demo> = crate::test_yaml::from_str("name: petId\n").unwrap();
         assert!(matches!(v, ReusableOr::Item(_)));
         let r: ReusableOr<Demo> =
-            serde_yaml_ng::from_str("reference: $components.parameters.foo\n").unwrap();
+            crate::test_yaml::from_str("reference: $components.parameters.foo\n").unwrap();
         assert!(matches!(r, ReusableOr::Reusable(_)));
     }
 

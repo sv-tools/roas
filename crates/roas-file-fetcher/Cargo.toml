@@ -21,13 +21,13 @@ default = []
 async = ["dep:tokio"]
 # Parse YAML file bodies in addition to JSON. Selection is by file path
 # extension (`.yaml` / `.yml`).
-yaml = ["dep:serde_yaml_ng"]
+yaml = ["dep:serde-saphyr"]
 
 [dependencies]
 roas = { workspace = true, features = ["v3_2"] }
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng = { workspace = true, optional = true }
+serde-saphyr = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["fs", "rt"] }
 url.workspace = true
 

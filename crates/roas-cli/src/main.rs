@@ -69,6 +69,8 @@ mod openapi;
 mod overlay;
 mod preview;
 mod versioned;
+mod yaml;
+mod yaml_value;
 
 use arazzo::ArazzoCommand;
 use asyncapi::AsyncApiCommand;
@@ -300,7 +302,7 @@ pub(crate) fn serialize_spec(
     pretty_json: bool,
 ) -> Result<String> {
     match format {
-        InputFormat::Yaml => serde_yaml_ng::to_string(value).context("serializing spec as YAML"),
+        InputFormat::Yaml => yaml::to_string(value).context("serializing spec as YAML"),
         InputFormat::Json => {
             let mut s = if pretty_json {
                 serde_json::to_string_pretty(value).context("serializing spec as JSON")?
@@ -459,7 +461,7 @@ pub(crate) mod tests {
         let v = serde_json::json!({"openapi":"3.2.0","info":{"title":"x","version":"1"}});
         let out = serialize_spec(&v, InputFormat::Yaml, false).expect("ok");
         // YAML structure: no curly braces at the top level, keys are bare,
-        // and serde_yaml_ng terminates documents with a newline.
+        // and the document ends with a newline.
         assert!(
             out.contains("openapi:"),
             "YAML output must use bare keys, got: {out}",
@@ -469,7 +471,7 @@ pub(crate) mod tests {
             "YAML output must not be JSON, got: {out}",
         );
         // Round-trips back to the same value.
-        let back: serde_json::Value = serde_yaml_ng::from_str(&out).unwrap();
+        let back = yaml::from_str(&out).unwrap();
         assert_eq!(back, v);
     }
 

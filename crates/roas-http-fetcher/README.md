@@ -19,7 +19,7 @@ Both forms are `Clone` so a single fetcher can be registered for both `http://` 
 - (default) JSON response bodies are parsed with `serde_json`.
 - `yaml` — also accept YAML response bodies. The fetcher sniffs `Content-Type`
   first (`application/yaml`, `application/x-yaml`, `text/yaml`, etc.) and falls
-  back to the URL path extension (`.yaml` / `.yml`). Pulls in `serde_yaml_ng`.
+  back to the URL path extension (`.yaml` / `.yml`). Pulls in `serde-saphyr`.
 
 ```toml
 [dependencies]

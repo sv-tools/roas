@@ -13,7 +13,31 @@ Validates HTTP requests against an [OpenAPI](https://spec.openapis.org/oas/lates
 use roas_http_validator::{RequestView, Validator};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-let spec = serde_yaml_ng::from_str(include_str!("petstore.openapi.yaml"))?;
+// The options every roas crate reads YAML with: YAML 1.2 booleans
+// (`yes` stays a string), `017` / `1_000` stay strings, merge keys are
+// expanded and duplicate keys rejected, and the budget raised so large
+// specs fit.
+let yaml = || serde_saphyr::options! {
+    budget: serde_saphyr::budget! {
+        max_nodes: 10_000_000,
+        max_events: 25_000_000,
+        max_aliases: 1_000_000,
+        max_anchors: 1_000_000,
+        max_merge_keys: 1_000_000,
+        enforce_alias_anchor_ratio: false,
+    },
+    alias_limits: serde_saphyr::alias_limits! {
+        max_total_replayed_events: 10_000_000,
+    },
+    strict_booleans: true,
+    ignore_binary_tag_for_string: true,
+    leading_zero_numbers_as_strings: true,
+    underscored_numbers_as_strings: true,
+    non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
+    merge_keys: serde_saphyr::MergeKeyPolicy::Merge,
+    duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+};
+let spec = serde_saphyr::from_str_with_options(include_str!("petstore.openapi.yaml"), yaml())?;
 let validator = Validator::new(spec);
 
 let request = RequestView::new("GET", "/pets").with_query("limit=1000");
@@ -147,9 +171,9 @@ What is left unchecked is only what will not fit: a literal past `i128`'s range 
 
 The *instance* side is always exact: a request body is JSON and this crate parses it itself.
 
-The *schema* side is exact as far as the format it was parsed from allows. `roas`'s numeric fields are `serde_json::Number` and this crate turns on its `exact-numbers` feature, which is what makes a `Number` keep its literal — so a **JSON** description is exact throughout. A **YAML** one is exact for every integer this crate can hold — both stop at exactly `i128`'s range, so nothing YAML loses would have been decidable in any format — but not for a literal written with a decimal point or an exponent: `serde_yaml_ng` reads those through an `f64` before `serde_json` is involved, so `maximum: 9007199254740993.5` arrives as `9007199254740994` and `maximum: 9007199254740993e0` arrives as `9007199254740992`. The rounded value still fits, so the verdict that follows is definite and wrong rather than reported — a request of `9007199254740994` is accepted against the first, and one of `9007199254740993` is rejected by the second. The same descriptions in JSON decide both correctly. That loss happens in the YAML parser, upstream of anything this crate or `roas` can reach.
+The *schema* side is exact as far as the format it was parsed from allows. `roas`'s numeric fields are `serde_json::Number` and this crate turns on its `exact-numbers` feature, which is what makes a `Number` keep its literal — so a **JSON** description is exact throughout. A **YAML** one is exact for every integer within the 64-bit range (`i64::MIN` to `u64::MAX`), but not for a wider decimal integer or for a literal written with a decimal point or an exponent: `serde-saphyr` reads those through an `f64` before `serde_json` is involved, so `maximum: 9007199254740993.5` arrives as `9007199254740994`, `maximum: 9007199254740993e0` arrives as `9007199254740992`, and `maximum: 18446744073709551617` arrives as `18446744073709552000`. The rounded value still fits, so the verdict that follows is definite and wrong rather than reported — a request of `9007199254740994` is accepted against the first, one of `9007199254740993` is rejected by the second, and one of `18446744073709551618` is accepted against the third. The same descriptions in JSON decide all three correctly. That loss happens in the YAML parser, upstream of anything this crate or `roas` can reach.
 
-In practice this needs a bound written in YAML with more significant digits than a double carries — 17-plus — *and* a decimal point or exponent, since a plain integer never goes near an `f64`. Ordinary decimals (`0.1`, `1.25`, `2.5`) round-trip YAML unchanged, and so does every integer in range — `2^53`, `i64::MAX`, `u64::MAX` and both ends of `i128` all survive. Past that range a number is reported as unchecked rather than compared, whatever it was parsed from.
+In practice this needs a bound written in YAML with more significant digits than a double carries — 17-plus — *and* either a decimal point or exponent, or an integer past the 64-bit range. Ordinary decimals (`0.1`, `1.25`, `2.5`) round-trip YAML unchanged, and so does every integer from `i64::MIN` to `u64::MAX` — `2^53`, `i64::MAX` and `u64::MAX` all survive. Write a wider bound in JSON if it must be exact. Past `i128`'s range a number is reported as unchecked rather than compared — for YAML, only if it is still past that range after rounding: `2^127` becomes `1.7014118346046923e38`, which fits, and is compared.
 
 ## Versions
 
