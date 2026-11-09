@@ -351,16 +351,16 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | Other unknown members | Dropped by the model; listed by `Description::unknown_members` | — | Preparation error (entry when given `Options::unknown_members`, external documents always) | A checked run refuses them; the lazy path never sees them |
 | OpenAPI 2.0 / 3.0 / 3.1 / 3.2 sources | Raw values with a checked version | `operationId`, `operationPath`, Path Item `$ref` chains, servers | Duplicate IDs, reference cycles, Path Item overlaps; no structural or schema validation | HTTP requests ([methods and servers](#openapi-operation-resolution)) |
 | AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Loaded as sources | AsyncAPI steps, `channel` parameters and `$message` expressions are preparation errors | Not run |
-| External Arazzo workflows | Typed models from the registry | `$sourceDescriptions.<name>.<workflowId>` | Structure, unknown members and the cross-document workflow graph | In their own document's scope; targets with their own `dependsOn` are refused |
+| External Arazzo workflows | Typed models from the registry | `$sourceDescriptions.<name>.<workflowId>` | Structure, unknown members and the cross-document workflow graph | In their own document's scope |
 | Components | Typed models | `$components.<kind>.<name>` by name | A missing component is a preparation error | Resolved where used |
 | Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>` | Syntax and references checked, with byte offsets | Evaluated, except `$message` (AsyncAPI) |
 | `simple` conditions | Strings | — | Parsed under the [condition profile](#condition-profile) | Evaluated, short-circuiting |
 | `regex` criteria | Typed criterion types | — | Constant patterns compiled | Evaluated |
-| JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535` | Evaluated as RFC 9535; a lazy run does not check the version |
+| JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run does not check the version |
 | JSON Pointer selectors (v1.1) and criteria | Typed | — | Pointer syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | Preparation error | Not run |
 | Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, local references | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
-| `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time; no parallel scheduling |
+| `dependsOn` | Typed | Step and workflow ids | Cycles rejected; a call, `goto` or `retry` to a workflow with its own `dependsOn` is refused | One at a time; no parallel scheduling; that call or transfer is refused when reached |
 
 ## Condition profile
 
@@ -523,18 +523,21 @@ run rejects the transfer when it reaches it, before the target starts.
 
 ### Locations and offsets
 
-Every offset this crate reports is a zero-based UTF-8 byte offset into a decoded
-string: `CriterionError::Syntax::offset` into the condition,
-`ExpressionError::Syntax` / `Navigation::offset` into the expression or operand
-held in its `expression` field, and `PreparationDiagnostic::offset` into the
-field's value as parsed, after quotes and escapes. Only preparation findings are
-mapped back to the original text: `PreparationDiagnostic::position`, a
-`roas_arazzo::source_map::SourcePosition`, is a byte offset plus a one-based line
-and a one-based column counted in Unicode scalar values. Runtime errors carry only
-the string offset. An editor speaking UTF-16, such as an LSP client, converts at its
-own boundary. A diagnostic about an operand boundary, such as a lone `=` or `&`
-inside a simple-condition operand, points at that operator character, so an editor
-can mark where the parser split the name.
+Offsets into a string are zero-based UTF-8 byte offsets into the decoded string:
+`CriterionError::Syntax::offset` into the condition, `ExpressionError::Syntax` /
+`Navigation::offset` into the expression or operand held in its `expression`
+field, and `PreparationDiagnostic::offset` into the field's value as parsed, after
+quotes and escapes. Only preparation findings are mapped back to the original
+text, when the document has a source map: `PreparationDiagnostic::span` is where
+the field's value (or, for a finding about a name, the name) is written, and
+`PreparationDiagnostic::position` is where `offset` falls, when the finding has
+one. Both are `roas_arazzo::source_map` positions: a zero-based UTF-8 byte offset
+into the original text plus a one-based line and a one-based column counted in
+Unicode scalar values. Runtime errors carry only the string offset. An editor
+speaking UTF-16, such as an LSP client, converts at its own boundary. A diagnostic
+about an operand boundary, such as a lone `=` or `&` inside a simple-condition
+operand, points at that operator character, so an editor can mark where the
+parser split the name.
 
 ### Workflow input validation
 
