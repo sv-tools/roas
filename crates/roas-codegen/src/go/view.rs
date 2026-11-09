@@ -85,6 +85,9 @@ pub(crate) struct SupportView {
     /// Substituted types likewise, whose own decoding then runs without
     /// the generated rules, as the substitution decides the rest itself.
     pub refuse_null_isolated: Vec<String>,
+    /// Substituted types that hold null themselves: decoded without the
+    /// generated rules, null included.
+    pub isolated: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,6 +205,7 @@ struct Builder<'a> {
     support: SupportView,
     refuse_null: BTreeSet<String>,
     refuse_null_isolated: BTreeSet<String>,
+    isolated: BTreeSet<String>,
     externs: BTreeSet<String>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -229,6 +233,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         support: SupportView::default(),
         refuse_null: BTreeSet::new(),
         refuse_null_isolated: BTreeSet::new(),
+        isolated: BTreeSet::new(),
         externs: BTreeSet::new(),
         diagnostics: Vec::new(),
     };
@@ -252,6 +257,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         .difference(&builder.refuse_null)
         .cloned()
         .collect();
+    builder.support.isolated = builder.isolated.iter().cloned().collect();
     let mut imports = Vec::new();
     let mut dependencies = Vec::new();
     if !types.is_empty() {
@@ -450,6 +456,9 @@ impl Builder<'_> {
     fn refused_extern(&mut self, spelled: &str) -> String {
         if !null_holding_spelling(spelled) {
             self.refuse_null_isolated.insert(spelled.to_owned());
+        } else if spelled != "jsontext.Value" {
+            // Raw JSON has nothing inside to reach.
+            self.isolated.insert(spelled.to_owned());
         }
         spelled.to_owned()
     }

@@ -537,3 +537,24 @@ fn a_substitution_decodes_by_its_own_rules() {
         panic!("go vet failed\n{error}\n{code}");
     }
 }
+
+#[test]
+fn a_pointer_substitution_is_isolated_but_takes_null() {
+    let components = serde_json::json!({
+        "Meta": {"type": "object"},
+        "Holder": {"type": "object", "properties": {"meta": {"$ref": "#/components/schemas/Meta"}, "name": {"type": "string"}}}
+    });
+    let toml = "[substitutions.Meta.go]\nname = \"*url.URL\"\nimport = \"net/url\"\n";
+    let Some(generation) = go(components, toml) else {
+        return;
+    };
+    let code = generation.unwrap().files.remove(0).contents;
+    let squeezed = squeezed(&code);
+    assert!(
+        squeezed.contains("json.UnmarshalFromFunc(func(d *jsontext.Decoder, v **url.URL) error {\nreturn json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))"),
+        "{squeezed}"
+    );
+    if let Some(Err(error)) = vet(&code, "pointer") {
+        panic!("go vet failed\n{error}\n{code}");
+    }
+}
