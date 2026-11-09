@@ -151,6 +151,10 @@ pub enum WriteError {
     )]
     Locked(PathBuf),
     #[error(
+        "generated paths {0} and {1} collide: the same file ignoring case, or a file where the other needs a directory"
+    )]
+    ConflictingPaths(PathBuf, PathBuf),
+    #[error(
         "label {label:?} belongs to output generated from {previous:?}, not {current:?}; if the description moved, allow replacing the recorded source (`roas openapi generate --force`) or delete the label's manifest; if it is a different description, give it its own label"
     )]
     SourceMismatch {
@@ -362,16 +366,44 @@ fn other_owners(out_dir: &Path, ours: &str) -> Result<BTreeMap<String, PathBuf>,
 /// The generated files keyed for the manifest, with their contents.
 fn planned(generation: &Generation) -> Result<BTreeMap<String, &str>, WriteError> {
     let mut out = BTreeMap::new();
+    // Compared case-insensitively throughout: the disk may be.
+    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
     for file in &generation.files {
         let key = key(&file.path)?;
-        let name = key.rsplit('/').next().unwrap_or(&key);
+        let lower = key.to_ascii_lowercase();
+        let name = lower.rsplit('/').next().unwrap_or(&lower);
         if (name.starts_with(MANIFEST_PREFIX) && name.ends_with(MANIFEST_SUFFIX))
             || name.contains(TMP_MARKER)
-            || name.eq_ignore_ascii_case(LOCK_FILE)
+            || name == LOCK_FILE
         {
             return Err(WriteError::ReservedPath(file.path.clone()));
         }
+        if let Some(other) = seen.insert(lower, file.path.clone()) {
+            return Err(WriteError::ConflictingPaths(other, file.path.clone()));
+        }
         out.insert(key, file.contents.as_str());
+    }
+    // A file cannot also be a directory another generated file sits in.
+    for path in seen.keys() {
+        let mut prefix = String::new();
+        for part in path
+            .split('/')
+            .collect::<Vec<_>>()
+            .split_last()
+            .map(|(_, dirs)| dirs.to_vec())
+            .unwrap_or_default()
+        {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            if let Some(file) = seen.get(&prefix) {
+                return Err(WriteError::ConflictingPaths(
+                    file.clone(),
+                    seen[path].clone(),
+                ));
+            }
+        }
     }
     Ok(out)
 }
@@ -446,8 +478,12 @@ fn outcome(
         .map(|(p, c)| (p.clone(), hash(c.as_bytes())))
         .collect();
     let mut removable = Vec::new();
+    let planned_lower: std::collections::BTreeSet<String> =
+        planned.keys().map(|p| p.to_ascii_lowercase()).collect();
     for (path, recorded) in previous {
-        if planned.contains_key(path) {
+        // A case-only rename is the same file on a case-insensitive disk:
+        // it must never be removed as stale under its old spelling.
+        if planned_lower.contains(&path.to_ascii_lowercase()) {
             continue;
         }
         if has_errors {
@@ -1470,5 +1506,73 @@ mod tests {
             .unwrap()
             .is_clean()
         );
+    }
+
+    #[test]
+    fn conflicting_and_case_variant_paths_are_refused_up_front() {
+        let dir = TempDir::new("conflicts");
+        for files in [
+            vec![("a", "x"), ("a/types.rs", "y")],
+            vec![("Types.rs", "x"), ("types.rs", "y")],
+            vec![("A", "x"), ("a/b.rs", "y")],
+        ] {
+            let error = write(
+                &generation(&files),
+                &dir.0,
+                Target::Rust,
+                &WriteOptions::new("api"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, WriteError::ConflictingPaths(..)),
+                "{files:?}: {error}"
+            );
+        }
+        assert!(
+            fs::read_dir(&dir.0).unwrap().next().is_none(),
+            "nothing written"
+        );
+        let mut options = WriteOptions::new("api");
+        options.overwrite_unowned = true;
+        let error = write(
+            &generation(&[(".ROAS-CODEGEN-api-rust.JSON", "x")]),
+            &dir.0,
+            Target::Rust,
+            &options,
+        )
+        .unwrap_err();
+        assert!(matches!(error, WriteError::ReservedPath(_)), "{error}");
+    }
+
+    #[test]
+    fn a_case_only_rename_never_deletes_the_new_file() {
+        let dir = TempDir::new("case-rename");
+        write(
+            &generation(&[("Types.rs", "same")]),
+            &dir.0,
+            Target::Rust,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let mut options = WriteOptions::new("api");
+        options.overwrite_unowned = true;
+        let report = write(
+            &generation(&[("types.rs", "same")]),
+            &dir.0,
+            Target::Rust,
+            &options,
+        )
+        .unwrap();
+        assert!(report.removed.is_empty(), "{report:?}");
+        let names: Vec<String> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| {
+                e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+            })
+            .collect();
+        assert!(names.contains(&"types.rs".to_owned()), "{names:?}");
     }
 }

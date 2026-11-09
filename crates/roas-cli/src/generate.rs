@@ -194,20 +194,21 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
 /// The canonical form of `path`, resolving its deepest existing ancestor
 /// and appending the rest lexically.
 fn resolve(path: &Path) -> Option<PathBuf> {
-    let absolute = normalize(&std::path::absolute(path).ok()?);
-    let mut existing = absolute.as_path();
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(existing) {
+    // The filesystem resolves first, `..` included, so `link/..` means the
+    // link's parent; only the part that does not exist yet is lexical.
+    let absolute = std::path::absolute(path).ok()?;
+    let parts: Vec<_> = absolute.components().collect();
+    for split in (1..=parts.len()).rev() {
+        let prefix: PathBuf = parts[..split].iter().collect();
+        if let Ok(real) = std::fs::canonicalize(&prefix) {
             let mut out = real;
-            for part in rest.iter().rev() {
+            for part in &parts[split..] {
                 out.push(part);
             }
-            return Some(out);
+            return Some(normalize(&out));
         }
-        rest.push(existing.file_name()?.to_owned());
-        existing = existing.parent()?;
     }
+    None
 }
 
 /// Resolve `.` and `..` lexically: `std::path::absolute` keeps them, and
@@ -749,6 +750,17 @@ mod tests {
             assert_eq!(
                 source_id(&via_link, &real.join("out")),
                 source_id(&file, &link.join("out"))
+            );
+            // A symlink followed by `..` is resolved by the filesystem:
+            // `spec/up/..` is wherever `up` points, not `spec`.
+            std::os::unix::fs::symlink(real.join("billing"), real.join("spec/up")).unwrap();
+            let through = InputSource::File(real.join("spec/up/../billing/openapi.json"));
+            assert_eq!(
+                source_id(&through, &real.join("out")),
+                source_id(
+                    &InputSource::File(real.join("billing/openapi.json")),
+                    &real.join("out")
+                )
             );
         }
     }
