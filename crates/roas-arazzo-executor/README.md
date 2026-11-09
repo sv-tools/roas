@@ -477,8 +477,9 @@ Source identity loading is opt-in and occurs before preparation;
 referenced OpenAPI resolution uses the already-supplied document graph.
 Checked JSONPath execution supports `rfc9535`, not the alternate Goessner draft.
 Entry-workflow dependencies are supported; calls/recovery transfers to workflows
-with their own `dependsOn` are rejected by the checked path because the engine
-does not yet schedule those nested dependencies.
+with their own `dependsOn` are rejected because the engine does not yet schedule
+those nested dependencies. Preparation rejects them before any request; a lazy
+run rejects the transfer when it reaches it, before the target starts.
 
 ### Workflow input validation
 
@@ -633,6 +634,11 @@ An explicit `Options::source` entry for an Arazzo alias also decides which
 document `$sourceDescriptions.<alias>.<id>` runs. An owned value cannot hold an
 Arazzo document, so it is reported as an error. Local calls, their reports and their diagnostics are
 unchanged.
+
+A lazy run (`execute`, `Run::start`) used to enter a called, `goto` or `retry`
+target that declares its own `dependsOn` without running those dependencies. It
+now stops there with the `ExecutionError::Unsupported` that preparation already
+reported, so both paths refuse the same descriptions.
 
 ## What it does not run
 

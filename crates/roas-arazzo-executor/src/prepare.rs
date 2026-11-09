@@ -599,8 +599,10 @@ impl<'d> Compiler<'d> {
         }
         match self.documents.resolve(self.current, id) {
             Ok((doc, index)) => {
-                if invocation && !self.documents.workflow(doc, index).depends_on.is_empty() {
-                    self.error(site, ExecutionError::Unsupported(format!("called workflow `{id}` declares dependsOn; dependency scheduling for nested calls is not supported")));
+                if invocation
+                    && let Err(error) = run::invocable(id, self.documents.workflow(doc, index))
+                {
+                    self.error(site, error);
                 }
                 self.pending.insert((doc, index));
             }

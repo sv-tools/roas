@@ -1051,7 +1051,7 @@ fn a_linked_source_that_is_not_arazzo_says_so() {
 }
 
 #[test]
-fn a_called_external_workflow_with_its_own_dependencies_is_rejected_by_preparation() {
+fn a_called_external_workflow_with_its_own_dependencies_is_rejected_on_both_paths() {
     let mut documents = standard();
     documents[2].1["workflows"][0]["dependsOn"] = json!(["other"]);
     documents[2].1 = with_workflow(
@@ -1062,6 +1062,16 @@ fn a_called_external_workflow_with_its_own_dependencies_is_rejected_by_preparati
     let graph = Graph::new(&documents);
     let error = prepare(&graph.description, &graph.options("main")).unwrap_err();
     assert!(error.to_string().contains("declares dependsOn"), "{error}");
+    // The lazy run refuses at the call, before the callee or its dependency
+    // sends anything; the reference is the entry's, so it stays unwrapped.
+    let mut client = Fake::new().reply(200, &ok("root")).reply(200, &ok("local"));
+    let error = execute(&graph.description, &graph.options("main"), &mut client).unwrap_err();
+    assert!(
+        matches!(&error, ExecutionError::Unsupported(reason)
+            if reason.contains("`$sourceDescriptions.shared.child` declares dependsOn")),
+        "{error}"
+    );
+    assert_eq!(client.sent().len(), 2);
 }
 
 #[cfg(feature = "input-validation")]

@@ -966,6 +966,7 @@ impl<'d> Run<'d> {
         let wanted = step.workflow_id.clone().unwrap_or_default();
         let (doc, at) = self.documents.resolve(frame.doc, &wanted)?;
         let workflow = self.documents.workflow(doc, at);
+        invocable(&wanted, workflow)?;
         let description = self.documents.get(frame.doc).description;
 
         // A workflow step's parameters are the workflow's inputs.
@@ -1288,6 +1289,8 @@ impl<'d> Run<'d> {
                             .resolve(frame.doc, &workflow_id)
                             .map_err(|error| locate(&self.documents, here, error))?;
                         let workflow = self.documents.workflow(doc, at);
+                        invocable(&workflow_id, workflow)
+                            .map_err(|error| locate(&self.documents, here, error))?;
                         let inputs = self
                             .arguments(&arguments)
                             .map_err(|error| locate(&self.documents, here, error))?;
@@ -1317,6 +1320,8 @@ impl<'d> Run<'d> {
                     .resolve(frame.doc, &workflow_id)
                     .map_err(|error| locate(&self.documents, here, error))?;
                 let workflow = self.documents.workflow(doc, at);
+                invocable(&workflow_id, workflow)
+                    .map_err(|error| locate(&self.documents, here, error))?;
                 let inputs = self
                     .arguments(&arguments)
                     .map_err(|error| locate(&self.documents, here, error))?;
@@ -1389,6 +1394,20 @@ fn describe(action: &Action) -> Option<String> {
             ..
         } => Some(format!("goto workflow `{workflow}`")),
         Action::Goto { .. } => None,
+    }
+}
+
+/// Whether `workflow` may be entered by a call, `goto` or `retry` named
+/// `reference`. Only the run's own workflow and its dependencies are
+/// scheduled after their `dependsOn`; a nested target with dependencies of
+/// its own would run without them, so both execution paths refuse it.
+pub(crate) fn invocable(reference: &str, workflow: &Workflow) -> Result<(), ExecutionError> {
+    if workflow.depends_on.is_empty() {
+        Ok(())
+    } else {
+        Err(ExecutionError::Unsupported(format!(
+            "called workflow `{reference}` declares dependsOn; dependency scheduling for nested calls is not supported"
+        )))
     }
 }
 
