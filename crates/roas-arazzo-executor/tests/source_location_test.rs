@@ -181,3 +181,19 @@ fn a_finding_about_the_callers_options_is_not_placed_in_the_document() {
     let inputs = find(&found, "options.inputs");
     assert_eq!((inputs.span, inputs.position), (None, None), "{inputs}");
 }
+
+#[test]
+fn a_finding_about_a_members_name_is_placed_at_the_name() {
+    let text = TEXT.replace(
+        "components:\n",
+        "components:\n  inputs:\n    bad key:\n      type: object\n",
+    );
+    assert_ne!(text, TEXT);
+    let found = diagnostics(
+        &text,
+        &options().source_map(SourceMap::parse(text.clone()).unwrap()),
+    );
+    let key = find(&found, "#.components.inputs.bad key");
+    let span = key.span.expect("located");
+    assert_eq!((span.start.line, span.start.column), (24, 5), "{key}");
+}

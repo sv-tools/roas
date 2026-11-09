@@ -589,7 +589,11 @@ impl<'d> Compiler<'d> {
             .source_map
             .as_deref()
             .filter(|_| site.path.starts_with('#'));
-        let span = map.and_then(|map| map.locate(&site.path));
+        let span = map.and_then(|map| match &issue {
+            // A finding about a member's name is where the name is written.
+            PreparationIssue::Model(error) if error.is_about_key() => map.locate_key(&site.path),
+            _ => map.locate(&site.path),
+        });
         let position = map
             .zip(offset)
             .and_then(|(map, offset)| map.locate_in(&site.path, offset));

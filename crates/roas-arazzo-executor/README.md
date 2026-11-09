@@ -414,9 +414,10 @@ step context, a byte offset where available, and the original model/executor err
 Paths use the model validator's human-readable notation, not JSON Pointer; a
 reusable value's path names its component while the workflow/step identifies its use.
 
-Give `Options::source_map` a `roas_arazzo::source_map::SourceMap` of the text the
-description was parsed from, and each finding also carries `span` (where its field's
-value is written) and `position` (where `offset` falls in that text, through escapes
+Give `Options::source_map` a `roas_arazzo::source_map::SourceMap` (built with
+`roas-arazzo`'s `source-map` feature) of the text the description was parsed from,
+and each finding also carries `span` (where its field's value is written, or its
+name for a finding about the name) and `position` (where `offset` falls in that text, through escapes
 and YAML folding); its display then reads `… at line 12, column 31: …` instead of
 `… at byte 9`. Without a map, or for a value the map cannot decode exactly, nothing
 is guessed: `position` stays `None` and the byte offset is shown. Only checked

@@ -143,7 +143,9 @@ pub(crate) fn detect_or_use_arazzo(
 /// was read from.
 pub(crate) struct ReadArazzo {
     pub(crate) detected: DetectedArazzo,
-    pub(crate) value: Value,
+    /// The parsed document, kept only when asked for (`run` loads its
+    /// sources from it).
+    pub(crate) value: Option<Value>,
     pub(crate) format: InputFormat,
     pub(crate) text: String,
 }
@@ -159,11 +161,21 @@ impl ReadArazzo {
 /// Read, detect and deserialize an Arazzo description. A description that
 /// does not fit the model names the field that did not, and where it is.
 pub(crate) fn read_arazzo(source: &InputSource, format: Option<InputFormat>) -> Result<ReadArazzo> {
+    read_arazzo_as(source, format, false)
+}
+
+/// [`read_arazzo`], keeping the parsed document when `keep` is set.
+fn read_arazzo_as(
+    source: &InputSource,
+    format: Option<InputFormat>,
+    keep: bool,
+) -> Result<ReadArazzo> {
     let (text, value, format) = read_input_text(source, format)?;
-    let detected = detect_or_use_arazzo(None, value.clone(), &text)?;
+    let kept = keep.then(|| value.clone());
+    let detected = detect_or_use_arazzo(None, value, &text)?;
     Ok(ReadArazzo {
         detected,
-        value,
+        value: kept,
         format,
         text,
     })
@@ -209,9 +221,8 @@ fn model_path(path: &serde_path_to_error::Path) -> String {
 /// A validation finding, with its line and column when the map has them:
 /// those of the member name for a finding about the name, else the value.
 fn located(map: Option<&SourceMap>, error: &ValidationError) -> String {
-    let about_key = error.message.starts_with("key must match");
     match map.and_then(|map| {
-        if about_key {
+        if error.is_about_key() {
             map.locate_key(&error.path)
         } else {
             map.locate(&error.path)
@@ -527,7 +538,7 @@ fn inputs_of(workflow: &v1_1::Workflow) -> Vec<String> {
 
 fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
-    let read = read_arazzo(&source, args.format)?;
+    let read = read_arazzo_as(&source, args.format, true)?;
     let map = read.source_map();
     let ReadArazzo {
         detected,
@@ -535,6 +546,7 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
         format: input_format,
         ..
     } = read;
+    let value = value.expect("kept for `run`");
     // One interpreter: a v1.0 description is upconverted first.
     let description = match detected {
         DetectedArazzo::V1_1(description) => description,

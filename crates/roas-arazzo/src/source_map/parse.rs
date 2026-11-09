@@ -203,6 +203,8 @@ fn node(
             };
         if indentless {
             start = dash - 1;
+        } else if let Some(at) = empty_first_item(text, &kind, first, start) {
+            start = at;
         }
         end = match text.as_bytes().get(start) {
             Some(b'[' | b'{') if !indentless => closing(text, start, end),
@@ -233,6 +235,31 @@ fn node(
     )
 }
 
+/// An indentless sequence whose first item is empty (`a:\n- # note`,
+/// `a:\n-\n- x`) is reported at the end of that item's line, past its
+/// `-` and any comment: back up to the `-`, if only indentation is
+/// before it. Only that one line is looked at.
+fn empty_first_item(text: &str, kind: &Kind, first: Option<usize>, start: usize) -> Option<usize> {
+    let Kind::Seq(items) = kind else { return None };
+    let item = items.first()?;
+    if first != Some(start) || item.start != item.end || !matches!(item.kind, Kind::Scalar(None)) {
+        return None;
+    }
+    let line = text[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
+    let prefix = &text[line..start];
+    let comment = prefix
+        .char_indices()
+        .find(|&(at, c)| c == '#' && (at == 0 || prefix[..at].ends_with([' ', '\t'])))
+        .map_or(prefix.len(), |(at, _)| at);
+    let before = prefix[..comment]
+        .trim_end_matches([' ', '\t'])
+        .strip_suffix('-')?;
+    before
+        .bytes()
+        .all(|byte| byte == b' ')
+        .then_some(line + before.len())
+}
+
 /// A block collection has no delimiter: it ends at its last key or value,
 /// and past the `:` of an empty last value. A `<<` merge ending a map is
 /// not seen as a member, so it is not in the range.
@@ -258,11 +285,36 @@ fn closing(text: &str, start: usize, end: usize) -> usize {
     };
     let bytes = text.as_bytes();
     let mut at = end.max(start + 1);
+    // Inside a trailing `<<: *a` / `<<: [*a, *b]`, which adds no member
+    // when every merged one is overridden: how deep in its `[…]`.
+    let mut merge = None;
     while let Some(&byte) = bytes.get(at) {
-        match byte {
-            b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'?' => at += 1,
-            b'#' => at += text[at..].find(['\n', '\r']).unwrap_or(text.len() - at),
-            byte if byte == close => return at + 1,
+        match (byte, merge) {
+            (b' ' | b'\t' | b'\n' | b'\r' | b':' | b'?', _) => at += 1,
+            (b',', Some(0)) => {
+                merge = None;
+                at += 1;
+            }
+            (b',', _) => at += 1,
+            (b'#', _) => at += text[at..].find(['\n', '\r']).unwrap_or(text.len() - at),
+            (b'<', None) if text[at..].starts_with("<<") => {
+                merge = Some(0);
+                at += 2;
+            }
+            (b'*', Some(_)) => {
+                at += text[at..]
+                    .find([' ', '\t', '\n', '\r', ',', '[', ']', '{', '}'])
+                    .unwrap_or(text.len() - at);
+            }
+            (b'[', Some(depth)) => {
+                merge = Some(depth + 1);
+                at += 1;
+            }
+            (b']', Some(depth)) if depth > 0 => {
+                merge = Some(depth - 1);
+                at += 1;
+            }
+            (byte, Some(0) | None) if byte == close => return at + 1,
             _ => break,
         }
     }
@@ -697,6 +749,39 @@ workflows:
         let map = SourceMap::parse("a:\n  - x\n").unwrap();
         assert_eq!(map.locate("#.a").unwrap().start.offset, 5);
         assert_eq!(map.locate("#.a[0]").unwrap().start.offset, 7);
+    }
+
+    #[test]
+    fn an_indentless_sequence_with_an_empty_first_item_starts_at_its_dash() {
+        for (text, range) in [
+            ("a:\n- # placeholder\n- x\n", (3, 22)),
+            ("a:\n- # c\n", (3, 8)),
+            ("a:\n-\n- x\n", (3, 8)),
+            ("a:\n-\n", (3, 4)),
+            ("a:\n- \n- x\n", (3, 9)),
+        ] {
+            let map = SourceMap::parse(text).unwrap();
+            let a = map.locate("#.a").unwrap();
+            assert_eq!((a.start.offset, a.end.offset), range, "{text:?}");
+        }
+        // An indented sequence is reported at its dash already.
+        let map = SourceMap::parse("a:\n  - # c\n  - x\n").unwrap();
+        assert_eq!(map.locate("#.a").unwrap().start.offset, 5);
+        let map = SourceMap::parse("a:\n- - # c\n").unwrap();
+        assert_eq!(map.locate("#.a").unwrap().start.offset, 3);
+    }
+
+    #[test]
+    fn a_flow_map_ends_past_a_trailing_merge_that_adds_nothing() {
+        for (text, close) in [
+            ("base: &b {foo: x}\nobj: {foo: y, <<: *b}\n", 39),
+            ("base: &b {foo: x}\nobj: {foo: y, << : [ *b, *b ] }\n", 49),
+            ("base: &b {foo: x}\nobj: [{foo: y, <<: *b}]\n", 41),
+        ] {
+            let map = SourceMap::parse(text).unwrap();
+            let obj = map.locate("#.obj").unwrap();
+            assert_eq!((obj.start.offset, obj.end.offset), (23, close), "{text:?}");
+        }
     }
 
     #[test]
