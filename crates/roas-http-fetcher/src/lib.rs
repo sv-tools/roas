@@ -23,7 +23,7 @@
 use reqwest::Client as AsyncClient;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
-use reqwest::header::CONTENT_TYPE;
+use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use roas::loader::{
     AsyncResourceFetcher, DocumentFetchFuture, FetchFuture, LoadedDocument, LoaderError,
     ResourceFetcher,
@@ -84,6 +84,25 @@ impl Fetcher<Client> {
     pub fn with_client(client: Client) -> Self {
         Self { client }
     }
+
+    /// [`ResourceFetcher::fetch_document`], also returning the body the
+    /// document was parsed from, for callers that report where in it
+    /// something is.
+    pub fn fetch_document_text(
+        &mut self,
+        uri: &Url,
+    ) -> Result<(LoadedDocument, String), LoaderError> {
+        check_scheme(uri)?;
+        let response = self.client.get(uri.as_str()).send().map_err(|source| {
+            fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
+        })?;
+        let (retrieval, content_type) =
+            accepted(uri, response.status(), response.headers(), response.url())?;
+        let bytes = response.bytes().map_err(|source| {
+            fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
+        })?;
+        with_text(uri, retrieval, content_type.as_deref(), &bytes)
+    }
 }
 
 impl Default for Fetcher<Client> {
@@ -115,6 +134,30 @@ impl Fetcher<AsyncClient> {
     pub fn with_client(client: AsyncClient) -> Self {
         Self { client }
     }
+
+    /// [`AsyncResourceFetcher::fetch_document`], also returning the body
+    /// the document was parsed from, for callers that report where in it
+    /// something is.
+    pub async fn fetch_document_text(
+        &mut self,
+        uri: &Url,
+    ) -> Result<(LoadedDocument, String), LoaderError> {
+        check_scheme(uri)?;
+        let response = self
+            .client
+            .get(uri.as_str())
+            .send()
+            .await
+            .map_err(|source| {
+                fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
+            })?;
+        let (retrieval, content_type) =
+            accepted(uri, response.status(), response.headers(), response.url())?;
+        let bytes = response.bytes().await.map_err(|source| {
+            fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
+        })?;
+        with_text(uri, retrieval, content_type.as_deref(), &bytes)
+    }
 }
 
 impl Default for Fetcher<AsyncClient> {
@@ -133,22 +176,8 @@ impl ResourceFetcher for Fetcher<Client> {
         let response = self.client.get(uri.as_str()).send().map_err(|source| {
             fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
         })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(fetch_error(
-                uri.as_str().to_string(),
-                HttpFetchError::Status { status },
-            ));
-        }
-
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        let retrieval = response.url().clone();
+        let (retrieval, content_type) =
+            accepted(uri, response.status(), response.headers(), response.url())?;
         let bytes = response.bytes().map_err(|source| {
             fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
         })?;
@@ -170,22 +199,8 @@ impl AsyncResourceFetcher for Fetcher<AsyncClient> {
             let response = client.get(uri.as_str()).send().await.map_err(|source| {
                 fetch_error(uri.as_str().to_string(), HttpFetchError::Request { source })
             })?;
-
-            let status = response.status();
-            if !status.is_success() {
-                return Err(fetch_error(
-                    uri.as_str().to_string(),
-                    HttpFetchError::Status { status },
-                ));
-            }
-
-            let content_type = response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-
-            let retrieval = response.url().clone();
+            let (retrieval, content_type) =
+                accepted(uri, response.status(), response.headers(), response.url())?;
             let bytes = response.bytes().await.map_err(|source| {
                 fetch_error(uri.as_str().to_string(), HttpFetchError::Body { source })
             })?;
@@ -194,6 +209,43 @@ impl AsyncResourceFetcher for Fetcher<AsyncClient> {
                 .map(|document| LoadedDocument::new(document, retrieval))
         })
     }
+}
+
+/// A successful response's final location and `Content-Type`, or the
+/// error for an unsuccessful one.
+fn accepted(
+    uri: &Url,
+    status: StatusCode,
+    headers: &HeaderMap,
+    retrieval: &Url,
+) -> Result<(Url, Option<String>), LoaderError> {
+    if !status.is_success() {
+        return Err(fetch_error(
+            uri.as_str().to_string(),
+            HttpFetchError::Status { status },
+        ));
+    }
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    Ok((retrieval.clone(), content_type))
+}
+
+/// The document a body holds, and the body as text.
+fn with_text(
+    requested: &Url,
+    retrieval: Url,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<(LoadedDocument, String), LoaderError> {
+    let document = parse_body(requested, &retrieval, content_type, bytes)?;
+    // Neither parser accepts anything but UTF-8, so this never fails.
+    let text = String::from_utf8(bytes.to_vec()).map_err(|error| LoaderError::Parse {
+        uri: retrieval.as_str().to_string(),
+        source: <serde_json::Error as serde::de::Error>::custom(error),
+    })?;
+    Ok((LoadedDocument::new(document, retrieval), text))
 }
 
 fn check_scheme(uri: &Url) -> Result<(), LoaderError> {

@@ -16,7 +16,7 @@
 
 #[cfg(feature = "async")]
 use roas::loader::{AsyncResourceFetcher, FetchFuture};
-use roas::loader::{LoaderError, ResourceFetcher};
+use roas::loader::{LoadedDocument, LoaderError, ResourceFetcher};
 #[cfg(feature = "yaml")]
 use serde::de::Error as _;
 use serde_json::Value;
@@ -32,6 +32,17 @@ impl FileFetcher {
     /// Construct a blocking file fetcher.
     pub fn new() -> Self {
         Self
+    }
+
+    /// [`ResourceFetcher::fetch_document`], also returning the text the
+    /// document was parsed from, for callers that report where in it
+    /// something is.
+    pub fn fetch_document_text(
+        &mut self,
+        uri: &Url,
+    ) -> Result<(LoadedDocument, String), LoaderError> {
+        let bytes = read(uri)?;
+        with_text(uri, bytes)
     }
 }
 
@@ -50,30 +61,56 @@ impl AsyncFileFetcher {
     pub fn new() -> Self {
         Self
     }
+
+    /// [`AsyncResourceFetcher::fetch_document`], also returning the text
+    /// the document was parsed from, for callers that report where in it
+    /// something is.
+    pub async fn fetch_document_text(
+        &mut self,
+        uri: &Url,
+    ) -> Result<(LoadedDocument, String), LoaderError> {
+        let bytes = read_async(uri).await?;
+        with_text(uri, bytes)
+    }
 }
 
 impl ResourceFetcher for FileFetcher {
     fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
-        check_scheme(uri)?;
-        let path = uri_to_path(uri)?;
-        let bytes =
-            std::fs::read(&path).map_err(|source| LoaderError::ReadFile { path, source })?;
-        parse_body(uri, &bytes)
+        parse_body(uri, &read(uri)?)
     }
 }
 
 #[cfg(feature = "async")]
 impl AsyncResourceFetcher for AsyncFileFetcher {
     fn fetch<'a>(&'a mut self, uri: &'a Url) -> FetchFuture<'a> {
-        Box::pin(async move {
-            check_scheme(uri)?;
-            let path = uri_to_path(uri)?;
-            let bytes = tokio::fs::read(&path)
-                .await
-                .map_err(|source| LoaderError::ReadFile { path, source })?;
-            parse_body(uri, &bytes)
-        })
+        Box::pin(async move { parse_body(uri, &read_async(uri).await?) })
     }
+}
+
+fn read(uri: &Url) -> Result<Vec<u8>, LoaderError> {
+    check_scheme(uri)?;
+    let path = uri_to_path(uri)?;
+    std::fs::read(&path).map_err(|source| LoaderError::ReadFile { path, source })
+}
+
+#[cfg(feature = "async")]
+async fn read_async(uri: &Url) -> Result<Vec<u8>, LoaderError> {
+    check_scheme(uri)?;
+    let path = uri_to_path(uri)?;
+    tokio::fs::read(&path)
+        .await
+        .map_err(|source| LoaderError::ReadFile { path, source })
+}
+
+/// The document `bytes` hold, and the bytes as text.
+fn with_text(uri: &Url, bytes: Vec<u8>) -> Result<(LoadedDocument, String), LoaderError> {
+    let document = parse_body(uri, &bytes)?;
+    // Neither parser accepts anything but UTF-8, so this never fails.
+    let text = String::from_utf8(bytes).map_err(|error| LoaderError::Parse {
+        uri: uri.as_str().to_string(),
+        source: <serde_json::Error as serde::de::Error>::custom(error),
+    })?;
+    Ok((LoadedDocument::new(document, uri.clone()), text))
 }
 
 fn check_scheme(uri: &Url) -> Result<(), LoaderError> {
