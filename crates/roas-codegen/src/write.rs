@@ -169,6 +169,12 @@ pub enum WriteError {
     IsADirectory(PathBuf),
     #[error("{0} must be a regular file: the generator takes its lock on it")]
     BadLock(PathBuf),
+    #[error(
+        "output directory {0} is a symbolic link; generated files are never written through one"
+    )]
+    OutputDirSymlink(PathBuf),
+    #[error("output directory {0} is not a directory")]
+    OutputDirNotADirectory(PathBuf),
     #[error("{0} is a symbolic link; generated files are never written through one")]
     Symlink(PathBuf),
     #[error("{0} is locked: another generation is writing to this directory")]
@@ -396,7 +402,10 @@ fn read_manifest(path: &Path) -> Result<Option<Manifest>, WriteError> {
     // named like a manifest would block the read for ever.
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(WriteError::Symlink(path.to_path_buf()));
+            // Manifests sit in the output directory: named relative to it.
+            return Err(WriteError::Symlink(
+                path.file_name().map(PathBuf::from).unwrap_or_default(),
+            ));
         }
         Ok(meta) if !meta.is_file() => {
             return Err(WriteError::Manifest {
@@ -442,33 +451,109 @@ fn read_manifest(path: &Path) -> Result<Option<Manifest>, WriteError> {
     }
 }
 
-/// Every other target's manifest in the directory, and the paths it owns.
-fn other_owners(out_dir: &Path, ours: &str) -> Result<BTreeMap<String, PathBuf>, WriteError> {
+fn is_manifest_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with(MANIFEST_PREFIX) && lower.ends_with(MANIFEST_SUFFIX)
+}
+
+/// Every other target's manifest that can own a path below `out_dir`, and
+/// the paths it owns there, keyed relative to `out_dir` in lowercase.
+///
+/// Output roots may nest: a target rooted in a subdirectory keeps its
+/// manifest there, and one rooted above keeps it above. Both are read: the
+/// first in each directory on the way to one of `keys` (only those can
+/// hold a manifest owning them), the second through `out_dir`'s
+/// ancestors, for their entries below `out_dir`.
+fn other_owners<'a>(
+    out_dir: &Path,
+    ours: &str,
+    keys: impl IntoIterator<Item = &'a String>,
+) -> Result<BTreeMap<String, PathBuf>, WriteError> {
     let mut owners = BTreeMap::new();
-    let entries = match fs::read_dir(out_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(owners),
-        Err(e) => {
-            return Err(WriteError::Io {
-                path: out_dir.to_path_buf(),
-                source: e,
-            });
+    // Below, the output directory included.
+    let mut dirs = BTreeSet::from([String::new()]);
+    for key in keys {
+        for (i, _) in key.match_indices('/') {
+            dirs.insert(key[..i].to_owned());
         }
-    };
-    for entry in entries {
-        let entry = entry.map_err(io(out_dir))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let lower = name.to_ascii_lowercase();
-        if lower == ours.to_ascii_lowercase()
-            || !lower.starts_with(MANIFEST_PREFIX)
-            || !lower.ends_with(MANIFEST_SUFFIX)
-        {
+    }
+    for rel in dirs {
+        let dir = if rel.is_empty() {
+            out_dir.to_path_buf()
+        } else {
+            out_dir.join(&rel)
+        };
+        // Not a directory, or a link the path checks refuse later: nothing
+        // here is read, let alone followed.
+        if !rel.is_empty() && !fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
             continue;
         }
-        let path = entry.path();
-        if let Some(manifest) = read_manifest(&path)? {
-            for file in manifest.files.keys() {
-                owners.insert(file.to_ascii_lowercase(), PathBuf::from(&name));
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(WriteError::Io {
+                    path: dir,
+                    source: e,
+                });
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(io(&dir))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let child = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            // Named like a manifest, it is read as one whatever it is, so a
+            // link or a directory under that name is refused.
+            if !is_manifest_name(&name) {
+                continue;
+            }
+            if rel.is_empty() && name.eq_ignore_ascii_case(ours) {
+                continue;
+            }
+            if let Some(manifest) = read_manifest(&entry.path())? {
+                for file in manifest.files.keys() {
+                    let key = if rel.is_empty() {
+                        file.clone()
+                    } else {
+                        format!("{rel}/{file}")
+                    };
+                    owners.insert(key.to_ascii_lowercase(), PathBuf::from(&child));
+                }
+            }
+        }
+    }
+    // Above: only entries that fall inside this output directory. These
+    // directories are the caller's, so what cannot be read is skipped.
+    if let Ok(root) = fs::canonicalize(out_dir) {
+        for ancestor in root.ancestors().skip(1) {
+            let Ok(below) = root.strip_prefix(ancestor) else {
+                continue;
+            };
+            let below: Vec<String> = below
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+                .collect();
+            let prefix = format!("{}/", below.join("/"));
+            let Ok(entries) = fs::read_dir(ancestor) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !is_manifest_name(&name) || !entry.file_type().is_ok_and(|t| t.is_file()) {
+                    continue;
+                }
+                let Ok(Some(manifest)) = read_manifest(&entry.path()) else {
+                    continue;
+                };
+                for file in manifest.files.keys() {
+                    if let Some(inside) = file.to_ascii_lowercase().strip_prefix(&prefix) {
+                        owners.insert(inside.to_owned(), entry.path());
+                    }
+                }
             }
         }
     }
@@ -525,9 +610,11 @@ fn check_out_dir(out_dir: &Path) -> Result<(), WriteError> {
     let out_dir = out_dir.as_path();
     match fs::symlink_metadata(out_dir) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            Err(WriteError::Symlink(out_dir.to_path_buf()))
+            Err(WriteError::OutputDirSymlink(out_dir.to_path_buf()))
         }
-        Ok(meta) if !meta.is_dir() => Err(WriteError::NotADirectory(out_dir.to_path_buf())),
+        Ok(meta) if !meta.is_dir() => {
+            Err(WriteError::OutputDirNotADirectory(out_dir.to_path_buf()))
+        }
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(WriteError::Io {
@@ -696,7 +783,11 @@ fn check_ownership(
     going: &BTreeSet<String>,
     options: &WriteOptions,
 ) -> Result<(), WriteError> {
-    let others = other_owners(out_dir, manifest_file)?;
+    let others = other_owners(
+        out_dir,
+        manifest_file,
+        planned.keys().chain(previous.files.keys()),
+    )?;
     for (path, content) in planned {
         let lower = path.to_ascii_lowercase();
         // The same path, a file where this one needs a directory, or a
@@ -765,7 +856,7 @@ fn going(
 ) -> Result<BTreeSet<String>, WriteError> {
     // A file another manifest also lists, as after merging two branches
     // that each added a target, is not this target's alone to delete.
-    let others = other_owners(out_dir, manifest_file)?;
+    let others = other_owners(out_dir, manifest_file, removable.iter().map(|(p, _)| p))?;
     let mut out = BTreeSet::new();
     for (path, _) in removable {
         if others.contains_key(&path.to_ascii_lowercase()) {
@@ -979,7 +1070,7 @@ fn shared(
     manifest_file: &str,
     removable: &[(String, String)],
 ) -> Result<BTreeSet<String>, WriteError> {
-    let others = other_owners(out_dir, manifest_file)?;
+    let others = other_owners(out_dir, manifest_file, removable.iter().map(|(p, _)| p))?;
     Ok(removable
         .iter()
         .filter(|(p, _)| others.contains_key(&p.to_ascii_lowercase()))
@@ -1820,7 +1911,7 @@ mod tests {
         let text = fs::read_to_string(&ours).unwrap();
         fs::remove_file(&ours).unwrap();
         fs::write(dir.0.join(".roas-codegen-Pets-rust.json"), text).unwrap();
-        let owners = other_owners(&dir.0, ".roas-codegen-pets-rust.json").unwrap();
+        let owners = other_owners(&dir.0, ".roas-codegen-pets-rust.json", []).unwrap();
         assert!(owners.is_empty(), "{owners:?}");
     }
 
@@ -1921,11 +2012,11 @@ mod tests {
         let g = generation(&[("types.rs", "x")]);
         assert!(matches!(
             write(&g, &link, &WriteOptions::new("api")),
-            Err(WriteError::Symlink(_))
+            Err(WriteError::OutputDirSymlink(_))
         ));
         assert!(matches!(
             check(&g, &link, &WriteOptions::new("api")),
-            Err(WriteError::Symlink(_))
+            Err(WriteError::OutputDirSymlink(_))
         ));
         assert!(fs::read_dir(&real).unwrap().next().is_none());
     }
@@ -2022,7 +2113,7 @@ mod tests {
         let g = generation(&[("types.rs", "x")]);
         assert!(matches!(
             write(&g, &with_slash, &WriteOptions::new("api")),
-            Err(WriteError::Symlink(_))
+            Err(WriteError::OutputDirSymlink(_))
         ));
         assert!(fs::read_dir(&real).unwrap().next().is_none());
     }
@@ -3043,5 +3134,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read_to_string(dir.0.join(&name)).unwrap(), "x");
+    }
+
+    #[test]
+    fn a_nested_roots_files_are_not_adopted_from_above() {
+        let dir = TempDir::new("nested-roots");
+        let nested = dir.0.join("nested");
+        write(
+            &generation(&[("types.rs", "t")]),
+            &nested,
+            &WriteOptions::new("inner"),
+        )
+        .unwrap();
+        let outer = generation(&[("nested/types.rs", "t")]);
+        assert!(matches!(
+            write(&outer, &dir.0, &WriteOptions::new("outer")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+        assert!(matches!(
+            check(&outer, &dir.0, &WriteOptions::new("outer")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+    }
+
+    #[test]
+    fn an_enclosing_roots_files_are_not_adopted_from_below() {
+        let dir = TempDir::new("enclosing-root");
+        write(
+            &generation(&[("nested/types.rs", "t")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        let inner = generation(&[("types.rs", "t")]);
+        assert!(matches!(
+            write(&inner, &dir.0.join("nested"), &WriteOptions::new("inner")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+    }
+
+    #[test]
+    fn the_output_directory_itself_has_its_own_errors() {
+        let dir = TempDir::new("out-file");
+        let file = dir.0.join("afile");
+        fs::write(&file, "").unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("a.rs", "a")]),
+                &file,
+                &WriteOptions::new("api")
+            ),
+            Err(WriteError::OutputDirNotADirectory(_))
+        ));
     }
 }

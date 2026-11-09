@@ -251,16 +251,8 @@ fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
         E::OwnedByOther { .. } | E::ReservedPath(_) | E::IsADirectory(_) => {
             anyhow!("{}: {error}", out.display())
         }
-        // The output directory itself, as given or with a manifest name.
-        E::Symlink(path) if path == out => anyhow!(
-            "output directory {} is a symbolic link; generated files are never written through one",
-            out.display()
-        ),
-        E::NotADirectory(path) if path == out => {
-            anyhow!("output directory {} is not a directory", out.display())
-        }
-        E::Symlink(path) | E::NotADirectory(path) if path.starts_with(out) => error.into(),
-        // Below the output directory: relative to it.
+        // Always relative to the output directory; the directory itself
+        // has its own variants, which name it.
         E::Symlink(_) | E::NotADirectory(_) => anyhow!("{}: {error}", out.display()),
         E::SourceMismatch {
             label,
