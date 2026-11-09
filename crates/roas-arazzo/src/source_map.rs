@@ -344,6 +344,27 @@ impl SourceMap {
         Some(self.range(key.start, key.end))
     }
 
+    /// Where the member name `path` ends in is written in its object: the
+    /// name, or, for an alias key or a member merged in with `<<`, the
+    /// `*name` that brings it there rather than the anchor
+    /// [`SourceMap::locate_key`] gives.
+    #[cfg(feature = "editor")]
+    pub(crate) fn locate_written_key(&self, path: &str) -> Option<SourceRange> {
+        let (_, key) = self.resolve(path)?;
+        let key = key?;
+        if key.written == key.start {
+            return Some(self.range(key.start, key.end));
+        }
+        // `*name` ends where an alias name may not go on.
+        let alias = self.text.get(key.written..)?;
+        let length = alias
+            .char_indices()
+            .skip(1)
+            .find(|&(_, c)| c.is_whitespace() || ",[]{}".contains(c))
+            .map_or(alias.len(), |(at, _)| at);
+        Some(self.range(key.written, key.written + length))
+    }
+
     /// `offset` bytes into the decoded string at `path`, in the original
     /// text. `None` when `path` is not a string, `offset` is past its end
     /// or not on a character boundary, or the raw scalar cannot be decoded

@@ -744,7 +744,7 @@ impl Checks<'_> {
     fn push(&mut self, severity: Severity, path: String, key: bool, message: String) {
         let range = self.map.and_then(|map| {
             if key {
-                map.locate_key(&path)
+                map.locate_written_key(&path)
             } else {
                 nearest(map, &path)
             }
@@ -1413,6 +1413,14 @@ workflows:
             ("a:\n  1: x\n  '1': y\nb:\n  2: p\n  '2': q\n", "1", (3, 3)),
             ("1: a\n'1':\n  2: x\n  '2': y\n", "2", (4, 3)),
             ("base: &b\n  1: x\nobj:\n  <<: *b\n  '1': y\n", "1", (5, 3)),
+            // An own key before the merge that repeats it: at the `*name`;
+            // a merge of a merge: at the outer one.
+            ("base: &b\n  1: x\nobj:\n  '1': y\n  <<: *b\n", "1", (5, 7)),
+            (
+                "b: &b {1: x}\nm: &m\n  <<: *b\n  k: v\nobj:\n  '1': y\n  <<: *m\n",
+                "1",
+                (7, 7),
+            ),
             // Two merges that collide: at the later `*name`, in the object.
             (
                 "a: &a {1: x}\nb: &b {'1': y}\nobj:\n  <<: [*a, *b]\n",
@@ -1464,6 +1472,32 @@ workflows:
             document.diagnostics()[0].message,
             "not JSON (a byte-order mark is not JSON); read as YAML"
         );
+    }
+
+    #[cfg(feature = "v1_1")]
+    #[test]
+    fn an_unknown_member_brought_in_by_an_alias_is_located_in_its_object() {
+        for (anchor, written, at) in [
+            ("x-a: &u bogus\n", "  *u : 1\n", (5, 3, 5)),
+            ("x-e: &e {bogus: 1}\n", "  <<: *e\n", (5, 7, 9)),
+        ] {
+            let text = VALID.replace(
+                "info:\n  title: Pets\n",
+                &format!("info:\n  title: Pets\n{written}"),
+            );
+            let document = read(&format!("{anchor}{text}"));
+            let warning = document
+                .diagnostics()
+                .iter()
+                .find(|d| d.path.as_deref() == Some("#.info.bogus"))
+                .unwrap_or_else(|| panic!("{:?}", document.diagnostics()));
+            let range = warning.range.unwrap();
+            assert_eq!(
+                (range.start.line, range.start.column, range.end.column),
+                at,
+                "{written}"
+            );
+        }
     }
 
     #[test]
