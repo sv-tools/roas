@@ -106,6 +106,12 @@ pub enum GenerateError {
     Template(String),
     #[error("generated `{path}` is not valid syntax, which is a generator bug: {reason}")]
     InvalidOutput { path: String, reason: String },
+    /// The user's templates rendered `path` into something that does not
+    /// parse; [`render`](crate::render()) shows what they wrote.
+    #[error(
+        "the templates in `template_dir` rendered `{path}` into invalid syntax: {reason}; `render` (`--dump-rendered`) shows the text"
+    )]
+    TemplateOutput { path: String, reason: String },
     #[error("not supported yet: {0}")]
     Unsupported(String),
     /// Nothing in the description can be generated at all, such as under
@@ -255,6 +261,17 @@ fn check_go(config: &Config) -> Result<(), GenerateError> {
     Ok(())
 }
 
+/// Output that does not parse is the generator's bug with its own
+/// templates, and most likely the user's with theirs.
+fn blame_templates(error: GenerateError, config: &Config) -> GenerateError {
+    match error {
+        GenerateError::InvalidOutput { path, reason } if config.template_dir.is_some() => {
+            GenerateError::TemplateOutput { path, reason }
+        }
+        other => other,
+    }
+}
+
 /// The lowered description and what was said on the way, before any
 /// backend runs. `ir` is `None` when nothing can be generated at all.
 struct Prepared {
@@ -394,7 +411,8 @@ pub fn generate(
     };
     let (files, dependencies, unformatted) = match config.target {
         Target::Rust => {
-            let output = rust::emit(&ir, config, &source)?;
+            let output =
+                rust::emit(&ir, config, &source).map_err(|e| blame_templates(e, config))?;
             diagnostics.extend(output.diagnostics);
             let dependencies = Dependencies {
                 rust: output.dependencies,
@@ -403,7 +421,7 @@ pub fn generate(
             (output.files, dependencies, output.unformatted)
         }
         Target::Go => {
-            let output = go::emit(&ir, config, &source)?;
+            let output = go::emit(&ir, config, &source).map_err(|e| blame_templates(e, config))?;
             diagnostics.extend(output.diagnostics);
             let dependencies = Dependencies {
                 rust: Vec::new(),

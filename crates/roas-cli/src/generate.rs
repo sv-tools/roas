@@ -457,29 +457,6 @@ fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
     }
 }
 
-/// A path as the filesystem resolves it: its longest existing ancestor
-/// canonical (symbolic links followed), the rest appended.
-fn resolved(path: &Path) -> Result<PathBuf> {
-    let absolute =
-        std::path::absolute(path).with_context(|| format!("resolving {}", path.display()))?;
-    let mut existing = absolute.as_path();
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(canonical) = existing.canonicalize() {
-            let mut out = canonical;
-            out.extend(rest.iter().rev());
-            return Ok(out);
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name.to_owned());
-                existing = parent;
-            }
-            _ => return Ok(absolute),
-        }
-    }
-}
-
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // As the library reads it, so the recorded source is computed too.
     if args.out.as_os_str().is_empty() {
@@ -560,7 +537,12 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     if let Some(dir) = &args.dump_rendered {
         // The dump is raw text with no ownership rules: it must not land
         // where generated files and their manifests live.
-        let (dump, out) = (resolved(dir)?, resolved(&args.out)?);
+        let resolved =
+            |path: &Path| resolve(path).ok_or_else(|| anyhow!("cannot resolve {}", path.display()));
+        // Compared without case: on a case-insensitive disk `GEN` and
+        // `gen` are one directory even before either exists.
+        let folded = |path: PathBuf| PathBuf::from(path.to_string_lossy().to_lowercase());
+        let (dump, out) = (folded(resolved(dir)?), folded(resolved(&args.out)?));
         if dump.starts_with(&out) || out.starts_with(&dump) {
             bail!(
                 "--dump-rendered {} overlaps the output directory {}; dump somewhere else",
@@ -574,7 +556,18 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
             }
-            std::fs::write(&path, &file.contents)
+            // Replaced, never written through: a link left at that name
+            // (to a generated file, say) is removed rather than followed.
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("replacing {}", path.display())),
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, file.contents.as_bytes()))
                 .with_context(|| format!("writing {}", path.display()))?;
             eprintln!("rendered {}", path.display());
         }
@@ -1042,6 +1035,34 @@ mod tests {
             overlapping.dump_rendered = Some(dump);
             let error = run_generate(overlapping).unwrap_err().to_string();
             assert!(error.contains("overlaps the output directory"), "{error}");
+        }
+        // Nor through a `..` past a directory that does not exist yet.
+        let mut sneaky = args(&spec, &out);
+        sneaky.check = true;
+        sneaky.dump_rendered = Some(dir.0.join("missing/../out"));
+        let error = run_generate(sneaky).unwrap_err().to_string();
+        assert!(error.contains("overlaps the output directory"), "{error}");
+        // Nor by spelling the output directory in another case.
+        let mut cased = args(&spec, &out);
+        cased.check = true;
+        cased.dump_rendered = Some(dir.0.join("OUT/raw"));
+        let error = run_generate(cased).unwrap_err().to_string();
+        assert!(error.contains("overlaps the output directory"), "{error}");
+        // A link left in the dump directory is replaced, not followed.
+        #[cfg(unix)]
+        {
+            let raw = dir.0.join("raw");
+            std::fs::create_dir_all(&raw).unwrap();
+            std::os::unix::fs::symlink(out.join("api.rs"), raw.join("api.rs")).unwrap();
+            let mut linked = args(&spec, &out);
+            linked.check = true;
+            linked.dump_rendered = Some(raw.clone());
+            let _ = run_generate(linked);
+            assert!(
+                !std::fs::symlink_metadata(raw.join("api.rs"))
+                    .unwrap()
+                    .is_symlink()
+            );
         }
         assert_eq!(
             std::fs::read_to_string(out.join("api.rs")).unwrap(),

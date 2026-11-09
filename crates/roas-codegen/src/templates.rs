@@ -194,23 +194,31 @@ fn until_close<'s>(text: &'s str, close: &str) -> (&'s str, &'s str) {
     (text, "")
 }
 
+/// What follows the `{% endraw %}` ending a raw section. As minijinja's
+/// lexer reads it: quotes mean nothing inside, and only a tag that is
+/// `endraw` itself, whitespace control aside, ends it.
 fn skip_raw(text: &str) -> &str {
     let mut rest = text;
     while let Some(open) = rest.find("{%") {
-        let (inner, remainder) = until_close(&rest[open + 2..], "%}");
-        if inner.trim_matches(['-', '+', '~']).trim() == "endraw" {
-            return remainder;
+        rest = &rest[open + 2..];
+        let tag = rest.trim_start_matches(['-', '+', '~']).trim_start();
+        if let Some(after) = tag.strip_prefix("endraw") {
+            let after = after.trim_start().trim_start_matches(['-', '+', '~']);
+            if let Some(remainder) = after.strip_prefix("%}") {
+                return remainder;
+            }
         }
-        rest = remainder;
     }
     ""
 }
 
 /// The word after `keyword` in a statement, if the statement is one.
 fn argument<'s>(statement: &'s str, keyword: &str) -> Option<&'s str> {
+    // The keyword ends where an identifier would: `extends"x"` is
+    // `extends` and `"x"`, as minijinja's lexer reads it.
     statement
         .strip_prefix(keyword)
-        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .filter(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
         .map(str::trim)
 }
 
@@ -391,8 +399,14 @@ pub(crate) fn render(
     // that only starts with the same text is someone else's.
     let body = rendered
         .strip_prefix(MARKER)
-        .filter(|rest| rest.is_empty() || rest.starts_with(['\n', '\r']))
-        .map(|rest| rest.trim_start_matches(['\n', '\r']))
+        .and_then(|rest| {
+            if rest.is_empty() {
+                Some(rest)
+            } else {
+                rest.strip_prefix("\r\n")
+                    .or_else(|| rest.strip_prefix('\n'))
+            }
+        })
         .unwrap_or(&rendered);
     Ok(format!("{MARKER}\n{separator}{body}"))
 }
@@ -421,6 +435,14 @@ mod tests {
         // Comments, raw sections and quoted `%}` are not tags.
         let source = "{# {% extends 'a' %}{% block old %} #}{% extends \"b\" %}{% raw %}{% block raw %}{% endraw %}{{ '%}' }}{% block kept %}{% endblock %}{% set x = '%}{% block fake %}' %}";
         assert_eq!(extends(source).unwrap().as_deref(), Some("b"));
+        // No space after the keyword is still the keyword.
+        assert_eq!(extends("{%extends\"c\"%}").unwrap().as_deref(), Some("c"));
+        assert_eq!(extends("{% extendsx \"c\" %}"), Ok(None));
+        // Quotes inside a raw section mean nothing.
+        assert_eq!(
+            blocks("{% raw %}{% it's %}{% endraw %}{% block after %}{% endblock %}"),
+            ["after"]
+        );
         assert_eq!(blocks(source), ["kept"]);
     }
 
