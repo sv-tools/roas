@@ -721,13 +721,10 @@ impl Created {
 impl Drop for Created {
     fn drop(&mut self) {
         let lock = self.lock.take();
+        // On success everything stays, even a directory made only on the
+        // way (`scratch` in `scratch/../gen`): the path the caller gave
+        // needs it to resolve the next time.
         if self.keep {
-            // Directories made only on the way, as `scratch` in
-            // `scratch/../gen`, are empty and go; the output directory
-            // and its parents hold files and stay.
-            for dir in self.dirs.iter().rev() {
-                let _ = fs::remove_dir(dir);
-            }
             return;
         }
         // Still locked while removed, so no run can take it in between;
@@ -4343,15 +4340,16 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_made_only_on_the_way_is_removed() {
+    fn a_path_through_a_directory_made_on_the_way_checks_clean() {
         let dir = TempDir::new("on-the-way");
-        write(
-            &generation(&[("a.rs", "a")]),
-            &dir.0.join("scratch/../gen"),
-            &WriteOptions::new("api"),
-        )
-        .unwrap();
+        let out = dir.0.join("scratch/../gen");
+        let g = generation(&[("a.rs", "a")]);
+        write(&g, &out, &WriteOptions::new("api")).unwrap();
         assert!(dir.0.join("gen/a.rs").is_file());
-        assert!(!dir.0.join("scratch").exists());
+        assert!(
+            check(&g, &out, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
     }
 }

@@ -168,13 +168,39 @@ fn stored_path(path: &Path) -> std::io::Result<PathBuf> {
     let parent = std::fs::canonicalize(parent)?;
     let typed = parent.join(name);
     let entry = std::fs::symlink_metadata(&typed)?;
-    let stored = std::fs::read_dir(&parent)?.flatten().find_map(|e| {
-        if e.file_name() == name {
-            return Some(e.file_name());
-        }
-        same_entry(&entry, &e.path()).then(|| e.file_name())
-    });
+    // The name as typed when it is stored that way; otherwise the one entry
+    // that is the same file (another case), never another hard link.
+    let entries: Vec<_> = std::fs::read_dir(&parent)?.flatten().collect();
+    if entries.iter().any(|e| e.file_name() == name) {
+        return Ok(typed);
+    }
+    let stored = entries
+        .iter()
+        .find(|e| {
+            if cfg!(unix) {
+                single_link(&entry) && same_entry(&entry, &e.path())
+            } else {
+                // No inode to compare: Windows folds case, so the entry
+                // spelled the same ignoring case is this file.
+                e.file_name().eq_ignore_ascii_case(name)
+            }
+        })
+        .map(|e| e.file_name());
     Ok(parent.join(stored.unwrap_or_else(|| name.to_owned())))
+}
+
+/// Whether the file has one name only: a hard link is a name of its own.
+fn single_link(entry: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        entry.nlink() == 1
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = entry;
+        true
+    }
 }
 
 /// Whether `other` is the directory entry `entry` describes.
