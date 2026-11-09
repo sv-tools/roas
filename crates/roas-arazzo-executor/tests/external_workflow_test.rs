@@ -910,7 +910,7 @@ fn an_unknown_member_of_an_external_document_fails_preparation() {
     assert_eq!(found.document.as_deref(), Some(SHARED));
     assert_eq!(found.workflow_id.as_deref(), Some("child"));
     assert!(
-        matches!(&found.issue, PreparationIssue::UnknownMember { name, version }
+        matches!(&found.issue, PreparationIssue::UnknownMember { name, version, .. }
             if name == "retryLimit" && version == "1.1.0"),
         "{found}"
     );

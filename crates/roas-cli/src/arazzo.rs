@@ -257,9 +257,9 @@ fn unknown_warnings(map: Option<&SourceMap>, unknown: &UnknownMembers) -> Vec<St
                 .map(|range| format!(" at {}", range.start))
                 .unwrap_or_default();
             format!(
-                "warning: {}{at}: `{}` is not a field of Arazzo {}; an extension's name starts \
-                 with `x-`",
-                member.path, member.name, unknown.version
+                "warning: {}{at}: {}",
+                member.path,
+                roas_arazzo::unknown::message(&member.name, &unknown.version)
             )
         })
         .collect()

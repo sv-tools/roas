@@ -40,8 +40,10 @@ pub enum PreparationIssue {
     #[error("{0}")]
     Portability(String),
     /// A member that is neither a field of its object nor an `x-`
-    /// extension: dropped on parse, so whatever it means is not honoured.
-    #[error("`{name}` is not a field of Arazzo {version}; an extension's name starts with `x-`")]
+    /// extension it allows: dropped on parse, so whatever it means is not
+    /// honoured.
+    #[error("{}", roas_arazzo::unknown::message(name, version))]
+    #[non_exhaustive]
     UnknownMember {
         /// The member's name as written.
         name: String,

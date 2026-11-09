@@ -68,7 +68,7 @@ YAML descriptions work the same way — parse with `serde-saphyr` (or any other 
 
 ## Unknown members
 
-An Arazzo object holds the fields its specification defines and `x-` extensions; deserializing drops anything else without a word, so a misspelt `sucessCriteria` simply vanishes. `Description::unknown_members(&raw)` lists what was dropped from the value the description was deserialized from, each with a model-style `path` (`#.workflows[0].steps[1].sucessCriteria`) that a `SourceMap` locates with `locate_key`. A member whose value is `null`, `[]` or `{}` is not listed: a known optional field left empty is dropped the same way, so the two cannot be told apart. List a v1.0 description's members before upconverting it; `UnknownMembers::version` keeps the version it declared.
+An Arazzo object holds the fields its specification defines and, except for a Reusable Object, `x-` extensions; deserializing drops anything else without a word, so a misspelt `sucessCriteria` simply vanishes. `Description::unknown_members(&raw)` lists what was dropped from the value the description was deserialized from, each with a model-style `path` (`#.workflows[0].steps[1].sucessCriteria`) that a `SourceMap` locates with `locate_key`. A member whose value is `null`, `[]` or `{}` is not listed: a known optional field left empty is dropped the same way, so the two cannot be told apart. List a v1.0 description's members before upconverting it; `UnknownMembers::version` keeps the version it declared.
 
 ```rust
 let raw = serde_json::json!({
