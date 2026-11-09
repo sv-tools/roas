@@ -171,3 +171,13 @@ fn a_path_two_members_could_spell_is_not_located() {
     assert_eq!((payload.span, payload.position), (None, None), "{payload}");
     assert!(payload.to_string().contains(" at byte "), "{payload}");
 }
+
+#[test]
+fn a_finding_about_the_callers_options_is_not_placed_in_the_document() {
+    // A member that happens to spell the same path as the option.
+    let text = format!("{TEXT}options:\n  inputs: whatever\n");
+    let map = SourceMap::parse(text.clone()).unwrap();
+    let found = diagnostics(&text, &options().source_map(map).inputs(json!(1)));
+    let inputs = find(&found, "options.inputs");
+    assert_eq!((inputs.span, inputs.position), (None, None), "{inputs}");
+}

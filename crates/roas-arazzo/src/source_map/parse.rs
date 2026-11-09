@@ -149,6 +149,15 @@ fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
         Raw::String(value) => Kind::Scalar(Some(value)),
         Raw::Other => Kind::Scalar(None),
     };
+    // An indentless sequence (`a:\n- x`) is reported from its first item:
+    // it starts at that item's `-`.
+    if matches!(kind, Kind::Seq(_)) && !matches!(text.as_bytes().get(start), Some(b'[')) {
+        let line = text[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
+        let before = text[line..start].trim_end_matches(' ');
+        if before.ends_with('-') {
+            start = line + before.len() - 1;
+        }
+    }
     if !matches!(kind, Kind::Scalar(_)) {
         end = match text.as_bytes().get(start) {
             Some(b'[' | b'{') => closing(text, start, end),
@@ -165,8 +174,17 @@ fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
 /// through every line indented at least as far as it starts (a sequence:
 /// sibling lines must be `-` items), skipping blank and comment lines.
 fn block_end(text: &str, start: usize, end: usize) -> usize {
-    let column = start - text[..start].rfind('\n').map_or(0, |at| at + 1);
-    let sequence = text[start..].starts_with('-');
+    // `\n`, `\r\n` and a bare `\r` each end a line, as in `SourceMap`.
+    let breaks = ['\n', '\r'];
+    let line_start = |at: usize| text[..at].rfind(breaks).map_or(0, |at| at + 1);
+    let line_stop = |at: usize| text[at..].find(breaks).map_or(text.len(), |stop| at + stop);
+    let next_line = |stop: usize| {
+        stop + if text[stop..].starts_with("\r\n") {
+            2
+        } else {
+            1
+        }
+    };
     let content_end = |line: usize, body: &str| {
         let comment = body
             .char_indices()
@@ -174,18 +192,17 @@ fn block_end(text: &str, start: usize, end: usize) -> usize {
             .map_or(body.len(), |(at, _)| at);
         line + body[..comment].trim_end().len()
     };
-    let line_of = |at: usize| {
-        text[at..]
-            .find('\n')
-            .map_or(text.len(), |newline| at + newline)
-    };
-    let mut last = end;
-    let rest = &text[end..line_of(end)];
-    last = last.max(content_end(end, rest.trim_end_matches('\r')));
-    let mut line = line_of(end) + 1;
+    // A last block scalar's span runs into the next line's indentation:
+    // measure from where its content stops.
+    let end = start + text[start..end].trim_end().len();
+    let column = start - line_start(start);
+    let sequence = text[start..].starts_with('-');
+    let stop = line_stop(end);
+    let mut last = content_end(end, &text[end..stop]).max(end);
+    let mut line = next_line(stop);
     while line < text.len() {
-        let stop = line_of(line);
-        let body = text[line..stop].trim_end_matches('\r');
+        let stop = line_stop(line);
+        let body = &text[line..stop];
         let indent = body.len() - body.trim_start_matches(' ').len();
         let content = &body[indent..];
         if !(content.is_empty() || content.starts_with('#')) {
@@ -198,9 +215,9 @@ fn block_end(text: &str, start: usize, end: usize) -> usize {
             }
             last = content_end(line, body);
         }
-        line = stop + 1;
+        line = next_line(stop);
     }
-    last.max(end)
+    last
 }
 
 /// A flow collection's span covers only its opening `[` / `{`, and its
@@ -458,6 +475,16 @@ workflows:
         assert_eq!(end("k:\n- 1 # one\n\n# note\nz: 2\n", "#.k"), 6);
         assert_eq!(end("- a: 1\n  b: 2\n- c\n", "#[0]"), 13);
         assert_eq!(end("a:\n  - x\n...\n", "#"), 8);
+        // A block scalar ending the last member does not take the sibling.
+        let steps =
+            "steps:\n  - stepId: a\n    description: |\n      text\n  - stepId: b\n    x: 1\n";
+        assert_eq!(end(steps, "#.steps[0]"), steps.find("text").unwrap() + 4);
+        assert_eq!(end(steps, "#.steps"), steps.len() - 1);
+        assert_eq!(end("a:\n  b:\n    c: |\n      x\n  d: 1\n", "#.a.b"), 24);
+        assert_eq!(end("k:\n  a: 1\n  b: |+\n    x\n\n\nz: 1\n", "#.k"), 23);
+        assert_eq!(end("a:\r  - 1\r  - 2\rb: 1\r", "#.a"), 14);
+        assert_eq!(end("a:\n  b: |\n    text\nc: 1\n", "#.a"), 18);
+        assert_eq!(end("a:\r  b: value\rc: 2\r", "#.a"), 13);
         // Block collections have no delimiter: they end at their last item.
         assert_eq!(end("a:\n  - 1\n  - 2\nb: 3\n", "#.a"), 14);
     }
@@ -516,6 +543,16 @@ workflows:
         let map = SourceMap::parse("k: |+\n\n\nz: 1\n").unwrap();
         assert_eq!(map.locate("#.k").unwrap().start.line, 1);
         assert_eq!(map.locate_in("#.k", 0), None);
+    }
+
+    #[test]
+    fn an_indentless_sequence_starts_at_its_first_dash() {
+        let map = SourceMap::parse("a:\n- x\n- y\n").unwrap();
+        let range = map.locate("#.a").unwrap();
+        assert_eq!((range.start.offset, range.end.offset), (3, 10));
+        let map = SourceMap::parse("a:\n  - x\n").unwrap();
+        assert_eq!(map.locate("#.a").unwrap().start.offset, 5);
+        assert_eq!(map.locate("#.a[0]").unwrap().start.offset, 7);
     }
 
     #[test]

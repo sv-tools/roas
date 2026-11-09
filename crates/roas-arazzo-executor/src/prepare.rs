@@ -582,7 +582,13 @@ impl<'d> Compiler<'d> {
     }
 
     fn finding(&mut self, site: &Site<'d>, offset: Option<usize>, issue: PreparationIssue) {
-        let map = self.scope().source_map.as_deref();
+        // `#…` paths are in the document; others (`options.inputs`) name
+        // what the caller passed, which no text of the document holds.
+        let map = self
+            .scope()
+            .source_map
+            .as_deref()
+            .filter(|_| site.path.starts_with('#'));
         let span = map.and_then(|map| map.locate(&site.path));
         let position = map
             .zip(offset)
