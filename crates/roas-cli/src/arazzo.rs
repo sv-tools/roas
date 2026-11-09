@@ -849,18 +849,21 @@ fn sources(
 /// `options` adapted to the registry, with a source map for every external
 /// Arazzo document the entry reaches whose text was read (`texts`) or
 /// fetched, so preparation can say where in it a finding is. `maps` keeps
-/// what was already parsed, by retrieval URI, with the value it is of and
-/// how many texts there were to choose from.
+/// the texts already parsed.
 fn scoped(
     options: &Options,
     registry: &SourceRegistry,
     root: roas_arazzo_executor::DocumentId,
     texts: &Texts,
     fetched: Option<&SharedFetches>,
-    maps: &mut BTreeMap<Url, (Value, usize, Option<Arc<SourceMap>>)>,
+    maps: &mut ParsedMaps,
 ) -> Result<Options> {
     let mut options = options.clone();
     let fetched = fetched.map(|fetched| fetched.borrow());
+    let no_fetches = Texts::new();
+    let fetched_texts = fetched
+        .as_ref()
+        .map_or(&no_fetches, |fetched| &fetched.texts);
     // The documents the executor's run table holds: those linked from the
     // root, transitively (`source_registry`'s walk; the CLI sets no
     // `Options::source` that could redirect an alias of the root).
@@ -876,49 +879,57 @@ fn scoped(
                 continue;
             }
             next.push(target);
-            let uri = document.retrieval_uri();
-            // Only a text that parsed to the very value registered: one URL
-            // can answer two fetches differently, and only one is kept.
-            // Two texts of that value: which one it was parsed from is not
-            // known, so neither is used.
-            let value = document.value();
-            // Every text read where this very document is: its retrieval
-            // URI, and any URI the registry folded into it (a copy with the
-            // same `$self` and value).
-            let candidates = texts
-                .iter()
-                .chain(fetched.iter().flat_map(|fetched| fetched.texts.iter()))
-                .filter(|(at, _)| {
-                    *at == uri
-                        || registry.resolve(root, at.as_str(), true).ok().flatten() == Some(target)
-                })
-                .flat_map(|(_, read)| read)
-                .collect::<Vec<_>>();
-            // Texts only accumulate: a later pass may have brought another.
-            if maps
-                .get(uri)
-                .is_none_or(|(parsed, seen, _)| parsed != value || *seen != candidates.len())
-            {
-                let mut matching = candidates
-                    .iter()
-                    .filter(|(parsed, _)| parsed == value)
-                    .map(|(_, text)| text.as_str())
-                    .collect::<Vec<_>>();
-                matching.sort_unstable();
-                matching.dedup();
-                let map = match matching[..] {
-                    [text] => SourceMap::parse(text).ok().map(Arc::new),
-                    _ => None,
-                };
-                maps.insert(uri.clone(), (value.clone(), candidates.len(), map));
-            }
-            if let Some((_, _, Some(map))) = maps.get(uri) {
-                options =
-                    options.document_source_map(document.identity().as_str(), Arc::clone(map));
+            if let Some(map) = source_map_of(registry, root, target, texts, fetched_texts, maps) {
+                options = options.document_source_map(document.identity().as_str(), map);
             }
         }
     }
     Ok(options.source_registry(registry, root)?)
+}
+
+/// The source map of the registry document `target`, from the text it was
+/// parsed from, when exactly one read or fetched text can have been it.
+fn source_map_of(
+    registry: &SourceRegistry,
+    root: roas_arazzo_executor::DocumentId,
+    target: roas_arazzo_executor::DocumentId,
+    texts: &Texts,
+    fetched_texts: &Texts,
+    maps: &mut ParsedMaps,
+) -> Option<Arc<SourceMap>> {
+    let document = registry.document(target).ok()?;
+    let uri = document.retrieval_uri();
+    let value = document.value();
+    // Every text read where this very document is — at its retrieval URI,
+    // or at a URI the registry folded into it (a copy with the same `$self`
+    // and value) — that parsed to the very value registered: one URL can
+    // answer two fetches differently, and only one is kept.
+    let mut matching = [(false, texts), (true, fetched_texts)]
+        .into_iter()
+        .flat_map(|(was_fetched, texts)| {
+            texts.iter().flat_map(move |(at, read)| {
+                read.iter()
+                    .enumerate()
+                    .map(move |(slot, entry)| ((was_fetched, at, slot), entry))
+            })
+        })
+        .filter(|((_, at, _), (parsed, _))| {
+            parsed == value
+                && (*at == uri
+                    || registry.resolve(root, at.as_str(), true).ok().flatten() == Some(target))
+        })
+        .map(|(key, (_, text))| (text.as_str(), key))
+        .collect::<Vec<_>>();
+    matching.sort_unstable();
+    matching.dedup_by(|(a, _), (b, _)| a == b);
+    // Two texts of that value: which one it was parsed from is not
+    // known, so neither is used.
+    let [(text, (was_fetched, at, slot))] = matching[..] else {
+        return None;
+    };
+    maps.entry((was_fetched, at.clone(), slot))
+        .or_insert_with(|| SourceMap::parse(text).ok().map(Arc::new))
+        .clone()
 }
 
 /// An error and what caused it, as one line: a loading diagnostic's own
@@ -1004,7 +1015,7 @@ struct Fetches {
 
 /// A fetcher that can also say what text it parsed a document from.
 trait TextFetcher: ResourceFetcher {
-    fn fetch_document_text(
+    fn fetch_with_text(
         &mut self,
         uri: &Url,
     ) -> Result<(LoadedDocument, Option<String>), LoaderError> {
@@ -1013,7 +1024,7 @@ trait TextFetcher: ResourceFetcher {
 }
 
 impl TextFetcher for Fetcher {
-    fn fetch_document_text(
+    fn fetch_with_text(
         &mut self,
         uri: &Url,
     ) -> Result<(LoadedDocument, Option<String>), LoaderError> {
@@ -1025,6 +1036,10 @@ type SharedFetches = Rc<RefCell<Fetches>>;
 
 /// Every Arazzo text read at a URI, with the value it parsed to.
 type Texts = BTreeMap<Url, Vec<(Value, String)>>;
+
+/// The map of each text parsed so far, by where it is kept: fetched or
+/// read, its URI, and its place in that URI's (only ever growing) list.
+type ParsedMaps = BTreeMap<(bool, Url, usize), Option<Arc<SourceMap>>>;
 
 /// Keep `text`, which parsed to `value`, if it is an Arazzo document's:
 /// only those have findings placed in their text.
@@ -1093,7 +1108,7 @@ impl<F: TextFetcher> ResourceFetcher for Remembering<F> {
     }
 
     fn fetch_document(&mut self, uri: &Url) -> Result<LoadedDocument, LoaderError> {
-        let (document, text) = self.remember(uri, |inner| inner.fetch_document_text(uri))?;
+        let (document, text) = self.remember(uri, |inner| inner.fetch_with_text(uri))?;
         if let Some(text) = text {
             let retrieval = document.retrieval_uri.clone();
             keep_text(
@@ -2083,31 +2098,19 @@ workflows:
             .unwrap();
         let mut texts = Texts::new();
         keep_text(&mut texts, &child_uri, &child, text.to_owned());
-        let mut maps = BTreeMap::new();
-        let mapped = |maps: &BTreeMap<Url, (Value, usize, Option<Arc<SourceMap>>)>| {
-            maps.get(&child_uri)
-                .is_some_and(|(_, _, map)| map.is_some())
-        };
-        scoped(&Options::new(), &registry, root, &texts, None, &mut maps).unwrap();
-        assert!(mapped(&maps));
+        let mut maps = ParsedMaps::new();
+        let child_id = registry
+            .resolve(root, child_uri.as_str(), false)
+            .unwrap()
+            .unwrap();
+        let none = Texts::new();
+        assert!(source_map_of(&registry, root, child_id, &texts, &none, &mut maps).is_some());
         // The same document fetched again, laid out differently.
-        let fetched: SharedFetches = Rc::default();
-        keep_text(
-            &mut fetched.borrow_mut().texts,
-            &child_uri,
-            &child,
-            format!("# again\n{text}"),
-        );
-        scoped(
-            &Options::new(),
-            &registry,
-            root,
-            &texts,
-            Some(&fetched),
-            &mut maps,
-        )
-        .unwrap();
-        assert!(!mapped(&maps));
+        let mut fetched = Texts::new();
+        keep_text(&mut fetched, &child_uri, &child, format!("# again\n{text}"));
+        assert!(source_map_of(&registry, root, child_id, &texts, &fetched, &mut maps).is_none());
+        // Either text alone is one to place findings in.
+        assert!(source_map_of(&registry, root, child_id, &none, &fetched, &mut maps).is_some());
     }
 
     #[test]
