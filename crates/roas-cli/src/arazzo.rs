@@ -914,9 +914,8 @@ fn source_map_of(
             })
         })
         .filter(|((_, at, _), (parsed, _))| {
-            parsed == value
-                && (*at == uri
-                    || registry.resolve(root, at.as_str(), true).ok().flatten() == Some(target))
+            (*at == uri || registry.resolve(root, at.as_str(), true).ok().flatten() == Some(target))
+                && parsed == value
         })
         .map(|(key, (_, text))| (text.as_str(), key))
         .collect::<Vec<_>>();
