@@ -56,4 +56,29 @@ func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 	}
 {% endfor %}	return nil
 }
-{% block trailing %}{% endblock %}
+{% if t.marshal %}
+// MarshalJSONTo writes {{ t.name }} member by member: a member name no struct
+// tag can carry is written here rather than through its field's tag.
+func (v {{ t.name }}) MarshalJSONTo(e *jsontext.Encoder) error {
+	if err := e.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+{% for f in t.fields if not f.catch_all %}{% if f.present %}	if {{ f.present }} {
+{% endif %}	if err := e.WriteToken(jsontext.String({{ f.literal }})); err != nil {
+		return err
+	}
+	if err := json.MarshalEncode(e, v.{{ f.name }}); err != nil {
+		return err
+	}
+{% if f.present %}	}
+{% endif %}{% endfor %}{% if t.extra_ty %}	for _, name := range slices.Sorted(maps.Keys(v.{{ t.extra_name }})) {
+		if err := e.WriteToken(jsontext.String(name)); err != nil {
+			return err
+		}
+		if err := json.MarshalEncode(e, v.{{ t.extra_name }}[name]); err != nil {
+			return err
+		}
+	}
+{% endif %}	return e.WriteToken(jsontext.EndObject)
+}
+{% endif %}{% block trailing %}{% endblock %}

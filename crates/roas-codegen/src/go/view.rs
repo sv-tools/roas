@@ -9,7 +9,7 @@
 //! refuses it, which the generated code turns back into an error.
 
 use crate::config::{Config, FieldConfig, TypeConfig};
-use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity, push_token, source_of};
+use crate::diagnostic::{Diagnostic, SchemaId};
 use crate::front::{FloatWidth, IntWidth};
 use crate::generate::GenerateError;
 use crate::go::naming::{
@@ -79,6 +79,8 @@ pub(crate) struct SupportView {
     pub int32: bool,
     pub null: bool,
     pub tagged: bool,
+    /// A self-writing struct has a catch-all, written in key order.
+    pub sorted_keys: bool,
     /// Types a JSON null would silently set to their zero value, which
     /// the generated decoders refuse.
     pub refuse_null: Vec<String>,
@@ -106,6 +108,9 @@ pub(crate) struct FieldView {
     pub required_index: Option<usize>,
     /// The embedded map collecting members no field names.
     pub catch_all: bool,
+    /// For a member left out when absent, the Go condition under which
+    /// it is written; empty when it always is.
+    pub present: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +161,8 @@ pub(crate) struct TypeView {
     pub extra_ty: String,
     /// The catch-all field's name.
     pub extra_name: String,
+    /// A member name no struct tag can carry: the struct writes itself.
+    pub marshal: bool,
     /// The raw constructor of a composed holder.
     pub from_raw: String,
 }
@@ -238,7 +245,6 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         diagnostics: Vec::new(),
     };
     select_check(ir, config)?;
-    builder.suppress_unspellable();
     builder.allocate_type_names()?;
     let mut types = Vec::new();
     for id in &ir.order {
@@ -261,18 +267,20 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     let mut imports = Vec::new();
     let mut dependencies = Vec::new();
     if !types.is_empty() {
-        imports.extend(BUILTIN_IMPORTS.iter().map(|(path, _)| quote(path)));
-        let mut used: BTreeMap<&str, &str> = BUILTIN_IMPORTS
-            .iter()
-            .map(|(path, name)| (*name, *path))
-            .collect();
+        let mut builtin = BUILTIN_IMPORTS.to_vec();
+        if builder.support.sorted_keys {
+            builtin.extend([("maps", "maps"), ("slices", "slices")]);
+        }
+        imports.extend(builtin.iter().map(|(path, _)| quote(path)));
+        let mut used: BTreeMap<&str, &str> =
+            builtin.iter().map(|(path, name)| (*name, *path)).collect();
         // A package named like a name the generated code declares would be
         // shadowed by it, or clash with it.
         for local in TEMPLATE_NAMES {
             used.insert(local, "a name the generated code declares");
         }
         for import in &builder.externs {
-            if BUILTIN_IMPORTS.iter().any(|(path, _)| path == import) {
+            if builtin.iter().any(|(path, _)| path == import) {
                 continue;
             }
             let name = package_of(import);
@@ -309,56 +317,6 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
 }
 
 impl Builder<'_> {
-    /// A member name a struct tag cannot carry makes its struct
-    /// ungeneratable in Go, and with it every type that holds it.
-    fn suppress_unspellable(&mut self) {
-        for id in &self.ir.order {
-            let def = &self.ir.types[id];
-            if self.suppressed.contains(id) {
-                continue;
-            }
-            let TypeKind::Struct(s) = &def.kind else {
-                continue;
-            };
-            for field in &s.fields {
-                if tag_name_ok(&field.raw_name) {
-                    continue;
-                }
-                let mut pointer = source_of(&def.id.pointer);
-                push_token(&mut pointer, "properties");
-                push_token(&mut pointer, &field.raw_name);
-                self.diagnostics.push(Diagnostic {
-                    severity: Severity::Error,
-                    kind: DiagnosticKind::UnrepresentableName {
-                        name: field.raw_name.clone(),
-                    },
-                    schema_id: def.id.clone(),
-                    pointer,
-                    message: format!(
-                        "property {:?} cannot be named in a Go struct tag, which reserves `,`, `\\`, `'`, `\"` and the backtick and reads an empty name as the field's own, so this type and every type holding it are not generated",
-                        field.raw_name
-                    ),
-                });
-                self.suppressed.insert(id.clone());
-            }
-        }
-        loop {
-            let before = self.suppressed.len();
-            for def in self.ir.types.values() {
-                if !self.suppressed.contains(&def.id)
-                    && Ir::all_edges(def)
-                        .iter()
-                        .any(|e| self.suppressed.contains(e))
-                {
-                    self.suppressed.insert(def.id.clone());
-                }
-            }
-            if self.suppressed.len() == before {
-                break;
-            }
-        }
-    }
-
     fn allocate_type_names(&mut self) -> Result<(), GenerateError> {
         // The helpers every file may declare.
         for reserved in ["Nullable", "Int64", "Int32", "Null"] {
@@ -576,6 +534,7 @@ impl Builder<'_> {
             required_count: 0,
             extra_ty: String::new(),
             extra_name: String::new(),
+            marshal: false,
             from_raw: String::new(),
         };
         if !self.fill_kind(def, &mut view)? {
@@ -656,7 +615,17 @@ impl Builder<'_> {
                         required_count - 1
                     });
                     let tag = struct_tag(&field.raw_name, omitzero, &go_tags, &at)?;
+                    if !tag_name_ok(&field.raw_name) {
+                        view.marshal = true;
+                        self.support.sorted_keys |= matches!(s.additional, Additional::CatchAll(_));
+                    }
+                    let present = match (omitzero, ty.starts_with("Nullable[")) {
+                        (false, _) => String::new(),
+                        (true, true) => format!("v.{name}.Set"),
+                        (true, false) => format!("v.{name} != nil"),
+                    };
                     view.fields.push(FieldView {
+                        present,
                         name,
                         raw_name: field.raw_name.clone(),
                         ty,
@@ -691,6 +660,7 @@ impl Builder<'_> {
                         non_null: false,
                         required_index: None,
                         catch_all: true,
+                        present: String::new(),
                     });
                 }
             }
@@ -886,7 +856,10 @@ fn struct_tag(
     at: &str,
 ) -> Result<String, GenerateError> {
     let mut json = raw_name.to_owned();
-    if omitzero {
+    if !tag_name_ok(raw_name) {
+        // The struct's own MarshalJSONTo writes it; decoding goes by name.
+        json = "-".to_owned();
+    } else if omitzero {
         json.push_str(",omitzero");
     } else if raw_name == "-" {
         // `json:"-"` alone skips the field, and a trailing comma is

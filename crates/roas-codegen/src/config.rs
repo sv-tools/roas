@@ -110,6 +110,8 @@ pub struct GoConfigFile {
     /// The generated file's stem: the file is `<file>.go`. Default
     /// `types`. Targets sharing an output directory need different ones.
     pub file: Option<String>,
+    /// Generate a `go.mod` declaring this module beside the file, which
+    /// makes the output a module of its own.
     pub module_path: Option<String>,
 }
 
@@ -244,7 +246,12 @@ impl ConfigFile {
                     }
                     None => "types".to_owned(),
                 },
-                module_path: self.go.module_path,
+                module_path: match self.go.module_path {
+                    Some(path) if !crate::go::naming::is_module_path(&path) => {
+                        return Err(ConfigError::InvalidModulePath(path));
+                    }
+                    other => other,
+                },
             },
             substitutions: self.substitutions,
             types: self.types,
@@ -387,6 +394,10 @@ pub enum ConfigError {
         "`go.file = {0:?}` must be a lowercase file stem `go build` reads as plain source: a letter, then letters, digits or `_`; no `_test`, `_<os>` or `_<arch>` suffix, and not a name Windows reserves"
     )]
     InvalidGoFile(String),
+    #[error(
+        "`go.module_path = {0:?}` is not a Go module path: `/`-separated elements of ASCII letters, digits, `-`, `.`, `_` and `~`, none empty or starting or ending with a dot"
+    )]
+    InvalidModulePath(String),
 }
 
 #[cfg(test)]

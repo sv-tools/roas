@@ -108,11 +108,11 @@ The output uses `encoding/json/v2` from the standard library, so it needs Go 1.2
 - **The decoders own their options.** Each generated type decodes its members with its own null rules, so unmarshalers a caller passes with `json.WithUnmarshalers` do not reach inside generated types; a substituted type decodes by its own rules alone, as in Rust.
 - **Unions.** A tagged union is a struct holding one variant, with `As<Variant>` accessors, `<Union>From<Variant>` constructors, `Tag()` and `Value()`; it reads the tag first and then decodes the whole value as that variant. Open unions and compositions keep the raw JSON with an accessor and a constructor per branch.
 
-Go identifiers are exported and ASCII. A property name a struct tag cannot carry — one holding `,`, `\`, `'`, `"` or a backtick, or the empty name — is an `Error` that suppresses its type and whatever holds it. Generating Go needs `gofmt`, which formats the output and is its only syntax check, so without it `generate` fails with `GenerateError::Toolchain` rather than returning unchecked code.
+Go identifiers are exported and ASCII. A property name a struct tag cannot carry — one holding `,`, `\`, `'`, `"` or a backtick, or the empty name — gets `json:"-"`, and its struct writes itself with a generated `MarshalJSONTo` instead; decoding goes by name anyway. Generating Go needs `gofmt`, which formats the output and is its only syntax check, so without it `generate` fails with `GenerateError::Toolchain` rather than returning unchecked code.
 
 ## Configuration
 
-The Rust output is one module, `<rust.module>.rs`, `types.rs` by default; the Go output is one file, `<go.file>.go`, also `types.go` by default, in package `go.package`, `api` by default. Targets sharing a directory need different names.
+The Rust output is one module, `<rust.module>.rs`, `types.rs` by default; the Go output is one file, `<go.file>.go`, also `types.go` by default, in package `go.package`, `api` by default. Targets sharing a directory need different names. `go.module_path` also writes a `go.mod` declaring that module beside the file, so the output builds as a module of its own; it is refused when a substitution imports another module, whose version a generated `go.mod` could not know.
 
 `ConfigFile` is what a TOML file may say: everything optional, unknown keys rejected, relative paths resolved against the file's own directory. `Config` is what generation consumes, and `ConfigFile::build` is the one place a missing `target` is refused.
 

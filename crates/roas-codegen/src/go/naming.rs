@@ -83,6 +83,23 @@ pub(crate) fn is_package_name(name: &str) -> bool {
         && name != "documentation"
 }
 
+/// A module path as `go.mod` takes one, by `go mod init`'s rules for an
+/// import path: `/`-separated elements of ASCII letters, digits, `-`, `.`,
+/// `_` and `~`, none empty, `.` or `..`, none starting or ending with a
+/// dot, and none a name Windows reserves.
+pub(crate) fn is_module_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.split('/').all(|element| {
+            !element.is_empty()
+                && !element.starts_with('.')
+                && !element.ends_with('.')
+                && element
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+                && crate::write::windows_safe(element.split('.').next().unwrap_or(element))
+        })
+}
+
 /// Operating systems and architectures `go build` knows, from
 /// `internal/syslist`: a file named `x_<os>.go` or `x_<arch>.go` builds
 /// only there.
@@ -299,6 +316,21 @@ mod tests {
         assert_eq!(go_file_name("con"), "con_types");
         assert!(!is_file_stem("api_amd64"));
         assert!(is_file_stem("types"));
+    }
+
+    #[test]
+    fn module_paths() {
+        assert!(is_module_path("example.com/pets"));
+        assert!(is_module_path("pets"));
+        assert!(is_module_path("github.com/a-b/c_d/v2"));
+        assert!(!is_module_path(""));
+        assert!(!is_module_path("/pets"));
+        assert!(!is_module_path("pets/"));
+        assert!(!is_module_path("a//b"));
+        assert!(!is_module_path("a/../b"));
+        assert!(!is_module_path(".hidden/x"));
+        assert!(!is_module_path("a b"));
+        assert!(!is_module_path("example.com/con"));
     }
 
     #[test]

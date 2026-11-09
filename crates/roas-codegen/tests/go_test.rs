@@ -4,8 +4,8 @@
 
 use roas::validation::{IGNORE_UNUSED, Options};
 use roas_codegen::{
-    ConfigError, ConfigFile, DiagnosticKind, GenerateError, Generation, Input, Severity,
-    SourceDocument, Target, generate, validate,
+    ConfigError, ConfigFile, GenerateError, Generation, Input, SourceDocument, Target, generate,
+    validate,
 };
 use std::path::Path;
 use url::Url;
@@ -122,7 +122,7 @@ fn nothing_to_generate_is_a_bare_package() {
 }
 
 #[test]
-fn a_member_no_struct_tag_can_name_suppresses_its_type_and_holders() {
+fn a_member_no_struct_tag_can_name_is_written_by_its_struct() {
     let components = serde_json::json!({
         "Odd": {"type": "object", "properties": {"a,b": {"type": "string"}}},
         "Holder": {"type": "object", "properties": {"odd": {"$ref": "#/components/schemas/Odd"}}},
@@ -132,22 +132,35 @@ fn a_member_no_struct_tag_can_name_suppresses_its_type_and_holders() {
         return;
     };
     let generation = generation.unwrap();
-    let errors: Vec<_> = generation
-        .diagnostics
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .collect();
-    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
+    let code = &generation.files[0].contents;
+    let squeezed = squeezed(code);
+    assert!(squeezed.contains("type Odd struct"), "{squeezed}");
+    assert!(squeezed.contains("type Holder struct"), "{squeezed}");
+    // The tag skips it; the struct writes it, extras in key order.
+    assert!(squeezed.contains("AB *string `json:\"-\"`"), "{squeezed}");
     assert!(
-        matches!(&errors[0].kind, DiagnosticKind::UnrepresentableName { name } if name == "a,b")
+        squeezed.contains("func (v Odd) MarshalJSONTo(e *jsontext.Encoder) error {"),
+        "{squeezed}"
     );
-    assert_eq!(errors[0].pointer, "/components/schemas/Odd/properties/a,b");
-    let code = squeezed(&generation.files[0].contents);
-    assert!(!code.contains("type Odd struct"), "{code}");
-    assert!(!code.contains("type Holder struct"), "{code}");
-    // `-` is named with a trailing comma; a space is fine.
-    assert!(code.contains("`json:\"-,omitzero\"`"), "{code}");
-    assert!(code.contains("`json:\"x y,omitzero\"`"), "{code}");
+    assert!(
+        squeezed.contains("e.WriteToken(jsontext.String(\"a,b\"))"),
+        "{squeezed}"
+    );
+    assert!(
+        squeezed.contains("slices.Sorted(maps.Keys(v.AdditionalProperties))"),
+        "{squeezed}"
+    );
+    assert!(
+        !squeezed.contains("func (v Fine) MarshalJSONTo"),
+        "{squeezed}"
+    );
+    // `-` is named with an option; a space is fine.
+    assert!(squeezed.contains("`json:\"-,omitzero\"`"), "{squeezed}");
+    assert!(squeezed.contains("`json:\"x y,omitzero\"`"), "{squeezed}");
+    if let Some(Err(error)) = vet(code, "odd") {
+        panic!("go vet failed\n{error}\n{code}");
+    }
 }
 
 #[test]
@@ -248,10 +261,6 @@ fn the_file_and_package_are_configurable_and_checked() {
     assert!(file.contents.contains("\npackage petstore\n"));
     // Rust-only settings do not stop a Go run.
     assert!(go(pet(), "[rust]\nedition = \"2027\"\n").unwrap().is_ok());
-    let error = go(pet(), "[go]\nmodule_path = \"example.com/pets\"\n")
-        .unwrap()
-        .unwrap_err();
-    assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
     for (toml, bad) in [
         ("[go]\npackage = \"type\"\n", "package"),
         ("[go]\npackage = \"Pets\"\n", "package"),
@@ -259,6 +268,7 @@ fn the_file_and_package_are_configurable_and_checked() {
         ("[go]\npackage = \"documentation\"\n", "package"),
         ("[go]\npackage = \"main\"\n", "package"),
         ("[go]\nfile = \"pets_windows\"\n", "file"),
+        ("[go]\nmodule_path = \"a b\"\n", "module"),
         ("[go]\nfile = \"pets_test\"\n", "file"),
         ("[go]\nfile = \"nul\"\n", "file"),
     ] {
@@ -269,6 +279,10 @@ fn the_file_and_package_are_configurable_and_checked() {
         match bad {
             "package" => assert!(
                 matches!(error, ConfigError::InvalidPackage(_)),
+                "{toml}: {error}"
+            ),
+            "module" => assert!(
+                matches!(error, ConfigError::InvalidModulePath(_)),
                 "{toml}: {error}"
             ),
             _ => assert!(
@@ -359,9 +373,8 @@ fn every_kind_renders_and_survives_gofmt() {
     );
 }
 
-/// `go vet` over a generated file in a module of its own, or why it could
-/// not run: Go 1.27 or later is needed.
-fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
+/// Whether Go 1.27 or later is here to build generated code with.
+fn have_go() -> bool {
     let version = std::process::Command::new("go")
         .args(["env", "GOVERSION"])
         .env("GOTOOLCHAIN", "local")
@@ -379,6 +392,15 @@ fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
             "ROAS_CODEGEN_REQUIRE_GO is set but go is {version:?}"
         );
         eprintln!("skipped: go is {version:?}");
+        return false;
+    }
+    true
+}
+
+/// `go vet` over a generated file in a module of its own; `None` without
+/// Go 1.27 or later.
+fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
+    if !have_go() {
         return None;
     }
     let dir = std::env::temp_dir().join(format!("roas-codegen-vet-{tag}-{}", std::process::id()));
@@ -557,4 +579,62 @@ fn a_pointer_substitution_is_isolated_but_takes_null() {
     if let Some(Err(error)) = vet(&code, "pointer") {
         panic!("go vet failed\n{error}\n{code}");
     }
+}
+
+#[test]
+fn a_module_path_makes_the_output_a_module() {
+    let toml = "[go]\nmodule_path = \"example.com/pets\"\npackage = \"pets\"\n";
+    let Some(generation) = go(pet(), toml) else {
+        return;
+    };
+    let generation = generation.unwrap();
+    let paths: Vec<_> = generation.files.iter().map(|f| f.path.clone()).collect();
+    assert_eq!(paths, [Path::new("types.go"), Path::new("go.mod")]);
+    assert_eq!(
+        generation.files[1].contents,
+        "// Code generated by roas. DO NOT EDIT.\n\nmodule example.com/pets\n\ngo 1.27\n"
+    );
+    // The module builds as it is, and names itself.
+    if have_go() {
+        let dir = std::env::temp_dir().join(format!("roas-codegen-module-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in &generation.files {
+            std::fs::write(dir.join(&file.path), &file.contents).unwrap();
+        }
+        let list = std::process::Command::new("go")
+            .args(["list", "-m"])
+            .current_dir(&dir)
+            .env("GOTOOLCHAIN", "local")
+            .env("GOWORK", "off")
+            .output()
+            .expect("go list runs");
+        let vet = std::process::Command::new("go")
+            .args(["vet", "./..."])
+            .current_dir(&dir)
+            .env("GOTOOLCHAIN", "local")
+            .env("GOWORK", "off")
+            .output()
+            .expect("go vet runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            String::from_utf8_lossy(&list.stdout).trim(),
+            "example.com/pets"
+        );
+        assert!(
+            vet.status.success(),
+            "{}",
+            String::from_utf8_lossy(&vet.stderr)
+        );
+    }
+    // A substitution from another module needs a version go.mod cannot know.
+    let components = serde_json::json!({
+        "P": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}
+    });
+    let toml = "[go]\nmodule_path = \"example.com/pets\"\n[substitutions.uuid.go]\nname = \"uuid.UUID\"\nimport = \"github.com/google/uuid\"\n";
+    let error = go(components, toml).unwrap().unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("without a version")),
+        "{error}"
+    );
 }
