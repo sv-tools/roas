@@ -958,6 +958,49 @@ fn check_source(previous: &Manifest, options: &WriteOptions) -> Result<(), Write
     Ok(())
 }
 
+/// The stale paths another manifest also lists, as after merging two
+/// branches that each added a target: kept, and not reported as edited.
+fn shared(
+    out_dir: &Path,
+    manifest_file: &str,
+    removable: &[(String, String)],
+) -> Result<BTreeSet<String>, WriteError> {
+    let others = other_owners(out_dir, manifest_file)?;
+    Ok(removable
+        .iter()
+        .filter(|(p, _)| others.contains_key(&p.to_ascii_lowercase()))
+        .map(|(p, _)| p.clone())
+        .collect())
+}
+
+/// The entry a planned path reaches under another spelling of its file
+/// name, as on a case-insensitive disk where a file was taken over or
+/// renamed by hand: the manifest would record a name the disk does not
+/// show. `None` when the exact name is there, or the variant is not the
+/// same single-link file.
+fn misspelled(out_dir: &Path, key: &str) -> Option<String> {
+    let path = out_dir.join(key);
+    let name = key.rsplit('/').next()?;
+    let entries = fs::read_dir(path.parent()?).ok()?;
+    let mut variant = None;
+    for entry in entries.flatten() {
+        let stored = entry.file_name().to_string_lossy().into_owned();
+        if stored == name {
+            return None;
+        }
+        if stored.eq_ignore_ascii_case(name) {
+            variant = Some(stored);
+        }
+    }
+    let stored = variant?;
+    let on_disk = path.with_file_name(&stored);
+    let same = matches!((file_id(&on_disk), file_id(&path)), (Some(a), Some(b)) if a == b);
+    (same && single_link(&on_disk)).then(|| match key.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/{stored}"),
+        None => stored,
+    })
+}
+
 /// Remove the temporary files a killed run left beside the files it was
 /// writing. They hold generated content only, and with the lock held no
 /// other run can be writing them. Only directories this run writes into
@@ -1153,6 +1196,7 @@ pub fn write(
             .renamed
             .push((PathBuf::from(old), PathBuf::from(new)));
     }
+    let shared = shared(out_dir, &manifest_file, &removable)?;
     // Stale files go first: one may sit where a new path needs a directory.
     for (path, _) in &removable {
         let on_disk = out_dir.join(path);
@@ -1168,7 +1212,7 @@ pub fn write(
                     });
                 }
             }
-        } else if read_recorded(&on_disk)?.is_some() {
+        } else if !shared.contains(path) && read_recorded(&on_disk)?.is_some() {
             // Once per file, whatever spellings recorded it, as check reports.
             let id = file_id(&on_disk);
             if !report.kept_edited.iter().any(|p| {
@@ -1176,6 +1220,14 @@ pub fn write(
             }) {
                 report.kept_edited.push(PathBuf::from(path));
             }
+        }
+    }
+    for path in planned.keys() {
+        if let Some(stored) = misspelled(out_dir, path) {
+            respell(out_dir, &stored, path)?;
+            report
+                .renamed
+                .push((PathBuf::from(stored), PathBuf::from(path)));
         }
     }
     for (path, content) in &planned {
@@ -1244,12 +1296,18 @@ pub fn check(
         &going,
         options,
     )?;
+    let shared = shared(out_dir, &manifest_file, &removable)?;
     let mut report = CheckReport::default();
     for (path, content) in &planned {
         // Reached through a stale spelling a write removes first: written
         // afresh.
         if is_going(out_dir, &going, path) {
             report.missing.push(PathBuf::from(path));
+            continue;
+        }
+        // Stored under another spelling: a write renames it.
+        if misspelled(out_dir, path).is_some() {
+            report.changed.push(PathBuf::from(path));
             continue;
         }
         match read_recorded(&out_dir.join(path))? {
@@ -1275,7 +1333,7 @@ pub fn check(
         }
         if going.contains(&path) {
             report.stale.push(PathBuf::from(path));
-        } else if read_recorded(&on_disk)?.is_some() {
+        } else if !shared.contains(&path) && read_recorded(&on_disk)?.is_some() {
             report.stale_edited.push(PathBuf::from(path));
         }
     }
@@ -2830,5 +2888,68 @@ mod tests {
         assert_eq!(checked.missing, vec![PathBuf::from("foo.rs")]);
         let report = write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
         assert_eq!(report.written, vec![PathBuf::from("foo.rs")]);
+    }
+
+    #[test]
+    fn a_taken_over_file_gets_the_planned_spelling() {
+        let dir = TempDir::new("takeover-spelling");
+        fs::write(dir.0.join("A.rs"), "same").unwrap();
+        if !same_file(&dir.0.join("A.rs"), &dir.0.join("a.rs")) {
+            return;
+        }
+        let g = generation(&[("a.rs", "same")]);
+        assert_eq!(
+            check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .changed,
+            vec![PathBuf::from("a.rs")]
+        );
+        let report = write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(
+            report.renamed,
+            vec![(PathBuf::from("A.rs"), PathBuf::from("a.rs"))]
+        );
+        let names: Vec<String> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".rs"))
+            .collect();
+        assert_eq!(names, vec!["a.rs".to_owned()]);
+        assert!(
+            check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+    }
+
+    #[test]
+    fn a_shared_stale_file_is_not_reported_as_edited() {
+        let dir = TempDir::new("shared-report");
+        write(
+            &generation(&[("x.rs", "x"), ("y.rs", "y")]),
+            &dir.0,
+            &WriteOptions::new("aaa"),
+        )
+        .unwrap();
+        let mut other = manifest_for("bbb", Target::Rust, "", BTreeMap::new());
+        other.files.insert("x.rs".into(), hash(b"x"));
+        fs::write(
+            dir.0.join(".roas-codegen-bbb-rust.json"),
+            manifest_text(&other),
+        )
+        .unwrap();
+        let next = generation(&[("y.rs", "y")]);
+        assert!(
+            check(&next, &dir.0, &WriteOptions::new("aaa"))
+                .unwrap()
+                .stale_edited
+                .is_empty()
+        );
+        assert!(
+            write(&next, &dir.0, &WriteOptions::new("aaa"))
+                .unwrap()
+                .kept_edited
+                .is_empty()
+        );
     }
 }

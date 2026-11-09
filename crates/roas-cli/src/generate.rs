@@ -26,14 +26,13 @@ use crate::{InputFormat, InputSource, resolve_input_source};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum GenerateTarget {
     Rust,
-    Go,
+    // Go joins when its backend exists; the library refuses it until then.
 }
 
 impl From<GenerateTarget> for Target {
     fn from(target: GenerateTarget) -> Self {
         match target {
             GenerateTarget::Rust => Target::Rust,
-            GenerateTarget::Go => Target::Go,
         }
     }
 }
