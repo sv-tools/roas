@@ -241,6 +241,15 @@ struct DirLock {
     made: Option<PathBuf>,
 }
 
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        // Unlocked explicitly, not only by closing: a child process another
+        // thread forks meanwhile shares the open file until it execs, and
+        // closing our copy alone would leave the lock held by it.
+        let _ = self._file.unlock();
+    }
+}
+
 impl DirLock {
     /// Exclusive, on this run's own output directory, creating the file.
     fn acquire(out_dir: &Path) -> Result<DirLock, WriteError> {
@@ -657,9 +666,14 @@ fn other_roots<'a>(
             }
         }
     }
-    for key in keys {
-        for (i, _) in key.match_indices('/') {
-            for rel in case_variants(out_dir, &key[..i]) {
+    // Each directory once, however many files sit below it.
+    let prefixes: BTreeSet<&str> = keys
+        .into_iter()
+        .flat_map(|key| key.match_indices('/').map(move |(i, _)| &key[..i]))
+        .collect();
+    for prefix in prefixes {
+        {
+            for rel in case_variants(out_dir, prefix) {
                 let dir = out_dir.join(rel);
                 if has(&dir, false) {
                     roots.push((dir, false));
@@ -811,10 +825,13 @@ fn other_owners<'a>(
     let mut owners = BTreeMap::new();
     // Below, the output directory included.
     let mut dirs = BTreeSet::from([String::new()]);
-    for key in keys {
-        for (i, _) in key.match_indices('/') {
-            dirs.extend(case_variants(out_dir, &key[..i]));
-        }
+    // Each directory once, however many files sit below it.
+    let prefixes: BTreeSet<&str> = keys
+        .into_iter()
+        .flat_map(|key| key.match_indices('/').map(move |(i, _)| &key[..i]))
+        .collect();
+    for prefix in prefixes {
+        dirs.extend(case_variants(out_dir, prefix));
     }
     for rel in dirs {
         let dir = if rel.is_empty() {
@@ -1532,9 +1549,14 @@ fn shared(
 /// renamed by hand: the manifest would record a name the disk does not
 /// show. `None` when the exact name is there, or the variant is not the
 /// same single-link file.
-fn misspelled(out_dir: &Path, key: &str) -> Option<String> {
+fn misspelled(out_dir: &Path, key: &str, listings: &mut Listings) -> Option<String> {
     let path = out_dir.join(key);
     let name = key.rsplit('/').next()?;
+    // Stored as planned, as nearly every file is: one listing per directory
+    // answers that without a stat per entry.
+    if listings.has(path.parent()?, name) {
+        return None;
+    }
     // The planned name reaches a file; which directory entry is it? Found
     // by identity, not by spelling: the disk may fold beyond ASCII case.
     let wanted = file_id(&path)?;
@@ -1559,6 +1581,23 @@ fn misspelled(out_dir: &Path, key: &str) -> Option<String> {
         Some((dir, _)) => format!("{dir}/{stored}"),
         None => stored,
     })
+}
+
+/// Directory listings, read once per run.
+#[derive(Default)]
+struct Listings(BTreeMap<PathBuf, BTreeSet<std::ffi::OsString>>);
+
+impl Listings {
+    fn has(&mut self, dir: &Path, name: &str) -> bool {
+        self.0
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| {
+                fs::read_dir(dir)
+                    .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+                    .unwrap_or_default()
+            })
+            .contains(std::ffi::OsStr::new(name))
+    }
 }
 
 /// Remove the temporary files a killed run left beside the files it was
@@ -1895,8 +1934,9 @@ pub fn write(
             }
         }
     }
+    let mut listings = Listings::default();
     for path in planned.keys() {
-        if let Some(stored) = misspelled(out_dir, path) {
+        if let Some(stored) = misspelled(out_dir, path, &mut listings) {
             respell(out_dir, &stored, path)?;
             report
                 .renamed
@@ -1993,6 +2033,7 @@ pub fn check(
     )?;
     let shared = shared(out_dir, &manifest_file, &removable)?;
     let mut report = CheckReport::default();
+    let mut listings = Listings::default();
     for (path, content) in &planned {
         // Reached through a stale spelling a write removes first: written
         // afresh.
@@ -2001,7 +2042,7 @@ pub fn check(
             continue;
         }
         // Stored under another spelling: a write renames it.
-        if misspelled(out_dir, path).is_some() {
+        if misspelled(out_dir, path, &mut listings).is_some() {
             report.changed.push(PathBuf::from(path));
             continue;
         }
