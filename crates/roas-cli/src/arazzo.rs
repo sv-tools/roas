@@ -707,8 +707,12 @@ fn with_causes(error: &dyn std::error::Error) -> String {
     let mut line = error.to_string();
     let mut cause = error.source();
     while let Some(error) = cause {
-        line.push_str(": ");
-        line.push_str(&error.to_string());
+        // Some messages already end with their source's.
+        let text = error.to_string();
+        if !line.ends_with(&text) {
+            line.push_str(": ");
+            line.push_str(&text);
+        }
         cause = error.source();
     }
     line
@@ -827,8 +831,8 @@ impl<F: ResourceFetcher> ResourceFetcher for Remembering<F> {
     }
 }
 
-/// A copy of a loading error that reads the same: diagnostics show the
-/// top-level message, and the source keeps the original's text.
+/// A copy of a loading error that reads the same: its message is the
+/// original's, and its source the original's whole cause chain as text.
 fn replay(error: &LoaderError) -> LoaderError {
     match error {
         LoaderError::NoFetcherRegistered { uri } => {
@@ -844,7 +848,7 @@ fn replay(error: &LoaderError) -> LoaderError {
         },
         LoaderError::ReadFile { path, source } => LoaderError::ReadFile {
             path: path.clone(),
-            source: std::io::Error::new(source.kind(), source.to_string()),
+            source: std::io::Error::new(source.kind(), with_causes(source)),
         },
         LoaderError::Parse { uri, source } => LoaderError::Parse {
             uri: uri.clone(),
@@ -856,7 +860,7 @@ fn replay(error: &LoaderError) -> LoaderError {
         },
         LoaderError::Fetch { uri, source } => LoaderError::Fetch {
             uri: uri.clone(),
-            source: source.to_string().into(),
+            source: with_causes(source.as_ref()).into(),
         },
         // A variant added later: its message is kept, if not its shape.
         other => LoaderError::Fetch {
@@ -1508,6 +1512,34 @@ mod tests {
         );
     }
 
+    /// An error with a fixed message and an `io::Error` source.
+    #[derive(Debug)]
+    struct Wrapping {
+        message: &'static str,
+        source: std::io::Error,
+    }
+
+    impl std::fmt::Display for Wrapping {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for Wrapping {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    #[test]
+    fn a_cause_already_in_the_message_is_not_repeated() {
+        let error = Wrapping {
+            message: "cannot parse `x`: bad type",
+            source: std::io::Error::other("bad type"),
+        };
+        assert_eq!(with_causes(&error), "cannot parse `x`: bad type");
+    }
+
     #[test]
     fn a_loading_diagnostic_says_why_as_well_as_what() {
         let fetches = Rc::new(RefCell::new(Fetches::default()));
@@ -1550,13 +1582,20 @@ mod tests {
                 source: "refused".into(),
             },
         ];
-        for error in errors {
+        let nested = LoaderError::Fetch {
+            uri: "http://h/t".into(),
+            source: Box::new(Wrapping {
+                message: "HTTP request failed",
+                source: std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "connection refused",
+                ),
+            }),
+        };
+        for error in errors.into_iter().chain([nested]) {
             let replayed = replay(&error);
             assert_eq!(replayed.to_string(), error.to_string());
-            assert_eq!(
-                std::error::Error::source(&replayed).map(ToString::to_string),
-                std::error::Error::source(&error).map(ToString::to_string),
-            );
+            assert_eq!(with_causes(&replayed), with_causes(&error));
         }
     }
 
