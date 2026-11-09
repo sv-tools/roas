@@ -87,8 +87,11 @@ pub(crate) struct GenerateArgs {
     #[arg(long)]
     pub(crate) allow_partial: bool,
 
-    /// Overwrite existing files no generation target owns. Off by default,
-    /// since such a file is probably hand-written.
+    /// Take over what a run would otherwise refuse: overwrite existing files
+    /// no generation target owns, and let this description take a label
+    /// recorded for a different source (after moving or renaming it). Off
+    /// by default, since such a file is probably hand-written and such a
+    /// label probably belongs to another description.
     #[arg(long)]
     pub(crate) force: bool,
 
@@ -171,8 +174,11 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
     let InputSource::File(path) = source else {
         return None;
     };
-    let file = normalize(&std::path::absolute(path.with_extension("")).ok()?);
-    let out = normalize(&std::path::absolute(out).ok()?);
+    // Resolve symlinks so one file has one identity however its path is
+    // spelled (`$PWD`, macOS `/tmp` → `/private/tmp`). The output directory
+    // may not exist yet, so its deepest existing ancestor is resolved.
+    let file = resolve(path)?.with_extension("");
+    let out = resolve(out)?;
     let file: Vec<_> = file.components().collect();
     let out: Vec<_> = out.components().collect();
     let common = file.iter().zip(&out).take_while(|(a, b)| a == b).count();
@@ -183,6 +189,25 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
             .map(|c| c.as_os_str().to_string_lossy().into_owned()),
     );
     Some(parts.join("/"))
+}
+
+/// The canonical form of `path`, resolving its deepest existing ancestor
+/// and appending the rest lexically.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    let absolute = normalize(&std::path::absolute(path).ok()?);
+    let mut existing = absolute.as_path();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            let mut out = real;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return Some(out);
+        }
+        rest.push(existing.file_name()?.to_owned());
+        existing = existing.parent()?;
+    }
 }
 
 /// Resolve `.` and `..` lexically: `std::path::absolute` keeps them, and
@@ -317,6 +342,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         let mut check_options = WriteOptions::new(label.clone());
         check_options.allow_partial = args.allow_partial;
         check_options.source_id = source_id(&source, &args.out);
+        check_options.replace_source = args.force;
         let report = check(&generation, &args.out, target, &check_options)?;
         if report.is_clean() {
             eprintln!("{}: up to date", args.out.display());
@@ -346,6 +372,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
 
     let mut write_options = WriteOptions::new(label);
     write_options.overwrite_unowned = args.force;
+    write_options.replace_source = args.force;
     write_options.allow_partial = args.allow_partial;
     write_options.source_id = source_id(&source, &args.out);
     let report = write(&generation, &args.out, target, &write_options)?;
@@ -693,24 +720,56 @@ mod tests {
     }
 
     #[test]
-    fn source_ids_are_relative_to_the_output_directory() {
-        let id = source_id(
-            &InputSource::File("/repo/specs/pets/openapi.yaml".into()),
-            Path::new("/repo/src/api"),
+    fn source_ids_are_relative_and_ignore_how_the_path_is_spelled() {
+        let dir = TempDir::new("ids");
+        let real = dir.0.join("real");
+        std::fs::create_dir_all(real.join("spec/pets")).unwrap();
+        std::fs::write(real.join("spec/pets/openapi.json"), PET).unwrap();
+        std::fs::create_dir_all(real.join("billing")).unwrap();
+        std::fs::write(real.join("billing/openapi.json"), PET).unwrap();
+        let file = InputSource::File(real.join("spec/pets/openapi.json"));
+        assert_eq!(
+            source_id(&file, &real.join("src/api")).as_deref(),
+            Some("../../spec/pets/openapi")
         );
-        assert_eq!(id.as_deref(), Some("../../specs/pets/openapi"));
-        // `..` is resolved before comparing, so siblings stay distinct.
-        let pets = source_id(
-            &InputSource::File("/repo/pets/../pets/openapi.json".into()),
-            Path::new("/repo/pets/../out"),
+        // `..` is resolved, so siblings stay distinct.
+        let pets = InputSource::File(real.join("spec/pets/../pets/openapi.json"));
+        let billing = InputSource::File(real.join("billing/openapi.json"));
+        assert_ne!(
+            source_id(&pets, &real.join("out")),
+            source_id(&billing, &real.join("out"))
         );
-        let billing = source_id(
-            &InputSource::File("/repo/billing/openapi.json".into()),
-            Path::new("/repo/billing/../out"),
-        );
-        assert_eq!(pets.as_deref(), Some("../pets/openapi"));
-        assert_eq!(billing.as_deref(), Some("../billing/openapi"));
         assert_eq!(source_id(&InputSource::Stdin, Path::new("/x")), None);
+        #[cfg(unix)]
+        {
+            // Through a symlink: the same identity.
+            let link = dir.0.join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let via_link = InputSource::File(link.join("spec/pets/openapi.json"));
+            assert_eq!(
+                source_id(&via_link, &real.join("out")),
+                source_id(&file, &link.join("out"))
+            );
+        }
+    }
+
+    #[test]
+    fn force_lets_a_moved_description_keep_its_label() {
+        let dir = TempDir::new("moved");
+        std::fs::create_dir_all(dir.0.join("spec")).unwrap();
+        std::fs::create_dir_all(dir.0.join("api")).unwrap();
+        let before = dir.0.join("spec/pets.json");
+        std::fs::write(&before, PET).unwrap();
+        let out = dir.0.join("out");
+        run_generate(args(&before, &out)).unwrap();
+        let after = dir.0.join("api/pets.json");
+        std::fs::rename(&before, &after).unwrap();
+        let error = format!("{:#}", run_generate(args(&after, &out)).unwrap_err());
+        assert!(error.contains("--force"), "{error}");
+        let mut forced = args(&after, &out);
+        forced.force = true;
+        run_generate(forced).unwrap();
+        run_generate(args(&after, &out)).unwrap();
     }
 
     #[test]

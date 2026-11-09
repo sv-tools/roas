@@ -63,6 +63,11 @@ pub struct WriteOptions {
     /// the output directory, without its extension, so moving between
     /// JSON and YAML keeps the label.
     pub source_id: Option<String>,
+    /// Accept a different [`source_id`](Self::source_id) than the one the
+    /// label recorded, and record the new one: the description moved or was
+    /// renamed. Off by default, so a second description cannot take over a
+    /// label by accident.
+    pub replace_source: bool,
 }
 
 impl WriteOptions {
@@ -72,6 +77,7 @@ impl WriteOptions {
             overwrite_unowned: false,
             allow_partial: false,
             source_id: None,
+            replace_source: false,
         }
     }
 }
@@ -145,7 +151,7 @@ pub enum WriteError {
     )]
     Locked(PathBuf),
     #[error(
-        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; give this description its own label"
+        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; if the description moved, allow replacing the recorded source (`roas openapi generate --force`) or delete the label's manifest; if it is a different description, give it its own label"
     )]
     SourceMismatch {
         label: String,
@@ -498,7 +504,11 @@ fn manifest_text(manifest: &Manifest) -> String {
 /// would otherwise overwrite each other's output without a word.
 fn check_source(previous: &Manifest, options: &WriteOptions) -> Result<(), WriteError> {
     let current = options.source_id.as_deref().unwrap_or_default();
-    if !previous.source.is_empty() && !current.is_empty() && previous.source != current {
+    if !options.replace_source
+        && !previous.source.is_empty()
+        && !current.is_empty()
+        && previous.source != current
+    {
         return Err(WriteError::SourceMismatch {
             label: options.label.clone(),
             previous: previous.source.clone(),
@@ -1411,5 +1421,54 @@ mod tests {
             Err(WriteError::Symlink(_))
         ));
         assert!(fs::read_dir(&real).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_moved_description_can_take_its_label_back() {
+        let dir = TempDir::new("moved");
+        let mut before = WriteOptions::new("pets");
+        before.source_id = Some("../spec/pets".into());
+        write(
+            &generation(&[("pets.rs", "a")]),
+            &dir.0,
+            Target::Rust,
+            &before,
+        )
+        .unwrap();
+        let mut after = WriteOptions::new("pets");
+        after.source_id = Some("../api/pets".into());
+        let error = write(
+            &generation(&[("pets.rs", "b")]),
+            &dir.0,
+            Target::Rust,
+            &after,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--force"), "{error}");
+        after.replace_source = true;
+        write(
+            &generation(&[("pets.rs", "b")]),
+            &dir.0,
+            Target::Rust,
+            &after,
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(dir.0.join("pets.rs")).unwrap(), "b");
+        assert!(
+            fs::read_to_string(dir.0.join(".roas-codegen-pets-rust.json"))
+                .unwrap()
+                .contains("../api/pets")
+        );
+        after.replace_source = false;
+        assert!(
+            check(
+                &generation(&[("pets.rs", "b")]),
+                &dir.0,
+                Target::Rust,
+                &after
+            )
+            .unwrap()
+            .is_clean()
+        );
     }
 }
