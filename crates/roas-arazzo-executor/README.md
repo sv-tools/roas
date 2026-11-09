@@ -14,8 +14,25 @@ use roas_arazzo::v1_1::Description;
 use roas_arazzo_executor::{Client, Options, execute};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-let description: Description = serde_saphyr::from_str(include_str!("buy_pet.arazzo.yaml"))?;
-let openapi = serde_saphyr::from_str(include_str!("petstore.openapi.yaml"))?;
+// The options every roas crate reads YAML with: YAML 1.2 booleans
+// (`yes` stays a string), `017` / `1_000` stay strings, merge keys are
+// expanded and duplicate keys rejected, and the budget raised so large
+// specs fit.
+let yaml = || serde_saphyr::options! {
+    budget: serde_saphyr::budget! {
+        max_nodes: 10_000_000,
+        max_events: 25_000_000,
+    },
+    strict_booleans: true,
+    leading_zero_numbers_as_strings: true,
+    underscored_numbers_as_strings: true,
+    non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
+    merge_keys: serde_saphyr::MergeKeyPolicy::Merge,
+    duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+};
+let description: Description =
+    serde_saphyr::from_str_with_options(include_str!("buy_pet.arazzo.yaml"), yaml())?;
+let openapi = serde_saphyr::from_str_with_options(include_str!("petstore.openapi.yaml"), yaml())?;
 
 let options = Options::new()
     .workflow("buyPet")

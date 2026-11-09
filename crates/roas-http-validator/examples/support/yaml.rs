@@ -6,6 +6,16 @@
 
 pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, serde_saphyr::Error> {
     let options = serde_saphyr::options! {
+        // Same options in every roas crate; keep the copies in step
+        // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
+        // from the defaults (250k nodes, 1M events), which reject ordinary
+        // large specs. Depth stays at 64: deeper nesting overflows a 2 MiB
+        // thread stack in debug builds. The input-size cap and alias limits
+        // stay at their defaults and still stop an alias bomb.
+        budget: serde_saphyr::budget! {
+            max_nodes: 10_000_000,
+            max_events: 25_000_000,
+        },
         strict_booleans: true,
         leading_zero_numbers_as_strings: true,
         underscored_numbers_as_strings: true,

@@ -274,11 +274,21 @@ fn parse_yaml(uri: &Url, bytes: &[u8]) -> Result<Value, LoaderError> {
 /// - `<<: *anchor` merge keys are expanded.
 /// - A duplicate mapping key is an error rather than a silent last-wins.
 ///
-/// The default [`serde_saphyr::Budget`] stays on: it rejects alias bombs and
-/// pathologically deep or large documents before they are materialised.
+/// A [`serde_saphyr::Budget`] stays on, raised so large specs fit: it rejects
+/// alias bombs, nesting past 64 levels and documents past 10M nodes.
 #[cfg(feature = "yaml")]
 fn yaml_options() -> serde_saphyr::Options {
     serde_saphyr::options! {
+        // Same options in every roas crate; keep the copies in step
+        // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
+        // from the defaults (250k nodes, 1M events), which reject ordinary
+        // large specs. Depth stays at 64: deeper nesting overflows a 2 MiB
+        // thread stack in debug builds. The input-size cap and alias limits
+        // stay at their defaults and still stop an alias bomb.
+        budget: serde_saphyr::budget! {
+            max_nodes: 10_000_000,
+            max_events: 25_000_000,
+        },
         strict_booleans: true,
         leading_zero_numbers_as_strings: true,
         underscored_numbers_as_strings: true,
@@ -391,13 +401,31 @@ mod yaml_tests {
 
     #[test]
     fn yaml_alias_bomb_is_rejected_by_the_budget() {
-        let mut yaml = String::from("l0: &l0 [lol, lol, lol, lol, lol, lol, lol, lol, lol, lol]\n");
-        for i in 1..10 {
-            let prev = format!("*l{}", i - 1);
-            yaml.push_str(&format!("l{i}: &l{i} [{}]\n", vec![prev; 10].join(", ")));
-        }
+        // One anchor expanded 200 times: the alias-to-anchor ratio guard
+        // stops it before anything is materialised.
+        let yaml = format!(
+            "a: &a [x, x, x, x, x, x, x, x, x, x]\nb: [{}]\n",
+            vec!["*a"; 200].join(", ")
+        );
         let err = parse(&yaml).unwrap_err();
         assert!(err.contains("budget breached"), "{err}");
+    }
+
+    #[test]
+    fn yaml_nesting_is_capped_at_64_levels() {
+        let nested = |depth: usize| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+        parse(&nested(64)).unwrap();
+        let err = parse(&nested(65)).unwrap_err();
+        assert!(err.contains("budget breached"), "{err}");
+    }
+
+    /// Past the library's default budget of 250k nodes, which rejects
+    /// ordinary large specs.
+    #[test]
+    fn yaml_large_document_fits_the_budget() {
+        let yaml: String = (0..60_000).map(|i| format!("k{i}: [a, b, c]\n")).collect();
+        let value = parse(&yaml).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 60_000);
     }
 }
 

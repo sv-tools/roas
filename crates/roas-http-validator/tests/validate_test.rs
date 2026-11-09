@@ -2121,14 +2121,22 @@ fn a_yaml_description_keeps_ordinary_decimal_bounds() {
     assert_eq!(errors(&validator, &posted(b"1.234")).len(), 1);
 }
 
-/// Characterization, not aspiration.
-///
-/// The YAML reader (`serde-saphyr`) reads a scalar with a decimal point
-/// through an `f64` before `serde_json` is involved, so a fractional
-/// literal carrying more precision than a double is already rounded when
-/// `roas` builds the `Spec` — upstream of anything this crate or
-/// `exact-numbers` can reach. This pins where that boundary is, and will
-/// fail if the YAML parser ever stops losing it, which is the point.
+/// Past `i128`'s range a JSON bound is reported as unchecked, but a YAML
+/// one has already been through an `f64`: `2^127` arrives as
+/// `1.7014118346046923e38`, which is inside the range, so it is compared
+/// rather than reported.
+#[test]
+fn a_yaml_bound_past_i128_is_rounded_into_range_and_compared() {
+    let bound = "170141183460469231731687303715884105728";
+    let from_yaml = body_schema_yaml(&format!("{{ type: integer, maximum: {bound} }}"));
+    let from_json = body_schema_text(&format!(r#"{{"type":"integer","maximum":{bound}}}"#));
+
+    assert!(errors(&from_yaml, &posted(b"1")).is_empty());
+    let found = errors(&from_json, &posted(b"1"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("was NOT checked"), "{found:?}");
+}
+
 /// Characterization, not aspiration.
 ///
 /// The YAML reader keeps an integer exactly only while it fits `u64` (or
@@ -2158,6 +2166,14 @@ fn a_yaml_integer_bound_past_64_bits_is_rounded_before_the_crate_sees_it() {
     );
 }
 
+/// Characterization, not aspiration.
+///
+/// The YAML reader (`serde-saphyr`) reads a scalar with a decimal point
+/// through an `f64` before `serde_json` is involved, so a fractional
+/// literal carrying more precision than a double is already rounded when
+/// `roas` builds the `Spec` — upstream of anything this crate or
+/// `exact-numbers` can reach. This pins where that boundary is, and will
+/// fail if the YAML parser ever stops losing it, which is the point.
 #[test]
 fn a_yaml_fractional_bound_past_a_double_is_rounded_before_the_crate_sees_it() {
     let from_yaml = body_schema_yaml("{ type: integer, maximum: 9007199254740993.5 }");
