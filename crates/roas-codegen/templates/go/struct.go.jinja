@@ -1,0 +1,20 @@
+{% block doc %}{% for line in t.doc %}//{% if line %} {{ line }}{% endif %}
+{% endfor %}{% endblock %}type {{ t.name }} struct {
+{% block fields %}{% for f in t.fields %}{% include "builtin/go/field.go.jinja" %}{% endfor %}{% endblock %}}
+
+// UnmarshalJSONFrom enforces what the struct tags of {{ t.name }} cannot:
+// required members{% if t.denied %}, members that must not be null, and no
+// members beyond those named{% else %} and members that must not be null{% endif %}.
+func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	raw, err := d.ReadValue()
+	if err != nil {
+		return err
+	}
+	if err := checkMembers(raw, {{ t.name_literal }}, {{ t.required }}, {{ t.non_null }}); err != nil {
+		return err
+	}
+	type plain {{ t.name }}
+	*v = {{ t.name }}{}
+	return json.Unmarshal(raw, (*plain)(v), decodeOptions{% if t.denied %}, json.RejectUnknownMembers(true){% endif %})
+}
+{% block trailing %}{% endblock %}

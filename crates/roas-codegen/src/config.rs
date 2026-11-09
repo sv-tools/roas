@@ -105,7 +105,11 @@ pub struct RustConfigFile {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct GoConfigFile {
+    /// The package clause of the generated file. Default `api`.
     pub package: Option<String>,
+    /// The generated file's stem: the file is `<file>.go`. Default
+    /// `types`. Targets sharing an output directory need different ones.
+    pub file: Option<String>,
     pub module_path: Option<String>,
 }
 
@@ -187,6 +191,7 @@ impl ConfigFile {
         self.rust.edition = over.rust.edition.or(self.rust.edition);
         self.rust.derives.extend(over.rust.derives);
         self.go.package = over.go.package.or(self.go.package);
+        self.go.file = over.go.file.or(self.go.file);
         self.go.module_path = over.go.module_path.or(self.go.module_path);
         self.substitutions.extend(over.substitutions);
         self.types.extend(over.types);
@@ -221,7 +226,24 @@ impl ConfigFile {
                 derives: self.rust.derives,
             },
             go: GoConfig {
-                package: self.go.package.unwrap_or_else(|| "api".to_owned()),
+                package: match self.go.package {
+                    Some(package) => {
+                        if !crate::go::naming::is_package_name(&package) {
+                            return Err(ConfigError::InvalidPackage(package));
+                        }
+                        package
+                    }
+                    None => "api".to_owned(),
+                },
+                file: match self.go.file {
+                    Some(file) => {
+                        if !crate::go::naming::is_file_stem(&file) {
+                            return Err(ConfigError::InvalidGoFile(file));
+                        }
+                        file
+                    }
+                    None => "types".to_owned(),
+                },
                 module_path: self.go.module_path,
             },
             substitutions: self.substitutions,
@@ -305,7 +327,10 @@ pub struct RustConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GoConfig {
+    /// The package clause of the generated file.
     pub package: String,
+    /// The generated file's stem; the file is `<file>.go`.
+    pub file: String,
     pub module_path: Option<String>,
 }
 
@@ -354,6 +379,14 @@ pub enum ConfigError {
         "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`; not a keyword, a crate name such as `std` or `serde`, `lib` or `main`, or a name Windows reserves"
     )]
     InvalidModule(String),
+    #[error(
+        "`go.package = {0:?}` must be a lowercase Go package name: a letter, then letters, digits or `_`, and not a keyword"
+    )]
+    InvalidPackage(String),
+    #[error(
+        "`go.file = {0:?}` must be a lowercase file stem `go build` reads as plain source: a letter, then letters, digits or `_`; no `_test`, `_<os>` or `_<arch>` suffix, and not a name Windows reserves"
+    )]
+    InvalidGoFile(String),
 }
 
 #[cfg(test)]

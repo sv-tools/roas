@@ -1,0 +1,31 @@
+{% block doc %}{% for line in t.doc %}//{% if line %} {{ line }}{% endif %}
+{% endfor %}{% if t.doc %}//
+{% endif %}{% if t.exclusive %}// Exactly one of the branches should match, which cannot be decided
+// from the wire shape alone; the raw value is kept and each branch is
+// offered through an accessor, never selected first-match-wins.
+{% else %}// Any number of the branches may match; the raw value is kept and
+// each branch is offered through an accessor.
+{% endif %}{% endblock %}type {{ t.name }} struct {
+	raw jsontext.Value
+}
+
+{% include "builtin/go/raw_holder.go.jinja" %}{% block accessors %}{% for b in t.branches %}
+// {{ b.accessor }} reads the value as {{ b.ty }}, when it is one.
+func (u {{ t.name }}) {{ b.accessor }}() ({{ b.ty }}, bool) {
+	var v {{ b.ty }}
+	if err := json.Unmarshal(u.raw, &v, decodeOptions); err != nil {
+		var zero {{ b.ty }}
+		return zero, false
+	}
+	return v, true
+}
+
+// {{ b.constructor }} builds a {{ t.name }} from one branch.
+func {{ b.constructor }}(v {{ b.ty }}) ({{ t.name }}, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return {{ t.name }}{}, err
+	}
+	return {{ t.name }}{raw: raw}, nil
+}
+{% endfor %}{% endblock %}{% block trailing %}{% endblock %}

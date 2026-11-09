@@ -1,0 +1,18 @@
+// Raw is the value as it was received or built.
+func (u {{ t.name }}) Raw() jsontext.Value { return u.raw.Clone() }
+
+func (u {{ t.name }}) MarshalJSONTo(e *jsontext.Encoder) error {
+	if u.raw == nil {
+		return fmt.Errorf("%s: holds no value", {{ t.name_literal }})
+	}
+	return e.WriteValue(u.raw)
+}
+
+func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	raw, err := d.ReadValue()
+	if err != nil {
+		return err
+	}
+	u.raw = raw.Clone()
+	return nil
+}

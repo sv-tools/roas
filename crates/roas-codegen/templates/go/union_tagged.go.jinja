@@ -1,0 +1,56 @@
+{% block doc %}{% for line in t.doc %}//{% if line %} {{ line }}{% endif %}
+{% endfor %}{% if t.doc %}//
+{% endif %}// Selected by {{ t.tag_literal }}. Marshaling writes the variant as it is;
+// unmarshaling reads {{ t.tag_literal }} first and then decodes the whole value
+// as that variant, so the variant keeps its own {{ t.tag_literal }}. The zero
+// value holds no variant and does not marshal.
+{% endblock %}type {{ t.name }} struct {
+	tag   string
+	value any
+}
+
+// Tag is the discriminator of the variant held, empty for the zero value.
+func (u {{ t.name }}) Tag() string { return u.tag }
+
+// Value is the variant held, nil for the zero value.
+func (u {{ t.name }}) Value() any { return u.value }
+{% block variants %}{% for v in t.variants %}
+// {{ v.accessor }} returns the variant when it is the {{ v.literal }} one.
+func (u {{ t.name }}) {{ v.accessor }}() ({{ v.ty }}, bool) {
+	v, ok := u.value.({{ v.ty }})
+	return v, ok && u.tag == {{ v.literal }}
+}
+
+// {{ v.constructor }} holds v as the {{ v.literal }} variant.
+func {{ v.constructor }}(v {{ v.ty }}) {{ t.name }} {
+	return {{ t.name }}{tag: {{ v.literal }}, value: v}
+}
+{% endfor %}{% endblock %}
+func (u {{ t.name }}) MarshalJSONTo(e *jsontext.Encoder) error {
+	if u.value == nil {
+		return fmt.Errorf("%s: holds no variant", {{ t.name_literal }})
+	}
+	return json.MarshalEncode(e, u.value)
+}
+
+func (u *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	raw, err := d.ReadValue()
+	if err != nil {
+		return err
+	}
+	tag, err := readTag(raw, {{ t.name_literal }}, {{ t.tag_literal }})
+	if err != nil {
+		return err
+	}
+	switch tag {
+{% for v in t.variants %}	case {{ v.literal }}:
+		var v {{ v.ty }}
+		if err := json.Unmarshal(raw, &v, decodeOptions); err != nil {
+			return err
+		}
+		*u = {{ t.name }}{tag: tag, value: v}
+		return nil
+{% endfor %}	}
+	return fmt.Errorf("%s: %q is not a known %s", {{ t.name_literal }}, tag, {{ t.tag_literal }})
+}
+{% block trailing %}{% endblock %}

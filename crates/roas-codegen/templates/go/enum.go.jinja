@@ -1,0 +1,25 @@
+{% block doc %}{% for line in t.doc %}//{% if line %} {{ line }}{% endif %}
+{% endfor %}{% endblock %}type {{ t.name }} string
+
+const (
+{% block variants %}{% for v in t.variants %}	{{ v.name }} {{ t.name }} = {{ v.literal }}
+{% endfor %}{% endblock %})
+
+// UnmarshalJSONFrom accepts only the values listed above.
+func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	raw, err := d.ReadValue()
+	if err != nil {
+		return err
+	}
+	var s string
+	if raw.Kind() != '"' || json.Unmarshal(raw, &s) != nil {
+		return fmt.Errorf("%s: want a string, got %s", {{ t.name_literal }}, raw)
+	}
+{% if t.variants %}	switch value := {{ t.name }}(s); value {
+	case {% for v in t.variants %}{{ v.name }}{% if not loop.last %}, {% endif %}{% endfor %}:
+		*v = value
+		return nil
+	}
+{% endif %}	return fmt.Errorf("%s: %q is not one of its values", {{ t.name_literal }}, s)
+}
+{% block trailing %}{% endblock %}

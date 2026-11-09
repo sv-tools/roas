@@ -1,0 +1,34 @@
+{% block doc %}{% for line in t.doc %}//{% if line %} {{ line }}{% endif %}
+{% endfor %}{% if t.doc %}//
+{% endif %}// An intersection that could not be flattened into one struct: the raw
+// value is kept, and each part is offered as a projection of it.
+{% endblock %}type {{ t.name }} struct {
+	raw jsontext.Value
+}
+
+{% include "builtin/go/raw_holder.go.jinja" %}
+// {{ t.from_raw }} holds any JSON value, unchecked against the parts.
+func {{ t.from_raw }}(raw jsontext.Value) {{ t.name }} {
+	return {{ t.name }}{raw: raw.Clone()}
+}
+{% block accessors %}{% for b in t.branches %}
+// {{ b.accessor }} reads the value as {{ b.ty }}, when it is one.
+func (u {{ t.name }}) {{ b.accessor }}() ({{ b.ty }}, bool) {
+	var v {{ b.ty }}
+	if err := json.Unmarshal(u.raw, &v, decodeOptions); err != nil {
+		var zero {{ b.ty }}
+		return zero, false
+	}
+	return v, true
+}
+
+// {{ b.constructor }} builds a {{ t.name }} from one part; the other parts
+// are not checked.
+func {{ b.constructor }}(v {{ b.ty }}) ({{ t.name }}, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return {{ t.name }}{}, err
+	}
+	return {{ t.name }}{raw: raw}, nil
+}
+{% endfor %}{% endblock %}{% block trailing %}{% endblock %}
