@@ -171,7 +171,7 @@ pub enum WriteError {
         current: String,
     },
     #[error(
-        "the generation has {0} error diagnostic(s); nothing written (allow a partial write to override)"
+        "the generation has {0} error diagnostic(s); refused (allow a partial generation to accept it)"
     )]
     HasErrors(usize),
     #[error("manifest {path} cannot be read: {reason}")]
@@ -2125,7 +2125,9 @@ pub fn check(
         }
     }
     let manifest_path = out_dir.join(&manifest_file);
-    let mut manifest_at_start = None;
+    // `None` until the manifest was read and validated: a check that fails
+    // before that has no snapshot to compare, and so no change to see.
+    let mut manifest_at_start: Option<Option<Vec<u8>>> = None;
     // Everything compared under the locks. Whatever it concludes, success
     // or an error, a write that ran meanwhile where there was no lock to
     // hold makes it moot: that is reported instead.
@@ -2134,7 +2136,7 @@ pub fn check(
         // As read now, to see whether a write rooted here ran meanwhile; after
         // `read_manifest`, which refuses links and non-files, and never through
         // either itself.
-        manifest_at_start = read_recorded(&manifest_path).ok().flatten();
+        manifest_at_start = Some(read_recorded(&manifest_path).ok().flatten());
         check_source(&previous, options)?;
         for path in previous.files.keys() {
             check_links(out_dir, path)?;
@@ -2212,7 +2214,8 @@ pub fn check(
             || misspelled_entry(out_dir, &manifest_file, &mut Listings::default()).is_some();
         Ok(report)
     })();
-    let manifest_changed = read_recorded(&manifest_path).ok().flatten() != manifest_at_start;
+    let manifest_changed = manifest_at_start
+        .is_some_and(|start| read_recorded(&manifest_path).ok().flatten() != start);
     if let Some(lock) = appeared(out_dir, &unlocked, manifest_changed) {
         return Err(WriteError::Locked(lock));
     }
