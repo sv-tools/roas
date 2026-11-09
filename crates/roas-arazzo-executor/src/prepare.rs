@@ -525,8 +525,12 @@ impl<'d> Compiler<'d> {
     /// `dependsOn` ordering errors. Before sources are supplied, an external
     /// dependency cannot be ordered yet; [`Self::target`] lists its source.
     fn dependency_error(&mut self, site: &Site<'d>, error: ExecutionError) {
-        if self.resolve_operations || !matches!(error, ExecutionError::ExternalWorkflow { .. }) {
-            self.error(site, error);
+        match error {
+            // An unresolvable `dependsOn` of another document: compiling that
+            // document reports it at its own site.
+            ExecutionError::InDocument { .. } => {}
+            ExecutionError::ExternalWorkflow { .. } if !self.resolve_operations => {}
+            error => self.error(site, error),
         }
     }
 

@@ -541,7 +541,7 @@ fn a_dependency_cycle_through_another_document_fails_preparation() {
     let mut client = Fake::new();
     let error = execute(&graph.description, &options, &mut client).unwrap_err();
     assert!(
-        matches!(&error, ExecutionError::Circular(at) if at == "w" || at.ends_with(B)),
+        matches!(&error, ExecutionError::Circular(at) if at == "w"),
         "{error}"
     );
     assert!(client.sent().is_empty());
@@ -1354,6 +1354,61 @@ fn a_queued_external_dependencys_step_order_error_names_its_document() {
     let error = lazily(&graph, "main", 1);
     assert!(
         matches!(located_in(&error, B), ExecutionError::Circular(_)),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_dependency_cycle_inside_another_document_is_labelled_with_it() {
+    let graph = pair(
+        json!([{ "workflowId": "main", "dependsOn": ["$sourceDescriptions.b.w"],
+            "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }]),
+        json!([
+            { "workflowId": "w", "dependsOn": ["v"],
+              "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] },
+            { "workflowId": "v", "dependsOn": ["w"],
+              "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }
+        ]),
+    );
+    let error = lazily(&graph, "main", 0);
+    let expected = format!("w of {B}");
+    assert!(
+        matches!(&error, ExecutionError::Circular(at) if *at == expected),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_unresolvable_dependency_of_an_external_workflow_names_its_document() {
+    let graph = pair(
+        json!([{ "workflowId": "main", "dependsOn": ["$sourceDescriptions.b.w"],
+            "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }]),
+        json!([{ "workflowId": "w", "dependsOn": ["missing"],
+            "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }]),
+    );
+    let error = lazily(&graph, "main", 0);
+    assert!(
+        matches!(located_in(&error, B), ExecutionError::ExternalWorkflow { reference, reason }
+            if reference == "missing" && reason == "this document has no workflow `missing`"),
+        "{error}"
+    );
+    let options = Options::new()
+        .workflow("main")
+        .source_registry(&graph.registry, graph.root)
+        .unwrap();
+    let error = prepare(&graph.description, &options).unwrap_err();
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.document.as_deref() == Some(B)),
+        "only the external document is at fault: {error}"
+    );
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.path.ends_with("dependsOn[0]")),
         "{error}"
     );
 }

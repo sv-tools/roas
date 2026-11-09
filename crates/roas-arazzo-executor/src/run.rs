@@ -1823,7 +1823,9 @@ fn visit<'d>(
         ));
     }
     for reference in &workflow.depends_on {
-        let (target, at) = documents.resolve(doc, reference)?;
+        let (target, at) = documents
+            .resolve(doc, reference)
+            .map_err(|error| locate(documents, doc, error))?;
         visit(
             documents,
             target,
