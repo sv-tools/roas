@@ -395,7 +395,7 @@ pub enum ConfigError {
     )]
     InvalidGoFile(String),
     #[error(
-        "`go.module_path = {0:?}` is not a Go module path: `/`-separated elements of ASCII letters, digits, `-`, `.`, `_` and `~`, none empty or starting or ending with a dot"
+        "`go.module_path = {0:?}` is not a module path Go accepts for a module others import: it starts with a lowercase domain such as `example.com`, then `/`-separated elements of ASCII letters, digits, `-`, `.`, `_` and `~`, none empty, starting or ending with a dot, or named like a Windows device, and a final `/vN` is a major version 2 or above"
     )]
     InvalidModulePath(String),
 }

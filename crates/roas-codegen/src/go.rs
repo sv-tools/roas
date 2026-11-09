@@ -26,25 +26,21 @@ pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, Gen
     let contents = format::format(&rendered, &path)?;
     let mut files = vec![GeneratedFile::new(path, contents)];
     if let Some(module) = &config.go.module_path {
-        // A version is what a `require` line needs, and a substitution
-        // names none; the module that imports one keeps its own go.mod.
-        // An `extra_imports` entry is an import spec: the path is its
-        // string, quoted either way.
+        // Every import must resolve inside this module or the standard
+        // library: anything else needs a `require` line, which needs a
+        // version no substitution names. An `extra_imports` entry is an
+        // import spec, its path quoted either way.
         let extra = config.extra_imports.iter().filter_map(|spec| {
             let quote = spec.find(['"', '`'])?;
             let delimiter = &spec[quote..=quote];
-            let path = spec[quote + 1..].split(delimiter).next()?;
-            path.split('/')
-                .next()
-                .is_some_and(|first| first.contains('.'))
-                .then_some(path)
+            spec[quote + 1..].split(delimiter).next()
         });
-        if let Some(import) = built
-            .dependencies
-            .iter()
-            .map(|d| d.import.as_str())
+        let generated = built.file.imports.iter().map(|spec| spec.trim_matches('"'));
+        let inside =
+            |path: &str| path == module.as_str() || path.starts_with(&format!("{module}/"));
+        if let Some(import) = generated
             .chain(extra)
-            .next()
+            .find(|path| !naming::is_std_import(path) && !inside(path))
         {
             return Err(GenerateError::Config(format!(
                 "`go.module_path` generates a go.mod, which cannot require {import:?} without a version; leave it unset and declare the module in a go.mod of your own"

@@ -83,16 +83,15 @@ pub(crate) fn is_package_name(name: &str) -> bool {
         && name != "documentation"
 }
 
-/// The standard library's top-level directories, from Go 1.27: a module
-/// whose first path element has no dot and is one of these is shadowed by
-/// or ambiguous with the standard library (`std` and `cmd` included).
+/// The standard library's top-level directories, from Go 1.27. An import
+/// whose first element has no dot is the standard library's only if it
+/// starts with one of these.
 const STD_ROOTS: &[&str] = &[
     "archive",
     "arena",
     "bufio",
     "builtin",
     "bytes",
-    "cmd",
     "cmp",
     "compress",
     "container",
@@ -128,7 +127,6 @@ const STD_ROOTS: &[&str] = &[
     "simd",
     "slices",
     "sort",
-    "std",
     "strconv",
     "strings",
     "structs",
@@ -141,25 +139,36 @@ const STD_ROOTS: &[&str] = &[
     "unique",
     "unsafe",
     "uuid",
-    "vendor",
     "weak",
 ];
 
-/// A module path as `go.mod` takes one, by the `go` command's rules:
-/// `/`-separated elements of ASCII letters, digits, `-`, `.`, `_` and `~`,
-/// none empty, `.` or `..`, none starting or ending with a dot, and none a
-/// name Windows reserves; no leading dash; not `go` or `toolchain`, which
-/// are reserved; and not rooted where the standard library is.
+/// Whether an import path is the standard library's.
+pub(crate) fn is_std_import(path: &str) -> bool {
+    let first = path.split('/').next().unwrap_or(path);
+    !first.contains('.') && STD_ROOTS.contains(&first)
+}
+
+/// A module path as Go's `module.CheckPath` accepts one — the rule for a
+/// module others can fetch and import: a first element that looks like a
+/// domain (lowercase letters, digits, `-` and `.`, with a dot, no leading
+/// dash), then `/`-separated elements of ASCII letters, digits, `-`, `.`,
+/// `_` and `~` that are not empty, all dots, or dot-led or dot-ended, pass
+/// Go's Windows rule, and end in a valid major version if they end in
+/// `/vN`. The last element also starts as the `go` command needs a package
+/// directory to. Requiring the domain rules out every clash with the
+/// standard library and the `go` command's reserved names at once.
 pub(crate) fn is_module_path(path: &str) -> bool {
     let first = path.split('/').next().unwrap_or(path);
     let last = path.rsplit('/').next().unwrap_or(path);
-    !path.is_empty()
-        && !path.starts_with('-')
-        // The last element names the package directory, which the `go`
-        // command refuses to start with a dash.
-        && !last.starts_with('-')
-        && path != "toolchain"
-        && (first.contains('.') || !STD_ROOTS.contains(&first))
+    first.contains('.')
+        && !first.starts_with('-')
+        && first
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+        && last
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
         && path.split('/').all(|element| {
             !element.is_empty()
                 && !element.starts_with('.')
@@ -169,6 +178,32 @@ pub(crate) fn is_module_path(path: &str) -> bool {
                     .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
                 && windows_element_ok(element)
         })
+        && major_version_ok(path)
+}
+
+/// Go's `SplitPathVersion`: a path ending in `/v` and digits names a major
+/// version, which must be 2 or more without a leading zero; a `gopkg.in`
+/// path ends in `.vN` instead.
+fn major_version_ok(path: &str) -> bool {
+    if let Some(rest) = path.strip_prefix("gopkg.in/") {
+        let rest = rest.strip_suffix("-unstable").unwrap_or(rest);
+        return rest.rsplit_once(".v").is_some_and(|(_, n)| {
+            !n.is_empty()
+                && n.bytes().all(|b| b.is_ascii_digit())
+                && (!n.starts_with('0') || n == "0")
+        });
+    }
+    let last = path.rsplit('/').next().unwrap_or(path);
+    let Some(digits) = last.strip_prefix('v') else {
+        return true;
+    };
+    if digits.is_empty()
+        || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        || !path.contains('/')
+    {
+        return true;
+    }
+    !digits.contains('.') && !digits.starts_with('0') && digits != "1"
 }
 
 /// Go's own Windows rule for a path element: the part before the first dot
@@ -405,31 +440,54 @@ mod tests {
 
     #[test]
     fn module_paths() {
-        assert!(is_module_path("example.com/pets"));
-        assert!(is_module_path("pets"));
-        assert!(is_module_path("github.com/a-b/c_d/v2"));
-        assert!(!is_module_path(""));
-        assert!(!is_module_path("/pets"));
-        assert!(!is_module_path("pets/"));
-        assert!(!is_module_path("a//b"));
-        assert!(!is_module_path("a/../b"));
-        assert!(!is_module_path(".hidden/x"));
-        assert!(!is_module_path("a b"));
-        assert!(!is_module_path("example.com/con"));
-        assert!(!is_module_path("-pets"));
-        assert!(!is_module_path("go"));
-        assert!(!is_module_path("toolchain"));
-        assert!(!is_module_path("fmt"));
-        assert!(!is_module_path("std"));
-        assert!(!is_module_path("net/pets"));
-        assert!(is_module_path("net.example/pets"));
-        assert!(is_module_path("a~b"));
-        assert!(is_module_path("example.com/a~1b"));
-        assert!(is_module_path("example.com/-x/y"));
-        assert!(!is_module_path("example.com/-x"));
-        assert!(!is_module_path("example.com/a~1"));
-        assert!(!is_module_path("example.com/a~1.b"));
-        assert!(!is_module_path("example.com/COM1.x"));
+        for ok in [
+            "example.com/pets",
+            "github.com/a-b/c_d/v2",
+            "example.com/a~1b",
+            "example.com/-x/y",
+            "example.com/A/b",
+            "gopkg.in/yaml.v3",
+            "example.com/v2x",
+        ] {
+            assert!(is_module_path(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "pets",
+            "fmt",
+            "std",
+            "go",
+            "toolchain",
+            "all",
+            "C",
+            "main",
+            "Fmt",
+            "corp/uuid",
+            "-pets.com",
+            "Example.com/x",
+            "/pets",
+            "example.com/",
+            "example.com//b",
+            "example.com/../b",
+            "example.com/.x",
+            "example.com/-x",
+            "example.com/~x",
+            "example.com/a b",
+            "example.com/a+b",
+            "example.com/a~1",
+            "example.com/COM1.x",
+            "example.com/x/v1",
+            "example.com/x/v0",
+            "example.com/x/v02",
+            "example.com/x/v2.1",
+            "gopkg.in/yaml",
+            "example.com/x.",
+        ] {
+            assert!(!is_module_path(bad), "{bad}");
+        }
+        assert!(is_std_import("encoding/json/v2"));
+        assert!(!is_std_import("corp/uuid"));
+        assert!(!is_std_import("github.com/google/uuid"));
     }
 
     #[test]

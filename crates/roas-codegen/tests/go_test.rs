@@ -650,6 +650,16 @@ fn a_module_path_makes_the_output_a_module() {
         matches!(&error, GenerateError::Config(m) if m.contains("github.com/google/uuid")),
         "{error}"
     );
+    // A dotless path outside the standard library is another module too.
+    let toml = "extra_imports = ['_ \"corp/x\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    let error = go(pet(), toml).unwrap().unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("corp/x")),
+        "{error}"
+    );
+    // A package of this module is fine.
+    let toml = "extra_imports = ['_ \"example.com/pets/more\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    assert!(go(pet(), toml).unwrap().is_ok());
     let toml = "extra_imports = ['_ \"time\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
     assert!(go(pet(), toml).unwrap().is_ok());
 }
