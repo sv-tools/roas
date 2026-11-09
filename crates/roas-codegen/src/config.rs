@@ -232,11 +232,12 @@ impl ConfigFile {
 
 /// A module named like a crate the user's code or the generated code
 /// names (`std`, `core`, `serde`, ...) hides that crate for every path in
-/// the file that declares it.
+/// the file that declares it; one named `lib` or `main` would be a crate
+/// root's file.
 fn shadows_a_crate(module: &str) -> bool {
     matches!(
         module,
-        "std" | "core" | "alloc" | "proc_macro" | "test" | "serde" | "serde_json"
+        "std" | "core" | "alloc" | "proc_macro" | "test" | "serde" | "serde_json" | "lib" | "main"
     )
 }
 
@@ -348,7 +349,7 @@ pub enum ConfigError {
     #[error("no target language: set `target`")]
     MissingTarget,
     #[error(
-        "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`; not a keyword, a crate name such as `std` or `serde`, or a name Windows reserves"
+        "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`; not a keyword, a crate name such as `std` or `serde`, `lib` or `main`, or a name Windows reserves"
     )]
     InvalidModule(String),
 }
@@ -482,6 +483,8 @@ mod tests {
     fn module_names_never_shadow_a_crate() {
         assert_eq!(rust_module_name("std"), "std_types");
         assert_eq!(rust_module_name("serde"), "serde_types");
+        assert_eq!(rust_module_name("lib"), "lib_types");
+        assert!(!is_module_name("main"));
         assert!(!is_module_name("core"));
     }
 }

@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 /// One generated file, relative to the output directory the caller
-/// chooses. The library never touches disk.
+/// chooses. Generating writes no output files; [`write`](crate::write())
+/// does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GeneratedFile {

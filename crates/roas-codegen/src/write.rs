@@ -23,8 +23,9 @@ pub struct WriteOptions {
     pub overwrite_unowned: bool,
     /// Write a generation that carries `Error` diagnostics. Off by
     /// default: such a generation is missing the types the errors
-    /// suppressed. Even when on, files the previous run wrote are kept
-    /// rather than removed as stale.
+    /// suppressed. When it writes such a generation, files the previous run
+    /// wrote are kept rather than removed as stale; a clean generation
+    /// removes them as usual.
     pub allow_partial: bool,
     /// What this label was generated from, recorded in the manifest. When
     /// set, a later run under the same label from a different source is
@@ -724,7 +725,8 @@ impl Drop for Created {
 /// The directories below `out_dir` whose path is `rel` ignoring ASCII
 /// case, as stored: on a case-sensitive disk `Sub` and `sub` are two, and
 /// a nested root in either owns what ownership, compared ignoring case,
-/// says it owns. Links are not followed.
+/// says it owns. Plus `rel` itself when the disk resolves it, for foldings
+/// beyond ASCII. Links are not followed.
 fn case_variants(out_dir: &Path, rel: &str) -> Vec<String> {
     let mut found = vec![String::new()];
     for part in rel.split('/') {
@@ -750,6 +752,21 @@ fn case_variants(out_dir: &Path, rel: &str) -> Vec<String> {
             }
         }
         found = next;
+    }
+    // And the path as spelled, where the disk resolves it to a directory
+    // stored under some other folding (Unicode case, normalization), with
+    // no link on the way.
+    let mut current = out_dir.to_path_buf();
+    let mut is_dir = true;
+    for part in rel.split('/') {
+        current.push(part);
+        if !fs::symlink_metadata(&current).is_ok_and(|m| m.is_dir()) {
+            is_dir = false;
+            break;
+        }
+    }
+    if is_dir && !found.iter().any(|f| f == rel) {
+        found.push(rel.to_owned());
     }
     found
 }
@@ -1592,7 +1609,7 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
 
 /// Write a generation into `out_dir`.
 ///
-/// `generate` never touches disk; this does, under these rules.
+/// `generate` writes no output files; this does, under these rules.
 ///
 /// - **Ownership is recorded.** A manifest in the output directory lists
 ///   every file a generation target wrote, with a content hash. Its name
@@ -4070,6 +4087,26 @@ mod tests {
         ));
         assert!(matches!(
             check(&outer, &dir.0, &WriteOptions::new("outer")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+    }
+
+    #[test]
+    fn a_nested_root_reached_through_unicode_folding_still_owns_its_files() {
+        let dir = TempDir::new("nested-kelvin");
+        let kelvin = dir.0.join("\u{212A}");
+        write(
+            &generation(&[("types.rs", "t")]),
+            &kelvin,
+            &WriteOptions::new("inner"),
+        )
+        .unwrap();
+        if !same_file(&kelvin, &dir.0.join("K")) {
+            return; // the disk keeps them apart: two directories
+        }
+        let outer = generation(&[("K/types.rs", "t")]);
+        assert!(matches!(
+            write(&outer, &dir.0, &WriteOptions::new("outer")),
             Err(WriteError::OwnedByOther { .. })
         ));
     }

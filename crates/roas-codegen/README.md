@@ -115,7 +115,7 @@ The URI is required. Every schema identity is the document URI plus a JSON Point
 
 ## Writing files
 
-`generate` never touches disk. `write` puts a `Generation` into a directory under a manifest — `.roas-codegen-<label>-<language>.json` — that records each file it owns with a content hash, and `check` compares the directory with a generation without writing anything.
+`generate` writes no output files (it only uses a temporary directory to run `rustfmt`). `write` puts a `Generation` into a directory under a manifest — `.roas-codegen-<label>-<language>.json` — that records each file it owns with a content hash, and `check` compares the directory with a generation without writing anything.
 
 ```rust
 use roas_codegen::{Generation, WriteOptions, check, write};
