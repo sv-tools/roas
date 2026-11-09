@@ -102,7 +102,7 @@ fn the_worked_example_generates_as_the_plan_shows() {
         "PetStatusAvailable PetStatus = \"available\"",
         "case PetStatusAvailable, PetStatusSold:",
         "type Nullable[T any] struct {",
-        "json.UnmarshalFromFunc(func(d *jsontext.Decoder, _ *string) error { return refuseNull(d) }),",
+        "json.UnmarshalFromFunc(func(d *jsontext.Decoder, _ *string) error { return refuseNull(d, \"string\") }),",
     ] {
         assert!(code.contains(fragment), "missing {fragment:?} in:\n{code}");
     }
@@ -356,4 +356,99 @@ fn every_kind_renders_and_survives_gofmt() {
             ),
         "{code}"
     );
+}
+
+/// `go vet` over a generated file in a module of its own, or why it could
+/// not run: Go 1.27 or later is needed.
+fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
+    let version = std::process::Command::new("go")
+        .args(["env", "GOVERSION"])
+        .env("GOTOOLCHAIN", "local")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default();
+    let minor = version
+        .strip_prefix("go1.")
+        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|m| m.parse::<u32>().ok());
+    if !minor.is_some_and(|m| m >= 27) {
+        assert!(
+            std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_none(),
+            "ROAS_CODEGEN_REQUIRE_GO is set but go is {version:?}"
+        );
+        eprintln!("skipped: go is {version:?}");
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("roas-codegen-vet-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("go.mod"), "module vet\n\ngo 1.27\n").unwrap();
+    std::fs::write(dir.join("types.go"), code).unwrap();
+    let output = std::process::Command::new("go")
+        .args(["vet", "./..."])
+        .current_dir(&dir)
+        .env("GOTOOLCHAIN", "local")
+        .env("GOWORK", "off")
+        .output()
+        .expect("go vet runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    })
+}
+
+#[test]
+fn every_single_kind_compiles_on_its_own() {
+    // One type per file, so no other type supplies an import or a helper
+    // this one forgets.
+    let cases = [
+        ("string", serde_json::json!({"Name": {"type": "string"}})),
+        ("boolean", serde_json::json!({"Flag": {"type": "boolean"}})),
+        (
+            "number",
+            serde_json::json!({"N": {"type": "number", "format": "float"}}),
+        ),
+        ("integer", serde_json::json!({"I": {"type": "integer"}})),
+        (
+            "array",
+            serde_json::json!({"L": {"type": "array", "items": {"type": "string"}}}),
+        ),
+        (
+            "map",
+            serde_json::json!({"M": {"type": "object", "additionalProperties": {"type": "boolean"}}}),
+        ),
+        ("any", serde_json::json!({"A": {}})),
+        ("null", serde_json::json!({"Z": {"type": "null"}})),
+        (
+            "enum",
+            serde_json::json!({"E": {"type": "string", "enum": ["a"]}}),
+        ),
+        (
+            "open",
+            serde_json::json!({"O": {"anyOf": [{"type": "string"}, {"type": "boolean"}]}}),
+        ),
+        (
+            "closed",
+            serde_json::json!({"C": {"type": "object", "additionalProperties": false}}),
+        ),
+        (
+            "struct",
+            serde_json::json!({"S": {"type": "object", "required": ["a"], "properties": {"a": {"type": ["string", "null"]}}}}),
+        ),
+    ];
+    for (tag, components) in cases {
+        let Some(generation) = go(components, "") else {
+            return;
+        };
+        let code = generation.unwrap().files.remove(0).contents;
+        let Some(result) = vet(&code, tag) else {
+            return;
+        };
+        if let Err(error) = result {
+            panic!("{tag}: go vet failed\n{error}\n{code}");
+        }
+    }
 }

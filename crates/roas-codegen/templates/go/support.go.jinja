@@ -2,13 +2,17 @@
 // would otherwise store its zero value, since the schema does not allow
 // null there.
 {% if support.refuse_null %}var decodeOptions = json.WithUnmarshalers(json.JoinUnmarshalers(
-{% for t in support.refuse_null %}	json.UnmarshalFromFunc(func(d *jsontext.Decoder, _ *{{ t }}) error { return refuseNull(d) }),
+{% for t in support.refuse_null %}	json.UnmarshalFromFunc(func(d *jsontext.Decoder, _ *{{ t }}) error { return refuseNull(d, {{ t | tojson }}) }),
 {% endfor %}))
 {% else %}var decodeOptions = json.JoinOptions()
 {% endif %}
-func refuseNull(d *jsontext.Decoder) error {
+func refuseNull(d *jsontext.Decoder, typ string) error {
 	if d.PeekKind() == 'n' {
-		return errors.New("null is not allowed here")
+		// Read first: a malformed literal is a syntax error, not a null.
+		if _, err := d.ReadToken(); err != nil {
+			return err
+		}
+		return fmt.Errorf("null is not a valid %s here", typ)
 	}
 	return errors.ErrUnsupported
 }

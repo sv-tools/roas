@@ -251,7 +251,9 @@ fn generated_rust_compiles_and_behaves() {
 const GO_MAIN: &str = r##"package main
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 
 	"generated/api"
@@ -398,6 +400,19 @@ func main() {
 	check(roundTrip[api.Dash](`{"-":"x"}`), `{"-":"x"}`)
 	check(roundTrip[api.Wrapper](`{"owner":{"name":null,"x":1}}`), `{"owner":{"name":null,"x":1}}`)
 	mustFail[api.Wrapper](`{"zz":1}`, "Wrapper is closed")
+	// A malformed literal is a syntax error, not a null.
+	for _, in := range []string{`{"name":nope}`, `{"name":"a","status":nUll}`} {
+		var pet api.Pet
+		var syntax *jsontext.SyntacticError
+		if err := json.Unmarshal([]byte(in), &pet); !errors.As(err, &syntax) {
+			panic(fmt.Sprintf("%s: want a syntax error, got %v", in, err))
+		}
+	}
+	var ids api.Ids
+	var syntax *jsontext.SyntacticError
+	if err := json.Unmarshal([]byte(`["a",nope]`), &ids); !errors.As(err, &syntax) {
+		panic(fmt.Sprintf("want a syntax error, got %v", err))
+	}
 	mustFail[api.Dash](`{}`, "- is required")
 	fmt.Println("generated code behaves")
 }

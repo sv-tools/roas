@@ -27,6 +27,9 @@ func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 		switch name := token.String(); name {
 {% for f in t.fields if not f.catch_all %}		case {{ f.literal }}:
 {% if f.non_null %}			if d.PeekKind() == 'n' {
+				if _, err := d.ReadToken(); err != nil {
+					return err
+				}
 				return fmt.Errorf("%s: member %q must not be null", {{ t.name_literal }}, name)
 			}
 {% endif %}{% if f.required_index is not none %}			present[{{ f.required_index }}] = true
