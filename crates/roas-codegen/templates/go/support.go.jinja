@@ -1,8 +1,15 @@
 // decodeOptions turns a JSON null into an error wherever the Go type
 // would otherwise store its zero value, since the schema does not allow
-// null there.
-{% if support.refuse_null %}var decodeOptions = json.WithUnmarshalers(json.JoinUnmarshalers(
+// null there. A substituted type is then decoded by its own rules alone,
+// and unmarshalers a caller passes do not reach into generated types.
+{% if support.refuse_null or support.refuse_null_isolated %}var decodeOptions = json.WithUnmarshalers(json.JoinUnmarshalers(
 {% for t in support.refuse_null %}	json.UnmarshalFromFunc(func(d *jsontext.Decoder, _ *{{ t }}) error { return refuseNull(d, {{ t | tojson }}) }),
+{% endfor %}{% for t in support.refuse_null_isolated %}	json.UnmarshalFromFunc(func(d *jsontext.Decoder, v *{{ t }}) error {
+		if err := refuseNull(d, {{ t | tojson }}); err != errors.ErrUnsupported {
+			return err
+		}
+		return json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))
+	}),
 {% endfor %}))
 {% else %}var decodeOptions = json.JoinOptions()
 {% endif %}

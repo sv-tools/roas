@@ -380,7 +380,7 @@ pub enum ConfigError {
     )]
     InvalidModule(String),
     #[error(
-        "`go.package = {0:?}` must be a lowercase Go package name: a letter, then letters, digits or `_`, and not a keyword"
+        "`go.package = {0:?}` must be a lowercase Go package name: a letter, then letters, digits or `_`; not a keyword, nor `main`, `init` or `documentation`, which no other package can import"
     )]
     InvalidPackage(String),
     #[error(

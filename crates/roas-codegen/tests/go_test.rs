@@ -206,7 +206,7 @@ fn substitutions_use_their_go_spelling_and_imports() {
     assert!(code.contains("Born Nullable[time.Time]"), "{code}");
     assert!(code.contains("\"github.com/google/uuid\""), "{code}");
     assert!(code.contains("\"time\""), "{code}");
-    assert!(code.contains("_ *time.Time) error"), "{code}");
+    assert!(code.contains("v *time.Time) error {"), "{code}");
     // The standard library is no dependency.
     let deps: Vec<_> = generation
         .dependencies
@@ -256,6 +256,7 @@ fn the_file_and_package_are_configurable_and_checked() {
         ("[go]\npackage = \"type\"\n", "package"),
         ("[go]\npackage = \"Pets\"\n", "package"),
         ("[go]\npackage = \"init\"\n", "package"),
+        ("[go]\npackage = \"documentation\"\n", "package"),
         ("[go]\npackage = \"main\"\n", "package"),
         ("[go]\nfile = \"pets_windows\"\n", "file"),
         ("[go]\nfile = \"pets_test\"\n", "file"),
@@ -513,4 +514,26 @@ fn an_optional_substitution_keeps_its_zero_value() {
         code.contains("case \"at\":\nif d.PeekKind() == 'n'"),
         "{code}"
     );
+}
+
+#[test]
+fn a_substitution_decodes_by_its_own_rules() {
+    let components = serde_json::json!({
+        "Meta": {"type": "object"},
+        "Holder": {"type": "object", "required": ["meta"], "properties": {"meta": {"$ref": "#/components/schemas/Meta"}}},
+        "Other": {"type": "object", "properties": {"labels": {"type": "array", "items": {"type": "string"}}}}
+    });
+    let toml = "[substitutions.Meta.go]\nname = \"url.URL\"\nimport = \"net/url\"\n";
+    let Some(generation) = go(components, toml) else {
+        return;
+    };
+    let code = generation.unwrap().files.remove(0).contents;
+    let squeezed = squeezed(&code);
+    assert!(
+        squeezed.contains("return json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))"),
+        "{squeezed}"
+    );
+    if let Some(Err(error)) = vet(&code, "isolated") {
+        panic!("go vet failed\n{error}\n{code}");
+    }
 }

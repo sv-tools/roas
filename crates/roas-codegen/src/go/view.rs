@@ -82,6 +82,9 @@ pub(crate) struct SupportView {
     /// Types a JSON null would silently set to their zero value, which
     /// the generated decoders refuse.
     pub refuse_null: Vec<String>,
+    /// Substituted types likewise, whose own decoding then runs without
+    /// the generated rules, as the substitution decides the rest itself.
+    pub refuse_null_isolated: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,6 +201,7 @@ struct Builder<'a> {
     suppressed: BTreeSet<SchemaId>,
     support: SupportView,
     refuse_null: BTreeSet<String>,
+    refuse_null_isolated: BTreeSet<String>,
     externs: BTreeSet<String>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -224,6 +228,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         suppressed: ir.suppressed.clone(),
         support: SupportView::default(),
         refuse_null: BTreeSet::new(),
+        refuse_null_isolated: BTreeSet::new(),
         externs: BTreeSet::new(),
         diagnostics: Vec::new(),
     };
@@ -240,6 +245,13 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         }
     }
     builder.support.refuse_null = builder.refuse_null.iter().cloned().collect();
+    // A substitution spelled like a generated type (`string`, say) is
+    // refused like that type; the first registered function would win.
+    builder.support.refuse_null_isolated = builder
+        .refuse_null_isolated
+        .difference(&builder.refuse_null)
+        .cloned()
+        .collect();
     let mut imports = Vec::new();
     let mut dependencies = Vec::new();
     if !types.is_empty() {
@@ -436,11 +448,10 @@ impl Builder<'_> {
     /// would reach those positions too; such a substitution decides about
     /// null itself, as its Rust spelling does.
     fn refused_extern(&mut self, spelled: &str) -> String {
-        if null_holding_spelling(spelled) {
-            spelled.to_owned()
-        } else {
-            self.refused(spelled)
+        if !null_holding_spelling(spelled) {
+            self.refuse_null_isolated.insert(spelled.to_owned());
         }
+        spelled.to_owned()
     }
 
     fn refused(&mut self, spelled: &str) -> String {

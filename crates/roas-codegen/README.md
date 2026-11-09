@@ -105,6 +105,7 @@ The output uses `encoding/json/v2` from the standard library, so it needs Go 1.2
 - **Unknown members.** `additionalProperties: false` is refused at decode, as in Rust; otherwise the extra members land in an `AdditionalProperties` map embedded with `json:",embed"` and are written back out.
 - **Enums check membership.** A named string type accepts any string, so its decoder accepts only the listed values.
 - **Integers read the token** into `Int64` / `Int32`, exactly as in Rust.
+- **The decoders own their options.** Each generated type decodes its members with its own null rules, so unmarshalers a caller passes with `json.WithUnmarshalers` do not reach inside generated types; a substituted type decodes by its own rules alone, as in Rust.
 - **Unions.** A tagged union is a struct holding one variant, with `As<Variant>` accessors, `<Union>From<Variant>` constructors, `Tag()` and `Value()`; it reads the tag first and then decodes the whole value as that variant. Open unions and compositions keep the raw JSON with an accessor and a constructor per branch.
 
 Go identifiers are exported and ASCII. A property name a struct tag cannot carry — one holding `,`, `\`, `'`, `"` or a backtick, or the empty name — is an `Error` that suppresses its type and whatever holds it. Generating Go needs `gofmt`, which formats the output and is its only syntax check, so without it `generate` fails with `GenerateError::Toolchain` rather than returning unchecked code.

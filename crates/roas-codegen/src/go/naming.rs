@@ -79,6 +79,8 @@ pub(crate) fn is_package_name(name: &str) -> bool {
         && !is_keyword(name)
         && name != "main"
         && name != "init"
+        // `go build` skips a file whose package is `documentation`.
+        && name != "documentation"
 }
 
 /// Operating systems and architectures `go build` knows, from
