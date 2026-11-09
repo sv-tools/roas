@@ -895,15 +895,18 @@ fn scoped_base_urls(
                 );
             };
             // Selective loading links only the aliases it follows; another
-            // alias may still have loaded the same document.
-            let target = registry.source(owner, alias).and_then(|link| {
-                link.target.or_else(|| {
-                    registry
+            // alias may still have loaded the same document. A reference that
+            // cannot be resolved stops the run: dropping the override would
+            // send its requests to the original server.
+            let target = match registry.source(owner, alias) {
+                Some(link) => match link.target {
+                    Some(target) => Some(target),
+                    None => registry
                         .resolve(owner, &link.declared_uri, retrieval_aliases)
-                        .ok()
-                        .flatten()
-                })
-            });
+                        .with_context(|| format!("`--base-url {path}=…`: `{alias}`"))?,
+                },
+                None => None,
+            };
             let arazzo = match target {
                 Some(target) => registry.document(target)?.arazzo().is_some(),
                 None => declared
@@ -1850,6 +1853,46 @@ mod tests {
         args.quiet = true;
         run_arazzo_run(args).unwrap();
         assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_scoped_base_url_through_an_unresolvable_alias_stops_the_run() {
+        let (_, _, api) = external_workflow();
+        let api_url = Url::from_file_path(&api.0).unwrap();
+        // `a` names the child by its `$self`; `b` by where it was read from,
+        // which identity-based referencing does not accept.
+        let child = TempFile::write(
+            "identity-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "$self": "https://canonical.example.test/child.arazzo.json",
+                "sourceDescriptions": [{ "name": "api", "url": api_url.as_str(), "type": "openapi" }],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                    "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write(
+            "identity-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "a", "url": "https://canonical.example.test/child.arazzo.json", "type": "arazzo" },
+                    { "name": "b", "url": child_name, "type": "arazzo" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.a.child" }] }]
+            }),
+        );
+        let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.source_document = vec![child.0.clone()];
+        args.load = vec![LoaderKind::File];
+        args.base_url = vec!["b.api=http://127.0.0.1:9".to_owned()];
+        args.quiet = true;
+        let error = format!("{:#}", run_arazzo_run(args).unwrap_err());
+        assert!(error.starts_with("`--base-url b.api=…`: `b`"), "{error}");
     }
 
     #[test]
