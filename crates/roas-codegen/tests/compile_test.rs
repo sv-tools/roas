@@ -265,6 +265,7 @@ fn generated_rust_compiles_and_behaves() {
 const GO_MAIN: &str = r##"package main
 
 import (
+	jsonv1 "encoding/json"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -415,6 +416,14 @@ func main() {
 	odd := "{\"\":1,\"a,b\":\"x\",\"q\\\"t\":null,\"x`y\":true,\"zz\":2,\"aa\":3}"
 	check(roundTrip[api.Odd](odd), "{\"\":1,\"a,b\":\"x\",\"q\\\"t\":null,\"x`y\":true,\"aa\":3,\"zz\":2}")
 	check(roundTrip[api.Odd](`{"a,b":"x"}`), `{"a,b":"x"}`)
+	// encoding/json v1 calls the encoder on a value it cannot address, too.
+	var oddValue api.Odd
+	if err := json.Unmarshal([]byte(odd), &oddValue); err != nil {
+		panic(err)
+	}
+	v1, err := jsonv1.Marshal(map[string]api.Odd{"k": oddValue})
+	check(err, nil)
+	check(string(v1), "{\"k\":{\"\":1,\"a,b\":\"x\",\"q\\\"t\":null,\"x`y\":true,\"aa\":3,\"zz\":2}}")
 	mustFail[api.Odd](`{"":1}`, "a,b is required")
 	check(roundTrip[api.Wrapper](`{"owner":{"name":null,"x":1}}`), `{"owner":{"name":null,"x":1}}`)
 	mustFail[api.Wrapper](`{"zz":1}`, "Wrapper is closed")

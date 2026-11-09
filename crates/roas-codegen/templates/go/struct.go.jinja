@@ -58,9 +58,10 @@ func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 }
 {% if t.marshal %}
 // MarshalJSONTo writes {{ t.name }} member by member: a member name no struct
-// tag can carry is written here rather than through its field's tag. Fields
-// are passed by address, so nothing is copied on the way.
-func (v *{{ t.name }}) MarshalJSONTo(e *jsontext.Encoder) error {
+// tag can carry is written here rather than through its field's tag. A value
+// receiver, like every generated encoder, so encoding/json v1 calls it on a
+// value that is not addressable too; fields go by address from there.
+func (v {{ t.name }}) MarshalJSONTo(e *jsontext.Encoder) error {
 	if err := e.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
