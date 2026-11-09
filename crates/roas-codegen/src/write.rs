@@ -91,6 +91,9 @@ pub struct WriteReport {
     pub written: Vec<PathBuf>,
     /// Already held exactly the generated content; left untouched.
     pub unchanged: Vec<PathBuf>,
+    /// Renamed to a new spelling of the same name (old, new), as on a
+    /// case-insensitive disk; also listed as written or unchanged.
+    pub renamed: Vec<(PathBuf, PathBuf)>,
     /// Owned by the previous run, no longer generated, and removed.
     pub removed: Vec<PathBuf>,
     /// Owned by the previous run and no longer generated, but edited since,
@@ -274,7 +277,10 @@ impl DirLock {
 
 impl Drop for DirLock {
     fn drop(&mut self) {
-        // Removed while still locked; the lock goes with the file handle.
+        // Removed while still locked; the lock goes with the file handle. A
+        // run that opened it meanwhile notices by the inode check above.
+        // Without that check the file stays, reused by the next run.
+        #[cfg(unix)]
         let _ = fs::remove_file(&self.path);
     }
 }
@@ -362,6 +368,20 @@ fn is_reserved(key: &str) -> bool {
 }
 
 fn read_manifest(path: &Path) -> Result<Option<Manifest>, WriteError> {
+    // Looked at before opening: a link is never followed, and a FIFO
+    // named like a manifest would block the read for ever.
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(WriteError::Symlink(path.to_path_buf()));
+        }
+        Ok(meta) if !meta.is_file() => {
+            return Err(WriteError::Manifest {
+                path: path.to_path_buf(),
+                reason: "not a regular file".into(),
+            });
+        }
+        _ => {}
+    }
     match fs::read(path) {
         Ok(bytes) => {
             let manifest: Manifest =
@@ -691,7 +711,7 @@ fn check_ownership(
             Err(WriteError::NotADirectory(blocker))
                 if blocker
                     .to_str()
-                    .is_some_and(|b| going.iter().any(|g| g.eq_ignore_ascii_case(b))) => {}
+                    .is_some_and(|b| is_going(out_dir, going, b)) => {}
             other => other?,
         }
         let on_disk = out_dir.join(path);
@@ -701,7 +721,7 @@ fn check_ownership(
             && on_disk.exists()
             // Already exactly what would be written: taking it over loses
             // nothing, which is how a deleted manifest is recovered.
-            && fs::read(&on_disk).ok().as_deref() != Some(content.as_bytes())
+            && read_recorded(&on_disk)?.as_deref() != Some(content.as_bytes())
         {
             return Err(WriteError::Unowned(PathBuf::from(path)));
         }
@@ -727,21 +747,31 @@ fn going(
     }
     // Another recorded spelling of a file that is ours is that same file,
     // whatever its own entry says, as after an interrupted respelling.
-    let ids: BTreeSet<_> = out
+    // Only a spelling: same file, same name ignoring case, one entry. A
+    // hard link the user made under another name keeps its own verdict.
+    let ours: Vec<(String, _)> = out
         .iter()
-        .filter_map(|p| file_id(&out_dir.join(p)))
+        .filter_map(|p| file_id(&out_dir.join(p)).map(|id| (p.clone(), id)))
         .collect();
     for (path, _) in removable {
-        if file_id(&out_dir.join(path)).is_some_and(|id| ids.contains(&id)) {
+        let on_disk = out_dir.join(path);
+        if single_link(&on_disk)
+            && file_id(&on_disk).is_some_and(|id| {
+                ours.iter()
+                    .any(|(p, other)| *other == id && p.eq_ignore_ascii_case(path))
+            })
+        {
             out.insert(path.clone());
         }
     }
     Ok(out)
 }
 
-/// A recorded file's content, or `None` when there is no file there to be
-/// ours: missing, a directory (checked first: some platforms refuse to open
-/// one with a permission error), or under a path that is no directory.
+/// A file's content, or `None` when there is no regular file there to be
+/// ours: missing, under a path that is no directory, or anything but a
+/// regular file — a directory (some platforms refuse to open one with a
+/// permission error), a link, or a FIFO a read would block on. Checked
+/// before opening, so nothing is followed or waited on.
 fn read_recorded(path: &Path) -> Result<Option<Vec<u8>>, WriteError> {
     let missing = |e: &std::io::Error| {
         matches!(
@@ -750,7 +780,7 @@ fn read_recorded(path: &Path) -> Result<Option<Vec<u8>>, WriteError> {
         )
     };
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => return Ok(None),
+        Ok(meta) if !meta.is_file() => return Ok(None),
         Ok(_) => {}
         Err(e) if missing(&e) => return Ok(None),
         Err(source) => {
@@ -784,12 +814,25 @@ fn check_recorded(out_dir: &Path, key: &str, going: &BTreeSet<String>) -> Result
         Err(WriteError::NotADirectory(blocker))
             if blocker
                 .to_str()
-                .is_some_and(|b| going.iter().any(|g| g.eq_ignore_ascii_case(b))) =>
+                .is_some_and(|b| is_going(out_dir, going, b)) =>
         {
             Ok(())
         }
         other => other,
     }
+}
+
+/// Whether `blocker` is one of the stale files a run removes first: by
+/// name, or as another spelling of the same file on a case-insensitive disk.
+fn is_going(out_dir: &Path, going: &BTreeSet<String>, blocker: &str) -> bool {
+    going.contains(blocker)
+        || going.iter().any(|g| {
+            g.eq_ignore_ascii_case(blocker)
+                && matches!(
+                    (file_id(&out_dir.join(g)), file_id(&out_dir.join(blocker))),
+                    (Some(a), Some(b)) if a == b
+                )
+        })
 }
 
 /// The first look at recorded paths, before any is read: no symbolic
@@ -799,6 +842,16 @@ fn check_links(out_dir: &Path, key: &str) -> Result<(), WriteError> {
     match check_path(out_dir, key) {
         Err(WriteError::NotADirectory(_)) => Ok(()),
         other => other,
+    }
+}
+
+/// `""` is the current directory to the filesystem, but not to `read_dir`,
+/// which would then miss every other target's manifest.
+fn current_if_empty(out_dir: &Path) -> &Path {
+    if out_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        out_dir
     }
 }
 
@@ -935,6 +988,7 @@ pub fn write(
     out_dir: &Path,
     options: &WriteOptions,
 ) -> Result<WriteReport, WriteError> {
+    let out_dir = current_if_empty(out_dir);
     let errors = error_count(generation);
     if errors > 0 && !options.allow_partial {
         return Err(WriteError::HasErrors(errors));
@@ -978,8 +1032,8 @@ pub fn write(
     // A file reached through an old spelling is replaced like any other:
     // until it is rewritten, it holds what the old spelling recorded.
     for (old, new) in &aliased {
-        let current = match fs::read(out_dir.join(old)) {
-            Ok(bytes) if previous.wrote(old, &bytes) => hash(&bytes),
+        let current = match read_recorded(&out_dir.join(old))? {
+            Some(bytes) if previous.wrote(old, &bytes) => hash(&bytes),
             _ => previous.files[old].clone(),
         };
         if current != hashes[new] {
@@ -992,8 +1046,8 @@ pub fn write(
         };
         // What the file holds now, when it is ours: after an interrupted
         // run that may be either hash the previous manifest records.
-        let current = match fs::read(out_dir.join(path)) {
-            Ok(bytes) if previous.wrote(path, &bytes) => hash(&bytes),
+        let current = match read_recorded(&out_dir.join(path))? {
+            Some(bytes) if previous.wrote(path, &bytes) => hash(&bytes),
             _ => recorded.clone(),
         };
         if &current == new {
@@ -1016,13 +1070,16 @@ pub fn write(
         write_atomic(&manifest_path, manifest_text(&pending).as_bytes())?;
     }
 
-    for (old, new) in &aliased {
-        respell(out_dir, old, new)?;
-    }
     let mut report = WriteReport {
         manifest: PathBuf::from(&manifest_file),
         ..Default::default()
     };
+    for (old, new) in &aliased {
+        respell(out_dir, old, new)?;
+        report
+            .renamed
+            .push((PathBuf::from(old), PathBuf::from(new)));
+    }
     // Stale files go first: one may sit where a new path needs a directory.
     for (path, _) in &removable {
         let on_disk = out_dir.join(path);
@@ -1039,12 +1096,18 @@ pub fn write(
                 }
             }
         } else if read_recorded(&on_disk)?.is_some() {
-            report.kept_edited.push(PathBuf::from(path));
+            // Once per file, whatever spellings recorded it, as check reports.
+            let id = file_id(&on_disk);
+            if !report.kept_edited.iter().any(|p| {
+                p.to_string_lossy().eq_ignore_ascii_case(path) && file_id(&out_dir.join(p)) == id
+            }) {
+                report.kept_edited.push(PathBuf::from(path));
+            }
         }
     }
     for (path, content) in &planned {
         let on_disk = out_dir.join(path);
-        if fs::read(&on_disk).ok().as_deref() == Some(content.as_bytes()) {
+        if read_recorded(&on_disk)?.as_deref() == Some(content.as_bytes()) {
             report.unchanged.push(PathBuf::from(path));
         } else {
             write_atomic(&on_disk, content.as_bytes())?;
@@ -1078,6 +1141,7 @@ pub fn check(
     out_dir: &Path,
     options: &WriteOptions,
 ) -> Result<CheckReport, WriteError> {
+    let out_dir = current_if_empty(out_dir);
     let errors = error_count(generation);
     if errors > 0 && !options.allow_partial {
         return Err(WriteError::HasErrors(errors));
@@ -1108,33 +1172,26 @@ pub fn check(
     )?;
     let mut report = CheckReport::default();
     for (path, content) in &planned {
-        match fs::read(out_dir.join(path)) {
-            Ok(current) if current == content.as_bytes() => {}
-            Ok(_) => report.changed.push(PathBuf::from(path)),
-            // A stale file of ours where its directory will be.
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                report.missing.push(PathBuf::from(path))
-            }
-            Err(e) => {
-                return Err(WriteError::Io {
-                    path: out_dir.join(path),
-                    source: e,
-                });
-            }
+        match read_recorded(&out_dir.join(path))? {
+            Some(current) if current == content.as_bytes() => {}
+            Some(_) => report.changed.push(PathBuf::from(path)),
+            // Absent, or a stale file of ours where its directory will be.
+            None => report.missing.push(PathBuf::from(path)),
         }
     }
     // One file reached through two recorded spellings is reported once,
     // as a write removes it once.
-    let mut seen = BTreeSet::new();
+    let mut seen: Vec<(String, _)> = Vec::new();
     for (path, _) in removable {
         let on_disk = out_dir.join(&path);
-        if file_id(&on_disk).is_some_and(|id| !seen.insert(id)) {
-            continue;
+        if let Some(id) = file_id(&on_disk) {
+            if seen
+                .iter()
+                .any(|(p, other)| *other == id && p.eq_ignore_ascii_case(&path))
+            {
+                continue;
+            }
+            seen.push((path.clone(), id));
         }
         if going.contains(&path) {
             report.stale.push(PathBuf::from(path));
@@ -2452,5 +2509,57 @@ mod tests {
             .filter(|n| n.contains(TMP_MARKER))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_replacing_another_generated_file_is_kept() {
+        let dir = TempDir::new("link-stale");
+        write(
+            &generation(&[("a.rs", "a"), ("b.rs", "b"), ("c.rs", "c")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        fs::remove_file(dir.0.join("b.rs")).unwrap();
+        fs::hard_link(dir.0.join("a.rs"), dir.0.join("b.rs")).unwrap();
+        let next = generation(&[("c.rs", "c")]);
+        let checked = check(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(checked.stale, vec![PathBuf::from("a.rs")]);
+        assert_eq!(checked.stale_edited, vec![PathBuf::from("b.rs")]);
+        let report = write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(report.removed, vec![PathBuf::from("a.rs")]);
+        assert_eq!(report.kept_edited, vec![PathBuf::from("b.rs")]);
+        assert_eq!(fs::read_to_string(dir.0.join("b.rs")).unwrap(), "a");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifests_are_never_read_through_links_or_from_non_files() {
+        let dir = TempDir::new("manifest-link");
+        let target = dir.0.join("elsewhere.json");
+        fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(&target, dir.0.join(".roas-codegen-other-rust.json")).unwrap();
+        let g = generation(&[("a.rs", "a")]);
+        assert!(matches!(
+            write(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::Symlink(_))
+        ));
+        assert!(matches!(
+            check(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::Symlink(_))
+        ));
+        fs::remove_file(dir.0.join(".roas-codegen-other-rust.json")).unwrap();
+        fs::create_dir(dir.0.join(".roas-codegen-other-rust.json")).unwrap();
+        assert!(matches!(
+            write(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::Manifest { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_output_path_is_the_current_directory() {
+        assert_eq!(current_if_empty(Path::new("")), Path::new("."));
+        assert_eq!(current_if_empty(Path::new("out")), Path::new("out"));
     }
 }

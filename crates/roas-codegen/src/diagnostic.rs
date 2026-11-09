@@ -42,6 +42,7 @@ impl fmt::Display for SchemaId {
 /// `Warning` changes nothing by itself, and a strict run promotes every
 /// warning to an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Severity {
     Warning,
     Error,

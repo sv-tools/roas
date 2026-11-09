@@ -16,6 +16,7 @@ use url::Url;
 /// provenance whatever its caller believes about it. There is
 /// deliberately no way to assert exactness on a `Value`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Input {
     /// JSON text. The only way to obtain exact numbers.
     Json(Vec<u8>),
@@ -27,6 +28,7 @@ pub enum Input {
 
 /// How faithfully the numbers in a document reflect what was written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Fidelity {
     /// Every number is the literal that was written. Requires the
     /// `exact-numbers` feature and JSON input; without the feature even

@@ -314,7 +314,8 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         eprintln!("{diagnostic}");
         match diagnostic.severity {
             Severity::Error => errors += 1,
-            Severity::Warning => warnings += 1,
+            // A kind added later counts as a warning: `--strict` fails on it.
+            _ => warnings += 1,
         }
     }
     let failing = if args.strict {
@@ -417,6 +418,9 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
             "warning: {} is no longer generated but was edited, so it was kept and is no longer tracked",
             path.display()
         );
+    }
+    for (old, new) in &report.renamed {
+        eprintln!("renamed {} to {}", old.display(), new.display());
     }
     eprintln!(
         "{}: {} written, {} unchanged, {} removed",

@@ -118,13 +118,15 @@ The URI is required. Every schema identity is the document URI plus a JSON Point
 `generate` never touches disk. `write` puts a `Generation` into a directory under a manifest — `.roas-codegen-<label>-<language>.json` — that records each file it owns with a content hash, and `check` compares the directory with a generation without writing anything.
 
 ```rust
-use roas_codegen::{WriteOptions, check, write};
-# fn run(generation: &roas_codegen::Generation) -> Result<(), Box<dyn std::error::Error>> {
-let out = std::path::Path::new("src/api");
-let report = write(generation, out, &WriteOptions::new("petstore"))?;
-println!("{} written, {} removed", report.written.len(), report.removed.len());
-assert!(check(generation, out, &WriteOptions::new("petstore"))?.is_clean());
-# Ok(()) }
+use roas_codegen::{Generation, WriteOptions, check, write};
+
+fn save(generation: &Generation) -> Result<(), Box<dyn std::error::Error>> {
+    let out = std::path::Path::new("src/api");
+    let report = write(generation, out, &WriteOptions::new("petstore"))?;
+    println!("{} written, {} removed", report.written.len(), report.removed.len());
+    assert!(check(generation, out, &WriteOptions::new("petstore"))?.is_clean());
+    Ok(())
+}
 ```
 
 - **Only owned files change.** A path another target's manifest owns is refused, and so is an existing file no manifest owns unless `overwrite_unowned` is set. Two targets with different labels can share a directory.
