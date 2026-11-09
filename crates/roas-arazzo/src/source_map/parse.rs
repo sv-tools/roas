@@ -34,7 +34,7 @@ impl SourceMap {
                     message: error.to_string(),
                 }
             })?;
-        let (root, _) = node(&text, root);
+        let (root, _) = node(&text, root, false);
         Ok(Self::new(text, root))
     }
 }
@@ -100,18 +100,30 @@ fn span(text: &str, spanned: &Spanned<Raw>) -> (usize, usize) {
 /// The node, and where its occurrence ends: for an alias, the end of the
 /// `*name` that uses it rather than of the anchored value, so the
 /// collection holding the alias is measured where the alias is written.
-fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
+/// Inside a replayed alias (`replayed`) every node is measured at its
+/// definition: the `*name` belongs to the alias alone.
+fn node(text: &str, spanned: Spanned<Raw>, replayed: bool) -> (Node, usize) {
     let alias = spanned.referenced != spanned.defined;
     let used = spanned.referenced.span();
     let used = used.byte_offset().map_or(0, |offset| offset as usize)
         + used.byte_len().map_or(0, |len| len as usize);
     let (mut start, mut end) = span(text, &spanned);
-    if start == end
-        && matches!(spanned.value, Raw::String(_) | Raw::Other)
-        && let Some(header) = super::scalar::empty_block(text, start)
-    {
-        (start, end) = (header, header);
+    let mut text_end = end;
+    match spanned.value {
+        Raw::String(_) | Raw::Other if start == end => {
+            if let Some(header) = super::scalar::empty_block(text, start) {
+                (start, end, text_end) = (header, header, header);
+            }
+        }
+        // A block scalar's span runs on into the next line's indentation;
+        // its range stops at its content, its decoding sees all of it.
+        Raw::String(_) if super::scalar::is_block(text, start) => {
+            end = start + text[start..end].trim_end().len();
+        }
+        _ => {}
     }
+    let inner = replayed || alias;
+    let mut first = None;
     let kind = match spanned.value {
         Raw::Map(members) => Kind::Map(
             members
@@ -123,7 +135,7 @@ fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
                         // `1: x` reads as the member `"1"`.
                         _ => text[key_start..key_end].to_owned(),
                     };
-                    let (value, value_end) = node(text, value);
+                    let (value, value_end) = node(text, value, inner);
                     end = end.max(key_end).max(value_end);
                     (
                         Key {
@@ -140,7 +152,8 @@ fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
             items
                 .into_iter()
                 .map(|item| {
-                    let (item, item_end) = node(text, item);
+                    let (item, item_end) = node(text, item, inner);
+                    first.get_or_insert(item.start);
                     end = end.max(item_end);
                     item
                 })
@@ -149,75 +162,48 @@ fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
         Raw::String(value) => Kind::Scalar(Some(value)),
         Raw::Other => Kind::Scalar(None),
     };
-    // An indentless sequence (`a:\n- x`) is reported from its first item:
-    // it starts at that item's `-`.
-    if matches!(kind, Kind::Seq(_)) && !matches!(text.as_bytes().get(start), Some(b'[')) {
+    if !matches!(kind, Kind::Scalar(_)) {
+        // An indentless sequence (`a:\n- x`) is reported from its first
+        // item, whatever that item is: it starts at the item's `-`.
         let line = text[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
         let before = text[line..start].trim_end_matches(' ');
-        if before.ends_with('-') {
+        let indentless = first == Some(start) && before.ends_with('-');
+        if indentless {
             start = line + before.len() - 1;
         }
-    }
-    if !matches!(kind, Kind::Scalar(_)) {
         end = match text.as_bytes().get(start) {
-            Some(b'[' | b'{') => closing(text, start, end),
-            _ => block_end(text, start, end),
+            Some(b'[' | b'{') if !indentless => closing(text, start, end),
+            _ => colon(text, end),
         };
+        text_end = end;
     }
-    let occurrence = if alias { used.min(text.len()) } else { end };
-    (Node { start, end, kind }, occurrence)
+    let occurrence = if alias && !replayed {
+        used.min(text.len())
+    } else {
+        end
+    };
+    (
+        Node {
+            start,
+            end,
+            text_end,
+            kind,
+        },
+        occurrence,
+    )
 }
 
-/// A block collection has no delimiter, and what ends it may be nothing
-/// this sees as a member — the `:` of an empty last value, a `<<` merge.
-/// It runs on through the rest of the line its last item ends on, then
-/// through every line indented at least as far as it starts (a sequence:
-/// sibling lines must be `-` items), skipping blank and comment lines.
-fn block_end(text: &str, start: usize, end: usize) -> usize {
-    // `\n`, `\r\n` and a bare `\r` each end a line, as in `SourceMap`.
-    let breaks = ['\n', '\r'];
-    let line_start = |at: usize| text[..at].rfind(breaks).map_or(0, |at| at + 1);
-    let line_stop = |at: usize| text[at..].find(breaks).map_or(text.len(), |stop| at + stop);
-    let next_line = |stop: usize| {
-        stop + if text[stop..].starts_with("\r\n") {
-            2
-        } else {
-            1
-        }
-    };
-    let content_end = |line: usize, body: &str| {
-        let comment = body
-            .char_indices()
-            .find(|&(at, c)| c == '#' && (at == 0 || body[..at].ends_with([' ', '\t'])))
-            .map_or(body.len(), |(at, _)| at);
-        line + body[..comment].trim_end().len()
-    };
-    // A last block scalar's span runs into the next line's indentation:
-    // measure from where its content stops.
-    let end = start + text[start..end].trim_end().len();
-    let column = start - line_start(start);
-    let sequence = text[start..].starts_with('-');
-    let stop = line_stop(end);
-    let mut last = content_end(end, &text[end..stop]).max(end);
-    let mut line = next_line(stop);
-    while line < text.len() {
-        let stop = line_stop(line);
-        let body = &text[line..stop];
-        let indent = body.len() - body.trim_start_matches(' ').len();
-        let content = &body[indent..];
-        if !(content.is_empty() || content.starts_with('#')) {
-            let item = content == "-" || content.starts_with("- ");
-            if indent < column
-                || (indent == column && sequence && !item)
-                || (column == 0 && (content.starts_with("---") || content.starts_with("...")))
-            {
-                break;
-            }
-            last = content_end(line, body);
-        }
-        line = next_line(stop);
+/// A block collection has no delimiter: it ends at its last key or value,
+/// and past the `:` of an empty last value. A `<<` merge ending a map is
+/// not seen as a member, so it is not in the range.
+fn colon(text: &str, end: usize) -> usize {
+    let rest = &text[end..];
+    let after = rest.trim_start_matches([' ', '\t']);
+    if after.starts_with(':') {
+        end + (rest.len() - after.len()) + 1
+    } else {
+        end
     }
-    last
 }
 
 /// A flow collection's span covers only its opening `[` / `{`, and its
@@ -468,8 +454,9 @@ workflows:
         assert_eq!(end("k: [a: ]\n", "#.k"), 8);
         assert_eq!(end("k: {a: , }\n", "#.k"), 10);
         assert_eq!(end("k:\n  a: 1\n  b:\nc: 1\n", "#.k"), 14);
-        // A map ending in a merge ends after it.
-        assert_eq!(end("base: &b\n  x: 1\nd:\n  x: 2\n  <<: *b\n", "#.d"), 34);
+        // A `<<` merge is not a member this sees: a map ending in one
+        // ends at its last own member (documented).
+        assert_eq!(end("base: &b\n  x: 1\nd:\n  x: 2\n  <<: *b\n", "#.d"), 25);
         // Comments and blank lines after the last item are not part of it;
         // a sibling key at the sequence's own column ends it.
         assert_eq!(end("k:\n- 1 # one\n\n# note\nz: 2\n", "#.k"), 6);
@@ -539,10 +526,50 @@ workflows:
             ends,
             [Some(9), Some(10), Some(11), Some(12), Some(13), Some(13)]
         );
+        // A block whose content opens with a quote is still a block.
+        let map = SourceMap::parse("k: >-\n  \"ok\" == \"ok\" &&\n  (\n").unwrap();
+        assert_eq!(map.locate_in("#.k", 0).unwrap().offset, 8);
+        assert_eq!(map.locate_in("#.k", 16).unwrap().offset, 26);
         // Blank lines only: their breaks are not in the text, so no offset.
         let map = SourceMap::parse("k: |+\n\n\nz: 1\n").unwrap();
         assert_eq!(map.locate("#.k").unwrap().start.line, 1);
         assert_eq!(map.locate_in("#.k", 0), None);
+    }
+
+    #[test]
+    fn nested_sequences_and_aliased_collections_keep_their_own_ranges() {
+        let range = |text: &str, path: &str| {
+            let range = SourceMap::parse(text).unwrap().locate(path).unwrap();
+            (range.start.offset, range.end.offset)
+        };
+        assert_eq!(range("- - a\n  - b\n- c\n", "#[0]"), (2, 11));
+        assert_eq!(
+            range("x:\n  a:\n  - - 1\n    - 2\n  - 3\n  b: 1\n", "#.x.a[0]"),
+            (12, 23)
+        );
+        assert_eq!(
+            range("seq:\n- a\n-   - b\n    - c\n- d\n", "#.seq[1]"),
+            (13, 24)
+        );
+        // An aliased collection is its anchor's text, not anchor-to-alias.
+        assert_eq!(range("a: &x [1]\nb: *x\n", "#.b"), (6, 9));
+        assert_eq!(range("a: &x\n  k: 1\nb: *x\nc: 2\n", "#.b"), (8, 12));
+        assert_eq!(
+            range("a: &x {k: [1, 2]}\nzz: 1\nb: *x\n", "#.b.k"),
+            (10, 16)
+        );
+        // An indentless sequence of flow items starts at its first `-`.
+        assert_eq!(range("a:\n- [1]\n- [2]\nb: 1\n", "#.a"), (3, 14));
+        assert_eq!(range("a:\n- [1]\n- [2]\nb: 1\n", "#.a[0]"), (5, 8));
+        // A mapping inside a flow sequence ends at its own value.
+        assert_eq!(range("a: [x: y, z: w]\n", "#.a[0]"), (4, 8));
+        assert_eq!(range("a: [x: y, z: w]\n", "#.a"), (3, 15));
+        assert_eq!(range("a: &x [one]\nb: *x\n", "#.b"), (6, 11));
+        // A block scalar's range stops at its content.
+        assert_eq!(
+            range("a:\n  - x\n  - |\n    t\n\n  - z\n", "#.a[1]"),
+            (19, 20)
+        );
     }
 
     #[test]

@@ -11,6 +11,11 @@
 pub(super) fn decode(text: &str, start: usize, end: usize, value: &str) -> Option<Vec<usize>> {
     let raw = text.get(start..end)?;
     let mut out = Decoded::default();
+    // A block's content may itself open with a quote: the header decides.
+    if let Some(style) = block_header(text, start) {
+        block(raw, start, start - line_start(text, start), style, &mut out);
+        return out.finish(value, true);
+    }
     let block = match raw.as_bytes().first() {
         Some(b'"') => {
             double(raw.strip_suffix('"')?, start, &mut out)?;
@@ -22,16 +27,10 @@ pub(super) fn decode(text: &str, start: usize, end: usize, value: &str) -> Optio
             out.end = end - 1;
             false
         }
-        _ => match block_header(text, start) {
-            Some(style) => {
-                block(raw, start, start - line_start(text, start), style, &mut out);
-                true
-            }
-            None => {
-                plain(raw, start, &mut out);
-                false
-            }
-        },
+        _ => {
+            plain(raw, start, &mut out);
+            false
+        }
     };
     out.finish(value, block)
 }
@@ -286,6 +285,12 @@ pub(super) fn empty_block(text: &str, at: usize) -> Option<usize> {
     header(text, at).map(|(_, end, _)| end)
 }
 
+/// Whether the scalar whose content starts at `start` is a block scalar.
+#[cfg_attr(not(feature = "source-map"), allow(dead_code))]
+pub(super) fn is_block(text: &str, start: usize) -> bool {
+    header(text, start).is_some()
+}
+
 /// The block style announced before `start`, where its indicator ends,
 /// and whether it sets an explicit indentation.
 fn header(text: &str, start: usize) -> Option<(Block, usize, bool)> {
@@ -309,7 +314,19 @@ fn header(text: &str, start: usize) -> Option<(Block, usize, bool)> {
         .find(|&(at, c)| c == '#' && (at == 0 || content[..at].ends_with([' ', '\t'])))
         .map_or(content.len(), |(at, _)| at);
     let head = content[..comment].trim_end();
-    let indicator = &head[head.rfind([' ', '\t']).map_or(0, |at| at + 1)..];
+    let from_indicator = head.rfind([' ', '\t']).map_or(0, |at| at + 1);
+    let indicator = &head[from_indicator..];
+    // Only where a value may start: after `:`, `-`, `?`, a tag or an
+    // anchor, or alone on its line — not the end of a plain `a |`.
+    let before = head[..from_indicator].trim_end();
+    let last = before.rsplit([' ', '\t']).next().unwrap_or_default();
+    if !(before.is_empty()
+        || before.ends_with(':')
+        || matches!(last, "-" | "?")
+        || last.starts_with(['!', '&']))
+    {
+        return None;
+    }
     let mut chars = indicator.chars();
     let style = match chars.next()? {
         '|' => Block::Literal,
@@ -549,6 +566,15 @@ mod tests {
         );
         let text = "k:\n# |\n  x\n";
         assert_eq!(block_header(text, text.rfind('x').unwrap()), None);
+        let text = "? a |\n: x\n";
+        assert_eq!(block_header(text, text.rfind('x').unwrap()), None);
+        for header in ["k: !!str |", "k: &a >", "|", "- - |", "? |"] {
+            let text = format!("{header}\n  x\n");
+            assert!(
+                block_header(&text, text.rfind('x').unwrap()).is_some(),
+                "{header}"
+            );
+        }
         let text = "k: a#|\n  x\n";
         assert_eq!(block_header(text, text.rfind('x').unwrap()), None);
         // An empty block is written at its header, not at what follows.

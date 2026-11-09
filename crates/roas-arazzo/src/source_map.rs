@@ -28,6 +28,13 @@
 //! Member names may contain dots and `[n]`, so a path is matched against
 //! the document's actual members. A path more than one way of reading
 //! resolves (`a.b` beside `a` → `b`) is ambiguous and locates nothing.
+//!
+//! # Ranges
+//!
+//! A value's range is its own text: an aliased value is its anchor's
+//! text, a flow collection runs to its closing delimiter, and a block
+//! collection to its last key or value. A `<<` merge key is not seen as
+//! a member, so a block map ending in one ends before it.
 
 #[cfg(feature = "source-map")]
 mod parse;
@@ -98,6 +105,9 @@ pub struct SourceMap {
 struct Node {
     start: usize,
     end: usize,
+    /// Where the raw scalar ends for decoding; past `end` for a block
+    /// scalar, whose kept breaks and trailing spaces follow its content.
+    text_end: usize,
     kind: Kind,
 }
 
@@ -168,7 +178,7 @@ impl SourceMap {
         if !value.is_char_boundary(offset) {
             return None;
         }
-        let table = scalar::decode(&self.text, node.start, node.end, value)?;
+        let table = scalar::decode(&self.text, node.start, node.text_end, value)?;
         table.get(offset).map(|&raw| self.position(raw))
     }
 
@@ -321,6 +331,7 @@ mod tests {
         Node {
             start,
             end,
+            text_end: end,
             kind: Kind::Scalar(Some(value.into())),
         }
     }
@@ -340,11 +351,13 @@ mod tests {
         let inner = Node {
             start: 12,
             end: 20,
+            text_end: 20,
             kind: Kind::Map(vec![(
                 key("b", 12),
                 Node {
                     start: 17,
                     end: 20,
+                    text_end: 20,
                     kind: Kind::Seq(vec![scalar(19, 20, "y")]),
                 },
             )]),
@@ -352,6 +365,7 @@ mod tests {
         let root = Node {
             start: 0,
             end: 20,
+            text_end: 20,
             kind: Kind::Map(vec![
                 (key("a.b", 0), scalar(5, 6, "x")),
                 (key("a", 7), inner),
@@ -426,6 +440,7 @@ mod tests {
         let root = Node {
             start: 0,
             end: 6,
+            text_end: 6,
             kind: Kind::Map(vec![(key("a.b", 0), scalar(5, 6, "x"))]),
         };
         let map = SourceMap::new(text.into(), root);
@@ -445,6 +460,7 @@ mod tests {
                 Node {
                     start: value - 4,
                     end: value + 2,
+                    text_end: value + 2,
                     kind: Kind::Map(vec![(key("x", value - 3), scalar(value, value + 1, "1"))]),
                 },
             )
@@ -452,6 +468,7 @@ mod tests {
         let root = Node {
             start: 0,
             end: text.len(),
+            text_end: text.len(),
             kind: Kind::Map(vec![member("foo", 0, 9), member("foo.", 12, 22)]),
         };
         let map = SourceMap::new(text.into(), root);
@@ -465,12 +482,14 @@ mod tests {
         let both = Node {
             start: 0,
             end: text.len(),
+            text_end: text.len(),
             kind: Kind::Map(vec![
                 (
                     key("items", 0),
                     Node {
                         start: 7,
                         end: 10,
+                        text_end: 10,
                         kind: Kind::Seq(vec![scalar(8, 9, "x")]),
                     },
                 ),
@@ -501,6 +520,7 @@ mod tests {
             Node {
                 start: 0,
                 end: 0,
+                text_end: 0,
                 kind: Kind::Scalar(None),
             },
         );
@@ -517,6 +537,7 @@ mod tests {
             Node {
                 start: 0,
                 end: 0,
+                text_end: 0,
                 kind: Kind::Scalar(None),
             },
         );
@@ -534,6 +555,7 @@ mod tests {
             Node {
                 start: 0,
                 end: 0,
+                text_end: 0,
                 kind: Kind::Scalar(None),
             },
         );
@@ -559,6 +581,7 @@ mod tests {
             Node {
                 start: 0,
                 end: 12,
+                text_end: 12,
                 kind: Kind::Map(vec![
                     (key("a", 0), scalar(3, 7, "é")),
                     (
@@ -566,6 +589,7 @@ mod tests {
                         Node {
                             start: 11,
                             end: 12,
+                            text_end: 12,
                             kind: Kind::Scalar(None),
                         },
                     ),
