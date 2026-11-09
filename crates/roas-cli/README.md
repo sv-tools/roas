@@ -192,7 +192,7 @@ buyPet
   steps: 2 (findPet, orderPet)
 ```
 
-- **`arazzo run`** — runs a workflow via [`roas-arazzo-executor`](https://crates.io/crates/roas-arazzo-executor): every step's request, its criteria, its `retry` / `goto` / `end` actions, and the workflows it calls. This is the one command that talks to an API rather than reading a document. What it parses, resolves, validates and runs, and what it refuses (AsyncAPI steps, XPath, parallel scheduling), is the executor's [support matrix](https://crates.io/crates/roas-arazzo-executor#support-matrix).
+- **`arazzo run`** — runs a workflow via [`roas-arazzo-executor`](https://crates.io/crates/roas-arazzo-executor): every step's request, its criteria, its `retry` / `goto` / `end` actions, and the workflows it calls. This is the one command that talks to an API rather than reading a document. What it parses, resolves, validates and runs, what it refuses (AsyncAPI steps, XPath, calls to workflows with their own `dependsOn`), and that `dependsOn` runs one at a time, is the executor's [support matrix](https://crates.io/crates/roas-arazzo-executor#support-matrix).
 
 ```shell
 roas arazzo run buy.arazzo.yaml --load file --input petId=7

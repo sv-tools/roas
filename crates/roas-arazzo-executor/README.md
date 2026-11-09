@@ -342,7 +342,7 @@ Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0`
 
 ## Support matrix
 
-Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability the last column does not run is an error where it is met, never skipped.
+Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability the last column does not run is an error where it is met, never skipped; a check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them.
 
 | Feature | Parsing | Reference resolution | Validation | Execution |
 | --- | --- | --- | --- | --- |
@@ -350,15 +350,16 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | `x-` extensions | Kept on every object but a Reusable Object | — | Not interpreted | Ignored |
 | Other unknown members | Dropped by the model; listed by `Description::unknown_members` | — | Preparation error (entry when given `Options::unknown_members`, external documents always) | A checked run refuses them; the lazy path never sees them |
 | OpenAPI 2.0 / 3.0 / 3.1 / 3.2 sources | Raw values with a checked version | `operationId`, `operationPath`, Path Item `$ref` chains, servers | Duplicate IDs, reference cycles, Path Item overlaps; no structural or schema validation | HTTP requests ([methods and servers](#openapi-operation-resolution)) |
-| AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Loaded as sources | AsyncAPI steps and `channel` parameters are preparation errors | Not run |
+| AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Loaded as sources | AsyncAPI steps, `channel` parameters and `$message` expressions are preparation errors | Not run |
 | External Arazzo workflows | Typed models from the registry | `$sourceDescriptions.<name>.<workflowId>` | Structure, unknown members and the cross-document workflow graph | In their own document's scope; targets with their own `dependsOn` are refused |
 | Components | Typed models | `$components.<kind>.<name>` by name | A missing component is a preparation error | Resolved where used |
-| Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>` | Syntax and references checked, with byte offsets | Evaluated |
+| Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>` | Syntax and references checked, with byte offsets | Evaluated, except `$message` (AsyncAPI) |
 | `simple` conditions | Strings | — | Parsed under the [condition profile](#condition-profile) | Evaluated, short-circuiting |
-| `regex` / `jsonpath` criteria | Typed criterion types | — | Constant patterns compiled; JSONPath only `rfc9535` | Evaluated |
+| `regex` criteria | Typed criterion types | — | Constant patterns compiled | Evaluated |
+| JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535` | Evaluated as RFC 9535; a lazy run does not check the version |
 | JSON Pointer selectors (v1.1) and criteria | Typed | — | Pointer syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | Preparation error | Not run |
-| Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, local references | Compiled with the `input-validation` feature | Inputs validated at every start, call and transfer |
+| Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, local references | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
 | `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time; no parallel scheduling |
 
 ## Condition profile
@@ -524,11 +525,13 @@ run rejects the transfer when it reaches it, before the target starts.
 
 Every offset this crate reports is a zero-based UTF-8 byte offset into a decoded
 string: `CriterionError::Syntax::offset` into the condition,
-`ExpressionError::Syntax` / `Navigation::offset` into the expression, and
-`PreparationDiagnostic::offset` into the field's value as parsed, after quotes and
-escapes. `roas_arazzo::source_map::SourcePosition` maps that back to the original
-text: a byte offset plus a one-based line and a one-based column counted in Unicode
-scalar values. An editor speaking UTF-16, such as an LSP client, converts at its
+`ExpressionError::Syntax` / `Navigation::offset` into the expression or operand
+held in its `expression` field, and `PreparationDiagnostic::offset` into the
+field's value as parsed, after quotes and escapes. Only preparation findings are
+mapped back to the original text: `PreparationDiagnostic::position`, a
+`roas_arazzo::source_map::SourcePosition`, is a byte offset plus a one-based line
+and a one-based column counted in Unicode scalar values. Runtime errors carry only
+the string offset. An editor speaking UTF-16, such as an LSP client, converts at its
 own boundary. A diagnostic about an operand boundary, such as a lone `=` or `&`
 inside a simple-condition operand, points at that operator character, so an editor
 can mark where the parser split the name.
