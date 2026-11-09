@@ -583,13 +583,13 @@ impl<'d> Run<'d> {
             let doc = frame.doc;
             let step = &frame.workflow.steps[index];
             if step.workflow_id.is_some() {
-                self.call(index).map_err(|error| self.located(doc, error))?;
+                self.call(index)?;
                 continue;
             }
 
             let (request, exchange) = self
                 .build(index)
-                .map_err(|error| self.located(doc, error))?;
+                .map_err(|error| locate(&self.documents, doc, error))?;
             let attempt = self
                 .frames
                 .last()
@@ -644,7 +644,6 @@ impl<'d> Run<'d> {
             url: pending.exchange.request.url.clone(),
             status,
         };
-        let doc = self.frames.last().expect("a frame to complete in").doc;
         // No criteria means the status is the whole judgement.
         self.complete(
             pending.step,
@@ -657,29 +656,6 @@ impl<'d> Run<'d> {
                 elapsed,
             },
         )
-        .map_err(|error| self.located(doc, error))
-    }
-
-    /// Name the external document an error was raised in, so an
-    /// operation, expression or criterion error of a linked document is
-    /// not mistaken for one of the entry's.
-    fn located(&self, doc: Doc, error: ExecutionError) -> ExecutionError {
-        let Some(identity) = self.documents.get(doc).identity else {
-            return error;
-        };
-        match error {
-            ExecutionError::Input(_)
-            | ExecutionError::InDocument { .. }
-            | ExecutionError::Limit { .. }
-            | ExecutionError::Client(_)
-            | ExecutionError::NotWaiting
-            | ExecutionError::Awaiting { .. }
-            | ExecutionError::Stopped => error,
-            error => ExecutionError::InDocument {
-                document: identity.to_owned(),
-                error: Box::new(error),
-            },
-        }
     }
 
     // ---- the steps of a run -----------------------------------------
@@ -692,6 +668,7 @@ impl<'d> Run<'d> {
     /// its actions decide where the workflow goes next.
     fn complete(&mut self, index: usize, done: Completion) -> Result<(), ExecutionError> {
         let frame = self.frames.last().expect("a frame to complete in");
+        let here = frame.doc;
         let step = &frame.workflow.steps[index];
         let step_id = step.step_id.clone();
         let workflow_id = frame.workflow.workflow_id.clone();
@@ -740,7 +717,8 @@ impl<'d> Run<'d> {
             };
             for criterion in &step.success_criteria {
                 let holds =
-                    evaluate_criterion(criterion, &scope, &mut self.records[record].criteria)?;
+                    evaluate_criterion(criterion, &scope, &mut self.records[record].criteria)
+                        .map_err(|error| locate(&self.documents, here, error))?;
                 passed = passed && holds;
             }
             // Only a step that did what it said can name what it
@@ -748,7 +726,10 @@ impl<'d> Run<'d> {
             // on, and its outputs would name what is not there.
             let outputs = if passed {
                 let mut outputs = done.given.clone();
-                outputs.extend(evaluate_outputs(&step.outputs, &scope)?);
+                outputs.extend(
+                    evaluate_outputs(&step.outputs, &scope)
+                        .map_err(|error| locate(&self.documents, here, error))?,
+                );
                 outputs
             } else {
                 // What it was handed only seeded the scope above: a
@@ -770,7 +751,9 @@ impl<'d> Run<'d> {
 
         self.records[record].passed = passed;
         self.records[record].outputs = outputs;
-        let action = self.decide(index, passed, done.exchange.as_ref(), record)?;
+        let action = self
+            .decide(index, passed, done.exchange.as_ref(), record)
+            .map_err(|error| locate(&self.documents, here, error))?;
         self.records[record].action = describe(&action);
         self.apply(action)
     }
@@ -815,9 +798,10 @@ impl<'d> Run<'d> {
                 .cloned()
                 .ok_or_else(|| {
                     ExecutionError::Unsupported("workflow is outside the prepared plan".into())
-                })?,
-            None => ordered_steps(workflow, document.description)?,
-        };
+                }),
+            None => ordered_steps(workflow, document.description),
+        }
+        .map_err(|error| locate(&self.documents, doc, error))?;
         if self.ambients[doc.0].is_none() {
             self.ambients[doc.0] = Some(Ambient::of(
                 document.description,
@@ -867,7 +851,7 @@ impl<'d> Run<'d> {
                 // wrong with an output is still worth saying.
                 evaluate_what_ran(&frame.workflow.outputs, &scope)
             }
-            .map_err(|error| self.located(frame.doc, error))?
+            .map_err(|error| locate(&self.documents, frame.doc, error))?
         };
         self.finished[frame.doc.0].insert(
             frame.workflow.workflow_id.clone(),
@@ -962,6 +946,20 @@ impl<'d> Run<'d> {
     /// A step that calls a workflow, of this document or of another
     /// Arazzo document it names as a source.
     fn call(&mut self, index: usize) -> Result<(), ExecutionError> {
+        let here = self.frames.last().expect("a frame to call from").doc;
+        let (doc, workflow, step_id, inputs) = self
+            .bind_call(index)
+            .map_err(|error| locate(&self.documents, here, error))?;
+        // The callee locates its own errors.
+        self.enter(doc, workflow, inputs, Some((step_id, Then::Advance)))
+    }
+
+    /// Resolve a workflow step's target and bind its arguments, in the
+    /// caller's document.
+    fn bind_call(
+        &self,
+        index: usize,
+    ) -> Result<(Doc, &'d Workflow, String, Value), ExecutionError> {
         let frame = self.frames.last().expect("a frame to call from");
         let step = &frame.workflow.steps[index];
         let step_id = step.step_id.clone();
@@ -989,8 +987,7 @@ impl<'d> Run<'d> {
             let parameter = parameter.resolve(&scope)?;
             inputs.insert(parameter.name, parameter.value);
         }
-        let inputs = Value::Object(inputs);
-        self.enter(doc, workflow, inputs, Some((step_id, Then::Advance)))
+        Ok((doc, workflow, step_id, Value::Object(inputs)))
     }
 
     /// The inputs a called workflow starts with: the caller's own,
@@ -1236,6 +1233,7 @@ impl<'d> Run<'d> {
     /// Carry an action out.
     fn apply(&mut self, action: Action) -> Result<(), ExecutionError> {
         let frame = self.frames.last_mut().expect("a frame to act in");
+        let here = frame.doc;
         match action {
             Action::Advance => {
                 // A step run as a retry's detour hands control back to
@@ -1277,16 +1275,22 @@ impl<'d> Run<'d> {
                     // upon completion of the specified step" — so the
                     // named step runs, then this one is tried again.
                     (Some(target), _) => {
-                        let at = position_of(frame, &target)?;
+                        let at = position_of(frame, &target)
+                            .map_err(|error| locate(&self.documents, here, error))?;
                         frame.detour = Some(frame.at);
                         frame.at = at;
                         Ok(())
                     }
                     // The same, for a workflow.
                     (None, Some(workflow_id)) => {
-                        let (doc, at) = self.documents.resolve(frame.doc, &workflow_id)?;
+                        let (doc, at) = self
+                            .documents
+                            .resolve(frame.doc, &workflow_id)
+                            .map_err(|error| locate(&self.documents, here, error))?;
                         let workflow = self.documents.workflow(doc, at);
-                        let inputs = self.arguments(&arguments)?;
+                        let inputs = self
+                            .arguments(&arguments)
+                            .map_err(|error| locate(&self.documents, here, error))?;
                         self.enter(doc, workflow, inputs, Some((step_id, Then::Retry)))
                     }
                     // Nothing named: this step, again.
@@ -1297,7 +1301,8 @@ impl<'d> Run<'d> {
                 step: Some(step_id),
                 ..
             } => {
-                frame.at = position_of(frame, &step_id)?;
+                frame.at = position_of(frame, &step_id)
+                    .map_err(|error| locate(&self.documents, here, error))?;
                 Ok(())
             }
             Action::Goto {
@@ -1307,9 +1312,14 @@ impl<'d> Run<'d> {
             } => {
                 let index = frame.order[frame.at];
                 let step_id = frame.workflow.steps[index].step_id.clone();
-                let (doc, at) = self.documents.resolve(frame.doc, &workflow_id)?;
+                let (doc, at) = self
+                    .documents
+                    .resolve(frame.doc, &workflow_id)
+                    .map_err(|error| locate(&self.documents, here, error))?;
                 let workflow = self.documents.workflow(doc, at);
-                let inputs = self.arguments(&arguments)?;
+                let inputs = self
+                    .arguments(&arguments)
+                    .map_err(|error| locate(&self.documents, here, error))?;
                 self.enter(doc, workflow, inputs, Some((step_id, Then::EndCaller)))
             }
             Action::Goto { .. } => Ok(()),
@@ -1379,6 +1389,30 @@ fn describe(action: &Action) -> Option<String> {
             ..
         } => Some(format!("goto workflow `{workflow}`")),
         Action::Goto { .. } => None,
+    }
+}
+
+/// Name the external document an error was raised in, so an operation,
+/// expression or criterion error of a linked document is not mistaken for
+/// one of the entry's. Each error is located where it arises, by the
+/// document of the frame it belongs to: an outer site never re-locates an
+/// error a callee raised, because the entry's own errors stay unwrapped.
+fn locate(documents: &Documents<'_>, doc: Doc, error: ExecutionError) -> ExecutionError {
+    let Some(identity) = documents.get(doc).identity else {
+        return error;
+    };
+    match error {
+        ExecutionError::Input(_)
+        | ExecutionError::InDocument { .. }
+        | ExecutionError::Limit { .. }
+        | ExecutionError::Client(_)
+        | ExecutionError::NotWaiting
+        | ExecutionError::Awaiting { .. }
+        | ExecutionError::Stopped => error,
+        error => ExecutionError::InDocument {
+            document: identity.to_owned(),
+            error: Box::new(error),
+        },
     }
 }
 

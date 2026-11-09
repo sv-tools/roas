@@ -1220,3 +1220,140 @@ fn a_call_back_into_the_entry_reports_its_errors_unwrapped() {
         "the entry's own workflow failed, unwrapped: {error}"
     );
 }
+
+/// Entry `A` and external `B`, each with its own `ping` API.
+fn pair(a_workflows: Value, b_workflows: Value) -> Graph {
+    Graph::new(&[
+        (
+            A,
+            arazzo(
+                "1.1.0",
+                json!([{ "name": "b", "url": "b.arazzo.json", "type": "arazzo" },
+                       { "name": "api", "url": "a.openapi.json", "type": "openapi" }]),
+                a_workflows,
+            ),
+        ),
+        (
+            B,
+            arazzo(
+                "1.1.0",
+                json!([{ "name": "a", "url": "a.arazzo.json", "type": "arazzo" },
+                       { "name": "api", "url": "b.openapi.json", "type": "openapi" }]),
+                b_workflows,
+            ),
+        ),
+        (
+            "https://example.test/cycle/a.openapi.json",
+            api("https://a.example.test"),
+        ),
+        (
+            "https://example.test/cycle/b.openapi.json",
+            api("https://b.example.test"),
+        ),
+    ])
+}
+
+fn tangled(workflow_id: &str) -> Value {
+    json!({ "workflowId": workflow_id, "steps": [
+        { "stepId": "s1", "operationId": "$sourceDescriptions.api.ping", "dependsOn": ["s2"] },
+        { "stepId": "s2", "operationId": "$sourceDescriptions.api.ping", "dependsOn": ["s1"] }] })
+}
+
+fn lazily(graph: &Graph, workflow: &str, replies: usize) -> ExecutionError {
+    let mut client = Fake::new();
+    for _ in 0..replies {
+        client = client.reply(200, &json!({}));
+    }
+    let options = Options::new()
+        .workflow(workflow)
+        .source_registry(&graph.registry, graph.root)
+        .unwrap();
+    execute(&graph.description, &options, &mut client).unwrap_err()
+}
+
+fn located_in<'e>(error: &'e ExecutionError, document: &str) -> &'e ExecutionError {
+    match error {
+        ExecutionError::InDocument {
+            document: found,
+            error,
+        } if found == document => error,
+        other => panic!("expected an error located in {document}, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_callees_step_order_error_names_the_callee_document() {
+    let graph = pair(
+        json!([{ "workflowId": "main", "steps": [
+            { "stepId": "across", "workflowId": "$sourceDescriptions.b.w" }] }]),
+        json!([tangled("w")]),
+    );
+    let error = lazily(&graph, "main", 0);
+    assert!(
+        matches!(located_in(&error, B), ExecutionError::Circular(_)),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_call_back_into_the_entry_keeps_its_step_order_error_unwrapped() {
+    let graph = pair(
+        json!([
+            { "workflowId": "main", "steps": [
+                { "stepId": "across", "workflowId": "$sourceDescriptions.b.w" }] },
+            tangled("helper")
+        ]),
+        json!([{ "workflowId": "w", "steps": [
+            { "stepId": "back", "workflowId": "$sourceDescriptions.a.helper" }] }]),
+    );
+    let error = lazily(&graph, "main", 0);
+    assert!(matches!(error, ExecutionError::Circular(_)), "{error}");
+}
+
+#[test]
+fn a_workflow_steps_completion_error_names_the_calling_document() {
+    let graph = pair(
+        json!([{ "workflowId": "main", "steps": [
+            { "stepId": "across", "workflowId": "$sourceDescriptions.b.w" }] }]),
+        json!([
+            { "workflowId": "w", "steps": [
+                { "stepId": "c", "workflowId": "inner",
+                  "outputs": { "x": "$inputs.missing" } }] },
+            { "workflowId": "inner", "steps": [
+                { "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }
+        ]),
+    );
+    let lazy = lazily(&graph, "main", 1);
+    assert!(
+        !matches!(located_in(&lazy, B), ExecutionError::InDocument { .. }),
+        "{lazy}"
+    );
+    let options = Options::new()
+        .workflow("main")
+        .source_registry(&graph.registry, graph.root)
+        .unwrap();
+    let checked = prepare(&graph.description, &options)
+        .unwrap()
+        .execute(&mut Fake::new().reply(200, &json!({})))
+        .unwrap_err();
+    assert_eq!(lazy.to_string(), checked.to_string());
+}
+
+#[test]
+fn a_queued_external_dependencys_step_order_error_names_its_document() {
+    let graph = pair(
+        json!([{ "workflowId": "main",
+            "dependsOn": ["$sourceDescriptions.b.w1", "$sourceDescriptions.b.w2"],
+            "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }]),
+        json!([
+            { "workflowId": "w1", "steps": [
+                { "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] },
+            tangled("w2")
+        ]),
+    );
+    let error = lazily(&graph, "main", 1);
+    assert!(
+        matches!(located_in(&error, B), ExecutionError::Circular(_)),
+        "{error}"
+    );
+}
