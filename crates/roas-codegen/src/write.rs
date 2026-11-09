@@ -2116,9 +2116,11 @@ pub fn check(
         }
     }
     let manifest_path = out_dir.join(&manifest_file);
-    // As read now, to see whether a write rooted here ran meanwhile.
-    let manifest_at_start = fs::read(&manifest_path).ok();
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
+    // As read now, to see whether a write rooted here ran meanwhile; after
+    // `read_manifest`, which refuses links and non-files, and never through
+    // either itself.
+    let manifest_at_start = read_recorded(&manifest_path).ok().flatten();
     check_source(&previous, options)?;
     for path in previous.files.keys() {
         check_links(out_dir, path)?;
@@ -2193,7 +2195,7 @@ pub fn check(
     expected.replacing = replacing;
     report.manifest_outdated =
         !read_manifest(&manifest_path)?.is_some_and(|m| m.same_as(&expected));
-    let manifest_changed = fs::read(&manifest_path).ok() != manifest_at_start;
+    let manifest_changed = read_recorded(&manifest_path).ok().flatten() != manifest_at_start;
     if let Some(lock) = appeared(out_dir, &unlocked, manifest_changed) {
         return Err(WriteError::Locked(lock));
     }
@@ -4616,5 +4618,21 @@ mod tests {
             .filter(|n| n.ends_with(".rs"))
             .collect();
         assert_eq!(names, vec!["a.rs".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_refuses_a_fifo_manifest_without_waiting() {
+        let dir = TempDir::new("fifo-manifest");
+        let manifest = dir.0.join(".roas-codegen-api-rust.json");
+        let status = std::process::Command::new("mkfifo").arg(&manifest).status();
+        if !status.is_ok_and(|s| s.success()) {
+            return; // no mkfifo here
+        }
+        let g = generation(&[("a.rs", "a")]);
+        assert!(matches!(
+            check(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::Manifest { .. })
+        ));
     }
 }
