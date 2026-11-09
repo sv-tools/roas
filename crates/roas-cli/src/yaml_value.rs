@@ -70,14 +70,6 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
         Ok(Value::Null)
     }
 
-    fn visit_none<E>(self) -> Result<Value, E> {
-        Ok(Value::Null)
-    }
-
-    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
-        deserializer.deserialize_any(JsonValueVisitor)
-    }
-
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
         let mut items = Vec::new();
         while let Some(JsonValue(item)) = seq.next_element()? {
@@ -107,5 +99,35 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
             return serde_json::from_value(Value::Object(entries)).map_err(de::Error::custom);
         }
         Ok(Value::Object(entries))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn read(yaml: &str) -> Value {
+        serde_saphyr::from_str::<JsonValue>(yaml)
+            .unwrap()
+            .into_inner()
+    }
+
+    #[test]
+    fn scalars_map_onto_json_values() {
+        assert_eq!(
+            read("a: -3\nb: 3\nc: 1.5\nd: ~\ne: true\nf: plain\ng: \"esc\\taped\"\nh: [1, x]\n"),
+            json!({
+                "a": -3, "b": 3, "c": 1.5, "d": null, "e": true,
+                "f": "plain", "g": "esc\taped", "h": [1, "x"],
+            }),
+        );
+    }
+
+    #[test]
+    fn a_value_yaml_cannot_produce_is_reported() {
+        let bytes = serde::de::value::BytesDeserializer::<serde::de::value::Error>::new(b"x");
+        let err = JsonValue::deserialize(bytes).err().unwrap();
+        assert!(err.to_string().contains("any YAML value"), "{err}");
     }
 }
