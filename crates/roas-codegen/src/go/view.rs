@@ -169,6 +169,8 @@ pub(crate) struct TypeView {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct FileView {
+    /// The contract version this context follows.
+    pub template_api: u32,
     pub source: String,
     pub header: String,
     pub package: String,
@@ -303,6 +305,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     }
     Ok(Built {
         file: FileView {
+            template_api: crate::templates::TEMPLATE_API,
             source: comment_text(source),
             header: config.header.clone().unwrap_or_default(),
             package: config.go.package.clone(),

@@ -9,7 +9,7 @@
 	raw jsontext.Value
 }
 
-{% include "builtin/go/raw_holder.go.jinja" %}{% block accessors %}{% for b in t.branches %}
+{% include "go/raw_holder.go.jinja" %}{% block accessors %}{% for b in t.branches %}
 // {{ b.accessor }} reads the value as {{ b.ty }}, when it is one.
 func (u {{ t.name }}) {{ b.accessor }}() ({{ b.ty }}, bool) {
 	var v {{ b.ty }}

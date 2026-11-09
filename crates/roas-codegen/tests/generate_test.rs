@@ -317,11 +317,7 @@ fn codegen_extensions_are_gated() {
 
 #[test]
 fn settings_this_release_cannot_honour_are_refused() {
-    for toml in [
-        "validation = true\n",
-        "template_dir = \"tpl\"\n",
-        "[rust]\ncrate_name = \"pets\"\n",
-    ] {
+    for toml in ["validation = true\n", "[rust]\ncrate_name = \"pets\"\n"] {
         let error = generate(&document(pet()), &rust_config(toml)).unwrap_err();
         assert!(
             matches!(error, GenerateError::Unsupported(_)),

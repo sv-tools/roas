@@ -1,6 +1,6 @@
 {% block doc %}{% for line in t.doc %}//{% if line %} {{ line }}{% endif %}
 {% endfor %}{% endblock %}type {{ t.name }} struct {
-{% block fields %}{% for f in t.fields %}{% include "builtin/go/field.go.jinja" %}{% endfor %}{% endblock %}}
+{% block fields %}{% for f in t.fields %}{% include "go/field.go.jinja" %}{% endfor %}{% endblock %}}
 
 // UnmarshalJSONFrom decodes {{ t.name }} in one pass, refusing what its struct
 // tags cannot: a missing required member, a null where none is allowed{% if not t.extra_ty %},

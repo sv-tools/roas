@@ -251,11 +251,15 @@ fn check_go(config: &Config) -> Result<(), GenerateError> {
     Ok(())
 }
 
-/// Generate from a validated document.
-pub fn generate(
-    document: &ValidatedSourceDocument,
-    config: &Config,
-) -> Result<Generation, GenerateError> {
+/// The lowered description and what was said on the way, before any
+/// backend runs. `ir` is `None` when nothing can be generated at all.
+struct Prepared {
+    ir: Option<crate::ir::Ir>,
+    diagnostics: Vec<Diagnostic>,
+    source: String,
+}
+
+fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepared, GenerateError> {
     if config.exact_numbers {
         if !cfg!(feature = "exact-numbers") {
             return Err(GenerateError::Config(
@@ -281,11 +285,6 @@ pub fn generate(
             "`validation = true` (generated validation)".into(),
         ));
     }
-    if config.template_dir.is_some() {
-        return Err(GenerateError::Unsupported(
-            "`template_dir` (user template overrides)".into(),
-        ));
-    }
     match config.target {
         Target::Rust => check_rust(config)?,
         Target::Go => check_go(config)?,
@@ -308,11 +307,10 @@ pub fn generate(
             pointer: "/jsonSchemaDialect".into(),
             message: format!("`jsonSchemaDialect: {dialect}` is not a dialect this generator understands, so no schema is generated; only the OAS dialect and Draft 2020-12 are"),
         });
-        return Ok(Generation {
-            target: config.target,
-            files: Vec::new(),
+        return Ok(Prepared {
+            ir: None,
             diagnostics,
-            dependencies: Dependencies::default(),
+            source: source_name(document.uri()),
         });
     }
 
@@ -365,7 +363,31 @@ pub fn generate(
     }
     diagnostics.append(&mut ir.diagnostics);
 
-    let source = source_name(document.uri());
+    Ok(Prepared {
+        ir: Some(ir),
+        diagnostics,
+        source: source_name(document.uri()),
+    })
+}
+
+/// Generate from a validated document.
+pub fn generate(
+    document: &ValidatedSourceDocument,
+    config: &Config,
+) -> Result<Generation, GenerateError> {
+    let Prepared {
+        ir,
+        mut diagnostics,
+        source,
+    } = prepare(document, config)?;
+    let Some(ir) = ir else {
+        return Ok(Generation {
+            target: config.target,
+            files: Vec::new(),
+            diagnostics,
+            dependencies: Dependencies::default(),
+        });
+    };
     let (files, dependencies, unformatted) = match config.target {
         Target::Rust => {
             let output = rust::emit(&ir, config, &source)?;
@@ -410,6 +432,37 @@ pub fn generate(
         diagnostics,
         dependencies,
     })
+}
+
+/// The exact context the templates receive, as JSON: the view model, the
+/// contract a template directory is written against (see
+/// [`TEMPLATE_API`](crate::TEMPLATE_API)). For writing templates; it is
+/// what `roas openapi generate --print-context` prints.
+pub fn template_context(
+    document: &ValidatedSourceDocument,
+    config: &Config,
+) -> Result<serde_json::Value, GenerateError> {
+    let prepared = prepare(document, config)?;
+    let ir = prepared.ir.unwrap_or_default();
+    match config.target {
+        Target::Rust => rust::context(&ir, config, &prepared.source),
+        Target::Go => go::context(&ir, config, &prepared.source),
+    }
+}
+
+/// The files as the templates render them, before the syntax check and
+/// the formatter: what to look at when a template produces something the
+/// formatter refuses.
+pub fn render(
+    document: &ValidatedSourceDocument,
+    config: &Config,
+) -> Result<Vec<GeneratedFile>, GenerateError> {
+    let prepared = prepare(document, config)?;
+    let ir = prepared.ir.unwrap_or_default();
+    match config.target {
+        Target::Rust => rust::render(&ir, config, &prepared.source),
+        Target::Go => go::render(&ir, config, &prepared.source),
+    }
 }
 
 #[cfg(test)]

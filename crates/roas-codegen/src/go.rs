@@ -19,9 +19,31 @@ pub(crate) struct Output {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+pub(crate) fn context(
+    ir: &Ir,
+    config: &Config,
+    source: &str,
+) -> Result<serde_json::Value, GenerateError> {
+    let built = view::build(ir, config, source)?;
+    serde_json::to_value(&built.file).map_err(|e| GenerateError::Template(e.to_string()))
+}
+
+pub(crate) fn render(
+    ir: &Ir,
+    config: &Config,
+    source: &str,
+) -> Result<Vec<GeneratedFile>, GenerateError> {
+    let built = view::build(ir, config, source)?;
+    let rendered = render::render_file(&built.file, config.template_dir.as_deref())?;
+    Ok(vec![GeneratedFile::new(
+        format!("{}.go", config.go.file),
+        rendered,
+    )])
+}
+
 pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, GenerateError> {
     let built = view::build(ir, config, source)?;
-    let rendered = render::render_file(&built.file)?;
+    let rendered = render::render_file(&built.file, config.template_dir.as_deref())?;
     let path = format!("{}.go", config.go.file);
     let contents = format::format(&rendered, &path)?;
     Ok(Output {

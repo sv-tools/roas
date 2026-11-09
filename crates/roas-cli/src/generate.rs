@@ -106,6 +106,23 @@ pub(crate) struct GenerateArgs {
     /// be generated.
     #[arg(long)]
     pub(crate) check: bool,
+
+    /// A directory of templates overriding the built-in ones by name; it
+    /// holds a `roas-templates.toml` declaring `template_api = 1`.
+    /// Overrides `template_dir` in the configuration.
+    #[arg(long)]
+    pub(crate) template_dir: Option<PathBuf>,
+
+    /// Print the JSON context the templates receive to stdout, and write
+    /// nothing: the reference for writing templates.
+    #[arg(long, conflicts_with = "check")]
+    pub(crate) print_context: bool,
+
+    /// Also write the files as the templates render them, before the syntax
+    /// check and the formatter, into this directory: what to look at when a
+    /// template produces code the formatter refuses.
+    #[arg(long)]
+    pub(crate) dump_rendered: Option<PathBuf>,
 }
 
 /// Read the description as bytes, so JSON can keep exact numbers, and give
@@ -493,6 +510,10 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     let mut flags = ConfigFile::default();
     flags.target = args.target.map(Target::from);
     flags.allow_codegen_extensions = args.allow_codegen_extensions.then_some(true);
+    if let Some(dir) = &args.template_dir {
+        flags.template_dir =
+            Some(std::path::absolute(dir).with_context(|| format!("resolving {}", dir.display()))?);
+    }
     // The generated file is named after the label unless the configuration
     // names it, so descriptions sharing a directory do not collide.
     if file.rust.module.is_none() {
@@ -508,6 +529,23 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         other => other.into(),
     })?;
 
+    if args.print_context {
+        let context = roas_codegen::template_context(&document, &config)?;
+        println!("{}", serde_json::to_string_pretty(&context)?);
+        return Ok(());
+    }
+    if let Some(dir) = &args.dump_rendered {
+        for file in roas_codegen::render(&document, &config)? {
+            let path = dir.join(&file.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::write(&path, &file.contents)
+                .with_context(|| format!("writing {}", path.display()))?;
+            eprintln!("rendered {}", path.display());
+        }
+    }
     let generation = generate(&document, &config)?;
     let mut errors = 0;
     let mut warnings = 0;
@@ -715,6 +753,9 @@ mod tests {
             force: false,
             replace_source: false,
             check: false,
+            template_dir: None,
+            print_context: false,
+            dump_rendered: None,
         }
     }
 
@@ -926,6 +967,39 @@ mod tests {
         // The Rust target for the same description shares the directory.
         run_generate(args(&spec, &out)).unwrap();
         assert!(out.join("pet_store_linux.rs").exists());
+    }
+
+    #[test]
+    fn templates_context_and_rendered_text_are_reachable() {
+        if !have_rustfmt() {
+            return;
+        }
+        let dir = TempDir::new("templates");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let templates = dir.0.join("tpl");
+        std::fs::create_dir_all(templates.join("rust")).unwrap();
+        std::fs::write(templates.join("roas-templates.toml"), "template_api = 1\n").unwrap();
+        std::fs::write(
+            templates.join("rust/module.rs.jinja"),
+            "{% extends \"builtin/rust/module.rs.jinja\" %}{% block footer %}// custom footer\n{% endblock %}",
+        )
+        .unwrap();
+        // --print-context writes nothing.
+        let out = dir.0.join("out");
+        let mut print = args(&spec, &out);
+        print.print_context = true;
+        run_generate(print).unwrap();
+        assert!(!out.exists());
+        // --template-dir applies, and --dump-rendered keeps the raw text.
+        let mut custom = args(&spec, &out);
+        custom.template_dir = Some(templates.clone());
+        custom.dump_rendered = Some(dir.0.join("rendered"));
+        run_generate(custom).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(code.ends_with("// custom footer\n"), "{code}");
+        let raw = std::fs::read_to_string(dir.0.join("rendered/api.rs")).unwrap();
+        assert!(raw.contains("// custom footer"), "{raw}");
     }
 
     #[test]

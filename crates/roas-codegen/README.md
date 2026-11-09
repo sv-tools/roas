@@ -147,6 +147,43 @@ Types and fields are addressed by the names in the description, never by the gen
 
 Generated Rust is validated with `syn` before it is returned and formatted with `rustfmt` when one is on the path. `rustfmt` always runs with an empty configuration, so a `rustfmt.toml` nearby never changes the output; when it cannot run, the output is unformatted and a warning says so.
 
+## Templates
+
+Every file is rendered through [minijinja](https://docs.rs/minijinja) templates, embedded in the crate. `template_dir` in the configuration (or `--template-dir`) points at a directory of your own, which overrides them by name: `rust/struct.rs.jinja`, `go/field.go.jinja` and so on, with the same paths as [`templates/`](templates). The directory holds a `roas-templates.toml` declaring the contract it was written against:
+
+```toml
+template_api = 1
+```
+
+A mismatch is an error, not a mystery. An override usually extends the default of the same name, which stays reachable under the reserved `builtin/` prefix, and fills only the blocks it changes; `{{ super() }}` keeps the default's content:
+
+```jinja
+{# rust/struct.rs.jinja #}
+{% extends "builtin/rust/struct.rs.jinja" %}
+{% block derives %}#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+{% endblock %}
+```
+
+The defaults include one another by plain name, so an override of an included template (`rust/field.rs.jinja`) applies wherever it is used, and an override can include new partials from the same directory. A template that extends another may only fill blocks the templates it extends declare — minijinja would ignore any other block without a word, so a typo or a renamed block is an error instead.
+
+| Template | Blocks |
+| --- | --- |
+| `rust/module.rs.jinja`, `go/file.go.jinja` | `header`, `imports`, `body`, `footer` |
+| `rust/struct.rs.jinja` | `doc`, `derives`, `attrs`, `fields`, `trailing` |
+| `rust/enum.rs.jinja`, `rust/union_tagged.rs.jinja` | `doc`, `derives`, `attrs`, `variants`, `trailing` |
+| `rust/union_open.rs.jinja`, `rust/composed_open.rs.jinja` | `doc`, `derives`, `attrs`, `accessors`, `trailing` |
+| `rust/alias.rs.jinja` | `doc`, `derives`, `attrs`, `trailing` |
+| `rust/field.rs.jinja`, `rust/variant.rs.jinja` | `doc`, `attrs`, `decl` |
+| `go/struct.go.jinja` | `doc`, `fields`, `trailing` |
+| `go/enum.go.jinja`, `go/union_tagged.go.jinja` | `doc`, `variants`, `trailing` |
+| `go/union_open.go.jinja`, `go/composed_open.go.jinja` | `doc`, `accessors`, `trailing` |
+| `go/alias.go.jinja` | `doc`, `trailing` |
+| `go/field.go.jinja` | `doc`, `decl` |
+
+The generated-code marker stays first in every file whatever the templates do, and a `header` or `footer` override with `{{ super() }}` adds to the configuration's `header` rather than replacing it.
+
+Templates lay out what the backend decided; they never decide a type. The context is a view model in which every type is already spelled for the target, every name is final and every literal quoted: a file with `template_api`, `source`, `header`, `imports`, `extra_imports`, `support` and `types`, each type with its `kind` (`struct`, `enum`, `union_tagged`, `union_open`, `composed_open`, `newtype`, `alias`), `name`, `raw_name`, `doc` and the parts its kind has (`fields`, `variants`, `branches`, `inner`, `tag`). Inside a type template the type is `t`; inside a field or variant template the member is `f` or `v`. `--print-context` prints the exact context for a description, which is the reference; `template_context` returns it from the library. The backend-owned parts — Rust's serde attributes, Go's `json` struct tag — arrive already in the context, so an override that replaces a field's `attrs` or `decl` should keep them, or it changes the wire format. The output is still checked — with `syn` for Rust, `gofmt` for Go — and when a template produces code that does not parse, `render` (or `--dump-rendered DIR`) gives the text before the check, to see what the template wrote.
+
 ## Input and fidelity
 
 `Input::Json(bytes)` is the only way to obtain exact numbers: the crate parses the bytes itself. `Input::Yaml(bytes)` is read with `serde-saphyr`, which keeps an integer within the 64-bit range exactly but reads a fraction, an exponent or a wider decimal integer through `f64`, and `Input::Value(serde_json::Value)` has unknown provenance by construction. `SourceDocument` keeps the fidelity it was given, so the `exact_numbers` setting can refuse a source that cannot honour it.

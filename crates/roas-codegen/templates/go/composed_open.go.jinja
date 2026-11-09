@@ -6,7 +6,7 @@
 	raw jsontext.Value
 }
 
-{% include "builtin/go/raw_holder.go.jinja" %}
+{% include "go/raw_holder.go.jinja" %}
 // {{ t.from_raw }} holds any JSON value, unchecked against the parts.
 func {{ t.from_raw }}(raw jsontext.Value) {{ t.name }} {
 	return {{ t.name }}{raw: raw.Clone()}

@@ -153,6 +153,8 @@ The generated module is named after `--label`, which defaults to the input file'
 
 Diagnostics go to stderr. An error suppresses the affected types; by default it also leaves the output directory untouched, and `--allow-partial` writes what could be generated but still exits with an error. `--strict` treats every warning as an error. Validation checks that say nothing about the generated types, such as unused components or undeclared tags, are skipped by default. `--allow-codegen-extensions` applies `x-rust-attrs` from the description, which is otherwise ignored because a description is often written by someone else. `--ignore` skips `roas` validation checks as in `openapi validate`.
 
+`--template-dir DIR` renders through your own templates, which override the built-in ones by name (see the [`roas-codegen` README](https://crates.io/crates/roas-codegen) for the contract); the directory holds a `roas-templates.toml` with `template_api = 1`. `--print-context` prints the JSON the templates receive and writes nothing, and `--dump-rendered DIR` also writes the rendered text before the syntax check and the formatter, for when a template produces code that does not parse.
+
 `--config` takes the TOML file described in the [`roas-codegen` README](https://crates.io/crates/roas-codegen): type substitutions, renames, extra attributes, a header. Flags override it.
 
 ### `overlay`
