@@ -283,8 +283,8 @@ fn yaml_options() -> serde_saphyr::Options {
     serde_saphyr::options! {
         // Same options in every roas crate; keep the copies in step
         // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
-        // from the defaults (250k nodes, 1M events), which reject ordinary
-        // large specs. Depth stays at 64: deeper nesting overflows a 2 MiB
+        // from the defaults (250k nodes, 1M events, 50k aliases, 50k anchors),
+        // which reject ordinary large or generated specs. Depth stays at 64: deeper nesting overflows a 2 MiB
         // thread stack in debug builds. The alias-to-anchor ratio check is off:
         // it rejects any document reusing one anchor 100+ times, a common
         // pattern in specs. Alias replay is raised to 10M events so a large
@@ -294,6 +294,8 @@ fn yaml_options() -> serde_saphyr::Options {
         budget: serde_saphyr::budget! {
             max_nodes: 10_000_000,
             max_events: 25_000_000,
+            max_aliases: 1_000_000,
+            max_anchors: 1_000_000,
             enforce_alias_anchor_ratio: false,
         },
         alias_limits: serde_saphyr::alias_limits! {
@@ -442,6 +444,19 @@ mod yaml_tests {
             value["responses"]["r5999"]["properties"]["p39"]["type"],
             "string"
         );
+    }
+
+    /// Past the library's default caps of 50k aliases and 50k anchors,
+    /// which generated specs (one anchor per shared object) can reach.
+    #[test]
+    fn yaml_many_aliases_and_anchors_fit_the_budget() {
+        let mut yaml = String::from("shared: &s x\n");
+        for i in 0..60_000 {
+            yaml.push_str(&format!("a{i}: *s\nb{i}: &b{i} y\n"));
+        }
+        let value = parse(&yaml).unwrap();
+        assert_eq!(value["a59999"], "x");
+        assert_eq!(value["b59999"], "y");
     }
 
     #[test]

@@ -22,6 +22,8 @@ let yaml = || serde_saphyr::options! {
     budget: serde_saphyr::budget! {
         max_nodes: 10_000_000,
         max_events: 25_000_000,
+        max_aliases: 1_000_000,
+        max_anchors: 1_000_000,
         enforce_alias_anchor_ratio: false,
     },
     alias_limits: serde_saphyr::alias_limits! {
