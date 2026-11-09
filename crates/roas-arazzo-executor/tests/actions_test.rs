@@ -716,3 +716,50 @@ fn a_workflow_depended_on_twice_runs_once() {
         "the shared dependency ran once, before both that need it"
     );
 }
+
+#[test]
+fn a_call_goto_or_retry_into_a_workflow_with_dependencies_is_refused_on_both_paths() {
+    let dependency = json!({ "workflowId": "dependency",
+        "steps": [{ "stepId": "dep", "operationId": "listPets" }] });
+    let target = json!({ "workflowId": "target", "dependsOn": ["dependency"],
+        "steps": [{ "stepId": "inner", "operationId": "listPets" }] });
+    // What the caller does before it reaches the target, as requests sent.
+    for (caller, sent_before) in [
+        (
+            json!({ "workflowId": "caller", "steps": [
+                { "stepId": "call", "workflowId": "target" }] }),
+            0,
+        ),
+        (
+            json!({ "workflowId": "caller", "steps": [{
+                "stepId": "first", "operationId": "listPets",
+                "onSuccess": [{ "name": "away", "type": "goto", "workflowId": "target" }] }] }),
+            1,
+        ),
+        (
+            json!({ "workflowId": "caller", "steps": [{
+                "stepId": "first", "operationId": "listPets",
+                "successCriteria": [{ "condition": "$statusCode == 201" }],
+                "onFailure": [{ "name": "again", "type": "retry",
+                    "workflowId": "target", "retryLimit": 1 }] }] }),
+            1,
+        ),
+    ] {
+        let description = description(
+            json!([caller.clone(), dependency.clone(), target.clone()]),
+            None,
+        );
+        let options = options().workflow("caller");
+        let mut client = Fake::new().reply(200, &json!([])).reply(200, &json!([]));
+        let lazy = execute(&description, &options, &mut client).unwrap_err();
+        assert!(
+            matches!(&lazy, ExecutionError::Unsupported(reason)
+                if reason.contains("`target` declares dependsOn")),
+            "{caller}: {lazy}"
+        );
+        // The target never starts, so its dependency is never skipped silently.
+        assert_eq!(client.sent().len(), sent_before, "{caller}");
+        let checked = roas_arazzo_executor::prepare(&description, &options).unwrap_err();
+        assert!(checked.to_string().contains(&lazy.to_string()), "{checked}");
+    }
+}
