@@ -83,7 +83,7 @@ assert_eq!(unknown.members[0].path, "#.info.summery");
 
 ## Source locations
 
-Behind the `source-map` feature, `source_map::SourceMap::parse(text)` reads the JSON or YAML text a description came from and answers where a diagnostic's `path` is written: `locate(path)` for the value, `locate_key(path)` for the member name, and `locate_in(path, offset)` for a byte offset inside a string value, mapped back through quotes, escapes (`\u00e9`, surrogate pairs), YAML line folding and block-scalar indentation. Positions are UTF-8 byte offsets with one-based lines and columns counted in characters; an editor speaking UTF-16 converts at its own boundary. Member names may contain dots or `[n]`; a path two members could spell (`a.b` beside `a` → `b`) locates nothing. When the raw scalar does not decode back to exactly the parsed value, `locate_in` returns `None` rather than guess. The map is a sidecar: the typed models are unchanged and stay usable without it.
+Behind the `source-map` feature, `source_map::SourceMap::parse(text)` reads the JSON or YAML text a description came from and answers where a diagnostic's `path` is written: `locate(path)` for the value, `locate_key(path)` for the member name, and `locate_in(path, offset)` for a byte offset inside a string value, mapped back through quotes, escapes (`\u00e9`, surrogate pairs), YAML line folding and block-scalar indentation. Positions are UTF-8 byte offsets with one-based lines and columns counted in characters; an editor speaking UTF-16 converts at its own boundary, with `utf16_column(position)`. Member names may contain dots or `[n]`; a path two members could spell (`a.b` beside `a` → `b`) locates nothing. When the raw scalar does not decode back to exactly the parsed value, `locate_in` returns `None` rather than guess. The map is a sidecar: the typed models are unchanged and stay usable without it.
 
 ```rust
 use roas_arazzo::source_map::SourceMap;
@@ -99,7 +99,7 @@ Behind the `editor` feature, `editor::Document::read(text, options)` reads text 
 
 - Text that is not JSON or YAML gets a located syntax error, and the text above the error is read again, up to 16 lines back, so a YAML description usually keeps the outline of everything before it. The outline is then marked incomplete (`is_complete()`), and nothing further is checked.
 - Text that reads in full is checked part by part — `arazzo`, `$self`, `info`, each source description, each workflow, `components` — so one broken workflow does not hide another. When every part fits the model, the description is validated and its unknown members are listed as warnings.
-- `utf16_column(position)` gives the column an LSP client counts.
+- `utf16_column(position)` gives the one-based column in UTF-16 code units; an LSP client counts from zero, so subtract one.
 
 Nothing a `Document` returns can be run: it never hands out a typed `Description`, and its outline is plain strings and ranges. To execute a description, deserialize it the strict way.
 

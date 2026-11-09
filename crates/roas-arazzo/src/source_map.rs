@@ -13,8 +13,9 @@
 //! Every offset is a zero-based UTF-8 byte offset into the original text.
 //! Lines and columns are one-based; a column counts Unicode scalar values
 //! (`char`s) from the start of its line. Editors that speak UTF-16 (the
-//! Language Server Protocol) convert at that boundary, from the line's
-//! text and the byte offset, and nowhere else.
+//! Language Server Protocol) convert at that boundary, nowhere else:
+//! [`SourceMap::utf16_column`] counts a position's column in UTF-16 code
+//! units.
 //!
 //! An offset *inside* a string value — a malformed expression three
 //! characters into a condition — is a byte offset into the decoded
@@ -64,11 +65,36 @@ impl fmt::Display for SourcePosition {
     }
 }
 
+/// The byte offset each line of `text` starts at, the first `0`: `\n`,
+/// `\r\n` and a bare `\r` each end a line, as in YAML.
+pub(crate) fn line_starts(text: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    std::iter::once(0)
+        .chain(bytes.iter().enumerate().filter_map(|(at, &byte)| {
+            (byte == b'\n' || (byte == b'\r' && bytes.get(at + 1) != Some(&b'\n')))
+                .then_some(at + 1)
+        }))
+        .collect()
+}
+
+/// The one-based line of `offset` in `text`, and the byte offset that
+/// line starts at, as [`line_starts`] counts lines.
+pub(crate) fn line_of(text: &str, offset: usize) -> (usize, usize) {
+    let starts = line_starts(text);
+    let line = starts.partition_point(|&start| start <= offset);
+    (line, starts[line - 1])
+}
+
 /// The one-based UTF-16 column of `position` in `text`: the code units
 /// between the start of its line (after a byte-order mark) and it, plus one.
 pub(crate) fn utf16_column(text: &str, position: SourcePosition) -> usize {
     let offset = position.offset.min(text.len());
-    let mut start = text[..offset].rfind('\n').map_or(0, |at| at + 1);
+    utf16_from(text, line_of(text, offset).1, offset)
+}
+
+/// The one-based UTF-16 column of `offset` on the line starting at
+/// `start`; a byte-order mark takes no column.
+fn utf16_from(text: &str, mut start: usize, offset: usize) -> usize {
     if start == 0 && text.starts_with('\u{feff}') {
         start = offset.min('\u{feff}'.len_utf8());
     }
@@ -284,7 +310,9 @@ impl SourceMap {
     /// `position` is one of this map's.
     #[must_use]
     pub fn utf16_column(&self, position: SourcePosition) -> usize {
-        utf16_column(&self.text, position)
+        let offset = position.offset.min(self.text.len());
+        let line = self.lines.partition_point(|&start| start <= offset);
+        utf16_from(&self.text, self.lines[line - 1], offset)
     }
 
     /// The line and column of a byte offset, clamped to the text and to
@@ -324,14 +352,7 @@ impl SourceMap {
 
     #[cfg_attr(not(feature = "source-map"), allow(dead_code))]
     fn new(text: String, root: Node) -> Self {
-        // `\n`, `\r\n` and a bare `\r` each end a line, as in YAML.
-        let bytes = text.as_bytes();
-        let lines = std::iter::once(0)
-            .chain(bytes.iter().enumerate().filter_map(|(at, &byte)| {
-                (byte == b'\n' || (byte == b'\r' && bytes.get(at + 1) != Some(&b'\n')))
-                    .then_some(at + 1)
-            }))
-            .collect::<Vec<_>>();
+        let lines = line_starts(&text);
         let mut checkpoints = Vec::new();
         let (mut line, mut chars, mut next) = (0, 0, CHECKPOINT);
         for (at, c) in text.char_indices() {

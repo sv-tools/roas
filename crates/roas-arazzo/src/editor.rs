@@ -26,7 +26,7 @@
 //! lines and columns counted in Unicode scalar values.
 //! [`Document::utf16_column`] gives the column an LSP client counts.
 
-use crate::source_map::{SourceMap, SourcePosition, SourceRange};
+use crate::source_map::{SourceMap, SourcePosition, SourceRange, line_of, line_starts};
 use crate::unknown::UnknownMembers;
 use crate::validation::{Validate, ValidationOptions};
 use enumset::EnumSet;
@@ -306,17 +306,20 @@ const RECOVERY_LINES: usize = 16;
 /// error is often reported a line or two after the construct that caused
 /// it, such as an unterminated quote. Returns how much was read.
 fn recover(text: &str, offset: usize) -> (Option<Value>, usize) {
-    let mut cut = text[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let starts = line_starts(text);
+    // The line of the error, then each line above it.
+    let mut line = starts.partition_point(|&start| start <= offset) - 1;
     for _ in 0..RECOVERY_LINES {
+        let cut = starts[line];
         if cut == 0 {
             break;
         }
         if let Ok(value) = crate::source_map::parse::value(&text[..cut]) {
             return (Some(value), cut);
         }
-        cut = text[..cut - 1].rfind('\n').map_or(0, |at| at + 1);
+        line -= 1;
     }
-    (None, cut)
+    (None, 0)
 }
 
 /// The reason of a syntax error, without the location and the snippet
@@ -326,9 +329,22 @@ fn reason(error: &serde_saphyr::Error) -> String {
     let first = shown.lines().next().unwrap_or_default();
     let first = first.strip_prefix("error: ").unwrap_or(first);
     // `line 10 column 5: invalid indentation …`
-    match first.split_once(": ") {
+    let reason = match first.split_once(": ") {
         Some((at, reason)) if at.starts_with("line ") && at.contains(" column ") => reason,
         _ => first,
+    };
+    // `unclosed bracket '[' at line 3, column 4`
+    match reason.rsplit_once(" at line ") {
+        Some((reason, at))
+            if at.split_once(", column ").is_some_and(|(line, column)| {
+                [line, column]
+                    .iter()
+                    .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            }) =>
+        {
+            reason
+        }
+        _ => reason,
     }
     .to_owned()
 }
@@ -351,15 +367,20 @@ fn error_offset(text: &str, error: &serde_saphyr::Error) -> usize {
 /// The byte offset of a one-based line and column, the column in
 /// characters; past the end of the line is its end.
 fn offset_of(text: &str, line: usize, column: usize) -> usize {
-    let start = text
-        .split_inclusive('\n')
-        .take(line.saturating_sub(1))
-        .map(str::len)
-        .sum::<usize>();
+    let starts = line_starts(text);
+    let Some(&start) = starts.get(line.saturating_sub(1)) else {
+        return text.len();
+    };
+    // A byte-order mark is not a column.
+    let start = if start == 0 && text.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        start
+    };
     let rest = &text[start..];
-    let line_end = start + rest.find('\n').unwrap_or(rest.len());
+    let line_end = start + rest.find(['\n', '\r']).unwrap_or(rest.len());
     rest.char_indices()
-        .take_while(|&(_, c)| c != '\n')
+        .take_while(|&(_, c)| c != '\n' && c != '\r')
         .nth(column.saturating_sub(1))
         .map_or(line_end, |(at, _)| start + at)
 }
@@ -380,14 +401,14 @@ fn position_in(text: &str, offset: usize) -> SourcePosition {
     while !text.is_char_boundary(offset) {
         offset -= 1;
     }
-    let mut start = text[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let (line, mut start) = line_of(text, offset);
     // A byte-order mark is not a column editors show.
     if start == 0 && text.starts_with('\u{feff}') {
         start = offset.min('\u{feff}'.len_utf8());
     }
     SourcePosition {
         offset,
-        line: text[..offset].matches('\n').count() + 1,
+        line,
         column: text[start..offset].chars().count() + 1,
     }
 }
@@ -528,9 +549,19 @@ impl Checks<'_> {
             if key {
                 map.locate_key(&path)
             } else {
-                nearest(map, &path)
+                map.locate(&path)
             }
         });
+        self.record(severity, path, range, message);
+    }
+
+    fn record(
+        &mut self,
+        severity: Severity,
+        path: String,
+        range: Option<SourceRange>,
+        message: String,
+    ) {
         self.diagnostics.push(Diagnostic {
             severity,
             path: Some(path),
@@ -596,8 +627,9 @@ impl Checks<'_> {
         match serde_path_to_error::deserialize::<_, T>(value) {
             Ok(_) => true,
             Err(error) => {
-                let path = join(path, error.path());
-                self.push(Severity::Error, path, false, error.into_inner().to_string());
+                let (path, ends) = join(path, error.path());
+                let range = self.map.and_then(|map| nearest(map, &path, &ends));
+                self.record(Severity::Error, path, range, error.into_inner().to_string());
                 false
             }
         }
@@ -608,7 +640,8 @@ impl Checks<'_> {
         if M::SELF
             && let Some(self_) = value.get("$self")
         {
-            clean &= self.part::<String>("#.$self", self_);
+            // `null` is absent, as for the model.
+            clean &= self.part::<Option<String>>("#.$self", self_);
         }
         for (member, required) in [
             ("info", true),
@@ -631,7 +664,7 @@ impl Checks<'_> {
             let path = format!("#.{member}");
             clean &= match (member, part.as_array()) {
                 ("info", _) => self.part::<M::Info>(&path, part),
-                ("components", _) => self.part::<M::Components>(&path, part),
+                ("components", _) => self.part::<Option<M::Components>>(&path, part),
                 ("sourceDescriptions", Some(items)) => self.items::<M::Source>(&path, items),
                 ("workflows", Some(items)) => self.items::<M::Workflow>(&path, items),
                 // Not a list: say so.
@@ -646,8 +679,9 @@ impl Checks<'_> {
         let description = match serde_path_to_error::deserialize::<_, M>(value) {
             Ok(description) => description,
             Err(error) => {
-                let path = join("#", error.path());
-                self.push(Severity::Error, path, false, error.into_inner().to_string());
+                let (path, ends) = join("#", error.path());
+                let range = self.map.and_then(|map| nearest(map, &path, &ends));
+                self.record(Severity::Error, path, range, error.into_inner().to_string());
                 return;
             }
         };
@@ -679,11 +713,15 @@ impl Checks<'_> {
     }
 }
 
-/// `base` followed by the model-style rendering of `path`.
-fn join(base: &str, path: &serde_path_to_error::Path) -> String {
+/// `base` followed by the model-style rendering of `path`, and where
+/// each of its fields ends, outermost first. `base` is a path this module
+/// builds, of plain names and indices.
+fn join(base: &str, path: &serde_path_to_error::Path) -> (String, Vec<usize>) {
     use serde_path_to_error::Segment;
     let mut joined = base.to_owned();
+    let mut ends: Vec<usize> = base.match_indices(['.', '[']).map(|(at, _)| at).collect();
     for segment in path.iter() {
+        ends.push(joined.len());
         match segment {
             Segment::Seq { index } => joined.push_str(&format!("[{index}]")),
             // An externally tagged variant is a member named after it.
@@ -694,20 +732,16 @@ fn join(base: &str, path: &serde_path_to_error::Path) -> String {
             Segment::Unknown => break,
         }
     }
-    joined
+    ends.push(joined.len());
+    ends.dedup();
+    (joined, ends)
 }
 
-/// Where `path` is written, or the nearest enclosing field that is: a
-/// missing field is reported at the object that lacks it.
-fn nearest(map: &SourceMap, path: &str) -> Option<SourceRange> {
-    let mut path = path;
-    loop {
-        if let Some(range) = map.locate(path) {
-            return Some(range);
-        }
-        let parent = path.rfind(['.', '['])?;
-        path = &path[..parent];
-    }
+/// Where `path` is written, or the nearest enclosing field that is, by
+/// the field ends [`join`] recorded: a missing field is reported at the
+/// object that lacks it, and a member name with a dot is never split.
+fn nearest(map: &SourceMap, path: &str, ends: &[usize]) -> Option<SourceRange> {
+    ends.iter().rev().find_map(|&end| map.locate(&path[..end]))
 }
 
 #[cfg(test)]
@@ -1069,10 +1103,102 @@ workflows:
     fn a_path_not_written_is_located_at_its_nearest_written_parent() {
         let map = SourceMap::parse("a:\n  b: 1\n").unwrap();
         let b = map.locate("#.a.b").unwrap();
-        assert_eq!(nearest(&map, "#.a.b"), Some(b));
-        assert_eq!(nearest(&map, "#.a.b.c[0].d"), Some(b));
-        assert_eq!(nearest(&map, "#.z"), map.locate("#"));
-        assert_eq!(nearest(&map, "nothing"), None);
+        assert_eq!(nearest(&map, "#.a.b", &[1, 3, 5]), Some(b));
+        assert_eq!(
+            nearest(&map, "#.a.b.c[0].d", &[1, 3, 5, 7, 10, 12]),
+            Some(b)
+        );
+        assert_eq!(nearest(&map, "#.z", &[1, 3]), map.locate("#"));
+        assert_eq!(nearest(&map, "nothing", &[7]), None);
+    }
+
+    #[cfg(feature = "v1_1")]
+    #[test]
+    fn a_member_name_with_a_dot_is_not_split_to_find_a_parent() {
+        // Parameter `a.b` lacks `name`; `a` is a different parameter with a
+        // member `b`, so `#.components.parameters.a.b` names two places.
+        let text = VALID.replace(
+            "    page: {name: page, in: query, value: 1}",
+            "    a: {name: a, in: query, value: 1, b: 2}\n    a.b: {in: query, value: 1}",
+        );
+        let document = read(&text);
+        let found = found(&document);
+        assert_eq!(found[0].1, Some("#.components.parameters.a.b"), "{found:?}");
+        // Not the unrelated `a` on line 21: the `parameters` map it is in.
+        assert_eq!(found[0].2, Some((21, 5)), "{found:?}");
+    }
+
+    #[cfg(feature = "v1_1")]
+    #[test]
+    fn optional_parts_written_as_null_are_absent() {
+        let text = VALID
+            .replace("arazzo: 1.1.0", "arazzo: 1.1.0\n$self: null")
+            .replace("components:\n", "x-was:\n")
+            + "components: null\n";
+        let document = read(&text);
+        assert!(
+            document.diagnostics().is_empty(),
+            "{:?}",
+            document.diagnostics()
+        );
+    }
+
+    #[test]
+    fn crlf_text_and_a_byte_order_mark_are_located_like_the_map() {
+        let text = "\u{feff}arazzo: 1.1.0\r\ninfo: {title: [x]}\r\n";
+        let document = read(text);
+        let map = document.source_map().unwrap();
+        let title = map.locate("#.info.title").unwrap();
+        assert_eq!((title.start.line, title.start.column), (2, 15));
+        assert_eq!(document.utf16_column(title.start), 15);
+        // A syntax error on the first line, after a byte-order mark.
+        let document = read("\u{feff}a: b: c\n");
+        let start = document.diagnostics()[0].range.unwrap().start;
+        let plain = read("a: b: c\n").diagnostics()[0].range.unwrap().start;
+        assert_eq!((start.line, start.column), (plain.line, plain.column));
+        assert_eq!(offset_of("\u{feff}ab", 1, 2), 4);
+    }
+
+    #[test]
+    fn recovery_gives_up_after_its_line_budget() {
+        // Every line is inside an unclosed flow sequence, which ends far
+        // more lines below its start than recovery tries.
+        let text = format!("a: [\n{}", "1,\n".repeat(RECOVERY_LINES + 4));
+        let document = read(&text);
+        assert!(!document.is_complete());
+        assert_eq!(document.outline(), None);
+    }
+
+    #[test]
+    fn text_that_is_json_is_read_as_json_and_yaml_keys_must_not_collide() {
+        // Duplicate JSON keys: the last wins, as `serde_json` reads them.
+        let document = read("{\"arazzo\": \"1.0.0\", \"arazzo\": \"2.0.0\"}");
+        assert_eq!(document.version(), Some("2.0.0"));
+        // YAML keys `200` and `'200'` are one JSON key: refused.
+        let document = read("a:\n  200: x\n  '200': y\n");
+        assert!(!document.is_complete());
+        assert!(document.has_errors());
+    }
+
+    #[test]
+    fn a_bare_carriage_return_ends_a_line() {
+        let document = read("a: b\rc: '😀x'\r");
+        let map = document.source_map().unwrap();
+        let x = map.position(document.text().find('x').unwrap());
+        assert_eq!((x.line, x.column, document.utf16_column(x)), (2, 6, 7));
+        assert_eq!(map.utf16_column(x), 7);
+        let text = "a: 1\rb: \"open\rc: 2\r";
+        let document = read(text);
+        // The first line is read again: an object, with nothing to outline.
+        assert_eq!(document.outline(), Some(&Outline::default()));
+        assert!(!document.is_complete());
+        let start = document.diagnostics()[0].range.unwrap().start;
+        assert!(start.line >= 2, "{start:?}");
+        assert_eq!(offset_of(text, 2, 1), 5);
+        assert_eq!(offset_of(text, 2, 99), text[5..].find('\r').unwrap() + 5);
+        // Recovery steps back over bare carriage returns too.
+        let recovered = read("a: 1\rb: [1\r");
+        assert!(!recovered.is_complete());
     }
 
     #[test]
@@ -1094,6 +1220,8 @@ workflows:
         // A message without a location prefix is kept as it is.
         let error = crate::source_map::parse::value("a: 1\na: 2\n").unwrap_err();
         assert!(!reason(&error).is_empty());
+        let error = crate::source_map::parse::value("a: 1\rb: [1\r").unwrap_err();
+        assert!(!reason(&error).contains(" at line "), "{}", reason(&error));
     }
 
     #[cfg(not(feature = "v1_0"))]

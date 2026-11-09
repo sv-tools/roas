@@ -84,6 +84,8 @@ pub mod common;
 pub mod editor;
 pub mod source_map;
 pub mod unknown;
+#[cfg(feature = "editor")]
+mod yaml_value;
 
 #[cfg(test)]
 mod test_yaml;
