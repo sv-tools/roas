@@ -77,24 +77,88 @@ pub(crate) fn line_starts(text: &str) -> Vec<usize> {
         .collect()
 }
 
-/// The one-based line of `offset` in `text`, and the byte offset that
-/// line starts at, as [`line_starts`] counts lines.
-#[cfg(feature = "editor")]
-pub(crate) fn line_of(text: &str, offset: usize) -> (usize, usize) {
-    let starts = line_starts(text);
-    let line = starts.partition_point(|&start| start <= offset);
-    (line, starts[line - 1])
+/// Where the lines of a text start, and checkpoints along long lines, so
+/// a column is never counted from the start of a minified document's one
+/// line.
+#[derive(Clone, Debug)]
+pub(crate) struct LineIndex {
+    /// Byte offset each line starts at; `lines[0] == 0`.
+    lines: Vec<usize>,
+    /// `(byte offset, characters, UTF-16 code units since its line
+    /// started)` every [`CHECKPOINT`] bytes or so along long lines.
+    checkpoints: Vec<(usize, usize, usize)>,
 }
 
-/// The one-based UTF-16 column of `offset` on the line starting at
-/// `start`; a byte-order mark takes no column.
-pub(crate) fn utf16_from(text: &str, mut start: usize, offset: usize) -> usize {
-    if start == 0 && text.starts_with('\u{feff}') {
-        start = offset.min('\u{feff}'.len_utf8());
+impl LineIndex {
+    pub(crate) fn new(text: &str) -> Self {
+        let lines = line_starts(text);
+        let mut checkpoints = Vec::new();
+        let (mut line, mut chars, mut units, mut next) = (0, 0, 0, CHECKPOINT);
+        for (at, c) in text.char_indices() {
+            if lines.get(line + 1) == Some(&at) {
+                line += 1;
+                (chars, units, next) = (0, 0, at + CHECKPOINT);
+            }
+            if at >= next {
+                checkpoints.push((at, chars, units));
+                next = at + CHECKPOINT;
+            }
+            // The byte-order mark takes no column.
+            if !(at == 0 && c == '\u{feff}') {
+                chars += 1;
+                units += c.len_utf16();
+            }
+        }
+        Self { lines, checkpoints }
     }
-    text.get(start..offset)
-        .map_or(0, |line| line.encode_utf16().count())
-        + 1
+
+    /// How many lines there are.
+    pub(crate) fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// The line `offset` is on, and from where on it to count: the start
+    /// of the line (past a byte-order mark) or the nearest checkpoint
+    /// before `offset`, with the characters and UTF-16 code units before
+    /// that point.
+    fn count_from(&self, text: &str, offset: usize) -> (usize, usize, usize, usize) {
+        let line = self.lines.partition_point(|&start| start <= offset);
+        let mut start = self.lines[line - 1];
+        // A byte-order mark is not a column editors show.
+        if start == 0 && text.starts_with('\u{feff}') {
+            start = offset.min('\u{feff}'.len_utf8());
+        }
+        let nearest = self.checkpoints.partition_point(|&(at, ..)| at <= offset);
+        match nearest.checked_sub(1).map(|index| self.checkpoints[index]) {
+            Some((at, chars, units)) if at > start => (line, at, chars, units),
+            _ => (line, start, 0, 0),
+        }
+    }
+
+    /// The line and column of a byte offset, clamped to the text and to
+    /// the character boundary at or before it.
+    pub(crate) fn position(&self, text: &str, offset: usize) -> SourcePosition {
+        let mut offset = offset.min(text.len());
+        while !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        let (line, start, chars, _) = self.count_from(text, offset);
+        SourcePosition {
+            offset,
+            line,
+            column: chars + text[start..offset].chars().count() + 1,
+        }
+    }
+
+    /// The one-based column of `position` in UTF-16 code units.
+    pub(crate) fn utf16_column(&self, text: &str, position: SourcePosition) -> usize {
+        let mut offset = position.offset.min(text.len());
+        while !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        let (_, start, _, units) = self.count_from(text, offset);
+        units + text[start..offset].encode_utf16().count() + 1
+    }
 }
 
 /// A span of the original text, `start` inclusive and `end` exclusive.
@@ -131,12 +195,7 @@ impl std::error::Error for SourceMapError {}
 /// Built from text with [`SourceMap::parse`] (feature `source-map`).
 pub struct SourceMap {
     text: String,
-    /// Byte offset each line starts at; `lines[0] == 0`.
-    lines: Vec<usize>,
-    /// `(byte offset, characters since its line started)` every
-    /// [`CHECKPOINT`] bytes or so along long lines, so a column is never
-    /// counted from the start of a minified document's one line.
-    checkpoints: Vec<(usize, usize)>,
+    index: LineIndex,
     /// Boxed, so its address — a cache key — stays put when the map moves.
     root: Box<Node>,
     /// What lookups worked out, kept so many findings in one large
@@ -204,8 +263,7 @@ impl Clone for SourceMap {
     fn clone(&self) -> Self {
         Self {
             text: self.text.clone(),
-            lines: self.lines.clone(),
-            checkpoints: self.checkpoints.clone(),
+            index: self.index.clone(),
             root: self.root.clone(),
             cache: Cache::default(),
         }
@@ -249,7 +307,7 @@ impl fmt::Debug for SourceMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SourceMap")
             .field("bytes", &self.text.len())
-            .field("lines", &self.lines.len())
+            .field("lines", &self.index.len())
             .finish_non_exhaustive()
     }
 }
@@ -304,37 +362,13 @@ impl SourceMap {
     /// `position` is one of this map's.
     #[must_use]
     pub fn utf16_column(&self, position: SourcePosition) -> usize {
-        let offset = position.offset.min(self.text.len());
-        let line = self.lines.partition_point(|&start| start <= offset);
-        utf16_from(&self.text, self.lines[line - 1], offset)
+        self.index.utf16_column(&self.text, position)
     }
 
     /// The line and column of a byte offset, clamped to the text and to
     /// the character boundary at or before it.
     pub fn position(&self, offset: usize) -> SourcePosition {
-        let mut offset = offset.min(self.text.len());
-        while !self.text.is_char_boundary(offset) {
-            offset -= 1;
-        }
-        let line = self.lines.partition_point(|&start| start <= offset);
-        let mut start = self.lines[line - 1];
-        // A byte-order mark is not a column editors show.
-        if start == 0 && self.text.starts_with('\u{feff}') {
-            start = offset.min('\u{feff}'.len_utf8());
-        }
-        // Count from the nearest checkpoint on this line, if any.
-        let mut counted = 0;
-        let nearest = self.checkpoints.partition_point(|&(at, _)| at <= offset);
-        if let Some(&(at, chars)) = nearest.checked_sub(1).map(|index| &self.checkpoints[index])
-            && at > start
-        {
-            (start, counted) = (at, chars);
-        }
-        SourcePosition {
-            offset,
-            line,
-            column: counted + self.text[start..offset].chars().count() + 1,
-        }
+        self.index.position(&self.text, offset)
     }
 
     fn range(&self, start: usize, end: usize) -> SourceRange {
@@ -346,27 +380,9 @@ impl SourceMap {
 
     #[cfg_attr(not(feature = "source-map"), allow(dead_code))]
     fn new(text: String, root: Node) -> Self {
-        let lines = line_starts(&text);
-        let mut checkpoints = Vec::new();
-        let (mut line, mut chars, mut next) = (0, 0, CHECKPOINT);
-        for (at, c) in text.char_indices() {
-            if lines.get(line + 1) == Some(&at) {
-                line += 1;
-                (chars, next) = (0, at + CHECKPOINT);
-            }
-            if at >= next {
-                checkpoints.push((at, chars));
-                next = at + CHECKPOINT;
-            }
-            // The byte-order mark takes no column.
-            if !(at == 0 && c == '\u{feff}') {
-                chars += 1;
-            }
-        }
         Self {
+            index: LineIndex::new(&text),
             text,
-            lines,
-            checkpoints,
             root: Box::new(root),
             cache: Cache::default(),
         }
@@ -377,15 +393,14 @@ impl SourceMap {
     }
 
     /// How many places `path` names: `0` when it is not written, `1` when
-    /// [`SourceMap::locate`] finds it, more when it is ambiguous.
+    /// [`SourceMap::locate`] finds it, more when it is ambiguous; `None`
+    /// when it is no path a map can follow.
     #[cfg(feature = "editor")]
-    pub(crate) fn places(&self, path: &str) -> usize {
-        let Some(tokens) = tokens(path) else {
-            return 0;
-        };
+    pub(crate) fn places(&self, path: &str) -> Option<usize> {
+        let tokens = tokens(path)?;
         let mut found = Vec::new();
         walk(&self.root, &tokens, None, &self.cache, &mut found);
-        found.len()
+        Some(found.len())
     }
 }
 
@@ -734,12 +749,12 @@ mod tests {
     #[test]
     #[cfg(feature = "source-map")]
     fn checkpointed_columns_agree_with_counting() {
-        let line = "é".repeat(700) + &"x".repeat(1500);
+        let line = "é".repeat(700) + &"😀".repeat(200) + &"x".repeat(1500);
         let map =
             SourceMap::parse(format!("\u{feff}a: {line}\r\nb: {line}\n\rc: {line}\n")).unwrap();
-        assert!(!map.checkpoints.is_empty());
+        assert!(!map.index.checkpoints.is_empty());
         let raw = map.text().to_owned();
-        let starts: Vec<usize> = map.lines.clone();
+        let starts: Vec<usize> = map.index.lines.clone();
         for (offset, _) in raw.char_indices().step_by(7) {
             let position = map.position(offset);
             let line_start = match position.line {
@@ -748,6 +763,8 @@ mod tests {
             };
             let expected = raw[line_start..offset].chars().count() + 1;
             assert_eq!(position.column, expected, "at {offset}");
+            let units = raw[line_start..offset].encode_utf16().count() + 1;
+            assert_eq!(map.utf16_column(position), units, "at {offset}");
         }
     }
 

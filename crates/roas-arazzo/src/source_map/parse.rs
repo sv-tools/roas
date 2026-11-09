@@ -28,14 +28,17 @@ impl SourceMap {
     /// assert_eq!(map.locate_in("#.workflows[0].workflowId", 3).unwrap().column, 21);
     /// ```
     pub fn parse(text: impl Into<String>) -> Result<Self, SourceMapError> {
-        let text = text.into();
-        let root: Spanned<Raw> = serde_saphyr::from_str_with_options(&text, options(MAX_DEPTH))
-            .map_err(|error| SourceMapError {
-                message: error.to_string(),
-            })?;
-        let (root, _) = node(&text, root, false, &mut Memo::default());
-        Ok(Self::new(text, root))
+        map(text.into()).map_err(|error| SourceMapError {
+            message: error.to_string(),
+        })
     }
+}
+
+/// [`SourceMap::parse`], with the parser's error, which says where.
+pub(crate) fn map(text: String) -> Result<SourceMap, serde_saphyr::Error> {
+    let root: Spanned<Raw> = serde_saphyr::from_str_with_options(&text, options(MAX_DEPTH))?;
+    let (root, _) = node(&text, root, false, &mut Memo::default());
+    Ok(SourceMap::new(text, root))
 }
 
 /// The value of YAML `text`, read as the roas CLI reads YAML: keys that

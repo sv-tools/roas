@@ -29,7 +29,7 @@
 //! lines and columns counted in Unicode scalar values.
 //! [`Document::utf16_column`] gives the column an LSP client counts.
 
-use crate::source_map::{SourceMap, SourcePosition, SourceRange, line_of, line_starts};
+use crate::source_map::{LineIndex, SourceMap, SourcePosition, SourceRange, line_starts};
 use crate::unknown::UnknownMembers;
 use crate::validation::{Validate, ValidationOptions};
 use enumset::EnumSet;
@@ -167,8 +167,8 @@ pub struct ComponentOutline {
 #[derive(Clone, Debug)]
 pub struct Document {
     text: String,
-    /// Where each line of `text` starts.
-    lines: Vec<usize>,
+    /// Where the lines of `text` start, for its columns.
+    index: LineIndex,
     map: Option<SourceMap>,
     version: Option<String>,
     outline: Option<Outline>,
@@ -252,14 +252,15 @@ impl Document {
         };
         // Whether what was read is the text as its format reads it.
         let mut strict = true;
+        let index = LineIndex::new(&text);
         let mut syntax = |offset: usize, severity: Severity, message: String| {
-            let position = position_in(&text, offset);
+            let position = index.position(&text, offset);
             diagnostics.push(Diagnostic {
                 severity,
                 path: None,
                 range: Some(SourceRange {
                     start: position,
-                    end: position_in(&text, next_char(&text, position.offset)),
+                    end: index.position(&text, next_char(&text, position.offset)),
                 }),
                 message,
             });
@@ -270,7 +271,11 @@ impl Document {
             Some(Ok(value)) => (Some(value), text.len()),
             Some(Err(error)) => {
                 let at = json_offset(&text, error.line(), error.column());
-                let reason = json_reason(&error);
+                let reason = if at == 0 && text.starts_with('\u{feff}') {
+                    "a byte-order mark is not JSON".to_owned()
+                } else {
+                    json_reason(&error)
+                };
                 match yaml(&text) {
                     // Sniffed as JSON, but YAML: say so, and go on as YAML.
                     Ok(value) if format.is_none() => {
@@ -301,9 +306,23 @@ impl Document {
             },
         };
         let complete = strict && read == text.len() && value.is_some();
-        let map = value
+        // Text that reads can still be refused a map, as a member written
+        // twice or deep nesting is: then nothing can be located, so say why.
+        let map = match value
             .as_ref()
-            .and_then(|_| SourceMap::parse(&text[..read]).ok());
+            .map(|_| crate::source_map::parse::map(text[..read].to_owned()))
+        {
+            Some(Ok(map)) => Some(map),
+            Some(Err(error)) => {
+                syntax(
+                    error_offset(&text, &error),
+                    Severity::Warning,
+                    format!("findings cannot be located: {}", reason(&error)),
+                );
+                None
+            }
+            None => None,
+        };
         let version = value
             .as_ref()
             .and_then(|value| value.get("arazzo"))
@@ -321,7 +340,7 @@ impl Document {
             checks.description(value, options);
         }
         Self {
-            lines: line_starts(&text),
+            index,
             text,
             map,
             version,
@@ -338,7 +357,10 @@ impl Document {
     }
 
     /// The map of the text that was read: of all of it when it is complete,
-    /// else of what came before the syntax error.
+    /// else of what came before the syntax error. `None` when nothing was
+    /// read, or when the map refused what was — a member written twice,
+    /// which JSON readers take last-wins, or nesting deeper than 32 levels
+    /// — which a warning then reports, as findings have no range.
     #[must_use]
     pub fn source_map(&self) -> Option<&SourceMap> {
         self.map.as_ref()
@@ -385,9 +407,7 @@ impl Document {
     /// an LSP client counts them (zero-based there: subtract one).
     #[must_use]
     pub fn utf16_column(&self, position: SourcePosition) -> usize {
-        let offset = position.offset.min(self.text.len());
-        let line = self.lines.partition_point(|&start| start <= offset);
-        crate::source_map::utf16_from(&self.text, self.lines[line - 1], offset)
+        self.index.utf16_column(&self.text, position)
     }
 }
 
@@ -421,6 +441,10 @@ fn reason(error: &serde_saphyr::Error) -> String {
     let shown = error.to_string();
     let first = shown.lines().next().unwrap_or_default();
     let first = first.strip_prefix("error: ").unwrap_or(first);
+    // `…; use from_str_multiple …` is advice to a programmer, not a writer.
+    let first = first
+        .split_once("; use ")
+        .map_or(first, |(reason, _)| reason);
     // `line 10 column 5: invalid indentation …`
     let reason = match first.split_once(": ") {
         Some((at, reason)) if at.starts_with("line ") && at.contains(" column ") => reason,
@@ -505,25 +529,6 @@ fn next_char(text: &str, offset: usize) -> usize {
         .chars()
         .next()
         .map_or(offset, |c| offset + c.len_utf8())
-}
-
-/// The position of `offset` in `text`, counted as [`SourceMap::position`]
-/// counts it, for text that has no map.
-fn position_in(text: &str, offset: usize) -> SourcePosition {
-    let mut offset = offset.min(text.len());
-    while !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let (line, mut start) = line_of(text, offset);
-    // A byte-order mark is not a column editors show.
-    if start == 0 && text.starts_with('\u{feff}') {
-        start = offset.min('\u{feff}'.len_utf8());
-    }
-    SourcePosition {
-        offset,
-        line,
-        column: text[start..offset].chars().count() + 1,
-    }
 }
 
 fn string(value: &Value, member: &str) -> Option<String> {
@@ -835,11 +840,13 @@ fn join(base: &str, path: &serde_path_to_error::Path) -> String {
 /// Where `path` is written, or, when it is not, where the nearest
 /// enclosing field is: a missing field is reported at the object that
 /// lacks it. A path that names two places locates nothing, so a member
-/// name with a dot is never mistaken for a parent and child.
+/// name with a dot is never mistaken for a parent and child, nor does one
+/// a map cannot follow, so an unrelated parent is never blamed.
 fn nearest(map: &SourceMap, path: &str) -> Option<SourceRange> {
     let mut path = path;
     loop {
-        match map.places(path) {
+        match map.places(path)? {
+            // Not written: perhaps its parent is.
             0 => path = &path[..path.rfind(['.', '['])?],
             1 => return map.locate(path),
             _ => return None,
@@ -1189,6 +1196,8 @@ workflows:
     #[test]
     fn positions_of_text_without_a_map() {
         let text = "\u{feff}ab\ncé\nx";
+        let index = LineIndex::new(text);
+        let position_in = |text: &str, offset: usize| index.position(text, offset);
         assert_eq!(
             (position_in(text, 3).line, position_in(text, 3).column),
             (1, 1)
@@ -1229,6 +1238,57 @@ workflows:
         // The path names two places, so neither is guessed; in particular
         // not the unrelated parameter `a`.
         assert_eq!(found[0].2, None, "{found:?}");
+    }
+
+    #[test]
+    fn text_the_map_refuses_is_read_but_says_why_nothing_is_located() {
+        let text = r#"{"arazzo": "1.1.0",
+ "info": {"title": "T", "title": "T", "version": "1"},
+ "sourceDescriptions": [{"name": "a", "url": "u"}],
+ "workflows": [{"workflowId": "w", "steps": [{"stepId": "s"}]}]}"#;
+        let document = read(text);
+        assert!(document.is_complete() && document.source_map().is_none());
+        let found = found(&document);
+        assert_eq!(found[0].0, Severity::Warning, "{found:?}");
+        assert!(
+            document.diagnostics()[0]
+                .message
+                .starts_with("findings cannot be located: duplicate"),
+            "{:?}",
+            document.diagnostics()[0]
+        );
+        // At the member written twice.
+        assert_eq!(found[0].2.map(|(line, _)| line), Some(2), "{found:?}");
+        // The description was still checked, though nothing is located.
+        assert!(
+            found[1..]
+                .iter()
+                .any(|(severity, _, range)| *severity == Severity::Error && range.is_none()),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_messages_speak_to_the_writer() {
+        let document = read("a: 1\n---\nb: 2\n");
+        let message = &document.diagnostics()[0].message;
+        assert!(!message.contains("from_str_multiple"), "{message}");
+        let document = read("\u{feff}{\"arazzo\": \"1.1.0\"}");
+        assert_eq!(
+            document.diagnostics()[0].message,
+            "not JSON (a byte-order mark is not JSON); read as YAML"
+        );
+    }
+
+    #[test]
+    fn a_path_the_map_cannot_follow_blames_no_parent() {
+        let map = SourceMap::parse("a:\n  name: 3\n").unwrap();
+        // Missing below a written member: that member is blamed.
+        assert_eq!(nearest(&map, "#.a.missing"), map.locate("#.a"));
+        assert!(map.locate("#.a").is_some());
+        // No path a map can follow: not `#.a`, nor anything else.
+        assert_eq!(nearest(&map, "#.a[bad]"), None);
+        assert_eq!(map.places("#.a[bad]"), None);
     }
 
     #[cfg(feature = "v1_1")]
