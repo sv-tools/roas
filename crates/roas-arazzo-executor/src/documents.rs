@@ -11,6 +11,13 @@ use std::collections::BTreeMap;
 
 /// A document in a run's table. [`Doc::ENTRY`] is the description the run
 /// was started with; every other handle names an external Arazzo document.
+/// How to supply an external Arazzo document, in this build.
+#[cfg(feature = "source-graph")]
+const SUPPLY_ARAZZO: &str =
+    "load the Arazzo document into a source registry and pass it with `Options::source_registry`";
+#[cfg(not(feature = "source-graph"))]
+const SUPPLY_ARAZZO: &str = "external workflows need the `source-graph` feature";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Doc(pub(crate) usize);
 
@@ -152,15 +159,18 @@ impl<'d> Documents<'d> {
                 {
                     Some(crate::operation::SourceData::Owned(_)) => format!(
                         "source `{alias}` was given with `Options::source`, which supplies API \
-                     documents only; load the Arazzo document into a source registry and pass \
-                     it with `Options::source_registry`"
+                         documents only; {SUPPLY_ARAZZO}"
                     ),
                     #[cfg(feature = "source-graph")]
                     Some(crate::operation::SourceData::Registry(_)) => {
                         format!("source `{alias}` is not an Arazzo document")
                     }
-                    // Library callers supply it through `Options::source_registry`.
+                    #[cfg(feature = "source-graph")]
                     None => format!("source `{alias}` was not supplied as an Arazzo document"),
+                    #[cfg(not(feature = "source-graph"))]
+                    None => format!(
+                        "source `{alias}` was not supplied as an Arazzo document; {SUPPLY_ARAZZO}"
+                    ),
                 },
             )
         })?;
@@ -232,5 +242,18 @@ mod tests {
             Some("shared")
         );
         assert_eq!(Documents::alias("w"), None);
+        // The advice is one this build can follow.
+        let owned = Options::new().source(
+            "shared",
+            "https://example.test/shared.arazzo.json",
+            json!({}),
+        );
+        let error = Documents::new(&description, &owned)
+            .resolve(Doc::ENTRY, "$sourceDescriptions.shared.w")
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with(SUPPLY_ARAZZO), "{error}");
+        #[cfg(not(feature = "source-graph"))]
+        assert!(error.contains("need the `source-graph` feature"), "{error}");
     }
 }
