@@ -869,26 +869,42 @@ fn scoped_base_urls(
     root: roas_arazzo_executor::DocumentId,
     base_urls: &[String],
 ) -> Result<()> {
-    for base_url in base_urls {
+    'flags: for base_url in base_urls {
         let (path, url) = split_pair(base_url, "--base-url")?;
         let Some((documents, name)) = path.rsplit_once('.') else {
             continue;
         };
         let mut owner = root;
         for alias in documents.split('.') {
-            owner = registry
-                .source(owner, alias)
-                .and_then(|link| link.target)
-                .filter(|target| {
-                    registry
-                        .document(*target)
-                        .is_ok_and(|document| document.arazzo().is_some())
-                })
-                .ok_or_else(|| {
-                    anyhow!(
-                        "`--base-url {path}=…`: `{alias}` names no loaded Arazzo source description"
-                    )
-                })?;
+            let document = registry.document(owner)?;
+            let declared = document.arazzo().and_then(|description| {
+                description
+                    .source_descriptions
+                    .iter()
+                    .find(|source| source.name == alias)
+            });
+            let Some(declared) = declared else {
+                bail!(
+                    "`--base-url {path}=…`: `{alias}` names no source description of {}",
+                    document.identity()
+                );
+            };
+            let target = registry.source(owner, alias).and_then(|link| link.target);
+            let arazzo = match target {
+                Some(target) => registry.document(target)?.arazzo().is_some(),
+                None => declared
+                    .type_
+                    .is_none_or(|type_| type_ == roas_arazzo::v1_1::SourceType::Arazzo),
+            };
+            if !arazzo {
+                bail!("`--base-url {path}=…`: `{alias}` is not an Arazzo source description");
+            }
+            // A document the selected workflow never reaches is not loaded,
+            // and nothing runs there for the override to change.
+            let Some(target) = target else {
+                continue 'flags;
+            };
+            owner = target;
         }
         if registry.source(owner, name).is_none() {
             bail!(
@@ -1746,15 +1762,12 @@ mod tests {
     }
 
     #[test]
-    fn a_scoped_base_url_error_keeps_the_loading_diagnostics_that_explain_it() {
+    fn a_scoped_base_url_into_a_document_that_failed_to_load_leaves_the_error_to_preparation() {
         let error = unloadable(
             "missing-external-document.json",
             Some("shared.api=http://127.0.0.1:9"),
         );
-        assert!(
-            error.starts_with("`--base-url shared.api=…`: `shared` names no loaded Arazzo"),
-            "{error}"
-        );
+        assert!(!error.contains("--base-url"), "{error}");
         assert!(error.contains("missing-external-document.json"), "{error}");
     }
 
@@ -1778,12 +1791,51 @@ mod tests {
     }
 
     #[test]
+    fn a_scoped_base_url_for_a_document_the_workflow_never_reaches_is_harmless() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write(
+            "unreached-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": "https://example.invalid/shared.arazzo.json", "type": "arazzo" },
+                    { "name": "api", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "viaShared", "steps": [{
+                        "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                    { "workflowId": "local", "steps": [{
+                        "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                        "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                ]
+            }),
+        );
+        let mut args = run_args(&entry, &api, &base);
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.workflow = Some("local".to_owned());
+        args.base_url = vec![
+            format!("api={base}"),
+            "shared.api=http://127.0.0.1:9".to_owned(),
+        ];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    #[test]
     fn run_refuses_a_scoped_base_url_that_names_nothing() {
         let (entry, child, api) = external_workflow();
         for (base_url, expected) in [
             (
                 "ghost.api=http://127.0.0.1:9",
-                "`--base-url ghost.api=…`: `ghost` names no loaded Arazzo source description",
+                "`--base-url ghost.api=…`: `ghost` names no source description of file://",
+            ),
+            (
+                "shared.api.x=http://127.0.0.1:9",
+                "`--base-url shared.api.x=…`: `api` is not an Arazzo source description",
             ),
             (
                 "shared.nope=http://127.0.0.1:9",
