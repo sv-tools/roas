@@ -342,12 +342,12 @@ Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0`
 
 ## Support matrix
 
-Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (AsyncAPI steps, XPath) is an error where it is met, never skipped; `x-` extensions are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
+Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (AsyncAPI steps, XPath) is an error where it is met, never skipped; `x-` extensions of Arazzo objects are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
 
 | Feature | Parsing | Reference resolution | Validation | Execution |
 | --- | --- | --- | --- | --- |
 | Arazzo 1.0 / 1.1 | Typed models; v1.0 keeps its written version | `$self` and Arazzo `sourceDescriptions` through `SourceRegistry` (`source-graph`) | Structural checks; preparation checks the selected workflow's reachable graph | v1.1 directly; v1.0 after upconversion |
-| `x-` extensions | Kept on every object but a Reusable Object | — | Not interpreted | Ignored |
+| `x-` extensions of Arazzo objects | Kept on every object but a Reusable Object | — | Not interpreted | Ignored |
 | Other unknown members | Dropped by the model; listed by `Description::unknown_members` | — | Preparation error (entry when given `Options::unknown_members`, external documents always) | A checked run refuses them; the lazy path never sees them |
 | OpenAPI 2.0 / 3.0 / 3.1 / 3.2 sources | Raw values with a checked version | `operationId`, `operationPath`, Path Item `$ref` chains, servers | Duplicate IDs, reference cycles, Path Item overlaps; no structural or schema validation | HTTP requests ([methods and servers](#openapi-operation-resolution)) |
 | AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Loaded as sources | AsyncAPI steps, `channel` parameters and `$message` expressions are preparation errors | Not run |
@@ -359,7 +359,7 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run does not check the version |
 | JSON Pointer selectors (v1.1) and criteria | Typed | — | Pointer syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | Preparation error | Not run |
-| Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, local references | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
+| Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
 | `dependsOn` | Typed | Step and workflow ids | Cycles rejected; a call, `goto` or `retry` to a workflow with its own `dependsOn` is refused | One at a time; no parallel scheduling; that call or transfer is refused when reached |
 
 ## Condition profile
