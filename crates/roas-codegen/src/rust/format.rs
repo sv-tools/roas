@@ -108,3 +108,16 @@ impl Drop for PrivateConfig {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_rustfmt_failure_says_why() {
+        if super::format("fn main() {}\n", "2024").is_err() {
+            return; // no working rustfmt here
+        }
+        let reason = super::format("fn main() {}\n", "1999").unwrap_err();
+        assert!(reason.starts_with("rustfmt failed ("), "{reason}");
+        assert!(reason.contains("edition"), "{reason}");
+    }
+}
