@@ -145,7 +145,8 @@ pub enum StepTarget {
     OperationPath(String),
     /// `workflowId`.
     WorkflowId(String),
-    /// `channelPath` (v1.1).
+    /// `channelPath`, outlined as written whatever the version; only v1.1
+    /// defines it.
     ChannelPath(String),
 }
 
@@ -449,6 +450,9 @@ fn reason(error: &serde_saphyr::Error) -> String {
         return "nested deeper than 64 levels".to_owned();
     }
     let shown = error.to_string();
+    if let Some(key) = json_collision(&shown) {
+        return format!("`{key}` is written twice in one object, once read as JSON");
+    }
     let first = shown.lines().next().unwrap_or_default();
     let first = first.strip_prefix("error: ").unwrap_or(first);
     // `…; use from_str_multiple …` is advice to a programmer, not a writer.
@@ -504,6 +508,14 @@ fn original(mut error: &serde_saphyr::Error) -> &serde_saphyr::Error {
     error
 }
 
+/// The key of a YAML mapping whose keys collide once read as JSON, from
+/// the error `yaml_value` raises for it.
+fn json_collision(shown: &str) -> Option<&str> {
+    let (_, rest) = shown.split_once("mapping key `")?;
+    rest.rsplit_once("` appears twice once read as JSON")
+        .map(|(key, _)| key)
+}
+
 /// Whether `error` is nesting past the parser's depth limit.
 fn too_deep(error: &serde_saphyr::Error) -> bool {
     matches!(
@@ -542,6 +554,15 @@ fn json_reason(error: &serde_json::Error) -> String {
 /// Where in `text` a syntax error is. A key written twice through an
 /// alias is placed where the parser places it: at the anchor.
 fn error_offset(text: &str, error: &serde_saphyr::Error) -> usize {
+    // Keys that differ as YAML but not as JSON: the parser places them at
+    // their mapping, or nowhere at the root, but the map has both keys.
+    if json_collision(&error.to_string()).is_some()
+        && let Some(offset) = crate::source_map::parse::map(text.to_owned())
+            .ok()
+            .and_then(|map| map.repeated_key())
+    {
+        return offset;
+    }
     let Some(location) = error.location() else {
         return text.len();
     };
@@ -1358,6 +1379,25 @@ workflows:
             document.diagnostics()[0].message,
             "nested deeper than 64 levels"
         );
+        // Keys that collide only as JSON, at the root, after many lines:
+        // located at the second key, and the outline above it is kept.
+        let text = format!(
+            "arazzo: 1.1.0\ninfo: {{title: T}}\n1: a\n'1': b\n{}",
+            (0..30).map(|n| format!("x-{n}: {n}\n")).collect::<String>()
+        );
+        let document = read(&text);
+        let error = &document.diagnostics()[0];
+        assert_eq!(
+            error.message,
+            "`1` is written twice in one object, once read as JSON"
+        );
+        let start = error.range.unwrap().start;
+        assert_eq!((start.line, start.column), (4, 1));
+        assert_eq!(document.outline().unwrap().title.as_deref(), Some("T"));
+        // Nested, at the second key rather than its mapping.
+        let document = read("info:\n  1: a\n  '1': b\n");
+        let start = document.diagnostics()[0].range.unwrap().start;
+        assert_eq!((start.line, start.column), (3, 3));
         // Nesting reached by replaying an alias, read and mapped.
         let deep = |levels: usize| {
             format!(

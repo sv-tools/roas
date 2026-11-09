@@ -392,6 +392,29 @@ impl SourceMap {
         resolve(&self.root, &tokens(path)?, &self.cache)
     }
 
+    /// Where the first key that repeats an earlier one of its mapping
+    /// starts, keys compared as JSON reads them: `1` and `'1'` repeat.
+    #[cfg(feature = "editor")]
+    pub(crate) fn repeated_key(&self) -> Option<usize> {
+        let mut pending = vec![self.root.as_ref()];
+        while let Some(node) = pending.pop() {
+            match &node.kind {
+                Kind::Map(members) => {
+                    let mut seen = std::collections::HashSet::new();
+                    for (key, value) in members {
+                        if !seen.insert(key.name.as_str()) {
+                            return Some(key.start);
+                        }
+                        pending.push(value);
+                    }
+                }
+                Kind::Seq(items) => pending.extend(items),
+                Kind::Scalar(_) => {}
+            }
+        }
+        None
+    }
+
     /// How many places `path` names: `0` when it is not written, `1` when
     /// [`SourceMap::locate`] finds it, more when it is ambiguous; `None`
     /// when it is no path a map can follow.
