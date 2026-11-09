@@ -612,7 +612,7 @@ fn sources(
         .iter()
         .filter_map(|source| source.split_once('=').map(|(name, _)| name.to_owned()))
         .collect();
-    let mut loader = remembering_loader(&args.load);
+    let mut loader = None;
     let mut load_options = SourceLoadOptions::default();
     load_options.max_documents = args.source_max_documents;
     load_options.max_depth = args.source_max_depth;
@@ -625,6 +625,14 @@ fn sources(
     let mut selection: Option<BTreeSet<String>> = None;
     let (mut registry, root, report) = loop {
         let (mut registry, root) = seeded_registry(&value, from, args)?;
+        // The budget covers supplied documents plus distinct fetches of the
+        // whole loading operation, not of each pass.
+        let loader = loader.get_or_insert_with(|| {
+            remembering_loader(
+                &args.load,
+                args.source_max_documents.saturating_sub(registry.len()),
+            )
+        });
         let selected = match selection.take() {
             Some(selected) => selected,
             None => {
@@ -637,7 +645,7 @@ fn sources(
             }
         };
         load_options.root_sources = (!args.load_all_sources).then(|| selected.clone());
-        let report = registry.load_sources(root, &mut loader, &load_options)?;
+        let report = registry.load_sources(root, loader, &load_options)?;
         if args.load_all_sources {
             break (registry, root, report);
         }
@@ -722,9 +730,13 @@ fn seeded_registry(
     Ok((registry, root))
 }
 
-/// The `--load` loader, with each fetcher wrapped to remember its failures.
-fn remembering_loader(kinds: &[LoaderKind]) -> Loader {
-    let failed = Failures::default();
+/// The `--load` loader, with each fetcher wrapped to remember its failures
+/// and to stop after `budget` distinct URLs.
+fn remembering_loader(kinds: &[LoaderKind], budget: usize) -> Loader {
+    let failed = Rc::new(RefCell::new(Fetches {
+        budget,
+        ..Fetches::default()
+    }));
     let mut loader = Loader::new();
     for kind in kinds {
         match kind {
@@ -742,11 +754,23 @@ fn remembering_loader(kinds: &[LoaderKind]) -> Loader {
     loader
 }
 
-type Failures = Rc<RefCell<BTreeMap<Url, LoaderError>>>;
+/// What the fetchers of one loading operation have asked for, across its
+/// passes. The loader caches only successes, so a fetcher sees each URL
+/// once unless it failed.
+#[derive(Default)]
+struct Fetches {
+    /// Distinct URLs the fetchers may still be asked for.
+    budget: usize,
+    asked: BTreeSet<Url>,
+    failed: BTreeMap<Url, LoaderError>,
+}
+
+type Failures = Rc<RefCell<Fetches>>;
 
 /// A fetcher that answers a URL it already failed on with the same error,
-/// without asking again. The loader caches only successes, and a later
-/// loading pass would otherwise repeat every failed request.
+/// without asking again, and refuses new URLs past the operation's budget.
+/// Without it a later loading pass would repeat every failed request and
+/// start its document budget afresh.
 struct Remembering<F> {
     inner: F,
     failed: Failures,
@@ -765,11 +789,26 @@ impl<F> Remembering<F> {
         uri: &Url,
         fetch: impl FnOnce(&mut F) -> Result<T, LoaderError>,
     ) -> Result<T, LoaderError> {
-        if let Some(error) = self.failed.borrow().get(uri) {
-            return Err(replay(error));
+        {
+            let mut fetches = self.failed.borrow_mut();
+            if let Some(error) = fetches.failed.get(uri) {
+                return Err(replay(error));
+            }
+            if !fetches.asked.contains(uri) {
+                if fetches.asked.len() >= fetches.budget {
+                    return Err(LoaderError::Fetch {
+                        uri: uri.to_string(),
+                        source: "the --source-max-documents budget is spent".into(),
+                    });
+                }
+                fetches.asked.insert(uri.clone());
+            }
         }
         fetch(&mut self.inner).inspect_err(|error| {
-            self.failed.borrow_mut().insert(uri.clone(), replay(error));
+            self.failed
+                .borrow_mut()
+                .failed
+                .insert(uri.clone(), replay(error));
         })
     }
 }
@@ -1393,6 +1432,50 @@ mod tests {
     }
 
     #[test]
+    fn remembered_fetches_replay_failures_and_spend_one_budget() {
+        struct Counting(Rc<RefCell<Vec<String>>>);
+        impl ResourceFetcher for Counting {
+            fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
+                self.0.borrow_mut().push(uri.to_string());
+                if uri.path().ends_with("bad") {
+                    Err(LoaderError::Fetch {
+                        uri: uri.to_string(),
+                        source: "refused".into(),
+                    })
+                } else {
+                    Ok(json!({}))
+                }
+            }
+        }
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let fetches = Rc::new(RefCell::new(Fetches {
+            budget: 2,
+            ..Fetches::default()
+        }));
+        let mut fetcher = Remembering::new(Counting(Rc::clone(&calls)), &fetches);
+        let good = Url::parse("http://h/good").unwrap();
+        let bad = Url::parse("http://h/bad").unwrap();
+        let late = Url::parse("http://h/late").unwrap();
+        fetcher.fetch(&good).unwrap();
+        let first = fetcher.fetch(&bad).unwrap_err().to_string();
+        // A failure is answered again without asking; the URL already counted.
+        assert_eq!(fetcher.fetch_document(&bad).unwrap_err().to_string(), first);
+        // A URL already asked for stays within the budget.
+        fetcher.fetch(&good).unwrap();
+        // A third distinct URL is past it, and is not asked for.
+        let refused = fetcher.fetch(&late).unwrap_err();
+        assert!(
+            std::error::Error::source(&refused)
+                .is_some_and(|source| source.to_string().contains("--source-max-documents")),
+            "{refused}"
+        );
+        assert_eq!(
+            *calls.borrow(),
+            ["http://h/good", "http://h/bad", "http://h/good"]
+        );
+    }
+
+    #[test]
     fn a_replayed_loading_error_reads_like_the_original() {
         let errors = [
             LoaderError::NoFetcherRegistered { uri: "x:a".into() },
@@ -1438,6 +1521,7 @@ mod tests {
         child: impl FnOnce(&str) -> Value,
         entry: impl FnOnce(&str) -> Value,
         api: &TempFile,
+        tweak: impl FnOnce(&mut ArazzoRunArgs),
     ) -> (Options, v1_1::Description, Vec<String>) {
         let entry_file = TempFile::write(&format!("{name}-entry.json"), &json!({}));
         let entry_name = entry_file
@@ -1454,6 +1538,7 @@ mod tests {
         let mut args = run_args(&entry_file, api, "http://127.0.0.1:1");
         args.source = Vec::new();
         args.load = vec![LoaderKind::File, LoaderKind::Http];
+        tweak(&mut args);
         let (options, _, diagnostics) = sources(
             Options::new(),
             &parsed,
@@ -1508,6 +1593,7 @@ mod tests {
                 })
             },
             &api,
+            |_| {},
         );
         let _ = std::net::TcpStream::connect(gone.trim_start_matches("http://"));
         let asked = gone_join.join().unwrap();
@@ -1573,8 +1659,70 @@ mod tests {
                 })
             },
             &api,
+            |_| {},
         );
         prepare(&parsed, &options).unwrap_or_else(|error| panic!("{error}\n{diagnostics:?}"));
+    }
+
+    #[test]
+    fn the_document_budget_bounds_every_loading_pass() {
+        let (_, _, api) = external_workflow();
+        let copy = |name: &str| {
+            let file = TempFile::write(
+                name,
+                &serde_json::from_str::<Value>(&std::fs::read_to_string(&api.0).unwrap()).unwrap(),
+            );
+            let name = file.0.file_name().unwrap().to_str().unwrap().to_owned();
+            (file, name)
+        };
+        let (_a1, a1) = copy("budget-a1.json");
+        let (_a2, a2) = copy("budget-a2.json");
+        let (_a3, a3) = copy("budget-a3.json");
+        let get = |source: &str| {
+            json!({ "stepId": format!("get-{source}"),
+            "operationId": format!("$sourceDescriptions.{source}.getThing"),
+            "parameters": [{ "name": "id", "in": "query", "value": 1 }] })
+        };
+        let child = |entry: &str| {
+            json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry, "type": "arazzo" },
+                    { "name": "a1", "url": a1, "type": "openapi" },
+                    { "name": "a2", "url": a2, "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [
+                    { "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" },
+                    get("a1"), get("a2")] }]
+            })
+        };
+        let entry = |child: &str| {
+            json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": child, "type": "arazzo" },
+                    { "name": "extra", "url": a3, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "buyPet", "steps": [{
+                        "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                    { "workflowId": "helper", "steps": [get("extra")] }
+                ]
+            })
+        };
+        let (options, parsed, diagnostics) = load_back_call("budget", child, entry, &api, |args| {
+            args.source_max_documents = 4
+        });
+        assert!(
+            diagnostics
+                .iter()
+                .any(|line| line.contains("(`a2`): source graph document limit (4) exceeded")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            prepare(&parsed, &options).is_err(),
+            "five documents loaded under a budget of four"
+        );
     }
 
     /// An entry linking `shared` to `child_url`, loaded with `--load file`.
