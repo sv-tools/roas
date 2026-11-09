@@ -12,10 +12,12 @@
 //!   may be. So is an existing file no manifest owns, unless the caller
 //!   allows overwriting it or it already holds exactly the generated
 //!   content, in which case it is adopted under the planned spelling.
-//! - **One run at a time.** An operating-system lock on a file in the
-//!   output directory spans the whole run, so two targets cannot both pass
-//!   the ownership checks and then race. It ends with the process, so a
-//!   killed run does not block the next.
+//! - **One run at a time.** An operating-system lock spans the whole run,
+//!   taken in the output directory, in each directory below it the run
+//!   writes into, and in each enclosing directory holding a manifest, so
+//!   two targets — sharing a directory or with nested output roots —
+//!   cannot both pass the ownership checks and then race. It ends with the
+//!   process, so a killed run does not block the next.
 //! - **Nothing below the output directory is followed.** A symbolic link
 //!   as the output directory or on any generated path is refused. The
 //!   path *to* the output directory is the caller's choice and is used as
@@ -451,6 +453,120 @@ fn read_manifest(path: &Path) -> Result<Option<Manifest>, WriteError> {
     }
 }
 
+/// `out_dir` as an absolute path with links resolved, even when it does not
+/// exist yet: the deepest existing ancestor is resolved and the rest
+/// appended, so a run that creates the directory sees the same enclosing
+/// roots as one that finds it.
+fn resolved(out_dir: &Path) -> Option<PathBuf> {
+    let mut existing = out_dir.to_path_buf();
+    let mut tail = Vec::new();
+    loop {
+        let probe = if existing.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            existing.as_path()
+        };
+        if let Ok(mut root) = fs::canonicalize(probe) {
+            root.extend(tail.iter().rev());
+            return Some(root);
+        }
+        tail.push(existing.file_name()?.to_owned());
+        existing.pop();
+    }
+}
+
+/// The directories above `out_dir` that hold a manifest: enclosing output
+/// roots, whose runs can reach files in this one.
+fn enclosing_roots(out_dir: &Path) -> Vec<PathBuf> {
+    let Some(root) = resolved(out_dir) else {
+        return Vec::new();
+    };
+    let mut roots: Vec<PathBuf> = root
+        .ancestors()
+        .skip(1)
+        .filter(|dir| {
+            fs::read_dir(dir).is_ok_and(|entries| {
+                entries
+                    .flatten()
+                    .any(|e| is_manifest_name(&e.file_name().to_string_lossy()))
+            })
+        })
+        .map(Path::to_path_buf)
+        .collect();
+    roots.reverse(); // outermost first
+    roots
+}
+
+/// Directories a run created, removed again (if still empty) unless the
+/// run succeeds, so a refused run leaves nothing behind.
+struct Created {
+    dirs: Vec<PathBuf>,
+    keep: bool,
+}
+
+impl Created {
+    /// Create `dir` and its missing ancestors, remembering each one.
+    fn dir_all(&mut self, dir: &Path) -> Result<(), WriteError> {
+        let mut missing: Vec<&Path> = dir
+            .ancestors()
+            .take_while(|a| !a.as_os_str().is_empty() && fs::symlink_metadata(a).is_err())
+            .collect();
+        missing.reverse();
+        for part in missing {
+            fs::create_dir(part).map_err(io(part))?;
+            self.dirs.push(part.to_path_buf());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Created {
+    fn drop(&mut self) {
+        if !self.keep {
+            for dir in self.dirs.iter().rev() {
+                let _ = fs::remove_dir(dir);
+            }
+        }
+    }
+}
+
+/// The directories below `out_dir` that a run's files go into, created
+/// where missing: each is where a nested output root could keep its
+/// manifest, so each is locked too. A path through a link or a file stops
+/// there; the ownership checks refuse or handle it.
+fn subdirs_to_lock(
+    out_dir: &Path,
+    planned: &BTreeMap<String, &str>,
+    created: &mut Created,
+) -> Result<Vec<PathBuf>, WriteError> {
+    let mut dirs = BTreeSet::new();
+    for key in planned.keys() {
+        let mut current = out_dir.to_path_buf();
+        let parts: Vec<&str> = key.split('/').collect();
+        for part in &parts[..parts.len() - 1] {
+            current.push(part);
+            match fs::symlink_metadata(&current) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    created.dir_all(&current)?;
+                }
+                Err(source) => {
+                    return Err(WriteError::Io {
+                        path: current,
+                        source,
+                    });
+                }
+            }
+            dirs.insert(current.clone());
+        }
+    }
+    // Outermost first, as every run takes its locks.
+    let mut dirs: Vec<PathBuf> = dirs.into_iter().collect();
+    dirs.sort_by_key(|d| d.components().count());
+    Ok(dirs)
+}
+
 fn is_manifest_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.starts_with(MANIFEST_PREFIX) && lower.ends_with(MANIFEST_SUFFIX)
@@ -514,7 +630,14 @@ fn other_owners<'a>(
             if rel.is_empty() && name.eq_ignore_ascii_case(ours) {
                 continue;
             }
-            if let Some(manifest) = read_manifest(&entry.path())? {
+            let manifest = match read_manifest(&entry.path()) {
+                // Named relative to the output directory, as everywhere.
+                Err(WriteError::Symlink(_)) => {
+                    return Err(WriteError::Symlink(PathBuf::from(&child)));
+                }
+                other => other?,
+            };
+            if let Some(manifest) = manifest {
                 for file in manifest.files.keys() {
                     let key = if rel.is_empty() {
                         file.clone()
@@ -528,7 +651,7 @@ fn other_owners<'a>(
     }
     // Above: only entries that fall inside this output directory. These
     // directories are the caller's, so what cannot be read is skipped.
-    if let Ok(root) = fs::canonicalize(out_dir) {
+    if let Some(root) = resolved(out_dir) {
         for ancestor in root.ancestors().skip(1) {
             let Ok(below) = root.strip_prefix(ancestor) else {
                 continue;
@@ -1229,9 +1352,22 @@ pub fn write(
     // missing directory holds no manifest or file to refuse anything else.
     let planned = planned(generation)?;
     check_out_dir(out_dir)?;
-    fs::create_dir_all(out_dir).map_err(io(out_dir))?;
+    let mut created = Created {
+        dirs: Vec::new(),
+        keep: false,
+    };
+    created.dir_all(out_dir)?;
     check_out_dir(out_dir)?;
-    let _lock = DirLock::acquire(out_dir)?;
+    // One run at a time over every file this one can touch: overlapping
+    // output roots lock each other's directories, outermost first, and a
+    // lock held elsewhere fails at once, so runs never wait on each other.
+    let mut lock_dirs = enclosing_roots(out_dir);
+    lock_dirs.push(out_dir.to_path_buf());
+    lock_dirs.extend(subdirs_to_lock(out_dir, &planned, &mut created)?);
+    let _locks = lock_dirs
+        .iter()
+        .map(|dir| DirLock::acquire(dir))
+        .collect::<Result<Vec<_>, _>>()?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -1376,6 +1512,7 @@ pub fn write(
     if !on_disk.is_some_and(|m| m.same_as(&final_manifest)) {
         write_atomic(&manifest_path, manifest_text(&final_manifest).as_bytes())?;
     }
+    created.keep = true;
     Ok(report)
 }
 
@@ -3186,5 +3323,88 @@ mod tests {
             ),
             Err(WriteError::OutputDirNotADirectory(_))
         ));
+    }
+
+    #[test]
+    fn nested_roots_lock_each_other() {
+        let dir = TempDir::new("nested-locks");
+        // A run rooted at `nested` holds its lock; one rooted above that
+        // writes into `nested` must not run alongside it.
+        fs::create_dir_all(dir.0.join("nested")).unwrap();
+        let held = DirLock::acquire(&dir.0.join("nested")).unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("nested/types.rs", "t")]),
+                &dir.0,
+                &WriteOptions::new("outer")
+            ),
+            Err(WriteError::Locked(_))
+        ));
+        drop(held);
+        // And the other way round: an enclosing root with a manifest.
+        write(
+            &generation(&[("other.rs", "o")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        let held = DirLock::acquire(&dir.0).unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("types.rs", "t")]),
+                &dir.0.join("nested"),
+                &WriteOptions::new("inner")
+            ),
+            Err(WriteError::Locked(_))
+        ));
+        drop(held);
+    }
+
+    #[test]
+    fn a_refused_write_leaves_no_directories_it_created() {
+        let dir = TempDir::new("refused-dirs");
+        write(
+            &generation(&[("inner/api.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        fs::remove_dir_all(dir.0.join("inner")).unwrap();
+        let inner = dir.0.join("inner");
+        let g = generation(&[("api.rs", "a"), ("deep/x.rs", "x")]);
+        assert!(matches!(
+            check(&g, &inner, &WriteOptions::new("inner")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+        assert!(matches!(
+            write(&g, &inner, &WriteOptions::new("inner")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+        assert!(!inner.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_manifest_in_a_nested_directory_is_named_with_its_directory() {
+        let dir = TempDir::new("nested-manifest-link");
+        write(
+            &generation(&[("inner/x.rs", "x")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let target = dir.0.join("elsewhere.json");
+        fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(&target, dir.0.join("inner/.roas-codegen-n-rust.json")).unwrap();
+        let error = write(
+            &generation(&[("inner/x.rs", "x")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, WriteError::Symlink(p) if p == Path::new("inner/.roas-codegen-n-rust.json")),
+            "{error}"
+        );
     }
 }
