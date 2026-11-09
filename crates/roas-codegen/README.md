@@ -116,12 +116,12 @@ The URI is required. Every schema identity is the document URI plus a JSON Point
 `generate` never touches disk. `write` puts a `Generation` into a directory under a manifest — `.roas-codegen-<label>-<language>.json` — that records each file it owns with a content hash, and `check` compares the directory with a generation without writing anything.
 
 ```rust
-use roas_codegen::{Target, WriteOptions, check, write};
+use roas_codegen::{WriteOptions, check, write};
 # fn run(generation: &roas_codegen::Generation) -> Result<(), Box<dyn std::error::Error>> {
 let out = std::path::Path::new("src/api");
-let report = write(generation, out, Target::Rust, &WriteOptions::new("petstore"))?;
+let report = write(generation, out, &WriteOptions::new("petstore"))?;
 println!("{} written, {} removed", report.written.len(), report.removed.len());
-assert!(check(generation, out, Target::Rust, &WriteOptions::new("petstore"))?.is_clean());
+assert!(check(generation, out, &WriteOptions::new("petstore"))?.is_clean());
 # Ok(()) }
 ```
 

@@ -13,9 +13,19 @@ use thiserror::Error;
 /// One generated file, relative to the output directory the caller
 /// chooses. The library never touches disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GeneratedFile {
     pub path: PathBuf,
     pub contents: String,
+}
+
+impl GeneratedFile {
+    pub fn new(path: impl Into<PathBuf>, contents: impl Into<String>) -> Self {
+        GeneratedFile {
+            path: path.into(),
+            contents: contents.into(),
+        }
+    }
 }
 
 /// What the generated code depends on, computed from what was emitted.
@@ -30,6 +40,9 @@ pub struct Dependencies {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Generation {
+    /// The language the files are in; [`write`](crate::write()) names the
+    /// manifest after it.
+    pub target: Target,
     pub files: Vec<GeneratedFile>,
     pub diagnostics: Vec<Diagnostic>,
     pub dependencies: Dependencies,
@@ -38,8 +51,9 @@ pub struct Generation {
 impl Generation {
     /// A generation made of files alone, for callers that produce their
     /// own and want [`write`](crate::write()) to manage them.
-    pub fn new(files: Vec<GeneratedFile>) -> Self {
+    pub fn new(target: Target, files: Vec<GeneratedFile>) -> Self {
         Generation {
+            target,
             files,
             diagnostics: Vec::new(),
             dependencies: Dependencies::default(),
@@ -171,6 +185,20 @@ pub fn generate(
             "`template_dir` (user template overrides)".into(),
         ));
     }
+    if config.rust.crate_name.is_some() {
+        return Err(GenerateError::Unsupported(
+            "`rust.crate_name` (generating a crate)".into(),
+        ));
+    }
+    if !matches!(
+        config.rust.edition.as_str(),
+        "2015" | "2018" | "2021" | "2024"
+    ) {
+        return Err(GenerateError::Config(format!(
+            "`rust.edition = {:?}` is not a Rust edition",
+            config.rust.edition
+        )));
+    }
     if config.layout != Layout::OneFilePerModule {
         return Err(GenerateError::Unsupported(
             "`layout = \"file_per_type\"`".into(),
@@ -190,6 +218,7 @@ pub fn generate(
             message: format!("`jsonSchemaDialect: {dialect}` is not a dialect this generator understands, so no schema is generated; only the OAS dialect and Draft 2020-12 are"),
         });
         return Ok(Generation {
+            target: config.target,
             files: Vec::new(),
             diagnostics,
             dependencies: Dependencies::default(),
@@ -267,6 +296,7 @@ pub fn generate(
     });
     diagnostics.dedup();
     Ok(Generation {
+        target: config.target,
         files: output.files,
         diagnostics,
         dependencies: Dependencies {

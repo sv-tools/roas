@@ -27,15 +27,12 @@ pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, Gen
     let rendered = render::render_module(&built.file)?;
     let path = format!("{}.rs", config.rust.module);
     format::validate(&rendered, &path)?;
-    let (contents, formatted) = match format::format(&rendered) {
+    let (contents, formatted) = match format::format(&rendered, &config.rust.edition) {
         Some(formatted) => (formatted, true),
         None => (rendered, false),
     };
     Ok(Output {
-        files: vec![GeneratedFile {
-            path: path.into(),
-            contents,
-        }],
+        files: vec![GeneratedFile::new(path, contents)],
         dependencies: built.dependencies,
         diagnostics: built.diagnostics,
         formatted,

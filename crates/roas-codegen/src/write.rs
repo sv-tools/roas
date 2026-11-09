@@ -34,7 +34,7 @@
 use crate::config::Target;
 use crate::generate::Generation;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -133,11 +133,11 @@ pub enum WriteError {
     #[error("generated path {0} must be relative and stay inside the output directory")]
     UnsafePath(PathBuf),
     #[error(
-        "{path} is owned by another generation target (manifest {manifest}); use a different output directory or label"
+        "{path} is owned by another generation target (manifest {manifest}); use a different output directory or label, or, if that target is this description under an old label, reuse that label or delete its manifest"
     )]
     OwnedByOther { path: PathBuf, manifest: PathBuf },
     #[error(
-        "{0} already exists and was not written by this generator; move it, or allow overwriting unowned files"
+        "{0} already exists and was not written by this generator; move it, or allow overwriting unowned files (`--force` on the command line)"
     )]
     Unowned(PathBuf),
     #[error("generated path {0} is reserved for the generator's own manifest and temporary files")]
@@ -371,11 +371,13 @@ fn planned(generation: &Generation) -> Result<BTreeMap<String, &str>, WriteError
     for file in &generation.files {
         let key = key(&file.path)?;
         let lower = key.to_ascii_lowercase();
-        let name = lower.rsplit('/').next().unwrap_or(&lower);
-        if (name.starts_with(MANIFEST_PREFIX) && name.ends_with(MANIFEST_SUFFIX))
-            || name.contains(TMP_MARKER)
-            || name == LOCK_FILE
-        {
+        // Any component: a directory named like a manifest would be read
+        // as one by the next run.
+        if lower.split('/').any(|name| {
+            (name.starts_with(MANIFEST_PREFIX) && name.ends_with(MANIFEST_SUFFIX))
+                || name.contains(TMP_MARKER)
+                || name == LOCK_FILE
+        }) {
             return Err(WriteError::ReservedPath(file.path.clone()));
         }
         if let Some(other) = seen.insert(lower, file.path.clone()) {
@@ -471,6 +473,7 @@ fn check_path(out_dir: &Path, key: &str) -> Result<(), WriteError> {
 fn outcome(
     previous: &BTreeMap<String, String>,
     planned: &BTreeMap<String, &str>,
+    aliased: &BTreeSet<String>,
     has_errors: bool,
 ) -> (BTreeMap<String, String>, Vec<(String, String)>) {
     let mut owned: BTreeMap<String, String> = planned
@@ -478,12 +481,10 @@ fn outcome(
         .map(|(p, c)| (p.clone(), hash(c.as_bytes())))
         .collect();
     let mut removable = Vec::new();
-    let planned_lower: std::collections::BTreeSet<String> =
-        planned.keys().map(|p| p.to_ascii_lowercase()).collect();
     for (path, recorded) in previous {
-        // A case-only rename is the same file on a case-insensitive disk:
-        // it must never be removed as stale under its old spelling.
-        if planned_lower.contains(&path.to_ascii_lowercase()) {
+        // Planned again, or the same file under another spelling on a
+        // case-insensitive disk: never stale.
+        if planned.contains_key(path) || aliased.contains(path) {
             continue;
         }
         if has_errors {
@@ -493,6 +494,43 @@ fn outcome(
         }
     }
     (owned, removable)
+}
+
+/// Whether two paths name one file: a case-only rename on a
+/// case-insensitive disk. Paths that do not both exist are distinct.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        #[cfg(unix)]
+        (Ok(a), Ok(b)) => {
+            use std::os::unix::fs::MetadataExt;
+            a.dev() == b.dev() && a.ino() == b.ino()
+        }
+        // Without inode numbers, assume the disk is case-insensitive, as
+        // other platforms' usually are: keeping a stale file is safe,
+        // deleting the new one is not.
+        #[cfg(not(unix))]
+        (Ok(_), Ok(_)) => true,
+        _ => false,
+    }
+}
+
+/// Previous paths that are, on this disk, the same file as a planned path
+/// spelled differently, keyed to the planned path.
+fn aliases(
+    out_dir: &Path,
+    previous: &BTreeMap<String, String>,
+    planned: &BTreeMap<String, &str>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for old in previous.keys().filter(|p| !planned.contains_key(*p)) {
+        let lower = old.to_ascii_lowercase();
+        if let Some(new) = planned.keys().find(|p| p.to_ascii_lowercase() == lower)
+            && same_file(&out_dir.join(old), &out_dir.join(new))
+        {
+            out.insert(old.clone(), new.clone());
+        }
+    }
+    out
 }
 
 fn error_count(generation: &Generation) -> usize {
@@ -611,13 +649,13 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
 pub fn write(
     generation: &Generation,
     out_dir: &Path,
-    target: Target,
     options: &WriteOptions,
 ) -> Result<WriteReport, WriteError> {
     let errors = error_count(generation);
     if errors > 0 && !options.allow_partial {
         return Err(WriteError::HasErrors(errors));
     }
+    let target = generation.target;
     let manifest_file = manifest_name(&options.label, target)?;
     check_out_dir(out_dir)?;
     fs::create_dir_all(out_dir).map_err(io(out_dir))?;
@@ -628,9 +666,13 @@ pub fn write(
     check_source(&previous, options)?;
     let others = other_owners(out_dir, &manifest_file)?;
     let planned = planned(generation)?;
+    for path in previous.files.keys() {
+        check_path(out_dir, path)?;
+    }
+    let aliased = aliases(out_dir, &previous.files, &planned);
 
     // Every check before the first write.
-    for path in planned.keys() {
+    for (path, content) in &planned {
         if let Some(manifest) = others.get(&path.to_ascii_lowercase()) {
             return Err(WriteError::OwnedByOther {
                 path: PathBuf::from(path),
@@ -638,20 +680,19 @@ pub fn write(
             });
         }
         check_path(out_dir, path)?;
-        if !previous.files.contains_key(path)
-            && out_dir.join(path).exists()
-            && !options.overwrite_unowned
+        let on_disk = out_dir.join(path);
+        if !options.overwrite_unowned
+            && !previous.files.contains_key(path)
+            && !aliased.values().any(|new| new == path)
+            && on_disk.exists()
+            // Already exactly what would be written: taking it over loses
+            // nothing, which is how a deleted manifest is recovered.
+            && fs::read(&on_disk).ok().as_deref() != Some(content.as_bytes())
         {
             return Err(WriteError::Unowned(PathBuf::from(path)));
         }
     }
     check_path(out_dir, &manifest_file)?;
-    // Stale removal touches the previous run's paths, so they get the same
-    // check: an owned directory replaced by a symlink must not lead a
-    // delete outside the output directory.
-    for path in previous.files.keys().filter(|p| !planned.contains_key(*p)) {
-        check_path(out_dir, path)?;
-    }
 
     let hashes: BTreeMap<String, String> = planned
         .iter()
@@ -686,7 +727,8 @@ pub fn write(
         }
     }
 
-    let (owned, removable) = outcome(&previous.files, &planned, errors > 0);
+    let aliased: BTreeSet<String> = aliased.into_keys().collect();
+    let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
     let _ = hashes;
     for (path, recorded) in &removable {
         let on_disk = out_dir.join(path);
@@ -726,13 +768,13 @@ pub fn write(
 pub fn check(
     generation: &Generation,
     out_dir: &Path,
-    target: Target,
     options: &WriteOptions,
 ) -> Result<CheckReport, WriteError> {
     let errors = error_count(generation);
     if errors > 0 && !options.allow_partial {
         return Err(WriteError::HasErrors(errors));
     }
+    let target = generation.target;
     let manifest_file = manifest_name(&options.label, target)?;
     check_out_dir(out_dir)?;
     let manifest_path = out_dir.join(&manifest_file);
@@ -759,7 +801,10 @@ pub fn check(
             }
         }
     }
-    let (owned, removable) = outcome(&previous.files, &planned, errors > 0);
+    let aliased: BTreeSet<String> = aliases(out_dir, &previous.files, &planned)
+        .into_keys()
+        .collect();
+    let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
     for (path, _) in removable {
         if out_dir.join(&path).exists() {
             report.stale.push(PathBuf::from(path));
@@ -806,12 +851,10 @@ mod tests {
 
     fn generation(files: &[(&str, &str)]) -> Generation {
         Generation::new(
+            Target::Rust,
             files
                 .iter()
-                .map(|(p, c)| GeneratedFile {
-                    path: PathBuf::from(p),
-                    contents: (*c).to_owned(),
-                })
+                .map(|(p, c)| GeneratedFile::new(*p, *c))
                 .collect(),
         )
     }
@@ -820,7 +863,7 @@ mod tests {
     fn writes_records_and_then_reports_unchanged() {
         let dir = TempDir::new("basic");
         let g = generation(&[("types.rs", "a"), ("nested/more.rs", "b")]);
-        let report = write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
+        let report = write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
         assert_eq!(report.written.len(), 2);
         assert_eq!(
             report.manifest,
@@ -831,12 +874,12 @@ mod tests {
             "b"
         );
         assert!(
-            check(&g, &dir.0, Target::Rust, &WriteOptions::new("api"))
+            check(&g, &dir.0, &WriteOptions::new("api"))
                 .unwrap()
                 .is_clean()
         );
 
-        let again = write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
+        let again = write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
         assert!(again.written.is_empty());
         assert_eq!(again.unchanged.len(), 2);
         // No temporary files are left behind.
@@ -855,14 +898,13 @@ mod tests {
         write(
             &generation(&[("a.rs", "a"), ("b.rs", "b"), ("c.rs", "c")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap();
         fs::write(dir.0.join("c.rs"), "edited").unwrap();
         let next = generation(&[("a.rs", "a2")]);
         assert_eq!(
-            check(&next, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap(),
+            check(&next, &dir.0, &WriteOptions::new("api")).unwrap(),
             CheckReport {
                 changed: vec!["a.rs".into()],
                 missing: vec![],
@@ -870,7 +912,7 @@ mod tests {
                 manifest_outdated: true
             }
         );
-        let report = write(&next, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
+        let report = write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
         assert_eq!(report.written, vec![PathBuf::from("a.rs")]);
         assert_eq!(report.removed, vec![PathBuf::from("b.rs")]);
         assert_eq!(report.kept_edited, vec![PathBuf::from("c.rs")]);
@@ -878,7 +920,7 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.0.join("c.rs")).unwrap(), "edited");
         // The edited file is no longer owned.
         assert!(
-            check(&next, &dir.0, Target::Rust, &WriteOptions::new("api"))
+            check(&next, &dir.0, &WriteOptions::new("api"))
                 .unwrap()
                 .is_clean()
         );
@@ -889,7 +931,7 @@ mod tests {
         let dir = TempDir::new("owners");
         fs::write(dir.0.join("types.rs"), "hand written").unwrap();
         let g = generation(&[("lib.rs", "x"), ("types.rs", "generated")]);
-        let error = write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap_err();
+        let error = write(&g, &dir.0, &WriteOptions::new("api")).unwrap_err();
         assert!(
             matches!(&error, WriteError::Unowned(p) if p == Path::new("types.rs")),
             "{error}"
@@ -905,7 +947,7 @@ mod tests {
 
         let mut options = WriteOptions::new("api");
         options.overwrite_unowned = true;
-        write(&g, &dir.0, Target::Rust, &options).unwrap();
+        write(&g, &dir.0, &options).unwrap();
         assert_eq!(
             fs::read_to_string(dir.0.join("types.rs")).unwrap(),
             "generated"
@@ -915,14 +957,12 @@ mod tests {
         write(
             &generation(&[("billing.rs", "b")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("billing"),
         )
         .unwrap();
         let error = write(
             &generation(&[("types.rs", "z")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("billing"),
         )
         .unwrap_err();
@@ -939,7 +979,6 @@ mod tests {
             let error = write(
                 &generation(&[(path, "x")]),
                 &dir.0,
-                Target::Rust,
                 &WriteOptions::new("api"),
             )
             .unwrap_err();
@@ -967,12 +1006,12 @@ mod tests {
     fn check_reports_a_missing_manifest_and_missing_files() {
         let dir = TempDir::new("check");
         let g = generation(&[("types.rs", "a")]);
-        let report = check(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
+        let report = check(&g, &dir.0, &WriteOptions::new("api")).unwrap();
         assert_eq!(report.missing, vec![PathBuf::from("types.rs")]);
         assert!(report.manifest_outdated && !report.is_clean());
         fs::write(dir.0.join(".roas-codegen-api-rust.json"), "not json").unwrap();
         assert!(matches!(
-            check(&g, &dir.0, Target::Rust, &WriteOptions::new("api")),
+            check(&g, &dir.0, &WriteOptions::new("api")),
             Err(WriteError::Manifest { .. })
         ));
     }
@@ -1006,7 +1045,6 @@ mod tests {
             let error = write(
                 &generation(&[("types.rs", "x")]),
                 &out,
-                Target::Rust,
                 &WriteOptions::new("api"),
             )
             .unwrap_err();
@@ -1018,7 +1056,6 @@ mod tests {
             let error = write(
                 &generation(&[("types.rs", "x")]),
                 &out,
-                Target::Rust,
                 &WriteOptions::new("other"),
             )
             .unwrap_err();
@@ -1039,7 +1076,7 @@ mod tests {
         // A path whose parent is a file is caught before anything is written.
         fs::write(dir.0.join("b"), "file").unwrap();
         let g = generation(&[("a.rs", "a"), ("b/c.rs", "c")]);
-        let error = write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap_err();
+        let error = write(&g, &dir.0, &WriteOptions::new("api")).unwrap_err();
         assert!(
             matches!(&error, WriteError::NotADirectory(p) if p == Path::new("b")),
             "{error}"
@@ -1053,10 +1090,10 @@ mod tests {
             &[("a.rs", &hash(b"a")), ("b/c.rs", &hash(b"c"))],
         );
         fs::write(dir.0.join("a.rs"), "a").unwrap();
-        write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
         assert_eq!(fs::read_to_string(dir.0.join("b/c.rs")).unwrap(), "c");
         assert!(
-            check(&g, &dir.0, Target::Rust, &WriteOptions::new("api"))
+            check(&g, &dir.0, &WriteOptions::new("api"))
                 .unwrap()
                 .is_clean()
         );
@@ -1072,8 +1109,7 @@ mod tests {
         ] {
             let mut options = WriteOptions::new("api");
             options.overwrite_unowned = true;
-            let error =
-                write(&generation(&[(path, "x")]), &dir.0, Target::Rust, &options).unwrap_err();
+            let error = write(&generation(&[(path, "x")]), &dir.0, &options).unwrap_err();
             assert!(
                 matches!(error, WriteError::ReservedPath(_)),
                 "{path}: {error}"
@@ -1093,7 +1129,6 @@ mod tests {
         let error = write(
             &generation(&[("nested/x.rs", "x")]),
             &out,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap_err();
@@ -1111,7 +1146,6 @@ mod tests {
         write(
             &generation(&[("types.rs", "a")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap();
@@ -1125,11 +1159,11 @@ mod tests {
             pointer: String::new(),
             message: String::new(),
         });
-        let error = write(&failed, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap_err();
+        let error = write(&failed, &dir.0, &WriteOptions::new("api")).unwrap_err();
         assert!(matches!(error, WriteError::HasErrors(1)), "{error}");
         let mut partial = WriteOptions::new("api");
         partial.allow_partial = true;
-        let report = write(&failed, &dir.0, Target::Rust, &partial).unwrap();
+        let report = write(&failed, &dir.0, &partial).unwrap();
         assert!(report.removed.is_empty());
         assert_eq!(fs::read_to_string(dir.0.join("types.rs")).unwrap(), "a");
     }
@@ -1138,17 +1172,17 @@ mod tests {
     fn check_agrees_with_write_about_the_manifest() {
         let dir = TempDir::new("agree");
         let g = generation(&[("types.rs", "a")]);
-        write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
         let path = dir.0.join(".roas-codegen-api-rust.json");
         let text = fs::read_to_string(&path).unwrap();
         // Another writer version with identical output: nothing to do.
         fs::write(&path, text.replace(env!("CARGO_PKG_VERSION"), "0.0.0-old")).unwrap();
         assert!(
-            check(&g, &dir.0, Target::Rust, &WriteOptions::new("api"))
+            check(&g, &dir.0, &WriteOptions::new("api"))
                 .unwrap()
                 .is_clean()
         );
-        write(&g, &dir.0, Target::Rust, &WriteOptions::new("api")).unwrap();
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
         assert!(
             fs::read_to_string(&path).unwrap().contains("0.0.0-old"),
             "not rewritten"
@@ -1156,7 +1190,7 @@ mod tests {
         // A real difference in ownership is still outdated.
         fs::write(&path, text.replace("fnv1a64:", "fnv1a64:0")).unwrap();
         assert!(
-            !check(&g, &dir.0, Target::Rust, &WriteOptions::new("api"))
+            !check(&g, &dir.0, &WriteOptions::new("api"))
                 .unwrap()
                 .is_clean()
         );
@@ -1173,7 +1207,6 @@ mod tests {
         write(
             &generation(&[("types.rs", "a")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap();
@@ -1189,7 +1222,6 @@ mod tests {
         write(
             &generation(&[("nested/old.rs", "old")]),
             &out,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap();
@@ -1199,7 +1231,6 @@ mod tests {
         let error = write(
             &generation(&[("types.rs", "x")]),
             &out,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap_err();
@@ -1217,7 +1248,6 @@ mod tests {
         write(
             &generation(&[("pets_a.rs", "A")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("pets"),
         )
         .unwrap();
@@ -1238,7 +1268,6 @@ mod tests {
         write(
             &generation(&[("old.rs", "o"), ("keep.rs", "k")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap();
@@ -1254,15 +1283,11 @@ mod tests {
         });
         let mut partial = WriteOptions::new("api");
         partial.allow_partial = true;
-        write(&failed, &dir.0, Target::Rust, &partial).unwrap();
+        write(&failed, &dir.0, &partial).unwrap();
         assert!(dir.0.join("old.rs").exists());
-        assert!(
-            check(&failed, &dir.0, Target::Rust, &partial)
-                .unwrap()
-                .is_clean()
-        );
+        assert!(check(&failed, &dir.0, &partial).unwrap().is_clean());
         assert!(matches!(
-            check(&failed, &dir.0, Target::Rust, &WriteOptions::new("api")),
+            check(&failed, &dir.0, &WriteOptions::new("api")),
             Err(WriteError::HasErrors(1))
         ));
     }
@@ -1273,16 +1298,16 @@ mod tests {
         let root = TempDir::new("check-symlink");
         let out = root.0.join("out");
         let g = generation(&[("t.rs", "x")]);
-        write(&g, &out, Target::Rust, &WriteOptions::new("api")).unwrap();
+        write(&g, &out, &WriteOptions::new("api")).unwrap();
         fs::write(root.0.join("elsewhere.rs"), "x").unwrap();
         fs::remove_file(out.join("t.rs")).unwrap();
         std::os::unix::fs::symlink(root.0.join("elsewhere.rs"), out.join("t.rs")).unwrap();
         assert!(matches!(
-            check(&g, &out, Target::Rust, &WriteOptions::new("api")),
+            check(&g, &out, &WriteOptions::new("api")),
             Err(WriteError::Symlink(_))
         ));
         assert!(matches!(
-            write(&g, &out, Target::Rust, &WriteOptions::new("api")),
+            write(&g, &out, &WriteOptions::new("api")),
             Err(WriteError::Symlink(_))
         ));
     }
@@ -1306,7 +1331,6 @@ mod tests {
         write(
             &generation(&[("types.rs", "generated")]),
             &out,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap();
@@ -1333,11 +1357,11 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let g = generation(&[("types.rs", "x")]);
         assert!(matches!(
-            write(&g, &link, Target::Rust, &WriteOptions::new("api")),
+            write(&g, &link, &WriteOptions::new("api")),
             Err(WriteError::Symlink(_))
         ));
         assert!(matches!(
-            check(&g, &link, Target::Rust, &WriteOptions::new("api")),
+            check(&g, &link, &WriteOptions::new("api")),
             Err(WriteError::Symlink(_))
         ));
         assert!(fs::read_dir(&real).unwrap().next().is_none());
@@ -1348,19 +1372,13 @@ mod tests {
         let dir = TempDir::new("source");
         let mut pets = WriteOptions::new("openapi");
         pets.source_id = Some("../pets/openapi".into());
-        write(
-            &generation(&[("openapi.rs", "pets")]),
-            &dir.0,
-            Target::Rust,
-            &pets,
-        )
-        .unwrap();
+        write(&generation(&[("openapi.rs", "pets")]), &dir.0, &pets).unwrap();
         let mut billing = WriteOptions::new("openapi");
         billing.source_id = Some("../billing/openapi".into());
         let g = generation(&[("openapi.rs", "billing")]);
         for result in [
-            write(&g, &dir.0, Target::Rust, &billing).map(|_| ()),
-            check(&g, &dir.0, Target::Rust, &billing).map(|_| ()),
+            write(&g, &dir.0, &billing).map(|_| ()),
+            check(&g, &dir.0, &billing).map(|_| ()),
         ] {
             let error = result.unwrap_err();
             assert!(
@@ -1376,7 +1394,6 @@ mod tests {
         write(
             &generation(&[("openapi.rs", "pets2")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("openapi"),
         )
         .unwrap();
@@ -1394,7 +1411,6 @@ mod tests {
         let error = write(
             &generation(&[("types.rs", "x")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap_err();
@@ -1403,20 +1419,13 @@ mod tests {
         write(
             &generation(&[("types.rs", "x")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap();
         assert!(!dir.0.join(LOCK_FILE).exists(), "the lock is released");
         let mut options = WriteOptions::new("api");
         options.overwrite_unowned = true;
-        let error = write(
-            &generation(&[(LOCK_FILE, "x")]),
-            &dir.0,
-            Target::Rust,
-            &options,
-        )
-        .unwrap_err();
+        let error = write(&generation(&[(LOCK_FILE, "x")]), &dir.0, &options).unwrap_err();
         assert!(matches!(error, WriteError::ReservedPath(_)), "{error}");
     }
 
@@ -1426,19 +1435,12 @@ mod tests {
         write(
             &generation(&[("Types.rs", "first")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("first"),
         )
         .unwrap();
         let mut options = WriteOptions::new("second");
         options.overwrite_unowned = true;
-        let error = write(
-            &generation(&[("types.rs", "second")]),
-            &dir.0,
-            Target::Rust,
-            &options,
-        )
-        .unwrap_err();
+        let error = write(&generation(&[("types.rs", "second")]), &dir.0, &options).unwrap_err();
         assert!(matches!(error, WriteError::OwnedByOther { .. }), "{error}");
     }
 
@@ -1453,7 +1455,7 @@ mod tests {
         let with_slash = PathBuf::from(format!("{}/", link.display()));
         let g = generation(&[("types.rs", "x")]);
         assert!(matches!(
-            write(&g, &with_slash, Target::Rust, &WriteOptions::new("api")),
+            write(&g, &with_slash, &WriteOptions::new("api")),
             Err(WriteError::Symlink(_))
         ));
         assert!(fs::read_dir(&real).unwrap().next().is_none());
@@ -1464,31 +1466,13 @@ mod tests {
         let dir = TempDir::new("moved");
         let mut before = WriteOptions::new("pets");
         before.source_id = Some("../spec/pets".into());
-        write(
-            &generation(&[("pets.rs", "a")]),
-            &dir.0,
-            Target::Rust,
-            &before,
-        )
-        .unwrap();
+        write(&generation(&[("pets.rs", "a")]), &dir.0, &before).unwrap();
         let mut after = WriteOptions::new("pets");
         after.source_id = Some("../api/pets".into());
-        let error = write(
-            &generation(&[("pets.rs", "b")]),
-            &dir.0,
-            Target::Rust,
-            &after,
-        )
-        .unwrap_err();
+        let error = write(&generation(&[("pets.rs", "b")]), &dir.0, &after).unwrap_err();
         assert!(error.to_string().contains("--force"), "{error}");
         after.replace_source = true;
-        write(
-            &generation(&[("pets.rs", "b")]),
-            &dir.0,
-            Target::Rust,
-            &after,
-        )
-        .unwrap();
+        write(&generation(&[("pets.rs", "b")]), &dir.0, &after).unwrap();
         assert_eq!(fs::read_to_string(dir.0.join("pets.rs")).unwrap(), "b");
         assert!(
             fs::read_to_string(dir.0.join(".roas-codegen-pets-rust.json"))
@@ -1497,14 +1481,9 @@ mod tests {
         );
         after.replace_source = false;
         assert!(
-            check(
-                &generation(&[("pets.rs", "b")]),
-                &dir.0,
-                Target::Rust,
-                &after
-            )
-            .unwrap()
-            .is_clean()
+            check(&generation(&[("pets.rs", "b")]), &dir.0, &after)
+                .unwrap()
+                .is_clean()
         );
     }
 
@@ -1516,13 +1495,7 @@ mod tests {
             vec![("Types.rs", "x"), ("types.rs", "y")],
             vec![("A", "x"), ("a/b.rs", "y")],
         ] {
-            let error = write(
-                &generation(&files),
-                &dir.0,
-                Target::Rust,
-                &WriteOptions::new("api"),
-            )
-            .unwrap_err();
+            let error = write(&generation(&files), &dir.0, &WriteOptions::new("api")).unwrap_err();
             assert!(
                 matches!(error, WriteError::ConflictingPaths(..)),
                 "{files:?}: {error}"
@@ -1537,7 +1510,6 @@ mod tests {
         let error = write(
             &generation(&[(".ROAS-CODEGEN-api-rust.JSON", "x")]),
             &dir.0,
-            Target::Rust,
             &options,
         )
         .unwrap_err();
@@ -1545,34 +1517,108 @@ mod tests {
     }
 
     #[test]
-    fn a_case_only_rename_never_deletes_the_new_file() {
+    fn a_case_only_rename_needs_no_force_and_leaves_one_file() {
         let dir = TempDir::new("case-rename");
         write(
-            &generation(&[("Types.rs", "same")]),
+            &generation(&[("Types.rs", "one")]),
             &dir.0,
-            Target::Rust,
             &WriteOptions::new("api"),
         )
         .unwrap();
-        let mut options = WriteOptions::new("api");
-        options.overwrite_unowned = true;
-        let report = write(
-            &generation(&[("types.rs", "same")]),
-            &dir.0,
-            Target::Rust,
-            &options,
-        )
-        .unwrap();
-        assert!(report.removed.is_empty(), "{report:?}");
+        let insensitive = same_file(&dir.0.join("Types.rs"), &dir.0.join("types.rs"));
+        let next = generation(&[("types.rs", "two")]);
+        let report = write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
         let names: Vec<String> = fs::read_dir(&dir.0)
             .unwrap()
-            .map(|e| {
-                e.unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .to_ascii_lowercase()
-            })
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".rs"))
             .collect();
-        assert!(names.contains(&"types.rs".to_owned()), "{names:?}");
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert_eq!(names[0].to_ascii_lowercase(), "types.rs");
+        assert_eq!(fs::read_to_string(dir.0.join("types.rs")).unwrap(), "two");
+        if insensitive {
+            assert!(report.removed.is_empty(), "{report:?}");
+        } else {
+            assert_eq!(report.removed, vec![PathBuf::from("Types.rs")]);
+        }
+        assert!(
+            check(&next, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+    }
+
+    #[test]
+    fn distinct_case_variants_on_a_case_sensitive_disk_are_stale() {
+        let dir = TempDir::new("case-distinct");
+        fs::write(dir.0.join("Probe.rs"), "").unwrap();
+        if dir.0.join("probe.rs").exists() {
+            return; // case-insensitive: covered above
+        }
+        fs::remove_file(dir.0.join("Probe.rs")).unwrap();
+        write(
+            &generation(&[("Types.rs", "x")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let next = generation(&[("types.rs", "x")]);
+        let report = check(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(report.stale, vec![PathBuf::from("Types.rs")]);
+    }
+
+    #[test]
+    fn identical_unowned_files_are_taken_over() {
+        let dir = TempDir::new("identical");
+        fs::write(dir.0.join("types.rs"), "same").unwrap();
+        let g = generation(&[("types.rs", "same")]);
+        let report = write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(report.unchanged, vec![PathBuf::from("types.rs")]);
+        assert!(
+            check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+        fs::write(dir.0.join("other.rs"), "hand written").unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("other.rs", "generated")]),
+                &dir.0,
+                &WriteOptions::new("api")
+            ),
+            Err(WriteError::Unowned(_))
+        ));
+    }
+
+    #[test]
+    fn reserved_names_are_refused_in_directories_too() {
+        let dir = TempDir::new("reserved-dirs");
+        for path in [
+            ".roas-codegen-other-rust.json/types.rs",
+            "a.roas-tmp-1/b.rs",
+            ".roas-codegen.lock/x.rs",
+        ] {
+            let error = write(
+                &generation(&[(path, "x")]),
+                &dir.0,
+                &WriteOptions::new("api"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, WriteError::ReservedPath(_)),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_manifest_is_named_after_the_generation_target() {
+        let dir = TempDir::new("go-target");
+        let g = Generation::new(
+            Target::Go,
+            vec![GeneratedFile::new("types.go", "package x")],
+        );
+        let report = write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(report.manifest, PathBuf::from(".roas-codegen-api-go.json"));
     }
 }

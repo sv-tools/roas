@@ -285,7 +285,6 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         flags.rust.module = Some(roas_codegen::rust_module_name(&label));
     }
     let config = file.merge(flags).build()?;
-    let target = config.target;
 
     let generation = generate(&document, &config)?;
     let mut errors = 0;
@@ -304,14 +303,28 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     };
     let partial_failure = || {
         anyhow!(
-            "{}: {failing} {}{}; wrote what could be generated",
+            "{}: {failing} {}{}; {} what could be generated",
             source.display(),
             if args.strict { "diagnostic" } else { "error" },
-            if failing == 1 { "" } else { "s" }
+            if failing == 1 { "" } else { "s" },
+            if args.check { "checked" } else { "wrote" }
         )
     };
+    let unformatted = generation
+        .diagnostics
+        .iter()
+        .any(|d| matches!(d.kind, roas_codegen::DiagnosticKind::Unformatted));
     if failing > 0 && !args.allow_partial {
-        let (what, hint) = if args.check {
+        let (what, hint) = if args.strict && unformatted {
+            (
+                if args.check {
+                    "cannot check"
+                } else {
+                    "nothing written"
+                },
+                "rustfmt could not be run; install it (`rustup component add rustfmt`)",
+            )
+        } else if args.check {
             (
                 "cannot check",
                 "pass --allow-partial to check the partial output",
@@ -331,20 +344,16 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     }
 
     if args.check {
-        if generation
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d.kind, roas_codegen::DiagnosticKind::Unformatted))
-        {
+        if unformatted {
             bail!(
-                "--check needs rustfmt: without it the output is unformatted and cannot match a formatted run"
+                "--check needs rustfmt: without it the output is unformatted and cannot match a formatted run; install rustfmt (`rustup component add rustfmt`)"
             );
         }
         let mut check_options = WriteOptions::new(label.clone());
         check_options.allow_partial = args.allow_partial;
         check_options.source_id = source_id(&source, &args.out);
         check_options.replace_source = args.force;
-        let report = check(&generation, &args.out, target, &check_options)?;
+        let report = check(&generation, &args.out, &check_options)?;
         if report.is_clean() {
             eprintln!("{}: up to date", args.out.display());
             return if failing > 0 {
@@ -376,7 +385,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     write_options.replace_source = args.force;
     write_options.allow_partial = args.allow_partial;
     write_options.source_id = source_id(&source, &args.out);
-    let report = write(&generation, &args.out, target, &write_options)?;
+    let report = write(&generation, &args.out, &write_options)?;
     for path in &report.kept_edited {
         eprintln!(
             "warning: {} is no longer generated but was edited, so it was kept and is no longer tracked",

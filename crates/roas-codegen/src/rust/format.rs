@@ -22,12 +22,12 @@ pub(crate) fn validate(text: &str, path: &str) -> Result<(), GenerateError> {
 ///
 /// The output must not depend on where the generator runs, so `rustfmt`
 /// never searches for a configuration: it gets an empty one explicitly,
-/// which means rustfmt's defaults for the 2024 edition everywhere. The
+/// which means rustfmt's defaults for the configured edition everywhere. The
 /// `rustfmt` version still matters, as it would for any formatted file.
-pub(crate) fn format(text: &str) -> Option<String> {
+pub(crate) fn format(text: &str, edition: &str) -> Option<String> {
     let config = PrivateConfig::create()?;
     let mut child = Command::new("rustfmt")
-        .args(["--edition", "2024", "--emit", "stdout", "--config-path"])
+        .args(["--edition", edition, "--emit", "stdout", "--config-path"])
         .arg(config.file())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -312,13 +312,33 @@ fn codegen_extensions_are_gated() {
 
 #[test]
 fn settings_this_release_cannot_honour_are_refused() {
-    for toml in ["validation = true\n", "template_dir = \"tpl\"\n"] {
+    for toml in [
+        "validation = true\n",
+        "template_dir = \"tpl\"\n",
+        "[rust]\ncrate_name = \"pets\"\n",
+    ] {
         let error = generate(&document(pet()), &rust_config(toml)).unwrap_err();
         assert!(
             matches!(error, GenerateError::Unsupported(_)),
             "{toml}: {error}"
         );
     }
+}
+
+#[test]
+fn the_edition_must_be_a_rust_edition_and_is_recorded_with_the_target() {
+    let error = generate(
+        &document(pet()),
+        &rust_config("[rust]\nedition = \"2027\"\n"),
+    )
+    .unwrap_err();
+    assert!(matches!(error, GenerateError::Config(_)), "{error}");
+    let generation = generate(
+        &document(pet()),
+        &rust_config("[rust]\nedition = \"2021\"\n"),
+    )
+    .unwrap();
+    assert_eq!(generation.target, Target::Rust);
 }
 
 #[test]
