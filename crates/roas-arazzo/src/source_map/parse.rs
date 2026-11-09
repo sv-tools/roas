@@ -207,7 +207,10 @@ fn node(
             start = at;
         }
         end = match text.as_bytes().get(start) {
-            Some(b'[' | b'{') if !indentless => closing(text, start, end),
+            // Only a collection of the delimiter's kind: `[a]: 1` in a flow
+            // sequence is a one-pair map that starts at its key's `[`.
+            Some(b'[') if !indentless && matches!(kind, Kind::Seq(_)) => closing(text, start, end),
+            Some(b'{') if matches!(kind, Kind::Map(_)) => closing(text, start, end),
             _ => colon(text, end),
         };
         // A replayed alias is its definition: reuse the range measured
@@ -274,51 +277,81 @@ fn colon(text: &str, end: usize) -> usize {
 }
 
 /// A flow collection's span covers only its opening `[` / `{`, and its
-/// last item ends before the closing one: step over separators (an empty
-/// value's `:`, an explicit `?`), white space and comments to include
-/// the delimiter.
+/// members end before the closing one — or, merged in by `<<` (measured
+/// where their alias or map is), well before it. Scan from the opening
+/// delimiter to its match, stepping over quoted scalars and comments; a
+/// plain scalar holds no flow indicator, so every other bracket counts.
+/// Nested collections rescan their own text: at most [`MAX_DEPTH`] times.
 fn closing(text: &str, start: usize, end: usize) -> usize {
-    let close = match text.as_bytes().get(start) {
-        Some(b'[') => b']',
-        Some(b'{') => b'}',
-        _ => unreachable!("only flow collections are closed"),
-    };
     let bytes = text.as_bytes();
-    let mut at = end.max(start + 1);
-    // Inside a trailing `<<: *a` / `<<: [*a, *b]`, which adds no member
-    // when every merged one is overridden: how deep in its `[…]`.
-    let mut merge = None;
+    let mut depth = 0usize;
+    let mut at = start;
+    // A quote opens a scalar only where a token starts: after a flow
+    // indicator, the `: ` of a value, or the `:` of a JSON-like key
+    // (`"a":"b"`). White space keeps the state, so `b 'c` is one plain
+    // scalar; a comment needs white space before it.
+    let mut token = true;
+    let mut space = false;
+    let mut quoted = false;
     while let Some(&byte) = bytes.get(at) {
-        match (byte, merge) {
-            (b' ' | b'\t' | b'\n' | b'\r' | b':' | b'?', _) => at += 1,
-            (b',', Some(0)) => {
-                merge = None;
-                at += 1;
+        let was_quoted = std::mem::take(&mut quoted);
+        let was_space = std::mem::take(&mut space);
+        match byte {
+            b'[' | b'{' => {
+                depth += 1;
+                token = true;
             }
-            (b',', _) => at += 1,
-            (b'#', _) => at += text[at..].find(['\n', '\r']).unwrap_or(text.len() - at),
-            (b'<', None) if text[at..].starts_with("<<") => {
-                merge = Some(0);
-                at += 2;
+            b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (at + 1).max(end);
+                }
+                token = false;
+                quoted = true;
             }
-            (b'*', Some(_)) => {
-                at += text[at..]
-                    .find([' ', '\t', '\n', '\r', ',', '[', ']', '{', '}'])
-                    .unwrap_or(text.len() - at);
+            b',' => token = true,
+            b' ' | b'\t' | b'\n' | b'\r' => space = true,
+            b':' | b'?' => {
+                let next = bytes.get(at + 1).copied();
+                token = was_quoted
+                    || matches!(
+                        next,
+                        None | Some(
+                            b' ' | b'\t' | b'\n' | b'\r' | b',' | b'[' | b']' | b'{' | b'}'
+                        )
+                    );
             }
-            (b'[', Some(depth)) => {
-                merge = Some(depth + 1);
-                at += 1;
+            b'#' if was_space || token => {
+                at += text[at..].find(['\n', '\r']).unwrap_or(text.len() - at);
+                continue;
             }
-            (b']', Some(depth)) if depth > 0 => {
-                merge = Some(depth - 1);
-                at += 1;
+            b'"' | b'\'' if token => {
+                at = quoted_end(text, at);
+                token = false;
+                quoted = true;
+                continue;
             }
-            (byte, Some(0) | None) if byte == close => return at + 1,
-            _ => break,
+            _ => token = false,
         }
+        at += 1;
     }
     end
+}
+
+/// Just past the quoted scalar opening at `at` (or the end of the text).
+fn quoted_end(text: &str, at: usize) -> usize {
+    let bytes = text.as_bytes();
+    let quote = bytes[at];
+    let mut next = at + 1;
+    while let Some(&byte) = bytes.get(next) {
+        match byte {
+            b'\\' if quote == b'"' => next += 2,
+            b'\'' if quote == b'\'' && bytes.get(next + 1) == Some(&b'\'') => next += 2,
+            byte if byte == quote => return next + 1,
+            _ => next += 1,
+        }
+    }
+    text.len()
 }
 
 impl<'de> Deserialize<'de> for Raw {
@@ -781,6 +814,57 @@ workflows:
             let map = SourceMap::parse(text).unwrap();
             let obj = map.locate("#.obj").unwrap();
             assert_eq!((obj.start.offset, obj.end.offset), (23, close), "{text:?}");
+        }
+        for (text, close) in [
+            // A merged member is measured at its `*b`, inside `[…]`.
+            ("base: &b {x: 1}\nobj: {<<: [*b]}\n", 31),
+            ("base: &b {x: 1}\nobj: {<<: [*b, *b]}\n", 35),
+            ("base: &b {x: 1}\nobj: {<<: *b}\n", 29),
+        ] {
+            let map = SourceMap::parse(text).unwrap();
+            let obj = map.locate("#.obj").unwrap();
+            assert_eq!((obj.start.offset, obj.end.offset), (21, close), "{text:?}");
+            assert_eq!(map.locate("#").unwrap().end.offset, close, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_flow_collection_ends_at_its_own_delimiter_whatever_is_inside() {
+        for (text, path, range) in [
+            // Merges of maps, kept or overridden, and of a list of aliases.
+            (
+                "base: &b {x: 1}\nobj: {foo: 2, <<: [*b, *b]}\n",
+                "#.obj",
+                (21, 43),
+            ),
+            ("obj: {foo: y, <<: {bar: 1}}\nz: 1\n", "#.obj", (5, 27)),
+            ("obj: {foo: y, <<: {foo: 1}}\n", "#.obj", (5, 27)),
+            ("obj: [{foo: y, <<: {foo: 1}}]\n", "#.obj", (5, 29)),
+            ("obj: [{foo: y, <<: {foo: 1}}]\n", "#", (0, 29)),
+            (
+                "obj:\n  - {foo: y, <<: {bar: 1}}\n  - q\n",
+                "#.obj[0]",
+                (9, 31),
+            ),
+            // Brackets inside quotes, plain scalars and comments.
+            ("obj: {a: \"<<: [x\", b: 1}\n", "#.obj", (5, 24)),
+            ("obj: {a: '}'']', b: \"\\\"]\"}\n", "#.obj", (5, 26)),
+            ("obj: {a: b 'c, d: e'}\n", "#.obj", (5, 21)),
+            ("obj: {\"a\":'}'}\n", "#.obj", (5, 14)),
+            ("obj: [a, # ] }\n  b]\n", "#.obj", (5, 19)),
+            // A one-pair map whose key is a flow sequence.
+            ("k: [[a]: 1]\n", "#.k[0]", (4, 10)),
+            ("k: [[a]: [b]]\n", "#.k[0]", (4, 12)),
+            ("k: [[a]: [b]]\n", "#.k", (3, 13)),
+        ] {
+            let map = SourceMap::parse(text).unwrap();
+            let found = map.locate(path).unwrap();
+            assert_eq!(
+                (found.start.offset, found.end.offset),
+                range,
+                "{text:?} {path}: {:?}",
+                &text[found.start.offset..found.end.offset]
+            );
         }
     }
 
