@@ -372,7 +372,7 @@ fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
         .strip_prefix("go1.")
         .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
         .and_then(|m| m.parse::<u32>().ok());
-    if !minor.is_some_and(|m| m >= 27) {
+    if minor.is_none_or(|m| m < 27) {
         assert!(
             std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_none(),
             "ROAS_CODEGEN_REQUIRE_GO is set but go is {version:?}"
