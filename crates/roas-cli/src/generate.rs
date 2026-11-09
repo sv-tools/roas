@@ -318,6 +318,13 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         args.out = PathBuf::from(".");
     }
     let source = resolve_input_source(args.file.as_deref())?;
+    // Before any work: a label that cannot name a manifest fails the run
+    // anyway, and should name what was typed.
+    if let Some(given) = &args.label
+        && roas_codegen::manifest_name(&given.to_ascii_lowercase(), Target::Rust).is_err()
+    {
+        bail!("--label {given:?} must use only letters, digits, `-` and `_` (it is lowercased)");
+    }
     let (input, uri) = read_description(&source, args.format)?;
     let document = SourceDocument::parse(input, uri)
         .with_context(|| format!("{}: cannot be read", source.display()))?;
@@ -924,5 +931,14 @@ mod tests {
         );
         assert_eq!(default_label(&InputSource::File("...json".into())), "api");
         assert_eq!(default_label(&InputSource::Stdin), "api");
+    }
+
+    #[test]
+    fn a_bad_label_fails_before_any_work_and_names_what_was_typed() {
+        let dir = TempDir::new("bad-label");
+        let mut bad = args(&dir.0.join("missing.json"), &dir.0.join("out"));
+        bad.label = Some("My API".into());
+        let error = format!("{:#}", run_generate(bad).unwrap_err());
+        assert!(error.contains("\"My API\""), "{error}");
     }
 }

@@ -233,7 +233,9 @@ impl ConfigFile {
 /// A lowercase Rust module name: a letter, then letters, digits or `_`,
 /// and not a keyword. The file name the Rust backend writes.
 pub(crate) fn is_module_name(module: &str) -> bool {
-    !crate::rust::naming::is_keyword(module)
+    // The module names the file: one Windows resolves elsewhere is refused.
+    crate::write::windows_safe(module)
+        && !crate::rust::naming::is_keyword(module)
         && module.starts_with(|c: char| c.is_ascii_lowercase())
         && module
             .bytes()
@@ -263,7 +265,7 @@ pub fn rust_module_name(text: &str) -> String {
         Some(c) if c.is_ascii_digit() => format!("m_{module}"),
         Some(_) => module,
     };
-    if crate::rust::naming::is_keyword(&module) {
+    if crate::rust::naming::is_keyword(&module) || !crate::write::windows_safe(&module) {
         format!("{module}_types")
     } else {
         module
@@ -451,5 +453,13 @@ mod tests {
         assert_eq!(uuid.rust.as_ref().unwrap().import.as_deref(), Some("uuid"));
         assert_eq!(uuid.go.as_ref().unwrap().name, "uuid.UUID");
         assert!(uuid.go.as_ref().unwrap().import.is_none());
+    }
+
+    #[test]
+    fn module_names_windows_resolves_elsewhere_are_avoided() {
+        assert_eq!(rust_module_name("aux"), "aux_types");
+        assert_eq!(rust_module_name("COM1"), "com1_types");
+        assert!(is_module_name(&rust_module_name("nul")));
+        assert!(!is_module_name("con"));
     }
 }

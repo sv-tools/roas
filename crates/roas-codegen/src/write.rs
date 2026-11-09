@@ -426,6 +426,35 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> WriteError + '_ {
     }
 }
 
+/// Whether Windows reaches a file by this name and no other: not an 8.3
+/// short name (`PETSTO~1.RS`), an alternate data stream (`a.rs:x`) or a
+/// device (`aux.rs`, `con`), which it resolves elsewhere whatever follows.
+/// Refused on every platform, as one rule.
+pub(crate) fn windows_safe(part: &str) -> bool {
+    if part.contains(':') {
+        return false;
+    }
+    let bytes = part.as_bytes();
+    if bytes
+        .windows(2)
+        .any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+    {
+        return false;
+    }
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or(part)
+        .trim_end()
+        .to_ascii_lowercase();
+    let device = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || ((stem.starts_with("com") || stem.starts_with("lpt"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0');
+    !device
+}
+
 /// A generated path as a manifest key, refusing anything that could
 /// escape the output directory.
 fn key(path: &Path) -> Result<String, WriteError> {
@@ -444,7 +473,7 @@ fn key(path: &Path) -> Result<String, WriteError> {
                 }
                 // Windows drops trailing dots and spaces, so `a.rs.` would
                 // be `a.rs` there: refused everywhere, as one rule.
-                if part.ends_with('.') || part.ends_with(' ') {
+                if part.ends_with('.') || part.ends_with(' ') || !windows_safe(part) {
                     return Err(WriteError::UnsafePath(path.to_path_buf()));
                 }
                 parts.push(part.to_owned());
@@ -640,6 +669,10 @@ struct Created {
     /// The run's own lock, released here: after its file is removed, if
     /// the run created that file and is refused.
     lock: Option<DirLock>,
+    /// Shared locks on other roots, released last, after any cleanup: an
+    /// enclosing run cannot start writing into a directory this run is
+    /// about to remove.
+    shared: Vec<DirLock>,
 }
 
 impl Created {
@@ -741,7 +774,16 @@ fn other_owners<'a>(
             if !is_manifest_name(&name) {
                 continue;
             }
-            if rel.is_empty() && name.eq_ignore_ascii_case(ours) {
+            // Ours only if it is the file this run reads as its manifest:
+            // on a case-sensitive disk `Pets` is someone else's.
+            if rel.is_empty()
+                && name.eq_ignore_ascii_case(ours)
+                && (name == ours
+                    || matches!(
+                        (file_id(&entry.path()), file_id(&out_dir.join(ours))),
+                        (Some(a), Some(b)) if a == b
+                    ))
+            {
                 continue;
             }
             let manifest = match read_manifest(&entry.path()) {
@@ -767,14 +809,25 @@ fn other_owners<'a>(
     // directories are the caller's, so what cannot be read is skipped.
     if let Some(root) = resolved(out_dir) {
         for ancestor in root.ancestors().skip(1) {
-            let Ok(below) = root.strip_prefix(ancestor) else {
+            let Ok(below_path) = root.strip_prefix(ancestor) else {
                 continue;
             };
-            let below: Vec<String> = below
+            let below_path = below_path.to_path_buf();
+            let below: Vec<String> = below_path
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
                 .collect();
             let prefix = format!("{}/", below.join("/"));
+            // The same directory under another name (case beyond ASCII,
+            // Unicode folding) is found by identity, not by its text.
+            let root_id = file_id(&root);
+            let same_dir = |rel: &str, depth: usize| {
+                let ours: PathBuf = below_path.components().take(depth).collect();
+                matches!(
+                    (file_id(&ancestor.join(rel)), file_id(&ancestor.join(ours))),
+                    (Some(a), Some(b)) if a == b
+                )
+            };
             let Ok(entries) = fs::read_dir(ancestor) else {
                 continue;
             };
@@ -791,11 +844,21 @@ fn other_owners<'a>(
                     Err(error) => return Err(error),
                 };
                 let own = prefix.trim_end_matches('/');
-                for file in manifest.files.keys() {
-                    let file = file.to_ascii_lowercase();
+                for original in manifest.files.keys() {
+                    let file = original.to_ascii_lowercase();
+                    let parts: Vec<&str> = original.split('/').collect();
                     if let Some(inside) = file.strip_prefix(&prefix) {
                         owners.insert(inside.to_owned(), entry.path());
-                    } else if file == own || own.starts_with(&format!("{file}/")) {
+                    } else if parts.len() > below.len()
+                        && root_id.is_some()
+                        && file_id(&ancestor.join(parts[..below.len()].join("/"))) == root_id
+                    {
+                        let inside = parts[below.len()..].join("/").to_ascii_lowercase();
+                        owners.insert(inside, entry.path());
+                    } else if file == own
+                        || own.starts_with(&format!("{file}/"))
+                        || (parts.len() <= below.len() && same_dir(original, parts.len()))
+                    {
                         // The output directory, or one above it, is that
                         // target's file: keyed empty, as the whole tree.
                         owners.insert(String::new(), entry.path());
@@ -1541,6 +1604,7 @@ pub fn write(
         dirs: Vec::new(),
         keep: false,
         lock: None,
+        shared: Vec::new(),
     };
     // One run at a time over every file this one can touch, and a lock
     // held elsewhere fails at once: runs never wait. Enclosing roots come
@@ -1549,23 +1613,17 @@ pub fn write(
     // writing into. Then this run's own directory, exclusively; only after
     // that are nested roots' lock files looked for, so of two overlapping
     // runs at least one sees the other's.
-    let mut _shared = Vec::new();
-    let enclosing: Vec<PathBuf> = other_roots(out_dir, std::iter::empty())
-        .into_iter()
-        .map(|(dir, create)| DirLock::share(&dir, create).map(|lock| (dir, lock)))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|(dir, lock)| {
-            _shared.extend(lock);
-            dir
-        })
-        .collect();
+    let mut enclosing = Vec::new();
+    for (dir, create) in other_roots(out_dir, std::iter::empty()) {
+        created.shared.extend(DirLock::share(&dir, create)?);
+        enclosing.push(dir);
+    }
     created.dir_all(out_dir)?;
     check_out_dir(out_dir)?;
     created.lock = Some(DirLock::acquire(out_dir)?);
     for (dir, create) in other_roots(out_dir, planned.keys()) {
         if !enclosing.contains(&dir) {
-            _shared.extend(DirLock::share(&dir, create)?);
+            created.shared.extend(DirLock::share(&dir, create)?);
         }
     }
     let manifest_path = out_dir.join(&manifest_file);
@@ -3697,6 +3755,7 @@ mod tests {
             dirs: Vec::new(),
             keep: false,
             lock: None,
+            shared: Vec::new(),
         };
         loser.dir_all(&gen_dir).unwrap();
         // Another run wins the lock in the directory the loser created.
@@ -3873,6 +3932,55 @@ mod tests {
                 &WriteOptions::new("inner")
             ),
             Err(WriteError::Manifest { .. })
+        ));
+    }
+
+    #[test]
+    fn names_windows_resolves_elsewhere_are_refused() {
+        let dir = TempDir::new("windows-names");
+        for path in ["PETSTO~1.RS", "a.rs:x", "aux.rs", "sub/CON", "com1.rs"] {
+            assert!(
+                matches!(
+                    write(
+                        &generation(&[(path, "x")]),
+                        &dir.0,
+                        &WriteOptions::new("api")
+                    ),
+                    Err(WriteError::UnsafePath(_))
+                ),
+                "{path:?}"
+            );
+        }
+        write(
+            &generation(&[("com0.rs", "x"), ("auxiliary.rs", "y")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_manifest_in_another_case_that_is_not_ours_is_another_owner() {
+        let dir = TempDir::new("manifest-variant");
+        write(
+            &generation(&[("a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("pets"),
+        )
+        .unwrap();
+        let ours = dir.0.join(".roas-codegen-pets-rust.json");
+        let variant = dir.0.join(".roas-codegen-Pets-rust.json");
+        fs::rename(&ours, &variant).unwrap();
+        if ours.exists() {
+            return; // case-insensitive: the variant is ours
+        }
+        assert!(matches!(
+            write(
+                &generation(&[("a.rs", "a")]),
+                &dir.0,
+                &WriteOptions::new("pets")
+            ),
+            Err(WriteError::OwnedByOther { .. })
         ));
     }
 }
