@@ -704,3 +704,18 @@ fn a_module_named_like_an_imported_crate_is_refused() {
         "{error}"
     );
 }
+
+#[test]
+fn a_module_named_like_a_crate_a_substitution_names_is_refused() {
+    let error = generate(
+        &document(pet()),
+        &rust_config(
+            "[rust]\nmodule = \"chrono\"\n[substitutions.date-time.rust]\nname = \"chrono::NaiveDate\"\n",
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("imports or names")),
+        "{error}"
+    );
+}

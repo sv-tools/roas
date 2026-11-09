@@ -563,50 +563,46 @@ fn read_manifest(path: &Path) -> Result<Option<Manifest>, WriteError> {
 }
 
 /// `out_dir` as an absolute path with links resolved, even when it does not
-/// exist yet: the deepest existing ancestor is resolved and the rest
-/// appended, so a run that creates the directory sees the same enclosing
-/// roots as one that finds it.
+/// exist yet: the deepest existing prefix is resolved by the filesystem
+/// (`..` included, so `link/..` is the link target's parent), the rest is
+/// appended and normalized by its text, and what that leaves is resolved
+/// again, since a `..` through a missing directory may lead back through
+/// links. A run that creates the directory and one that finds it see the
+/// same enclosing roots. `None` when nothing on the path exists, as on a
+/// missing drive.
 fn resolved(out_dir: &Path) -> Option<PathBuf> {
-    let mut existing = out_dir.to_path_buf();
-    let mut tail = Vec::new();
-    loop {
-        let probe = if existing.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            existing.as_path()
+    let probe = if out_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        out_dir
+    };
+    let absolute = std::path::absolute(probe).ok()?;
+    let parts: Vec<Component> = absolute.components().collect();
+    for split in (1..=parts.len()).rev() {
+        let prefix: PathBuf = parts[..split].iter().collect();
+        let Ok(mut out) = fs::canonicalize(&prefix) else {
+            continue;
         };
-        if let Ok(mut root) = fs::canonicalize(probe) {
-            root.extend(tail.iter().rev());
-            return Some(root);
+        for part in &parts[split..] {
+            out.push(part);
         }
-        match existing.file_name() {
-            Some(name) => {
-                tail.push(name.to_owned());
-                existing.pop();
-            }
-            // `..` through a missing directory: no link can be involved
-            // there, so it is resolved by the path's text.
-            None => {
-                let mut lexical = PathBuf::new();
-                for part in std::path::absolute(probe).ok()?.components() {
-                    match part {
-                        Component::ParentDir => {
-                            lexical.pop();
-                        }
-                        Component::CurDir => {}
-                        other => lexical.push(other),
-                    }
+        let mut lexical = PathBuf::new();
+        for part in out.components() {
+            match part {
+                Component::ParentDir => {
+                    lexical.pop();
                 }
-                lexical.extend(tail.iter().rev());
-                // Nothing left to resolve: no ancestor exists at all, as
-                // on a missing drive.
-                if lexical == out_dir {
-                    return None;
-                }
-                return resolved(&lexical);
+                Component::CurDir => {}
+                other => lexical.push(other),
             }
         }
+        return if lexical == out {
+            Some(out)
+        } else {
+            resolved(&lexical)
+        };
     }
+    None
 }
 
 /// The other output roots a run in `out_dir` can reach, each with whether
@@ -4142,5 +4138,16 @@ mod tests {
         )
         .unwrap();
         assert!(!leftover.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_before_a_dot_dot_through_a_missing_directory_are_followed() {
+        let dir = TempDir::new("resolved-link");
+        fs::create_dir_all(dir.0.join("real/deep")).unwrap();
+        std::os::unix::fs::symlink(dir.0.join("real/deep"), dir.0.join("link")).unwrap();
+        let through = resolved(&dir.0.join("link/missing/../../gen")).unwrap();
+        let direct = resolved(&dir.0.join("real/gen")).unwrap();
+        assert_eq!(through, direct);
     }
 }

@@ -258,7 +258,8 @@ pub(crate) fn is_module_name(module: &str) -> bool {
 
 /// A Rust module name derived from free text such as a label or a file
 /// name: lowercase, other characters to `_`, never empty, never digit-led,
-/// never a keyword. Always accepted as `rust.module`.
+/// never a keyword. Accepted as `rust.module` unless a substitution
+/// imports or names a crate of that name, which `generate` refuses.
 pub fn rust_module_name(text: &str) -> String {
     let mut module: String = text
         .chars()

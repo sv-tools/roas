@@ -209,14 +209,19 @@ pub fn generate(
     }
     // Nor may it share its name with a crate a substitution imports: the
     // module would hide that crate in the file that declares it.
+    // Imported, or named as the first segment of the type's path.
     if let Some((key, _)) = config.substitutions.iter().find(|(_, s)| {
-        s.rust
-            .as_ref()
-            .and_then(|r| r.import.as_deref())
-            .is_some_and(|import| import.replace('-', "_") == config.rust.module)
+        s.rust.as_ref().is_some_and(|r| {
+            r.import
+                .as_deref()
+                .is_some_and(|import| import.replace('-', "_") == config.rust.module)
+                || r.name
+                    .split_once("::")
+                    .is_some_and(|(first, _)| first.trim_start_matches("::") == config.rust.module)
+        })
     }) {
         return Err(GenerateError::Config(format!(
-            "`rust.module = {:?}` is the crate substitution `{key}` imports; choose another module name or label",
+            "`rust.module = {:?}` is the crate substitution `{key}` imports or names; choose another module name or label",
             config.rust.module
         )));
     }
