@@ -6,7 +6,7 @@ use serde_json::Value;
 /// Read `raw` as YAML.
 ///
 /// - YAML 1.2 booleans only: `yes` / `on` / `no` / `off` stay strings.
-/// - `017` and `1_000` stay strings rather than becoming numbers.
+/// - Integer spellings `017` and `1_000` stay strings rather than becoming numbers.
 /// - `.inf` / `.nan` pass through (a `serde_json::Value` holds them as `null`).
 /// - `<<: *anchor` merge keys are expanded.
 /// - A duplicate mapping key is an error rather than a silent last-wins.
@@ -20,11 +20,14 @@ pub(crate) fn from_str(raw: &str) -> Result<Value, serde_saphyr::Error> {
         // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
         // from the defaults (250k nodes, 1M events), which reject ordinary
         // large specs. Depth stays at 64: deeper nesting overflows a 2 MiB
-        // thread stack in debug builds. The scalar-size and alias limits stay
-        // at their defaults and still stop an alias bomb.
+        // thread stack in debug builds. The alias-to-anchor ratio check is off:
+        // it rejects any document reusing one anchor 100+ times, a common
+        // pattern in specs. The scalar-size and alias-replay limits stay at
+        // their defaults and still stop an alias bomb.
         budget: serde_saphyr::budget! {
             max_nodes: 10_000_000,
             max_events: 25_000_000,
+            enforce_alias_anchor_ratio: false,
         },
         strict_booleans: true,
         leading_zero_numbers_as_strings: true,
@@ -100,15 +103,27 @@ mod tests {
 
     #[test]
     fn yaml_alias_bomb_is_rejected_by_the_budget() {
-        // One anchor expanded 200 times: the alias-to-anchor ratio check
-        // rejects the document when it is finalised. Expansion while parsing
-        // is bounded separately, by the alias-replay limits.
-        let yaml = format!(
-            "a: &a [x, x, x, x, x, x, x, x, x, x]\nb: [{}]\n",
-            vec!["*a"; 200].join(", ")
-        );
+        // Billion laughs: each level aliases the previous one ten times, so
+        // full expansion is 10^7 scalars. The anchor-replay limits stop it.
+        let mut yaml = String::from("l0: &l0 [lol, lol, lol, lol, lol, lol, lol, lol, lol, lol]\n");
+        for i in 1..7 {
+            let prev = format!("*l{}", i - 1);
+            yaml.push_str(&format!("l{i}: &l{i} [{}]\n", vec![prev; 10].join(", ")));
+        }
         let err = parse(&yaml).unwrap_err();
         assert!(err.contains("budget breached"), "{err}");
+    }
+
+    /// One shared anchor reused many times, as specs do for common
+    /// responses, is not a bomb.
+    #[test]
+    fn yaml_anchor_reused_many_times_is_accepted() {
+        let mut yaml = String::from("err: &err { description: error }\npaths:\n");
+        for i in 0..150 {
+            yaml.push_str(&format!("  p{i}: {{ '500': *err }}\n"));
+        }
+        let value = parse(&yaml).unwrap();
+        assert_eq!(value["paths"]["p149"]["500"]["description"], "error");
     }
 
     #[test]

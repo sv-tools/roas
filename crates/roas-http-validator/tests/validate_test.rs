@@ -2109,7 +2109,8 @@ fn a_yaml_exponent_loses_its_digits_even_without_a_fraction() {
         "known limit: the YAML parser rounded the bound down",
     );
 
-    // A plain integer never goes near a double, so it is unharmed.
+    // A plain integer inside the 64-bit range never goes near a double,
+    // so it is unharmed.
     let plain = body_schema_yaml("{ type: integer, maximum: 9007199254740993 }");
     assert!(errors(&plain, &posted(b"9007199254740993")).is_empty());
 }

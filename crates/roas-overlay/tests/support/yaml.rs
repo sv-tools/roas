@@ -10,11 +10,14 @@ pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, serde_
         // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
         // from the defaults (250k nodes, 1M events), which reject ordinary
         // large specs. Depth stays at 64: deeper nesting overflows a 2 MiB
-        // thread stack in debug builds. The scalar-size and alias limits stay
-        // at their defaults and still stop an alias bomb.
+        // thread stack in debug builds. The alias-to-anchor ratio check is off:
+        // it rejects any document reusing one anchor 100+ times, a common
+        // pattern in specs. The scalar-size and alias-replay limits stay at
+        // their defaults and still stop an alias bomb.
         budget: serde_saphyr::budget! {
             max_nodes: 10_000_000,
             max_events: 25_000_000,
+            enforce_alias_anchor_ratio: false,
         },
         strict_booleans: true,
         leading_zero_numbers_as_strings: true,

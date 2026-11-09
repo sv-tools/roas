@@ -78,9 +78,10 @@
 //! Numbers are compared as the decimals they were written as, on both
 //! sides. The one limit is the format a
 //! *description* is parsed from: JSON is exact throughout, while YAML
-//! reads scalars through an `f64` before `serde_json` is involved, so a
-//! fractional bound carrying more precision than a double is already
-//! rounded when it arrives. Every integer survives either way.
+//! reads a fraction, an exponent, or an integer outside `i64::MIN` to
+//! `u64::MAX` through an `f64` before `serde_json` is involved, so such a
+//! bound carrying more precision than a double is already rounded when it
+//! arrives. An integer inside the 64-bit range survives either way.
 //!
 //! ## Media types it does not read itself
 //!
