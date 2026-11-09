@@ -12,6 +12,7 @@ use url::Url;
 ///
 /// [RFC 6901]: https://www.rfc-editor.org/rfc/rfc6901
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct SchemaId {
     /// The document the schema lives in.
     pub uri: Url,

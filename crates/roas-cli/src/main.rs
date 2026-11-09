@@ -6,11 +6,12 @@
 //! `arazzo run` is the one command that talks to an API rather than
 //! reading a document.
 //!
-//! - `roas openapi <validate|convert|preview>` — work with OpenAPI
-//!   specs: `openapi validate` parses + validates one, `openapi
+//! - `roas openapi <validate|convert|generate|preview>` — work with
+//!   OpenAPI specs: `openapi validate` parses + validates one, `openapi
 //!   convert --to <VERSION>` upconverts one (merging, applying
-//!   overlays and collapsing on the way if asked), and `openapi
-//!   preview` renders one in a browser. The `openapi` module documents
+//!   overlays and collapsing on the way if asked), `openapi generate`
+//!   writes Rust types for its schemas, and `openapi preview` renders
+//!   one in a browser. The `openapi` module documents
 //!   each in full.
 //!
 //! - `roas overlay <validate|convert|apply>` — work with OpenAPI

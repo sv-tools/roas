@@ -655,19 +655,10 @@ fn respell(out_dir: &Path, old: &str, new: &str) -> Result<(), WriteError> {
     let from = out_dir.join(old);
     let name = new.rsplit('/').next().unwrap_or(new);
     let to = from.with_file_name(name);
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let tmp = to.with_file_name(format!(".rename{TMP_MARKER}{}-{n}", std::process::id()));
-    if tmp.exists() {
-        return Err(WriteError::Io {
-            path: tmp,
-            source: std::io::Error::from(std::io::ErrorKind::AlreadyExists),
-        });
-    }
-    fs::rename(&from, &tmp).map_err(io(&from))?;
-    fs::rename(&tmp, &to).map_err(io(&to))
+    // One rename, so no crash leaves the file under a third name. APFS,
+    // NTFS and case-folding ext4 apply a case-only rename; a disk that
+    // ignores it keeps the old spelling, which reaches the same file.
+    fs::rename(&from, &to).map_err(io(&from))
 }
 
 /// The ownership refusals both [`write()`] and [`check()`] apply, so a
@@ -764,6 +755,19 @@ fn going(
             out.insert(path.clone());
         }
     }
+    // One file, one verdict: a spelling that is not ours keeps every
+    // spelling of that file, as check reports it once.
+    let kept: Vec<(String, _)> = removable
+        .iter()
+        .filter(|(p, _)| !out.contains(p))
+        .filter_map(|(p, _)| file_id(&out_dir.join(p)).map(|id| (p.clone(), id)))
+        .collect();
+    out.retain(|p| {
+        let id = file_id(&out_dir.join(p));
+        !kept
+            .iter()
+            .any(|(k, kid)| k.eq_ignore_ascii_case(p) && Some(kid) == id.as_ref())
+    });
     Ok(out)
 }
 
@@ -930,6 +934,37 @@ fn check_source(previous: &Manifest, options: &WriteOptions) -> Result<(), Write
 }
 
 /// Write `content` to `path` through a temporary sibling and a rename.
+/// Remove the temporary files a killed run left beside the files it was
+/// writing. They hold generated content only, and with the lock held no
+/// other run can be writing them. Only directories this run writes into
+/// are looked at, and only regular files named the way [`write_atomic`]
+/// names them.
+fn remove_leftover_temps(out_dir: &Path, generation: &Generation) -> Result<(), WriteError> {
+    let mut dirs = BTreeSet::from([out_dir.to_path_buf()]);
+    for file in &generation.files {
+        if let Some(parent) = out_dir.join(&file.path).parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+    }
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.map_err(io(&dir))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.')
+                && name.contains(TMP_MARKER)
+                && entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                let path = entry.path();
+                fs::remove_file(&path).map_err(io(&path))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io(parent))?;
@@ -999,6 +1034,7 @@ pub fn write(
     fs::create_dir_all(out_dir).map_err(io(out_dir))?;
     check_out_dir(out_dir)?;
     let _lock = DirLock::acquire(out_dir)?;
+    remove_leftover_temps(out_dir, generation)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -1075,6 +1111,11 @@ pub fn write(
         ..Default::default()
     };
     for (old, new) in &aliased {
+        let name = |p: &str| p.rsplit('/').next().map(str::to_owned);
+        // Only a directory's case differs: nothing to rename.
+        if name(old) == name(new) {
+            continue;
+        }
         respell(out_dir, old, new)?;
         report
             .renamed
@@ -2561,5 +2602,45 @@ mod tests {
     fn an_empty_output_path_is_the_current_directory() {
         assert_eq!(current_if_empty(Path::new("")), Path::new("."));
         assert_eq!(current_if_empty(Path::new("out")), Path::new("out"));
+    }
+
+    #[test]
+    fn temporary_files_left_by_a_killed_run_are_removed() {
+        let dir = TempDir::new("leftover-tmp");
+        fs::create_dir_all(dir.0.join("sub")).unwrap();
+        let top = dir.0.join(format!(".a.rs{TMP_MARKER}1-2-3"));
+        let nested = dir.0.join(format!("sub/.b.rs{TMP_MARKER}1-2-3"));
+        fs::write(&top, "partial").unwrap();
+        fs::write(&nested, "partial").unwrap();
+        fs::write(dir.0.join("sub/keep.txt"), "mine").unwrap();
+        write(
+            &generation(&[("a.rs", "a"), ("sub/b.rs", "b")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(!top.exists() && !nested.exists());
+        assert!(dir.0.join("sub/keep.txt").exists());
+    }
+
+    #[test]
+    fn a_directory_only_case_change_reports_no_rename() {
+        let dir = TempDir::new("dir-case");
+        write(
+            &generation(&[("Dir/a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        if !same_file(&dir.0.join("Dir/a.rs"), &dir.0.join("dir/a.rs")) {
+            return;
+        }
+        let report = write(
+            &generation(&[("dir/a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(report.renamed.is_empty(), "{report:?}");
     }
 }

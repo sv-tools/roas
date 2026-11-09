@@ -88,6 +88,7 @@ impl std::ops::Deref for ValidatedSourceDocument {
 /// consumed, so it can be inspected or validated again with other
 /// options. Boxed, since the whole 3.2 model rides inside.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub struct SourceValidationError {
     pub document: Box<SourceDocument>,
     pub errors: Vec<ValidationError>,
