@@ -186,11 +186,16 @@ pub(crate) fn is_module_path(path: &str) -> bool {
 /// path ends in `.vN` instead.
 fn major_version_ok(path: &str) -> bool {
     if let Some(rest) = path.strip_prefix("gopkg.in/") {
-        let rest = rest.strip_suffix("-unstable").unwrap_or(rest);
-        return rest.rsplit_once(".v").is_some_and(|(_, n)| {
-            !n.is_empty()
-                && n.bytes().all(|b| b.is_ascii_digit())
-                && (!n.starts_with('0') || n == "0")
+        // `splitGopkgIn`, exactly: the major part is `.v`, the digits,
+        // and any `-unstable`, and is refused when it is just `.v` or its
+        // digits start with a zero other than `.v0` itself.
+        let unstable = rest.strip_suffix("-unstable");
+        let core = unstable.unwrap_or(rest);
+        return core.rsplit_once(".v").is_some_and(|(_, n)| {
+            let major = format!(".v{n}{}", if unstable.is_some() { "-unstable" } else { "" });
+            n.bytes().all(|b| b.is_ascii_digit())
+                && major.len() > 2
+                && !(major.as_bytes()[2] == b'0' && major != ".v0")
         });
     }
     let last = path.rsplit('/').next().unwrap_or(path);
@@ -447,6 +452,8 @@ mod tests {
             "example.com/-x/y",
             "example.com/A/b",
             "gopkg.in/yaml.v3",
+            "gopkg.in/yaml.v-unstable",
+            "gopkg.in/yaml.v0",
             "example.com/v2x",
         ] {
             assert!(is_module_path(ok), "{ok}");
@@ -481,6 +488,9 @@ mod tests {
             "example.com/x/v02",
             "example.com/x/v2.1",
             "gopkg.in/yaml",
+            "gopkg.in/yaml.v",
+            "gopkg.in/yaml.v01",
+            "gopkg.in/yaml.v0-unstable",
             "example.com/x.",
         ] {
             assert!(!is_module_path(bad), "{bad}");

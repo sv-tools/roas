@@ -657,6 +657,32 @@ fn a_module_path_makes_the_output_a_module() {
         matches!(&error, GenerateError::Config(m) if m.contains("corp/x")),
         "{error}"
     );
+    // Every import spec in an entry counts, not only the first.
+    let toml = "extra_imports = ['_ \"time\"; _ \"github.com/google/uuid\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    let error = go(pet(), toml).unwrap().unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("github.com/google/uuid")),
+        "{error}"
+    );
+    // The module itself is the generated package: a cycle.
+    let toml =
+        "extra_imports = ['_ \"example.com/pets\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    let error = go(pet(), toml).unwrap().unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("import cycle")),
+        "{error}"
+    );
+    // A substitution from a package of this module is no dependency.
+    let components = serde_json::json!({
+        "P": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}
+    });
+    let toml = "[go]\nmodule_path = \"example.com/pets\"\n[substitutions.uuid.go]\nname = \"ids.ID\"\nimport = \"example.com/pets/ids\"\n";
+    let generation = go(components, toml).unwrap().unwrap();
+    assert!(
+        generation.dependencies.go.is_empty(),
+        "{:?}",
+        generation.dependencies.go
+    );
     // A package of this module is fine.
     let toml = "extra_imports = ['_ \"example.com/pets/more\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
     assert!(go(pet(), toml).unwrap().is_ok());

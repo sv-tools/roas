@@ -19,6 +19,34 @@ pub(crate) struct Output {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Every string literal in Go source text — interpreted or raw — with its
+/// escapes left as they are, which an import path never needs.
+fn string_literals(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                let mut literal = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            literal.push(c);
+                            literal.extend(chars.next());
+                        }
+                        '"' => break,
+                        c => literal.push(c),
+                    }
+                }
+                out.push(literal);
+            }
+            '`' => out.push(chars.by_ref().take_while(|&c| c != '`').collect()),
+            _ => {}
+        }
+    }
+    out
+}
+
 pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, GenerateError> {
     let built = view::build(ir, config, source)?;
     let rendered = render::render_file(&built.file)?;
@@ -28,18 +56,25 @@ pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, Gen
     if let Some(module) = &config.go.module_path {
         // Every import must resolve inside this module or the standard
         // library: anything else needs a `require` line, which needs a
-        // version no substitution names. An `extra_imports` entry is an
-        // import spec, its path quoted either way.
-        let extra = config.extra_imports.iter().filter_map(|spec| {
-            let quote = spec.find(['"', '`'])?;
-            let delimiter = &spec[quote..=quote];
-            spec[quote + 1..].split(delimiter).next()
-        });
+        // version no substitution names. An `extra_imports` entry may hold
+        // several import specs, so every string in it is a path to check.
+        let extra: Vec<String> = config
+            .extra_imports
+            .iter()
+            .flat_map(|spec| string_literals(spec))
+            .collect();
         let generated = built.file.imports.iter().map(|spec| spec.trim_matches('"'));
-        let inside =
-            |path: &str| path == module.as_str() || path.starts_with(&format!("{module}/"));
-        if let Some(import) = generated
-            .chain(extra)
+        let paths: Vec<&str> = generated.chain(extra.iter().map(String::as_str)).collect();
+        // The generated file is the module's root package: importing the
+        // module itself is a cycle.
+        if paths.iter().any(|path| path == module) {
+            return Err(GenerateError::Config(format!(
+                "an import of {module:?} is the generated package importing itself, which Go refuses as an import cycle"
+            )));
+        }
+        let inside = |path: &str| path.starts_with(&format!("{module}/"));
+        if let Some(import) = paths
+            .iter()
             .find(|path| !naming::is_std_import(path) && !inside(path))
         {
             return Err(GenerateError::Config(format!(
