@@ -248,8 +248,28 @@ impl DirLock {
         let (file, made) = match open(true) {
             Ok(file) => (file, true),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Locking needs no write access to an existing file.
-                (fs::File::open(&path).map_err(io(&path))?, false)
+                // Read-write where possible: some filesystems (NFS on
+                // Linux) give an exclusive lock only to a writable handle.
+                // Read-only otherwise, which local filesystems accept.
+                let file = match open(false) {
+                    Ok(file) => file,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::PermissionDenied
+                                | std::io::ErrorKind::ReadOnlyFilesystem
+                        ) =>
+                    {
+                        fs::File::open(&path).map_err(io(&path))?
+                    }
+                    // Removed in between by a refused run that made it:
+                    // another run is active here.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(WriteError::Locked(path));
+                    }
+                    Err(source) => return Err(WriteError::Io { path, source }),
+                };
+                (file, false)
             }
             Err(source) => return Err(WriteError::Io { path, source }),
         };
@@ -268,15 +288,23 @@ impl DirLock {
     /// Shared, on another output root this run can reach: runs under one
     /// enclosing root share it, while that root's own run, holding it
     /// exclusively, keeps them out. An existing lock file is opened for
-    /// reading only. Without `create` a directory with no lock file is no
-    /// root, and one where it cannot be created is skipped: a run rooted
-    /// there takes its own lock before looking for this run's.
+    /// reading only, and one that cannot be opened is an error. Without
+    /// `create` a directory with no lock file is no root, and one where it
+    /// cannot be created is skipped: a run rooted there creates its own
+    /// lock file before looking for this run's.
     fn share(dir: &Path, create: bool) -> Result<Option<DirLock>, WriteError> {
         check_lock(dir)?;
         let path = dir.join(LOCK_FILE);
+        let cannot_create = |e: &std::io::Error| {
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            )
+        };
         let file = match fs::File::open(&path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+            // An existing lock that cannot be opened may be held: refuse
+            // rather than run unsynchronised.
             Err(e)
                 if matches!(
                     e.kind(),
@@ -294,7 +322,7 @@ impl DirLock {
                     .open(&path)
                 {
                     Ok(file) => file,
-                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+                    Err(e) if cannot_create(&e) => return Ok(None),
                     Err(source) => return Err(WriteError::Io { path, source }),
                 }
             }
@@ -740,9 +768,15 @@ fn other_owners<'a>(
                 let Ok(Some(manifest)) = read_manifest(&entry.path()) else {
                     continue;
                 };
+                let own = prefix.trim_end_matches('/');
                 for file in manifest.files.keys() {
-                    if let Some(inside) = file.to_ascii_lowercase().strip_prefix(&prefix) {
+                    let file = file.to_ascii_lowercase();
+                    if let Some(inside) = file.strip_prefix(&prefix) {
                         owners.insert(inside.to_owned(), entry.path());
+                    } else if file == own || own.starts_with(&format!("{file}/")) {
+                        // The output directory, or one above it, is that
+                        // target's file: keyed empty, as the whole tree.
+                        owners.insert(String::new(), entry.path());
                     }
                 }
             }
@@ -997,6 +1031,12 @@ fn check_ownership(
         manifest_file,
         planned.keys().chain(previous.files.keys()),
     )?;
+    if let Some(manifest) = others.get("") {
+        return Err(WriteError::OwnedByOther {
+            path: PathBuf::from("."),
+            manifest: manifest.clone(),
+        });
+    }
     for (path, content) in planned {
         let lower = path.to_ascii_lowercase();
         // The same path, a file where this one needs a directory, or a
@@ -3673,5 +3713,53 @@ mod tests {
         let result = write(&g, &dir.0, &WriteOptions::new("api"));
         fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
         result.unwrap();
+    }
+
+    #[test]
+    fn an_output_directory_owned_as_a_file_above_is_refused() {
+        let dir = TempDir::new("owned-as-file");
+        write(
+            &generation(&[("nested", "n")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        fs::remove_file(dir.0.join("nested")).unwrap();
+        let g = generation(&[("a.rs", "a")]);
+        let inner = dir.0.join("nested");
+        assert!(matches!(
+            check(&g, &inner, &WriteOptions::new("inner")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+        assert!(matches!(
+            write(&g, &inner, &WriteOptions::new("inner")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_enclosing_lock_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("unreadable-lock");
+        write(
+            &generation(&[("top.rs", "t")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        let lock = dir.0.join(LOCK_FILE);
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&lock).is_ok() {
+            fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+            return; // running as root
+        }
+        let result = write(
+            &generation(&[("b.rs", "b")]),
+            &dir.0.join("b"),
+            &WriteOptions::new("b"),
+        );
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(result, Err(WriteError::Io { .. })), "{result:?}");
     }
 }
