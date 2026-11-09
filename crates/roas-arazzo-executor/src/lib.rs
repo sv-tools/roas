@@ -51,6 +51,8 @@
 //! statically by preparation. The optional `input-validation` feature supports
 //! offline JSON Schema 2020-12 when [`Options::input_validation`] enables it.
 //! Plans compile schemas; each run validates its actual bound inputs at entry.
+//! The [README's support matrix](https://crates.io/crates/roas-arazzo-executor#support-matrix)
+//! separates what is parsed, resolved, validated and executed.
 
 mod criterion;
 mod documents;

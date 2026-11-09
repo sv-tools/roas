@@ -330,7 +330,7 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 - **Steps** that name an operation by `operationId` (bare, or `$sourceDescriptions.<name>.<id>`) or by `operationPath`, and steps that call another `workflowId` — of the same document, or of an external Arazzo document as `$sourceDescriptions.<name>.<workflowId>` (the `source-graph` feature).
 - **Parameters** in `path`, `query`, `querystring`, `header` and `cookie`, from the workflow and the step, with `$components.parameters` references and their `value` overrides.
 - **Request bodies**, with runtime expressions anywhere inside the payload and `replacements` by JSON Pointer or JSONPath.
-- **Criteria** — `simple` conditions (comparisons, `!`, `&&`, `||`, parentheses, property access and indexing), `regex`, and `jsonpath`. Pattern conditions interpolate `{$expressions}` before evaluation; simple conditions parse runtime expressions directly. A `jsonpath` condition passes on a non-empty nodelist, whatever the node holds.
+- **Criteria** — `simple` conditions (comparisons, `!`, `&&`, `||`, parentheses, property access and indexing), `regex`, `jsonpath`, and v1.1 `jsonpointer` expression-type criteria (an extension). Pattern conditions interpolate `{$expressions}` before evaluation; simple conditions parse runtime expressions directly. A `jsonpath` condition passes on a non-empty nodelist, whatever the node holds.
 - **Actions** — `end`, `goto` a step or a workflow, and `retry`, which honours `retryAfter`, defaults to a single attempt when `retryLimit` is absent, may send the run through another step or workflow before trying again, and gives way to the next failure action once its limit is spent.
 - **Outputs** at step and workflow level, including [`Selector`](https://spec.openapis.org/arazzo/v1.1.0.html#selector-object)s, readable by later steps as `$steps.<id>.outputs.<name>`.
 - **Runtime expressions** — `$url`, `$method`, `$statusCode`, `$request.*`, `$response.*`, `$inputs`, `$outputs`, `$steps`, `$workflows.<id>.inputs` / `.outputs`, `$sourceDescriptions`, `$components`, and `$self`.
@@ -339,6 +339,28 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 A step that calls a workflow is a step like any other: what it called becomes its outputs, its own `outputs` are named on top, its `successCriteria` are judged, its `timeout` covers the whole call, and its `onSuccess` / `onFailure` decide where the workflow goes next. It gets a record of its own in the report — `Performed::Workflow` rather than `Performed::Request`.
 
 Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0` feature), which upconverts first so there is one interpreter.
+
+## Support matrix
+
+Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (AsyncAPI steps, XPath) is an error where it is met, never skipped; `x-` extensions of Arazzo objects are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
+
+| Feature | Parsing | Reference resolution | Validation | Execution |
+| --- | --- | --- | --- | --- |
+| Arazzo 1.0 / 1.1 | Typed models; v1.0 keeps its written version | `$self` and Arazzo `sourceDescriptions` through `SourceRegistry` (`source-graph`) | Structural checks; preparation checks the selected workflow's reachable graph | v1.1 directly; v1.0 after upconversion |
+| `x-` extensions of Arazzo objects | Kept on every object but a Reusable Object | — | Not interpreted | Ignored |
+| Other unknown members | Dropped by the model; listed by `Description::unknown_members` | — | Preparation error (entry when given `Options::unknown_members`, external documents always) | A checked run refuses them; the lazy path never sees them |
+| OpenAPI 2.0 / 3.0 / 3.1 / 3.2 sources | Raw values with a checked version | `operationId`, `operationPath`, Path Item `$ref` chains, servers | Duplicate IDs, reference cycles, Path Item overlaps; no structural or schema validation | HTTP requests ([methods and servers](#openapi-operation-resolution)) |
+| AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Loaded as sources | AsyncAPI steps, `channel` parameters and `$message` expressions are preparation errors | Not run |
+| External Arazzo workflows | Typed models from the registry | `$sourceDescriptions.<name>.<workflowId>` | Structure, unknown members and the cross-document workflow graph | In their own document's scope |
+| Components | Typed models | `$components.<kind>.<name>` by name | A missing component is a preparation error | Resolved where used |
+| Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>` | Syntax and references checked, with byte offsets | Evaluated, except `$message` (AsyncAPI) |
+| `simple` conditions | Strings | — | Parsed under the [condition profile](#condition-profile) | Evaluated, short-circuiting |
+| `regex` criteria | Typed criterion types | — | Constant patterns compiled | Evaluated |
+| JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run does not check the version |
+| JSON Pointer selectors and criteria (v1.1) | Typed | — | Constant pointers' syntax checked | Evaluated; the criterion type is an extension |
+| XPath criteria and selectors | Typed | — | Preparation error | Not run |
+| Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
+| `dependsOn` | Typed | Step and workflow ids | Cycles rejected; a call, `goto` or `retry` to a workflow with its own `dependsOn` is refused | One at a time; no parallel scheduling; that call or transfer is refused when reached |
 
 ## Condition profile
 
@@ -498,6 +520,24 @@ Entry-workflow dependencies are supported; calls/recovery transfers to workflows
 with their own `dependsOn` are rejected because the engine does not yet schedule
 those nested dependencies. Preparation rejects them before any request; a lazy
 run rejects the transfer when it reaches it, before the target starts.
+
+### Locations and offsets
+
+Offsets into a string are zero-based UTF-8 byte offsets into the decoded string:
+`CriterionError::Syntax::offset` into the condition, `ExpressionError::Syntax` /
+`Navigation::offset` into the expression or operand held in its `expression`
+field, and `PreparationDiagnostic::offset` into the field's value as parsed, after
+quotes and escapes. Only preparation findings are mapped back to the original
+text, when the document has a source map: `PreparationDiagnostic::span` is where
+the field's value (or, for a finding about a name, the name) is written, and
+`PreparationDiagnostic::position` is where `offset` falls, when the finding has
+one. Both are `roas_arazzo::source_map` positions: a zero-based UTF-8 byte offset
+into the original text plus a one-based line and a one-based column counted in
+Unicode scalar values. Runtime errors carry only the string offset. An editor
+speaking UTF-16, such as an LSP client, converts at its own boundary. A diagnostic
+about an operand boundary, such as a lone `=` or `&` inside a simple-condition
+operand, points at that operator character, so an editor can mark where the
+parser split the name.
 
 ### Workflow input validation
 
