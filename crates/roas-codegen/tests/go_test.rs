@@ -140,7 +140,7 @@ fn a_member_no_struct_tag_can_name_is_written_by_its_struct() {
     // The tag skips it; the struct writes it, extras in key order.
     assert!(squeezed.contains("AB *string `json:\"-\"`"), "{squeezed}");
     assert!(
-        squeezed.contains("func (v Odd) MarshalJSONTo(e *jsontext.Encoder) error {"),
+        squeezed.contains("func (v *Odd) MarshalJSONTo(e *jsontext.Encoder) error {"),
         "{squeezed}"
     );
     assert!(
@@ -152,7 +152,7 @@ fn a_member_no_struct_tag_can_name_is_written_by_its_struct() {
         "{squeezed}"
     );
     assert!(
-        !squeezed.contains("func (v Fine) MarshalJSONTo"),
+        !squeezed.contains("func (v *Fine) MarshalJSONTo"),
         "{squeezed}"
     );
     // `-` is named with an option; a space is fine.
@@ -683,6 +683,18 @@ fn a_module_path_makes_the_output_a_module() {
         "{:?}",
         generation.dependencies.go
     );
+    // A comment is no import, either way it hides one.
+    let toml = "extra_imports = ['/* `fmt/ */ _ \"github.com/google/uuid\" /* ` */']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    let error = go(pet(), toml).unwrap().unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("github.com/google/uuid")),
+        "{error}"
+    );
+    let toml = "extra_imports = ['_ \"time\" // see \"docs\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    assert!(go(pet(), toml).unwrap().is_ok());
+    // cgo's `C` is no module.
+    let toml = "extra_imports = ['\"C\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
+    assert!(go(pet(), toml).unwrap().is_ok());
     // A package of this module is fine.
     let toml = "extra_imports = ['_ \"example.com/pets/more\"']\n[go]\nmodule_path = \"example.com/pets\"\n";
     assert!(go(pet(), toml).unwrap().is_ok());

@@ -19,32 +19,77 @@ pub(crate) struct Output {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Every string literal in Go source text — interpreted or raw — with its
-/// escapes left as they are, which an import path never needs.
+/// The string literals of Go source text, decoded — interpreted or raw —
+/// with comments skipped, so only real tokens are taken for import paths.
 fn string_literals(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
+            '/' if chars.peek() == Some(&'/') => {
+                chars.by_ref().find(|&c| c == '\n');
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut star = false;
+                for c in chars.by_ref() {
+                    if star && c == '/' {
+                        break;
+                    }
+                    star = c == '*';
+                }
+            }
+            '`' => out.push(
+                chars
+                    .by_ref()
+                    .take_while(|&c| c != '`')
+                    .filter(|&c| c != '\r')
+                    .collect(),
+            ),
             '"' => {
                 let mut literal = String::new();
                 while let Some(c) = chars.next() {
                     match c {
-                        '\\' => {
-                            literal.push(c);
-                            literal.extend(chars.next());
-                        }
                         '"' => break,
+                        '\\' => literal.extend(unescape(&mut chars)),
                         c => literal.push(c),
                     }
                 }
                 out.push(literal);
             }
-            '`' => out.push(chars.by_ref().take_while(|&c| c != '`').collect()),
             _ => {}
         }
     }
     out
+}
+
+/// One escape of a Go interpreted string, after its backslash.
+fn unescape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
+    fn number(chars: &mut impl Iterator<Item = char>, radix: u32, digits: usize) -> Option<char> {
+        let text: String = chars.take(digits).collect();
+        u32::from_str_radix(&text, radix)
+            .ok()
+            .and_then(char::from_u32)
+    }
+    match chars.next()? {
+        'a' => Some('\u{7}'),
+        'b' => Some('\u{8}'),
+        'f' => Some('\u{c}'),
+        'n' => Some('\n'),
+        'r' => Some('\r'),
+        't' => Some('\t'),
+        'v' => Some('\u{b}'),
+        'x' => number(chars, 16, 2),
+        'u' => number(chars, 16, 4),
+        'U' => number(chars, 16, 8),
+        d @ '0'..='7' => {
+            let rest: String = chars.by_ref().take(2).collect();
+            u32::from_str_radix(&format!("{d}{rest}"), 8)
+                .ok()
+                .and_then(char::from_u32)
+        }
+        other => Some(other),
+    }
 }
 
 pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, GenerateError> {
@@ -75,7 +120,8 @@ pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, Gen
         let inside = |path: &str| path.starts_with(&format!("{module}/"));
         if let Some(import) = paths
             .iter()
-            .find(|path| !naming::is_std_import(path) && !inside(path))
+            // `C` is cgo's pseudo-package, no module at all.
+            .find(|path| **path != "C" && !naming::is_std_import(path) && !inside(path))
         {
             return Err(GenerateError::Config(format!(
                 "`go.module_path` generates a go.mod, which cannot require {import:?} without a version; leave it unset and declare the module in a go.mod of your own"
@@ -91,4 +137,22 @@ pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, Gen
         dependencies: built.dependencies,
         diagnostics: built.diagnostics,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn import_strings_are_real_tokens() {
+        assert_eq!(
+            super::string_literals(r#"_ "time" // registers "timer""#),
+            ["time"]
+        );
+        assert_eq!(
+            super::string_literals("/* `fmt/ */ _ \"github.com/x/y\" /* ` */"),
+            ["github.com/x/y"]
+        );
+        assert_eq!(super::string_literals(r#""\u0074ime""#), ["time"]);
+        assert_eq!(super::string_literals(r#""\x74\151me""#), ["time"]);
+        assert_eq!(super::string_literals("_ `a/b`; x \"c\""), ["a/b", "c"]);
+    }
 }
