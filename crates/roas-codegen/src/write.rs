@@ -110,7 +110,8 @@ pub struct WriteReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CheckReport {
-    /// On disk, but different from what would be generated.
+    /// On disk, but different from what would be generated, or stored
+    /// under another spelling of its name.
     pub changed: Vec<PathBuf>,
     /// Would be generated, but absent.
     pub missing: Vec<PathBuf>,
@@ -1018,26 +1019,35 @@ fn misspelled(out_dir: &Path, key: &str) -> Option<String> {
 /// writing. They hold generated content only, and with the lock held no
 /// other run can be writing them. Only directories this run writes into
 /// are looked at, built from planned paths that already passed every
-/// check, and only regular files named the way [`write_atomic`] names them.
+/// check, and only regular files named the way [`write_atomic`] names the
+/// temporaries of this run's own files.
 fn remove_leftover_temps(
     out_dir: &Path,
     planned: &BTreeMap<String, &str>,
+    manifest_file: &str,
 ) -> Result<(), WriteError> {
-    let mut dirs = BTreeSet::from([out_dir.to_path_buf()]);
+    // Only temporaries of the files this run writes: a run rooted in a
+    // subdirectory holds its own lock, and its temporaries are its own.
+    let mut prefixes: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    prefixes
+        .entry(out_dir.to_path_buf())
+        .or_default()
+        .insert(tmp_prefix(manifest_file));
     for key in planned.keys() {
-        if let Some((parent, _)) = key.rsplit_once('/') {
-            dirs.insert(out_dir.join(parent));
-        }
+        let (dir, name) = match key.rsplit_once('/') {
+            Some((parent, name)) => (out_dir.join(parent), name),
+            None => (out_dir.to_path_buf(), key.as_str()),
+        };
+        prefixes.entry(dir).or_default().insert(tmp_prefix(name));
     }
-    for dir in dirs {
+    for (dir, prefixes) in prefixes {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries {
             let entry = entry.map_err(io(&dir))?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.')
-                && name.contains(TMP_MARKER)
+            if prefixes.iter().any(|p| name.starts_with(p.as_str()))
                 && entry.file_type().is_ok_and(|t| t.is_file())
             {
                 let path = entry.path();
@@ -1046,6 +1056,15 @@ fn remove_leftover_temps(
         }
     }
     Ok(())
+}
+
+/// The start of every temporary name for a file called `name`: a short
+/// hash, not the name itself, so a name near the filesystem's limit still
+/// has room for the suffix, and cleanup can tell whose temporary it is.
+fn tmp_prefix(name: &str) -> String {
+    let digest = hash(name.as_bytes());
+    let digest = digest.trim_start_matches("fnv1a64:");
+    format!(".{digest}{TMP_MARKER}")
 }
 
 /// Write `content` to `path` through a temporary sibling and a rename.
@@ -1068,7 +1087,8 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
             .unwrap_or(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = path.with_file_name(format!(
-            ".{name}{TMP_MARKER}{}-{nanos:x}-{n}",
+            "{}{}-{nanos:x}-{n}",
+            tmp_prefix(&name),
             std::process::id()
         ));
         match fs::OpenOptions::new()
@@ -1143,7 +1163,7 @@ pub fn write(
     )?;
     // Only now: every planned path is known to stay inside the output
     // directory and to reach it through no link.
-    remove_leftover_temps(out_dir, &planned)?;
+    remove_leftover_temps(out_dir, &planned, &manifest_file)?;
 
     let hashes: BTreeMap<String, String> = planned
         .iter()
@@ -1867,7 +1887,7 @@ mod tests {
         for name in ["types.rs", ".roas-codegen-api-rust.json"] {
             std::os::unix::fs::symlink(
                 &victim,
-                out.join(format!(".{name}{TMP_MARKER}{}", std::process::id())),
+                out.join(format!("{}{}", tmp_prefix(name), std::process::id())),
             )
             .unwrap();
         }
@@ -2723,8 +2743,8 @@ mod tests {
     fn temporary_files_left_by_a_killed_run_are_removed() {
         let dir = TempDir::new("leftover-tmp");
         fs::create_dir_all(dir.0.join("sub")).unwrap();
-        let top = dir.0.join(format!(".a.rs{TMP_MARKER}1-2-3"));
-        let nested = dir.0.join(format!("sub/.b.rs{TMP_MARKER}1-2-3"));
+        let top = dir.0.join(format!("{}1-2-3", tmp_prefix("a.rs")));
+        let nested = dir.0.join(format!("sub/{}1-2-3", tmp_prefix("b.rs")));
         fs::write(&top, "partial").unwrap();
         fs::write(&nested, "partial").unwrap();
         fs::write(dir.0.join("sub/keep.txt"), "mine").unwrap();
@@ -2766,7 +2786,7 @@ mod tests {
         let outside = root.0.join("x");
         fs::create_dir_all(&out).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        let victim = outside.join(format!(".other.rs{TMP_MARKER}1-2-3"));
+        let victim = outside.join(format!("{}1-2-3", tmp_prefix("a.rs")));
         fs::write(&victim, "not ours").unwrap();
         assert!(matches!(
             write(
@@ -2993,5 +3013,35 @@ mod tests {
                 .is_clean()
         );
         assert_eq!(fs::read_to_string(dir.0.join("models")).unwrap(), "m");
+    }
+
+    #[test]
+    fn another_runs_temporaries_in_a_nested_directory_are_left_alone() {
+        let dir = TempDir::new("nested-temps");
+        fs::create_dir_all(dir.0.join("nested")).unwrap();
+        let theirs = dir
+            .0
+            .join(format!("nested/{}1-2-3", tmp_prefix("other.rs")));
+        fs::write(&theirs, "in flight").unwrap();
+        write(
+            &generation(&[("nested/big.rs", "b")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(theirs.exists());
+    }
+
+    #[test]
+    fn a_name_near_the_length_limit_can_be_written() {
+        let dir = TempDir::new("long-name");
+        let name = format!("{}.rs", "a".repeat(250));
+        write(
+            &generation(&[(name.as_str(), "x")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(dir.0.join(&name)).unwrap(), "x");
     }
 }
