@@ -117,6 +117,11 @@ fn main() {
     );
     must_fail::<Holder>(r#"{}"#, "needed is required");
     assert_eq!(round_trip::<Dash>(r#"{"-":"x"}"#), r#"{"-":"x"}"#);
+    assert_eq!(
+        round_trip::<Wrapper>(r#"{"owner":{"name":null,"x":1}}"#),
+        r#"{"owner":{"name":null,"x":1}}"#
+    );
+    must_fail::<Wrapper>(r#"{"zz":1}"#, "Wrapper is closed");
     println!("generated code behaves");
 }
 "##;
@@ -168,6 +173,11 @@ fn description() -> serde_json::Value {
             "needed": {"$ref": "#/components/schemas/Anything"},
             "loose": {"$ref": "#/components/schemas/Loose"}
         }
+    });
+    // A closed struct holding an open one: the open one keeps its extras.
+    raw["components"]["schemas"]["Wrapper"] = serde_json::json!({
+        "type": "object", "additionalProperties": false,
+        "properties": {"owner": {"$ref": "#/components/schemas/Owner"}}
     });
     // A member named `-`, which a bare `json:"-"` tag would skip.
     raw["components"]["schemas"]["Dash"] = serde_json::json!({
@@ -386,6 +396,8 @@ func main() {
 	check(roundTrip[api.Holder](`{"needed":{"a":[1]}}`), `{"needed":{"a":[1]}}`)
 	mustFail[api.Holder](`{}`, "needed is required")
 	check(roundTrip[api.Dash](`{"-":"x"}`), `{"-":"x"}`)
+	check(roundTrip[api.Wrapper](`{"owner":{"name":null,"x":1}}`), `{"owner":{"name":null,"x":1}}`)
+	mustFail[api.Wrapper](`{"zz":1}`, "Wrapper is closed")
 	mustFail[api.Dash](`{}`, "- is required")
 	fmt.Println("generated code behaves")
 }

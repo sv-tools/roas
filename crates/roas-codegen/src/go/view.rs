@@ -99,6 +99,9 @@ pub(crate) struct TypeView {
     pub non_null: String,
     /// A struct refusing members it does not name.
     pub denied: bool,
+    /// A closed struct's member names, as a Go `[]string` expression;
+    /// `nil` for an open one.
+    pub known: String,
     /// The raw constructor of a composed holder.
     pub from_raw: String,
 }
@@ -488,6 +491,7 @@ impl Builder<'_> {
             required: "nil".to_owned(),
             non_null: "nil".to_owned(),
             denied: false,
+            known: "nil".to_owned(),
             from_raw: String::new(),
         };
         if !self.fill_kind(def, &mut view)? {
@@ -579,7 +583,13 @@ impl Builder<'_> {
                 view.required = string_slice(&required);
                 view.non_null = string_slice(&non_null);
                 match &s.additional {
-                    Additional::Denied => view.denied = true,
+                    Additional::Denied => {
+                        view.denied = true;
+                        let names: Vec<String> =
+                            s.fields.iter().map(|f| quote(&f.raw_name)).collect();
+                        // Empty but not nil: no member is known.
+                        view.known = format!("[]string{{{}}}", names.join(", "));
+                    }
                     Additional::CatchAll(ty) => {
                         let inner = self.spell(unboxed(ty))?;
                         view.fields.push(FieldView {

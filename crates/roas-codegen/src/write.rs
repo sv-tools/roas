@@ -817,41 +817,33 @@ fn case_variants(out_dir: &Path, rel: &str) -> Vec<String> {
 }
 
 /// Go files in one directory are one package, so two Go generation targets
-/// there would declare the same helpers and fail to compile: another Go
-/// manifest in a directory this generation puts a `.go` file in is refused.
+/// with files in one directory would declare the same helpers and fail to
+/// compile: a directory this generation puts a `.go` file in must hold no
+/// `.go` file another Go target's manifest owns, wherever that manifest is.
 fn check_go_package(
     out_dir: &Path,
     manifest_file: &str,
     planned: &BTreeMap<String, &str>,
 ) -> Result<(), WriteError> {
-    let dirs: BTreeSet<&str> = planned
+    fn dir_of(key: &str) -> String {
+        key.rsplit_once('/')
+            .map_or(String::new(), |(dir, _)| dir.to_ascii_lowercase())
+    }
+    let ours: BTreeSet<String> = planned
         .keys()
-        .filter(|key| key.ends_with(".go"))
-        .map(|key| key.rsplit_once('/').map_or("", |(dir, _)| dir))
+        .filter(|key| key.to_ascii_lowercase().ends_with(".go"))
+        .map(|key| dir_of(key))
         .collect();
+    if ours.is_empty() {
+        return Ok(());
+    }
     let suffix = format!("-{}{MANIFEST_SUFFIX}", language(Target::Go));
-    for dir in dirs {
-        let path = if dir.is_empty() {
-            out_dir.to_path_buf()
-        } else {
-            out_dir.join(dir)
-        };
-        let entries = match fs::read_dir(&path) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => return Err(WriteError::Io { path, source }),
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let lower = name.to_ascii_lowercase();
-            if is_manifest_name(&lower)
-                && lower.ends_with(&suffix)
-                && !(dir.is_empty() && lower == manifest_file.to_ascii_lowercase())
-            {
-                return Err(WriteError::SharedGoPackage {
-                    manifest: Path::new(dir).join(name),
-                });
-            }
+    for (path, manifest) in other_owners(out_dir, manifest_file, planned.keys())? {
+        let go_manifest = manifest
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().ends_with(&suffix));
+        if go_manifest && path.ends_with(".go") && ours.contains(&dir_of(&path)) {
+            return Err(WriteError::SharedGoPackage { manifest });
         }
     }
     Ok(())
@@ -3121,12 +3113,28 @@ mod tests {
             );
         }
         assert!(!dir.0.join("billing.go").exists());
-        // In a directory of its own, it is a package of its own.
-        let nested = Generation::new(
-            Target::Go,
-            vec![GeneratedFile::new("billing/billing.go", "package billing")],
+        // In a directory of its own, it is a package of its own, whatever
+        // directory its manifest is in, and the first is still fine.
+        let nested =
+            |name: &str| Generation::new(Target::Go, vec![GeneratedFile::new(name, "package x")]);
+        write(
+            &nested("billing/billing.go"),
+            &dir.0,
+            &WriteOptions::new("billing"),
+        )
+        .unwrap();
+        write(&go("pets.go"), &dir.0, &WriteOptions::new("pets")).unwrap();
+        check(&go("pets.go"), &dir.0, &WriteOptions::new("pets")).unwrap();
+        // Two manifests side by side, files together in a subdirectory.
+        let result = write(
+            &nested("billing/more.go"),
+            &dir.0,
+            &WriteOptions::new("more"),
         );
-        write(&nested, &dir.0, &WriteOptions::new("billing")).unwrap();
+        assert!(
+            matches!(&result, Err(WriteError::SharedGoPackage { manifest }) if manifest == Path::new(".roas-codegen-billing-go.json")),
+            "{result:?}"
+        );
     }
 
     #[test]

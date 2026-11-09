@@ -96,8 +96,7 @@ fn the_worked_example_generates_as_the_plan_shows() {
         "Name string `json:\"name\"`",
         "Tag Nullable[string] `json:\"tag,omitzero\"`",
         "Status *PetStatus `json:\"status,omitzero\"`",
-        "checkMembers(raw, \"Pet\", []string{\"name\"}, []string{\"name\", \"status\"})",
-        "json.RejectUnknownMembers(true)",
+        "checkMembers(raw, \"Pet\", []string{\"name\"}, []string{\"name\", \"status\"}, []string{\"name\", \"status\", \"tag\"})",
         "type PetStatus string",
         "PetStatusAvailable PetStatus = \"available\"",
         "case PetStatusAvailable, PetStatusSold:",
@@ -339,7 +338,7 @@ fn every_kind_renders_and_survives_gofmt() {
     }
     // A null is a value for `{}` and `type: null`, as in Rust.
     assert!(
-        code.contains("checkMembers(raw, \"Node\", nil, []string{\"next\"})"),
+        code.contains("checkMembers(raw, \"Node\", nil, []string{\"next\"}, nil)"),
         "{code}"
     );
 }

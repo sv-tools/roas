@@ -10,11 +10,11 @@ func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 	if err != nil {
 		return err
 	}
-	if err := checkMembers(raw, {{ t.name_literal }}, {{ t.required }}, {{ t.non_null }}); err != nil {
+	if err := checkMembers(raw, {{ t.name_literal }}, {{ t.required }}, {{ t.non_null }}, {{ t.known }}); err != nil {
 		return err
 	}
 	type plain {{ t.name }}
 	*v = {{ t.name }}{}
-	return json.Unmarshal(raw, (*plain)(v), decodeOptions{% if t.denied %}, json.RejectUnknownMembers(true){% endif %})
+	return json.Unmarshal(raw, (*plain)(v), decodeOptions)
 }
 {% block trailing %}{% endblock %}

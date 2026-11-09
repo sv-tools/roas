@@ -13,9 +13,11 @@ func refuseNull(d *jsontext.Decoder) error {
 	return errors.ErrUnsupported
 }
 
-// checkMembers refuses anything but an object, a missing required member
-// and a null member that must not be null.
-func checkMembers(raw jsontext.Value, typ string, required, nonNull []string) error {
+// checkMembers refuses anything but an object, a missing required member,
+// a null member that must not be null and, unless known is nil, a member
+// known does not list. It checks this object only: a value nested in it
+// keeps its own type's rules.
+func checkMembers(raw jsontext.Value, typ string, required, nonNull, known []string) error {
 	if raw.Kind() != '{' {
 		return fmt.Errorf("%s: want a JSON object, got %s", typ, raw)
 	}
@@ -31,6 +33,17 @@ func checkMembers(raw jsontext.Value, typ string, required, nonNull []string) er
 	for _, name := range nonNull {
 		if member, ok := members[name]; ok && member.Kind() == 'n' {
 			return fmt.Errorf("%s: member %q must not be null", typ, name)
+		}
+	}
+	if known != nil {
+	members:
+		for name := range members {
+			for _, k := range known {
+				if name == k {
+					continue members
+				}
+			}
+			return fmt.Errorf("%s: unknown member %q", typ, name)
 		}
 	}
 	return nil
