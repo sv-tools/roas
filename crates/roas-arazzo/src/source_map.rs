@@ -301,10 +301,12 @@ struct Key {
     start: usize,
     end: usize,
     /// Where the member is written in its mapping: the key, or, for an
-    /// alias key or a member merged in, the `*name` that brings it there,
-    /// while `start` is at the anchor.
+    /// alias key, a member merged in or one of a replayed alias, the
+    /// `*name` that brings it there, while `start` is at the anchor.
     #[cfg_attr(not(feature = "editor"), allow(dead_code))]
     written: usize,
+    #[cfg_attr(not(feature = "editor"), allow(dead_code))]
+    written_end: usize,
 }
 
 impl fmt::Debug for SourceMap {
@@ -345,24 +347,14 @@ impl SourceMap {
     }
 
     /// Where the member name `path` ends in is written in its object: the
-    /// name, or, for an alias key or a member merged in with `<<`, the
-    /// `*name` that brings it there rather than the anchor
-    /// [`SourceMap::locate_key`] gives.
+    /// name, or, for an alias key, a member merged in with `<<` or one of
+    /// a replayed alias, the `*name` that brings it there rather than the
+    /// anchor [`SourceMap::locate_key`] gives.
     #[cfg(feature = "editor")]
     pub(crate) fn locate_written_key(&self, path: &str) -> Option<SourceRange> {
         let (_, key) = self.resolve(path)?;
         let key = key?;
-        if key.written == key.start {
-            return Some(self.range(key.start, key.end));
-        }
-        // `*name` ends where an alias name may not go on.
-        let alias = self.text.get(key.written..)?;
-        let length = alias
-            .char_indices()
-            .skip(1)
-            .find(|&(_, c)| c.is_whitespace() || ",[]{}".contains(c))
-            .map_or(alias.len(), |(at, _)| at);
-        Some(self.range(key.written, key.written + length))
+        Some(self.range(key.written, key.written_end))
     }
 
     /// `offset` bytes into the decoded string at `path`, in the original
@@ -597,6 +589,7 @@ mod tests {
             start,
             end: start + name.len(),
             written: start,
+            written_end: start + name.len(),
         }
     }
 

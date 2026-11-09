@@ -68,7 +68,11 @@ pub struct Diagnostic {
     pub path: Option<String>,
     /// Where it is in the text, when that is known: the field's value, or
     /// its name for a finding about the name, or the nearest enclosing
-    /// object for a field that is missing.
+    /// object for a field that is missing. A name an alias brings into the
+    /// object (an alias key, a `<<` merge, a replayed `*name`) is placed at
+    /// that `*name`, where the object can be edited; the anchor's name is
+    /// what [`SourceMap::locate_key`] gives, as `roas arazzo validate`
+    /// reports it.
     pub range: Option<SourceRange>,
     /// What is wrong.
     pub message: String,
@@ -1480,6 +1484,7 @@ workflows:
         for (anchor, written, at) in [
             ("x-a: &u bogus\n", "  *u : 1\n", (5, 3, 5)),
             ("x-e: &e {bogus: 1}\n", "  <<: *e\n", (5, 7, 9)),
+            ("x-o: &o {bogus: 1}\n", "  <<: [*o]\n", (5, 8, 10)),
         ] {
             let text = VALID.replace(
                 "info:\n  title: Pets\n",
@@ -1498,6 +1503,24 @@ workflows:
                 "{written}"
             );
         }
+    }
+
+    #[cfg(feature = "v1_1")]
+    #[test]
+    fn an_unknown_member_of_a_replayed_object_is_located_at_the_alias() {
+        let text = VALID.replace("info:\n  title: Pets\n  version: '1'\n", "info: *o\n");
+        let text = format!("x-o: &o {{title: Pets, version: '1', bogus: 1}}\n{text}");
+        let document = read(&text);
+        let warning = document
+            .diagnostics()
+            .iter()
+            .find(|d| d.path.as_deref() == Some("#.info.bogus"))
+            .unwrap_or_else(|| panic!("{:?}", document.diagnostics()));
+        let range = warning.range.unwrap();
+        assert_eq!(
+            (range.start.line, range.start.column, range.end.column),
+            (3, 7, 9)
+        );
     }
 
     #[test]

@@ -166,19 +166,22 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
             // serde-saphyr lists a map's own members before merged ones;
             // measure them in the order they are written, so a definition
             // is seen before any replay of it, then keep serde's order.
-            let mut order: Vec<(usize, usize, Member)> = members
+            let mut order: Vec<((usize, usize), usize, Member)> = members
                 .into_iter()
                 .enumerate()
                 .map(|(index, (key, value))| {
-                    let written = if alias_end(text, &key).is_some() {
-                        key.referenced.span().byte_offset().unwrap_or(0) as usize
-                    } else {
-                        span(text, &key).0
+                    // The key, or the `*name` that brings it here.
+                    let written = match alias_end(text, &key) {
+                        Some(end) => (
+                            key.referenced.span().byte_offset().unwrap_or(0) as usize,
+                            end,
+                        ),
+                        None => span(text, &key),
                     };
                     (written, index, (key, value))
                 })
                 .collect();
-            order.sort_by_key(|&(written, index, _)| (written, index));
+            order.sort_by_key(|&((written, _), index, _)| (written, index));
             let mut out: Vec<(usize, (Key, Node))> = order
                 .into_iter()
                 .map(|(written, index, (key, value))| {
@@ -240,7 +243,8 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
                                 name,
                                 start: key_start,
                                 end: key_end,
-                                written,
+                                written: written.0,
+                                written_end: written.1,
                             },
                             value,
                         )
