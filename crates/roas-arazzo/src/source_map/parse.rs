@@ -13,7 +13,9 @@ impl SourceMap {
     /// The map is a sidecar: it locates fields of the document that was
     /// parsed separately, and does not itself validate or authorize
     /// anything. Text the typed parse accepts but this rejects (or the
-    /// reverse) simply has no map.
+    /// reverse) simply has no map — for instance a member repeated
+    /// anywhere, which `serde_json` takes last-wins and this refuses, or
+    /// nesting deeper than 32 levels.
     ///
     /// ```
     /// use roas_arazzo::source_map::SourceMap;
@@ -122,7 +124,7 @@ fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
                         _ => text[key_start..key_end].to_owned(),
                     };
                     let (value, value_end) = node(text, value);
-                    end = end.max(value_end);
+                    end = end.max(key_end).max(value_end);
                     (
                         Key {
                             name,
@@ -148,27 +150,74 @@ fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
         Raw::Other => Kind::Scalar(None),
     };
     if !matches!(kind, Kind::Scalar(_)) {
-        end = closing(text, start, end);
+        end = match text.as_bytes().get(start) {
+            Some(b'[' | b'{') => closing(text, start, end),
+            _ => block_end(text, start, end),
+        };
     }
     let occurrence = if alias { used.min(text.len()) } else { end };
     (Node { start, end, kind }, occurrence)
 }
 
+/// A block collection has no delimiter, and what ends it may be nothing
+/// this sees as a member — the `:` of an empty last value, a `<<` merge.
+/// It runs on through the rest of the line its last item ends on, then
+/// through every line indented at least as far as it starts (a sequence:
+/// sibling lines must be `-` items), skipping blank and comment lines.
+fn block_end(text: &str, start: usize, end: usize) -> usize {
+    let column = start - text[..start].rfind('\n').map_or(0, |at| at + 1);
+    let sequence = text[start..].starts_with('-');
+    let content_end = |line: usize, body: &str| {
+        let comment = body
+            .char_indices()
+            .find(|&(at, c)| c == '#' && (at == 0 || body[..at].ends_with([' ', '\t'])))
+            .map_or(body.len(), |(at, _)| at);
+        line + body[..comment].trim_end().len()
+    };
+    let line_of = |at: usize| {
+        text[at..]
+            .find('\n')
+            .map_or(text.len(), |newline| at + newline)
+    };
+    let mut last = end;
+    let rest = &text[end..line_of(end)];
+    last = last.max(content_end(end, rest.trim_end_matches('\r')));
+    let mut line = line_of(end) + 1;
+    while line < text.len() {
+        let stop = line_of(line);
+        let body = text[line..stop].trim_end_matches('\r');
+        let indent = body.len() - body.trim_start_matches(' ').len();
+        let content = &body[indent..];
+        if !(content.is_empty() || content.starts_with('#')) {
+            let item = content == "-" || content.starts_with("- ");
+            if indent < column
+                || (indent == column && sequence && !item)
+                || (column == 0 && (content.starts_with("---") || content.starts_with("...")))
+            {
+                break;
+            }
+            last = content_end(line, body);
+        }
+        line = stop + 1;
+    }
+    last.max(end)
+}
+
 /// A flow collection's span covers only its opening `[` / `{`, and its
-/// last item ends before the closing one: step over separators, white
-/// space and comments to include the delimiter. Block collections, which
-/// have none, keep the end of their last item.
+/// last item ends before the closing one: step over separators (an empty
+/// value's `:`, an explicit `?`), white space and comments to include
+/// the delimiter.
 fn closing(text: &str, start: usize, end: usize) -> usize {
     let close = match text.as_bytes().get(start) {
         Some(b'[') => b']',
         Some(b'{') => b'}',
-        _ => return end,
+        _ => unreachable!("only flow collections are closed"),
     };
     let bytes = text.as_bytes();
     let mut at = end.max(start + 1);
     while let Some(&byte) = bytes.get(at) {
         match byte {
-            b' ' | b'\t' | b'\n' | b'\r' | b',' => at += 1,
+            b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'?' => at += 1,
             b'#' => at += text[at..].find(['\n', '\r']).unwrap_or(text.len() - at),
             byte if byte == close => return at + 1,
             _ => break,
@@ -396,6 +445,19 @@ workflows:
         assert_eq!(end("a: &one abc\nb: [*one]\n", "#.b"), 21);
         assert_eq!(end("a: &one abc\nb: {k: *one}\n", "#.b"), 24);
         assert_eq!(end("a: &one abc\nb:\n  - *one\nc: 1\n", "#.b"), 23);
+        // An empty last value ends after its `:`.
+        assert_eq!(end("k: {a: }\n", "#.k"), 8);
+        assert_eq!(end("k: {a: 1, b: }\n", "#.k"), 14);
+        assert_eq!(end("k: [a: ]\n", "#.k"), 8);
+        assert_eq!(end("k: {a: , }\n", "#.k"), 10);
+        assert_eq!(end("k:\n  a: 1\n  b:\nc: 1\n", "#.k"), 14);
+        // A map ending in a merge ends after it.
+        assert_eq!(end("base: &b\n  x: 1\nd:\n  x: 2\n  <<: *b\n", "#.d"), 34);
+        // Comments and blank lines after the last item are not part of it;
+        // a sibling key at the sequence's own column ends it.
+        assert_eq!(end("k:\n- 1 # one\n\n# note\nz: 2\n", "#.k"), 6);
+        assert_eq!(end("- a: 1\n  b: 2\n- c\n", "#[0]"), 13);
+        assert_eq!(end("a:\n  - x\n...\n", "#"), 8);
         // Block collections have no delimiter: they end at their last item.
         assert_eq!(end("a:\n  - 1\n  - 2\nb: 3\n", "#.a"), 14);
     }
@@ -432,6 +494,24 @@ workflows:
                 "{text:?}"
             );
         }
+        // An explicit indentation indicator is a header too.
+        let map = SourceMap::parse("a: |2-\nnext: 1\n").unwrap();
+        assert_eq!(map.locate("#.a").unwrap().start.offset, 6);
+        // Kept trailing breaks: the end of the value is after them.
+        let map = SourceMap::parse("a: |+\n  one\n\n\nb: 1\n").unwrap();
+        assert_eq!(map.locate_in("#.a", 6).unwrap().offset, 14);
+        assert_eq!(map.locate_in("#.a", 3).unwrap().offset, 11);
+        let map = SourceMap::parse("a: |+\r\n  one\r\n\r\nb: 1\r\n").unwrap();
+        assert_eq!(map.locate_in("#.a", 5).unwrap().offset, 16);
+        // Trailing spaces at the end of the text are content, mapped forward.
+        let map = SourceMap::parse("k: |\n    -   ").unwrap();
+        let ends: Vec<_> = (0..=5)
+            .map(|at| map.locate_in("#.k", at).map(|p| p.offset))
+            .collect();
+        assert_eq!(
+            ends,
+            [Some(9), Some(10), Some(11), Some(12), Some(13), Some(13)]
+        );
         // Blank lines only: their breaks are not in the text, so no offset.
         let map = SourceMap::parse("k: |+\n\n\nz: 1\n").unwrap();
         assert_eq!(map.locate("#.k").unwrap().start.line, 1);

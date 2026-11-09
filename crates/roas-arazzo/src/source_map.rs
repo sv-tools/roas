@@ -219,8 +219,8 @@ impl SourceMap {
 
 /// `#.a.b[0][1].c` → `a`, `b`, `0`, `1`, `c`. A leading `#` is optional;
 /// `None` when a bracket is not a closed run of digits.
-fn tokens(path: &str) -> Option<Vec<Token<'_>>> {
-    let mut path = path.strip_prefix('#').unwrap_or(path);
+fn tokens(original: &str) -> Option<Vec<Token<'_>>> {
+    let mut path = original.strip_prefix('#').unwrap_or(original);
     let mut tokens = Vec::new();
     match path.strip_prefix('.') {
         // `#.` is the member named `""`, not the document.
@@ -229,11 +229,16 @@ fn tokens(path: &str) -> Option<Vec<Token<'_>>> {
         None if path.is_empty() => return Some(tokens),
         None => {}
     }
-    for segment in path.split('.') {
+    let dotted = original
+        .strip_prefix('#')
+        .unwrap_or(original)
+        .starts_with('.');
+    for (position, segment) in path.split('.').enumerate() {
         let (name, mut rest) = segment.split_at(segment.find('[').unwrap_or(segment.len()));
-        // An empty name is kept: `foo..x` is member `foo.` then `x`, never
-        // a sibling `foo`. Only `[n]` straight after a name has none.
-        if !name.is_empty() || rest.is_empty() {
+        // An empty name is kept: `foo..x` is member `foo.` then `x`, and
+        // `a.[0]` is member `a.` then index `0` — never a sibling. Only a
+        // path that opens on `[n]` (`#[0]`, a root array) has none.
+        if !name.is_empty() || rest.is_empty() || position > 0 || dotted {
             tokens.push(Token::Key(name));
         }
         while let Some(tail) = rest.strip_prefix('[') {
@@ -360,6 +365,15 @@ mod tests {
         assert_eq!(tokens("#"), Some(vec![]));
         assert_eq!(tokens(""), Some(vec![]));
         assert_eq!(tokens("#."), Some(vec![Token::Key("")]));
+        assert_eq!(tokens("#[0]"), Some(vec![Token::Index("0")]));
+        assert_eq!(
+            tokens("#.[0]"),
+            Some(vec![Token::Key(""), Token::Index("0")])
+        );
+        assert_eq!(
+            tokens("#.a.[0]"),
+            Some(vec![Token::Key("a"), Token::Key(""), Token::Index("0")])
+        );
         assert_eq!(
             tokens("#.workflows[0].steps[12][3].type.version"),
             Some(vec![

@@ -273,7 +273,9 @@ enum Block {
 /// it. `None` for anything else, including an explicit indentation
 /// indicator, whose indentation this does not reconstruct.
 fn block_header(text: &str, start: usize) -> Option<Block> {
-    header(text, start).map(|(style, _)| style)
+    header(text, start)
+        .filter(|&(_, _, explicit)| !explicit)
+        .map(|(style, _, _)| style)
 }
 
 /// Where an empty block scalar is written: just after its header.
@@ -281,11 +283,12 @@ fn block_header(text: &str, start: usize) -> Option<Block> {
 /// the token after it, which belongs to another field.
 #[cfg_attr(not(feature = "source-map"), allow(dead_code))]
 pub(super) fn empty_block(text: &str, at: usize) -> Option<usize> {
-    header(text, at).map(|(_, end)| end)
+    header(text, at).map(|(_, end, _)| end)
 }
 
-/// The block style announced before `start`, and where its indicator ends.
-fn header(text: &str, start: usize) -> Option<(Block, usize)> {
+/// The block style announced before `start`, where its indicator ends,
+/// and whether it sets an explicit indentation.
+fn header(text: &str, start: usize) -> Option<(Block, usize, bool)> {
     let line = line_start(text, start);
     if !text[line..start].bytes().all(|byte| byte == b' ') {
         return None;
@@ -303,7 +306,7 @@ fn header(text: &str, start: usize) -> Option<(Block, usize)> {
     // A comment starts at a `#` after white space.
     let comment = content
         .char_indices()
-        .find(|&(at, c)| c == '#' && content[..at].ends_with([' ', '\t']))
+        .find(|&(at, c)| c == '#' && (at == 0 || content[..at].ends_with([' ', '\t'])))
         .map_or(content.len(), |(at, _)| at);
     let head = content[..comment].trim_end();
     let indicator = &head[head.rfind([' ', '\t']).map_or(0, |at| at + 1)..];
@@ -313,9 +316,14 @@ fn header(text: &str, start: usize) -> Option<(Block, usize)> {
         '>' => Block::Folded,
         _ => return None,
     };
+    // Chomping and indentation indicators, in either order.
     chars
-        .all(|c| c == '-' || c == '+')
-        .then_some((style, from + head.len()))
+        .all(|c| c == '-' || c == '+' || ('1'..='9').contains(&c))
+        .then_some((
+            style,
+            from + head.len(),
+            indicator.bytes().any(|byte| byte.is_ascii_digit()),
+        ))
 }
 
 fn block(raw: &str, start: usize, indent: usize, style: Block, out: &mut Decoded) {
@@ -368,6 +376,17 @@ fn block(raw: &str, start: usize, indent: usize, style: Block, out: &mut Decoded
                 index += 1;
             }
         }
+    }
+    // The value ends after the last thing it decoded — a kept break
+    // (`|+`), trailing spaces of the last line — not at trimmed content.
+    if let Some(&last) = out.raw.last() {
+        let rest = &raw[last - start..];
+        let width = if rest.starts_with("\r\n") {
+            2
+        } else {
+            rest.chars().next().map_or(0, char::len_utf8)
+        };
+        out.end = out.end.max(last + width);
     }
 }
 
@@ -528,6 +547,8 @@ mod tests {
             block_header(text, text.rfind('x').unwrap()),
             Some(Block::Literal)
         );
+        let text = "k:\n# |\n  x\n";
+        assert_eq!(block_header(text, text.rfind('x').unwrap()), None);
         let text = "k: a#|\n  x\n";
         assert_eq!(block_header(text, text.rfind('x').unwrap()), None);
         // An empty block is written at its header, not at what follows.
