@@ -62,17 +62,6 @@ fn find<'a>(diagnostics: &'a [PreparationDiagnostic], path: &str) -> &'a Prepara
         .unwrap_or_else(|| panic!("no finding at {path}: {diagnostics:#?}"))
 }
 
-/// `value[offset..]` is spelled at `position` in the text: as itself, or
-/// as the escape standing for it.
-fn spelled_at(value: &str, offset: usize, position: usize) -> bool {
-    let raw = &TEXT[position..];
-    match value[offset..].chars().next() {
-        Some(c) => raw.starts_with(c) || raw.starts_with('\\') || raw.starts_with('\n'),
-        // The end of a value is where its closing quote or line break is.
-        None => raw.starts_with(['"', '\'', '\n']),
-    }
-}
-
 #[test]
 fn findings_carry_lines_and_columns_through_escapes_and_components() {
     let found = diagnostics(TEXT, &options().source_map(SourceMap::parse(TEXT).unwrap()));
@@ -88,31 +77,32 @@ fn findings_carry_lines_and_columns_through_escapes_and_components() {
         "{title}"
     );
 
-    for (path, value, line) in [
-        (
-            "#.workflows[0].steps[0].parameters[0].value",
-            "café \"x\" {$statusCode.extra}",
-            17,
-        ),
+    // (path, the decoded byte the finding points at, where it is written)
+    for (path, offset, line, column) in [
+        // `.extra`, after the `\u00e9` and `\"` escapes.
+        ("#.workflows[0].steps[0].parameters[0].value", 22, 17, 49),
+        // The end of the value: its closing quote.
         (
             "#.workflows[0].steps[0].successCriteria[0].condition",
-            "$statusCode == 'café' && (",
+            27,
             19,
+            56,
         ),
+        // `$steps`, on the second line of a folded block.
         (
             "#.components.successActions.shared.criteria[0].condition",
-            "$statusCode == 200 && $steps.typo.outputs.x",
+            22,
             30,
+            20,
         ),
     ] {
         let finding = find(&found, path);
-        let offset = finding.offset.expect("a string finding has an offset");
-        let position = finding.position.expect("and a position");
-        assert_eq!(position.line, line, "{finding}");
-        assert!(
-            spelled_at(value, offset, position.offset),
-            "{finding}: byte {offset} of {value:?} vs {:?}",
-            &TEXT[position.offset..]
+        assert_eq!(finding.offset, Some(offset), "{finding}");
+        let position = finding.position.expect("a position");
+        assert_eq!(
+            (position.line, position.column),
+            (line, column),
+            "{finding}"
         );
         assert!(
             finding.to_string().contains(&format!("at {position}")),
@@ -163,4 +153,21 @@ fn an_offset_the_map_cannot_place_falls_back_to_the_field() {
         "{shown}"
     );
     assert!(shown.contains(" of the value"), "{shown}");
+}
+
+#[test]
+fn a_path_two_members_could_spell_is_not_located() {
+    // `payload.a.b` is both `a` → `b` and the member `a.b`.
+    let text = TEXT.replace(
+        "        operationId: check\n",
+        "        operationId: check\n        requestBody:\n          payload:\n            a:\n              b: \"plain text here\"\n            a.b: \"x {$inputs.} y\"\n",
+    );
+    assert_ne!(text, TEXT);
+    let found = diagnostics(
+        &text,
+        &options().source_map(SourceMap::parse(text.clone()).unwrap()),
+    );
+    let payload = find(&found, "#.workflows[0].steps[0].requestBody.payload.a.b");
+    assert_eq!((payload.span, payload.position), (None, None), "{payload}");
+    assert!(payload.to_string().contains(" at byte "), "{payload}");
 }

@@ -37,6 +37,9 @@ impl SourceMap {
     }
 }
 
+/// Nesting past this many levels is refused rather than mapped.
+const MAX_DEPTH: usize = 32;
+
 fn options() -> serde_saphyr::Options {
     serde_saphyr::options! {
         // Same options in every roas crate; keep the copies in step
@@ -51,6 +54,11 @@ fn options() -> serde_saphyr::Options {
         // how large one anchored node can be. `!!binary` is
         // read as its text, as before, not decoded.
         budget: serde_saphyr::budget! {
+            // Not the 64 of the other copies: this visitor nests
+            // `Spanned` values, and a debug build overflows a 2 MiB
+            // thread stack between 40 and 50 levels. Deeper text gets no
+            // map (`SourceMapError`), never an abort.
+            max_depth: MAX_DEPTH,
             max_nodes: 10_000_000,
             max_events: 25_000_000,
             max_aliases: 1_000_000,
@@ -126,7 +134,33 @@ fn node(text: &str, spanned: Spanned<Raw>) -> Node {
         Raw::String(value) => Kind::Scalar(Some(value)),
         Raw::Other => Kind::Scalar(None),
     };
+    if !matches!(kind, Kind::Scalar(_)) {
+        end = closing(text, start, end);
+    }
     Node { start, end, kind }
+}
+
+/// A flow collection's span covers only its opening `[` / `{`, and its
+/// last item ends before the closing one: step over separators, white
+/// space and comments to include the delimiter. Block collections, which
+/// have none, keep the end of their last item.
+fn closing(text: &str, start: usize, end: usize) -> usize {
+    let close = match text.as_bytes().get(start) {
+        Some(b'[') => b']',
+        Some(b'{') => b'}',
+        _ => return end,
+    };
+    let bytes = text.as_bytes();
+    let mut at = end.max(start + 1);
+    while let Some(&byte) = bytes.get(at) {
+        match byte {
+            b' ' | b'\t' | b'\n' | b'\r' | b',' => at += 1,
+            b'#' => at += text[at..].find(['\n', '\r']).unwrap_or(text.len() - at),
+            byte if byte == close => return at + 1,
+            _ => break,
+        }
+    }
+    end
 }
 
 impl<'de> Deserialize<'de> for Raw {
@@ -326,6 +360,51 @@ workflows:
             error.to_string().contains("a JSON or YAML value"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn flow_collections_end_at_their_closing_delimiter() {
+        let end = |text: &str, path: &str| {
+            SourceMap::parse(text)
+                .unwrap()
+                .locate(path)
+                .unwrap()
+                .end
+                .offset
+        };
+        assert_eq!(end("[1, 2]", "#"), 6);
+        assert_eq!(end("[]", "#"), 2);
+        assert_eq!(end("{}", "#"), 2);
+        assert_eq!(end("{\"a\": {\"b\": [1, \"x\" ]} , }", "#.a"), 22);
+        assert_eq!(end("{\"a\": {\"b\": [1, \"x\" ]} , }", "#"), 26);
+        assert_eq!(end("a: [1, # one\n  2\n  ]\n", "#.a"), 20);
+        // Block collections have no delimiter: they end at their last item.
+        assert_eq!(end("a:\n  - 1\n  - 2\nb: 3\n", "#.a"), 14);
+    }
+
+    #[test]
+    fn nesting_past_the_limit_is_refused_not_overflowed() {
+        let nested = |depth: usize| format!("{}1{}", "{\"a\": ".repeat(depth), "}".repeat(depth));
+        // On a small stack, in a debug build: refused, never an abort.
+        let outcome = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || {
+                (
+                    SourceMap::parse(nested(MAX_DEPTH - 1)).is_ok(),
+                    SourceMap::parse(nested(100)).is_err(),
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(outcome, (true, true));
+    }
+
+    #[test]
+    fn a_byte_order_mark_shifts_no_column() {
+        let map = SourceMap::parse("\u{feff}a: 1\nb: 2\n").unwrap();
+        assert_eq!(at(&map, "#.a"), (1, 4));
+        assert_eq!(at(&map, "#.b"), (2, 4));
     }
 
     #[test]

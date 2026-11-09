@@ -22,6 +22,12 @@
 //! (`\u00e9`, surrogate pairs, `\n`), YAML line folding and block-scalar
 //! indentation. When the decoded text cannot be reproduced from the raw
 //! scalar exactly, it answers `None` rather than guess.
+//!
+//! # Paths
+//!
+//! Member names may contain dots and `[n]`, so a path is matched against
+//! the document's actual members. A path more than one way of reading
+//! resolves (`a.b` beside `a` → `b`) is ambiguous and locates nothing.
 
 #[cfg(feature = "source-map")]
 mod parse;
@@ -79,7 +85,7 @@ impl std::error::Error for SourceMapError {}
 /// The locations of a document's members and values.
 ///
 /// Built from text with [`SourceMap::parse`] (feature `source-map`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SourceMap {
     text: String,
     /// Byte offset each line starts at; `lines[0] == 0`.
@@ -111,6 +117,16 @@ struct Key {
     name: String,
     start: usize,
     end: usize,
+}
+
+impl fmt::Debug for SourceMap {
+    /// The size of what is mapped, not the text itself.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SourceMap")
+            .field("bytes", &self.text.len())
+            .field("lines", &self.lines.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -163,7 +179,11 @@ impl SourceMap {
             offset -= 1;
         }
         let line = self.lines.partition_point(|&start| start <= offset);
-        let start = self.lines[line - 1];
+        let mut start = self.lines[line - 1];
+        // A byte-order mark is not a column editors show.
+        if start == 0 && self.text.starts_with('\u{feff}') {
+            start = offset.min('\u{feff}'.len_utf8());
+        }
         SourcePosition {
             offset,
             line,
@@ -180,8 +200,13 @@ impl SourceMap {
 
     #[cfg_attr(not(feature = "source-map"), allow(dead_code))]
     fn new(text: String, root: Node) -> Self {
+        // `\n`, `\r\n` and a bare `\r` each end a line, as in YAML.
+        let bytes = text.as_bytes();
         let lines = std::iter::once(0)
-            .chain(text.match_indices('\n').map(|(at, _)| at + 1))
+            .chain(bytes.iter().enumerate().filter_map(|(at, &byte)| {
+                (byte == b'\n' || (byte == b'\r' && bytes.get(at + 1) != Some(&b'\n')))
+                    .then_some(at + 1)
+            }))
             .collect();
         Self { text, lines, root }
     }
@@ -202,7 +227,9 @@ fn tokens(path: &str) -> Option<Vec<Token<'_>>> {
     }
     for segment in path.split('.') {
         let (name, mut rest) = segment.split_at(segment.find('[').unwrap_or(segment.len()));
-        if !name.is_empty() {
+        // An empty name is kept: `foo..x` is member `foo.` then `x`, never
+        // a sibling `foo`. Only `[n]` straight after a name has none.
+        if !name.is_empty() || rest.is_empty() {
             tokens.push(Token::Key(name));
         }
         while let Some(tail) = rest.strip_prefix('[') {
@@ -220,43 +247,55 @@ fn tokens(path: &str) -> Option<Vec<Token<'_>>> {
     Some(tokens)
 }
 
-/// Walk `tokens` down from `node`. Member names may themselves contain
-/// dots, so a run of name tokens is tried as one name, two joined by
-/// `.`, and so on, backtracking until the rest of the path resolves.
+/// Walk `tokens` down from `node`. A member name may itself contain dots
+/// or `[n]` (`a.b`, `items[0]`), so every split of the path into names is
+/// tried; a path more than one split resolves is ambiguous and locates
+/// nothing, rather than whichever split came first.
 fn resolve<'n>(node: &'n Node, tokens: &[Token<'_>]) -> Option<(&'n Node, Option<&'n Key>)> {
-    let Some(first) = tokens.first() else {
-        return Some((node, None));
-    };
-    match (first, &node.kind) {
-        (Token::Index(index), Kind::Seq(items)) => resolve(items.get(*index)?, &tokens[1..]),
-        (Token::Key(_), Kind::Map(members)) => {
-            let names = tokens
-                .iter()
-                .take_while(|token| matches!(token, Token::Key(_)))
-                .count();
-            let mut name = String::new();
-            for taken in 1..=names {
-                let Token::Key(part) = &tokens[taken - 1] else {
-                    unreachable!("counted name tokens only");
-                };
+    let mut found: Vec<(&'n Node, Option<&'n Key>)> = Vec::new();
+    walk(node, tokens, None, &mut found);
+    match found.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+fn walk<'n>(
+    node: &'n Node,
+    tokens: &[Token<'_>],
+    key: Option<&'n Key>,
+    found: &mut Vec<(&'n Node, Option<&'n Key>)>,
+) {
+    match (tokens.first(), &node.kind) {
+        (None, _) if !found.iter().any(|(seen, _)| std::ptr::eq(*seen, node)) => {
+            found.push((node, key));
+        }
+        (Some(Token::Index(index)), Kind::Seq(items)) => {
+            if let Some(item) = items.get(*index) {
+                walk(item, &tokens[1..], None, found);
+            }
+        }
+        (Some(Token::Key(first)), Kind::Map(members)) => {
+            let mut name = String::from(*first);
+            for taken in 1..=tokens.len() {
                 if taken > 1 {
-                    name.push('.');
+                    match &tokens[taken - 1] {
+                        Token::Key(part) => {
+                            name.push('.');
+                            name.push_str(part);
+                        }
+                        Token::Index(index) => {
+                            use std::fmt::Write;
+                            let _ = write!(name, "[{index}]");
+                        }
+                    }
                 }
-                name.push_str(part);
-                let Some((key, child)) = members.iter().find(|(key, _)| key.name == name) else {
-                    continue;
-                };
-                let rest = &tokens[taken..];
-                if rest.is_empty() {
-                    return Some((child, Some(key)));
-                }
-                if let Some(found) = resolve(child, rest) {
-                    return Some(found);
+                for (member, child) in members.iter().filter(|(member, _)| member.name == name) {
+                    walk(child, &tokens[taken..], Some(member), found);
                 }
             }
-            None
         }
-        _ => None,
+        _ => {}
     }
 }
 
@@ -324,6 +363,15 @@ mod tests {
             ])
         );
         assert_eq!(tokens("a.b"), Some(vec![Token::Key("a"), Token::Key("b")]));
+        assert_eq!(
+            tokens("#.outputs.foo..x"),
+            Some(vec![
+                Token::Key("outputs"),
+                Token::Key("foo"),
+                Token::Key(""),
+                Token::Key("x")
+            ])
+        );
         for broken in ["#.a[", "#.a[x]", "#.a[]", "#.a[0]b", "#.a[1"] {
             assert_eq!(tokens(broken), None, "{broken}");
         }
@@ -332,11 +380,12 @@ mod tests {
     #[test]
     fn dotted_member_names_resolve_by_backtracking() {
         let map = dotted();
-        // `a.b` is both a member of its own and a path through `a`; the
-        // shorter split wins only when the rest of the path resolves.
-        assert_eq!(map.locate("#.a.b").unwrap().start.offset, 17);
+        // `a.b` is both a member of its own and a path through `a`:
+        // ambiguous, so nothing is located rather than a guess.
+        assert_eq!(map.locate("#.a.b"), None);
+        assert_eq!(map.locate_key("#.a.b"), None);
+        // One more step only resolves through `a`.
         assert_eq!(map.locate("#.a.b[0]").unwrap().start.offset, 19);
-        assert_eq!(map.locate_key("#.a.b").unwrap().start.offset, 12);
         assert_eq!(map.locate("#.a.b[1]"), None);
         assert_eq!(map.locate("#.a.c"), None);
         assert_eq!(map.locate("#.a[0]"), None);
@@ -360,6 +409,96 @@ mod tests {
         assert_eq!((range.start.offset, range.end.offset), (5, 6));
         assert_eq!(map.locate_key("#.a.b").unwrap().end.offset, 3);
         assert_eq!(map.locate_in("#.a.b", 0).unwrap().offset, 5);
+    }
+
+    #[test]
+    fn an_empty_name_segment_is_part_of_the_member_name() {
+        // Members `foo` and `foo.`, each with an `x`.
+        let text = "foo: {x: 1}\nfoo.: {x: 2}\n";
+        let member = |name: &str, start: usize, value: usize| {
+            (
+                key(name, start),
+                Node {
+                    start: value - 4,
+                    end: value + 2,
+                    kind: Kind::Map(vec![(key("x", value - 3), scalar(value, value + 1, "1"))]),
+                },
+            )
+        };
+        let root = Node {
+            start: 0,
+            end: text.len(),
+            kind: Kind::Map(vec![member("foo", 0, 9), member("foo.", 12, 22)]),
+        };
+        let map = SourceMap::new(text.into(), root);
+        assert_eq!(map.locate("#.foo..x").unwrap().start.offset, 22);
+        assert_eq!(map.locate("#.foo.x").unwrap().start.offset, 9);
+    }
+
+    #[test]
+    fn a_member_name_with_an_index_is_told_apart_from_an_array() {
+        let text = "items: [x]\nitems[0]: y\n";
+        let both = Node {
+            start: 0,
+            end: text.len(),
+            kind: Kind::Map(vec![
+                (
+                    key("items", 0),
+                    Node {
+                        start: 7,
+                        end: 10,
+                        kind: Kind::Seq(vec![scalar(8, 9, "x")]),
+                    },
+                ),
+                (key("items[0]", 11), scalar(21, 22, "y")),
+            ]),
+        };
+        let map = SourceMap::new(text.into(), both.clone());
+        assert_eq!(map.locate("#.items[0]"), None);
+        let Kind::Map(members) = both.kind else {
+            unreachable!()
+        };
+        let literal = Node {
+            kind: Kind::Map(members.into_iter().skip(1).collect()),
+            ..both
+        };
+        let map = SourceMap::new(text.into(), literal);
+        assert_eq!(map.locate("#.items[0]").unwrap().start.offset, 21);
+        assert_eq!(map.locate_key("#.items[0]").unwrap().end.offset, 19);
+        assert_eq!(format!("{map:?}"), "SourceMap { bytes: 23, lines: 3, .. }");
+    }
+
+    #[test]
+    fn a_byte_order_mark_takes_no_column() {
+        let map = SourceMap::new(
+            "\u{feff}a: 1\nb".into(),
+            Node {
+                start: 0,
+                end: 0,
+                kind: Kind::Scalar(None),
+            },
+        );
+        assert_eq!(map.position(0).column, 1);
+        assert_eq!(map.position(3).column, 1);
+        assert_eq!(map.position(6).column, 4);
+        assert_eq!(map.position(8).column, 1);
+    }
+
+    #[test]
+    fn a_bare_carriage_return_ends_a_line() {
+        let map = SourceMap::new(
+            "a\rb\r\nc\nd".into(),
+            Node {
+                start: 0,
+                end: 0,
+                kind: Kind::Scalar(None),
+            },
+        );
+        let at = |offset| (map.position(offset).line, map.position(offset).column);
+        assert_eq!(
+            [at(0), at(2), at(3), at(5), at(7)],
+            [(1, 1), (2, 1), (2, 2), (3, 1), (4, 1)]
+        );
     }
 
     #[test]
