@@ -107,9 +107,6 @@ pub enum GenerateError {
     Unsupported(String),
 }
 
-/// How the generated header names its source: the document's file name,
-/// never its full location. Output must be identical in every checkout,
-/// and an absolute path would also leak the machine it was generated on.
 /// The first segment of every relative path in a Rust type, such as
 /// `chrono` twice in `Option<chrono::NaiveDate>` and `chrono::Utc`: the
 /// names a module of the same name would hide. A path starting `::` names
@@ -118,14 +115,22 @@ fn first_path_segments(ty: &str) -> impl Iterator<Item = &str> {
     ty.match_indices("::").filter_map(move |(at, _)| {
         let before = &ty[..at];
         let start = before
-            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map_or(0, |i| i + 1);
+            .char_indices()
+            .rev()
+            // Identifiers may hold any Unicode letter or mark; what ends
+            // one in a type is punctuation or space.
+            .find(|(_, c)| c.is_whitespace() || "<>,()[]&*;:'!=+".contains(*c))
+            // Past that whole character, however many bytes it takes.
+            .map_or(0, |(i, c)| i + c.len_utf8());
         let segment = &before[start..];
         let rooted = before[..start].ends_with(':');
         (!segment.is_empty() && !rooted).then_some(segment)
     })
 }
 
+/// How the generated header names its source: the document's file name,
+/// never its full location. Output must be identical in every checkout,
+/// and an absolute path would also leak the machine it was generated on.
 fn source_name(uri: &url::Url) -> String {
     uri.path_segments()
         .and_then(|mut segments| segments.next_back())
@@ -370,6 +375,9 @@ mod tests {
         assert_eq!(firsts, vec!["chrono"]);
         let firsts: Vec<_> = super::first_path_segments("a::b::C").collect();
         assert_eq!(firsts, vec!["a"]);
+        // A combining mark is no alphanumeric, and takes two bytes.
+        let firsts: Vec<_> = super::first_path_segments("cafe\u{301}::Date").collect();
+        assert_eq!(firsts.len(), 1);
     }
 
     #[test]

@@ -59,7 +59,7 @@ pub(crate) struct GenerateArgs {
     /// Names this generation target in the output directory's manifest, so
     /// several targets can share one directory, and names the generated
     /// file unless the configuration sets `rust.module`. Defaults to the
-    /// input file's name, or `api` for stdin.
+    /// input file's name, or `api` for stdin or a pipe.
     #[arg(long)]
     pub(crate) label: Option<String>,
 
@@ -364,7 +364,9 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     if let Some(given) = &args.label
         && roas_codegen::manifest_name(&given.to_ascii_lowercase(), Target::Rust).is_err()
     {
-        bail!("--label {given:?} must use only letters, digits, `-` and `_` (it is lowercased)");
+        bail!(
+            "--label {given:?} must be non-empty and use only letters, digits, `-` and `_` (it is lowercased)"
+        );
     }
     let (input, uri) = read_description(&source, args.format)?;
     let document = SourceDocument::parse(input, uri)
