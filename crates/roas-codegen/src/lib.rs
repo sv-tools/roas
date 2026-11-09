@@ -38,6 +38,7 @@ mod report;
 mod rust;
 mod source;
 mod validate;
+mod yaml_value;
 
 pub use config::{
     Config, ConfigError, ConfigFile, FieldConfig, GoConfig, GoConfigFile, Layout, RustConfig,

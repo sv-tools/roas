@@ -307,9 +307,9 @@ mod tests {
 
     #[test]
     fn round_trips_through_yaml() {
-        let v: RefOr<Demo> = serde_yaml_ng::from_str("name: n\n").unwrap();
+        let v: RefOr<Demo> = crate::test_yaml::from_str("name: n\n").unwrap();
         assert!(matches!(v, RefOr::Item(_)));
-        let r: RefOr<Demo> = serde_yaml_ng::from_str("$ref: '#/x'\n").unwrap();
+        let r: RefOr<Demo> = crate::test_yaml::from_str("$ref: '#/x'\n").unwrap();
         assert!(matches!(r, RefOr::Reference(_)));
     }
 

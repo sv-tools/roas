@@ -5,6 +5,9 @@
 
 #![cfg(feature = "v1_0")]
 
+#[path = "support/yaml.rs"]
+mod yaml;
+
 use roas_arazzo::v1_0::Description;
 use roas_arazzo::validation::Validate;
 use roas_arazzo_executor::testing::Fake;
@@ -14,8 +17,7 @@ use std::time::Duration;
 
 fn description() -> Description {
     let yaml = include_str!("data/buy_pet.arazzo.yaml");
-    let description: Description =
-        serde_yaml_ng::from_str(yaml).expect("the fixture is a v1.0 description");
+    let description: Description = yaml::from_str(yaml).expect("the fixture is a v1.0 description");
     description
         .validate(enumset::EnumSet::empty())
         .expect("the fixture is valid");
@@ -23,7 +25,7 @@ fn description() -> Description {
 }
 
 fn options() -> Options {
-    let openapi: Value = serde_yaml_ng::from_str(include_str!("data/petstore.openapi.yaml"))
+    let openapi: Value = yaml::from_str(include_str!("data/petstore.openapi.yaml"))
         .expect("the fixture is an OpenAPI document");
     Options::new()
         .source("petStore", "https://api.example.com/openapi.yaml", openapi)

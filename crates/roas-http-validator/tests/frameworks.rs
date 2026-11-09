@@ -17,6 +17,9 @@
     feature = "reqwest",
 ))]
 
+#[path = "../examples/support/yaml.rs"]
+mod yaml;
+
 use roas_http_validator::{Options, ToRequestView, Validator};
 
 /// The request every adapter builds: a templated path, a query
@@ -25,7 +28,7 @@ use roas_http_validator::{Options, ToRequestView, Validator};
 const PATH_AND_QUERY: &str = "/pets?limit=10&tags=cute&tags=small";
 
 fn validator() -> Validator {
-    let spec = serde_yaml_ng::from_str(include_str!("data/petstore.openapi.yaml"))
+    let spec = yaml::from_str(include_str!("data/petstore.openapi.yaml"))
         .expect("the description must parse");
     // The description advertises `/v1`; these requests arrive without it.
     Validator::with_options(spec, Options::new())

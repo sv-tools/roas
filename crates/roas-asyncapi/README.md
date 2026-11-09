@@ -52,7 +52,7 @@ doc.validate(EnumSet::empty()).expect("document is well-formed");
 assert_eq!(doc.channels.len(), 1);
 ```
 
-YAML documents work the same way — parse with `serde_yaml_ng` (or any other YAML crate) into `Document`.
+YAML documents work the same way — parse with `serde-saphyr` (or any other YAML crate) into `Document`.
 
 ## Validation
 

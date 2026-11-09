@@ -55,7 +55,7 @@
 //! # }
 //! ```
 //!
-//! YAML descriptions work the same way — parse with `serde_yaml_ng` (or
+//! YAML descriptions work the same way — parse with `serde-saphyr` (or
 //! any other YAML crate) into [`v1_1::Description`].
 //!
 //! ## Versions
@@ -73,6 +73,9 @@
 #![cfg_attr(not(any(feature = "v1_0", feature = "v1_1")), allow(dead_code))]
 
 pub mod common;
+
+#[cfg(test)]
+mod test_yaml;
 pub mod validation;
 
 #[cfg(feature = "v1_0")]

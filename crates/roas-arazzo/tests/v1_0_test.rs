@@ -3,6 +3,9 @@
 
 #![cfg(feature = "v1_0")]
 
+#[path = "../src/test_yaml.rs"]
+mod yaml;
+
 use enumset::EnumSet;
 use roas_arazzo::v1_0::Description;
 use roas_arazzo::validation::Validate;
@@ -24,7 +27,7 @@ fn load_json(name: &str) -> Description {
 }
 
 fn load_yaml(name: &str) -> Description {
-    serde_yaml_ng::from_str(&read(name)).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+    yaml::from_str(&read(name)).unwrap_or_else(|e| panic!("parse {name}: {e}"))
 }
 
 #[test]

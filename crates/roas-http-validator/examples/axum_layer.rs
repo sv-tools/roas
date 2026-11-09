@@ -14,6 +14,11 @@
 //! the buffering is explicit, capped, and undone afterwards so the
 //! handler still receives a body it can read.
 
+// The YAML reader the examples and tests share, with the options every
+// roas crate reads YAML with.
+#[path = "support/yaml.rs"]
+mod yaml;
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -56,7 +61,7 @@ paths:
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let validator = Arc::new(Validator::new(serde_yaml_ng::from_str(PETSTORE)?));
+    let validator = Arc::new(Validator::new(yaml::from_str(PETSTORE)?));
 
     let app = Router::new()
         .route("/pets", get(list_pets).post(create_pet))
