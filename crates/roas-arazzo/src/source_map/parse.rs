@@ -119,7 +119,9 @@ type Member = (Spanned<Raw>, Spanned<Raw>);
 #[derive(Default)]
 struct Memo {
     /// The end of each collection defined so far, by its start.
-    ends: HashMap<usize, usize>,
+    /// By start and whether it is a map: a sequence may start where its
+    /// first item does.
+    ends: HashMap<(usize, bool), usize>,
     /// Where an empty value was placed, by where it was reported.
     placed: HashMap<usize, usize>,
 }
@@ -253,14 +255,15 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
         Raw::Other => Kind::Scalar(None),
     };
     if !matches!(kind, Kind::Scalar(_)) {
+        let is_map = matches!(kind, Kind::Map(_));
         // An indentless sequence (`a:\n- x`) is reported from its first
         // item's first token (`x`, `&k`, `!t`, `|`, `*q`, `[`), not from
         // its own `-`: a sequence not starting at a `-` with one just
         // before it is that. A flow sequence (`- [1]` written inside an
         // item) starts at `[` too, but before its first item. Only the
-        // spaces before it are looked at — never the whole line, which in
+        // spaces and tabs before it are looked at — never the whole line, which in
         // minified JSON is the whole document.
-        let spaces = text[..start].len() - text[..start].trim_end_matches(' ').len();
+        let spaces = text[..start].len() - text[..start].trim_end_matches([' ', '\t']).len();
         let dash = start - spaces;
         let opens = text.as_bytes().get(start).copied();
         let indentless = matches!(kind, Kind::Seq(_))
@@ -280,7 +283,7 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
         // there, which saw where its own nested aliases are written — and
         // do not measure it again per alias.
         let known = (replayed || alias)
-            .then(|| memo.ends.get(&start).copied())
+            .then(|| memo.ends.get(&(start, is_map)).copied())
             .flatten();
         end = match (known, text.as_bytes().get(start)) {
             (Some(known), _) => known,
@@ -293,7 +296,7 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
             _ => colon(text, end),
         };
         if !(replayed || alias) {
-            memo.ends.insert(start, end);
+            memo.ends.insert((start, is_map), end);
         }
         text_end = end;
     }
@@ -1141,6 +1144,27 @@ workflows:
         let text = "k: {a: ?'x, <<: {m: 1}}\n";
         let map = SourceMap::parse(text).unwrap();
         assert_eq!(map.locate("#.k").unwrap().end.offset, 23);
+    }
+
+    #[test]
+    fn a_tab_after_a_dash_still_starts_the_sequence_there() {
+        let text = "x: &s\n  steps:\n  -\tstepId: a\n  - stepId: c\ny: *s\n";
+        let map = SourceMap::parse(text).unwrap();
+        let steps = map.locate("#.x.steps").unwrap();
+        assert_eq!(steps.start.offset, text.find('-').unwrap());
+        for path in ["#.x.steps[0]", "#.y.steps[0]"] {
+            let item = map.locate(path).unwrap();
+            assert_eq!(
+                &text[item.start.offset..item.end.offset],
+                "stepId: a",
+                "{path}"
+            );
+        }
+        let text = "a: &a3 1\nx: &s\n  k:\n  -\t[*a3, ~]\n  - z\ny: *s\n";
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(map.locate("#.x.k[0]"), map.locate("#.y.k[0]"));
+        let item = map.locate("#.y.k[0]").unwrap();
+        assert_eq!(&text[item.start.offset..item.end.offset], "[*a3, ~]");
     }
 
     #[test]
