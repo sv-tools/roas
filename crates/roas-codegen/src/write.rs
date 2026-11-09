@@ -1407,13 +1407,15 @@ fn check_links(out_dir: &Path, key: &str) -> Result<(), WriteError> {
     }
 }
 
-/// `""` is the current directory to the filesystem, but not to `read_dir`,
-/// which would then miss every other target's manifest.
-fn current_if_empty(out_dir: &Path) -> &Path {
-    if out_dir.as_os_str().is_empty() {
-        Path::new(".")
+/// The output directory as the filesystem calls should see it: without
+/// `.` components (`create_dir_all("gen/.")` fails while `gen` is missing),
+/// and `""` as `.`, which `read_dir` would not accept.
+fn current_if_empty(out_dir: &Path) -> PathBuf {
+    let normalized: PathBuf = out_dir.components().collect();
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
     } else {
-        out_dir
+        normalized
     }
 }
 
@@ -1516,6 +1518,9 @@ fn shared(
 fn misspelled(out_dir: &Path, key: &str) -> Option<String> {
     let path = out_dir.join(key);
     let name = key.rsplit('/').next()?;
+    // The planned name reaches a file; which directory entry is it? Found
+    // by identity, not by spelling: the disk may fold beyond ASCII case.
+    let wanted = file_id(&path)?;
     let entries = fs::read_dir(path.parent()?).ok()?;
     let mut variant = None;
     for entry in entries.flatten() {
@@ -1523,14 +1528,13 @@ fn misspelled(out_dir: &Path, key: &str) -> Option<String> {
         if stored == name {
             return None;
         }
-        if stored.eq_ignore_ascii_case(name) {
+        if file_id(&entry.path()).is_some_and(|id| id == wanted) {
             variant = Some(stored);
         }
     }
     let stored = variant?;
     let on_disk = path.with_file_name(&stored);
-    let same = matches!((file_id(&on_disk), file_id(&path)), (Some(a), Some(b)) if a == b);
-    (same && single_link(&on_disk)).then(|| match key.rsplit_once('/') {
+    single_link(&on_disk).then(|| match key.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/{stored}"),
         None => stored,
     })
@@ -1697,6 +1701,7 @@ pub fn write(
     options: &WriteOptions,
 ) -> Result<WriteReport, WriteError> {
     let out_dir = current_if_empty(out_dir);
+    let out_dir = out_dir.as_path();
     let errors = error_count(generation);
     if errors > 0 && !options.allow_partial {
         return Err(WriteError::HasErrors(errors));
@@ -1909,6 +1914,7 @@ pub fn check(
     options: &WriteOptions,
 ) -> Result<CheckReport, WriteError> {
     let out_dir = current_if_empty(out_dir);
+    let out_dir = out_dir.as_path();
     let errors = error_count(generation);
     if errors > 0 && !options.allow_partial {
         return Err(WriteError::HasErrors(errors));
@@ -3378,6 +3384,8 @@ mod tests {
     fn an_empty_output_path_is_the_current_directory() {
         assert_eq!(current_if_empty(Path::new("")), Path::new("."));
         assert_eq!(current_if_empty(Path::new("out")), Path::new("out"));
+        assert_eq!(current_if_empty(Path::new("out/.")), Path::new("out"));
+        assert_eq!(current_if_empty(Path::new("./")), Path::new("."));
     }
 
     #[test]
@@ -4258,5 +4266,40 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_new_output_path_ending_in_dot_is_created() {
+        let dir = TempDir::new("trailing-dot-out");
+        write(
+            &generation(&[("a.rs", "a")]),
+            &dir.0.join("fresh/."),
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(dir.0.join("fresh/a.rs").is_file());
+    }
+
+    #[test]
+    fn a_file_renamed_to_a_unicode_folded_spelling_is_respelled() {
+        let dir = TempDir::new("kelvin-file");
+        let g = generation(&[("k.rs", "k")]);
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        fs::rename(dir.0.join("k.rs"), dir.0.join("\u{212A}.rs")).unwrap();
+        if !same_file(&dir.0.join("\u{212A}.rs"), &dir.0.join("k.rs")) {
+            return; // the disk keeps them apart
+        }
+        assert!(
+            !check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        let names: Vec<String> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".rs"))
+            .collect();
+        assert_eq!(names, vec!["k.rs".to_owned()]);
     }
 }

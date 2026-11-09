@@ -90,6 +90,15 @@ pub struct RustDependency {
     pub features: Vec<String>,
 }
 
+impl RustDependency {
+    pub fn new(name: impl Into<String>, features: Vec<String>) -> Self {
+        RustDependency {
+            name: name.into(),
+            features,
+        }
+    }
+}
+
 /// The constraints a schema declares, as documentation until generated
 /// validation lands; the type itself does not enforce them.
 fn constraint_notes(c: &Constraints) -> Vec<String> {
