@@ -123,7 +123,9 @@ fn after_blanks(content: &str, mut i: usize) -> usize {
 }
 
 fn line_start(text: &str, at: usize) -> usize {
-    text[..at].rfind('\n').map_or(0, |newline| newline + 1)
+    text[..at]
+        .rfind(['\n', '\r'])
+        .map_or(0, |newline| newline + 1)
 }
 
 fn plain(raw: &str, base: usize, out: &mut Decoded) {
@@ -294,8 +296,10 @@ pub(super) fn is_block(text: &str, start: usize) -> bool {
 /// The block style announced before `start`, where its indicator ends,
 /// and whether it sets an explicit indentation.
 fn header(text: &str, start: usize) -> Option<(Block, usize, bool)> {
-    let line = line_start(text, start);
-    if !text[line..start].bytes().all(|byte| byte == b' ') {
+    // Block content starts a line after its indentation; look back over
+    // the spaces only, never along a long line (minified JSON).
+    let line = start - (text[..start].len() - text[..start].trim_end_matches(' ').len());
+    if line > 0 && !matches!(text.as_bytes()[line - 1], b'\n' | b'\r') {
         return None;
     }
     // The last non-blank line before this one.
@@ -347,7 +351,22 @@ fn block(raw: &str, start: usize, indent: usize, style: Block, out: &mut Decoded
     // (content, where it starts, where its line break is)
     let mut lines = Vec::new();
     let mut offset = 0;
-    for (index, line) in raw.split_inclusive('\n').enumerate() {
+    // `\n`, `\r\n` and a bare `\r` each end a line.
+    let mut lines_of = Vec::new();
+    let mut from = 0;
+    while from < raw.len() {
+        let stop = raw[from..]
+            .find(['\n', '\r'])
+            .map_or(raw.len(), |at| from + at);
+        let next = if raw[stop..].starts_with("\r\n") {
+            stop + 2
+        } else {
+            (stop + 1).min(raw.len())
+        };
+        lines_of.push(&raw[from..next]);
+        from = next;
+    }
+    for (index, line) in lines_of.into_iter().enumerate() {
         let body = line.trim_end_matches(['\n', '\r']);
         let skip = if index == 0 {
             0

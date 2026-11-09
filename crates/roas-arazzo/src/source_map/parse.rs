@@ -4,6 +4,7 @@
 use super::{Key, Kind, Node, SourceMap, SourceMapError};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_saphyr::Spanned;
+use std::collections::HashMap;
 use std::fmt;
 
 impl SourceMap {
@@ -34,7 +35,7 @@ impl SourceMap {
                     message: error.to_string(),
                 }
             })?;
-        let (root, _) = node(&text, root, false);
+        let (root, _) = node(&text, root, false, &mut HashMap::new());
         Ok(Self::new(text, root))
     }
 }
@@ -101,8 +102,14 @@ fn span(text: &str, spanned: &Spanned<Raw>) -> (usize, usize) {
 /// `*name` that uses it rather than of the anchored value, so the
 /// collection holding the alias is measured where the alias is written.
 /// Inside a replayed alias (`replayed`) every node is measured at its
-/// definition: the `*name` belongs to the alias alone.
-fn node(text: &str, spanned: Spanned<Raw>, replayed: bool) -> (Node, usize) {
+/// definition: the `*name` belongs to the alias alone. `ends` holds the
+/// end measured for each collection defined so far, by its start.
+fn node(
+    text: &str,
+    spanned: Spanned<Raw>,
+    replayed: bool,
+    ends: &mut HashMap<usize, usize>,
+) -> (Node, usize) {
     let alias = spanned.referenced != spanned.defined;
     let used = spanned.referenced.span();
     let used = used.byte_offset().map_or(0, |offset| offset as usize)
@@ -135,7 +142,17 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool) -> (Node, usize) {
                         // `1: x` reads as the member `"1"`.
                         _ => text[key_start..key_end].to_owned(),
                     };
-                    let (value, value_end) = node(text, value, inner);
+                    let (mut value, mut value_end) = node(text, value, inner, ends);
+                    // `? key` with no value: its empty value is given the
+                    // next token's place, on a later line. It belongs
+                    // right after the key (or its `:`).
+                    if value.start == value.end
+                        && matches!(value.kind, Kind::Scalar(None))
+                        && text[key_end..value.start].contains(['\n', '\r'])
+                    {
+                        let at = colon(text, key_end);
+                        (value.start, value.end, value.text_end, value_end) = (at, at, at, at);
+                    }
                     end = end.max(key_end).max(value_end);
                     (
                         Key {
@@ -152,7 +169,7 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool) -> (Node, usize) {
             items
                 .into_iter()
                 .map(|item| {
-                    let (item, item_end) = node(text, item, inner);
+                    let (item, item_end) = node(text, item, inner, ends);
                     first.get_or_insert(item.start);
                     end = end.max(item_end);
                     item
@@ -164,17 +181,37 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool) -> (Node, usize) {
     };
     if !matches!(kind, Kind::Scalar(_)) {
         // An indentless sequence (`a:\n- x`) is reported from its first
-        // item, whatever that item is: it starts at the item's `-`.
-        let line = text[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
-        let before = text[line..start].trim_end_matches(' ');
-        let indentless = first == Some(start) && before.ends_with('-');
+        // item's first token (`x`, `&k`, `!t`, `|`, `*q`, `[`), not from
+        // its own `-`: a sequence not starting at a `-` with one just
+        // before it is that. A flow sequence (`- [1]` written inside an
+        // item) starts at `[` too, but before its first item. Only the
+        // spaces before it are looked at — never the whole line, which in
+        // minified JSON is the whole document.
+        let spaces = text[..start].len() - text[..start].trim_end_matches(' ').len();
+        let dash = start - spaces;
+        let opens = text.as_bytes().get(start).copied();
+        let indentless = matches!(kind, Kind::Seq(_))
+            && spaces > 0
+            && text[..dash].ends_with('-')
+            && match opens {
+                // At a `-` or `[` that opens its first item, not itself.
+                Some(b'-' | b'[') => first == Some(start),
+                _ => true,
+            };
         if indentless {
-            start = line + before.len() - 1;
+            start = dash - 1;
         }
         end = match text.as_bytes().get(start) {
             Some(b'[' | b'{') if !indentless => closing(text, start, end),
             _ => colon(text, end),
         };
+        // A replayed alias is its definition: reuse the range measured
+        // there, which saw where its own nested aliases are written.
+        if replayed || alias {
+            end = ends.get(&start).copied().unwrap_or(end);
+        } else {
+            ends.insert(start, end);
+        }
         text_end = end;
     }
     let occurrence = if alias && !replayed {
@@ -530,6 +567,13 @@ workflows:
         let map = SourceMap::parse("k: >-\n  \"ok\" == \"ok\" &&\n  (\n").unwrap();
         assert_eq!(map.locate_in("#.k", 0).unwrap().offset, 8);
         assert_eq!(map.locate_in("#.k", 16).unwrap().offset, 26);
+        // Bare `\r` line ends.
+        let map = SourceMap::parse("k: |\rz: 1\r").unwrap();
+        assert_eq!(map.locate("#.k").unwrap().start.offset, 4);
+        let map = SourceMap::parse("k: |\r  text\rz: 1\r").unwrap();
+        let k = map.locate("#.k").unwrap();
+        assert_eq!((k.start.offset, k.end.offset), (7, 11));
+        assert_eq!(map.locate_in("#.k", 4).unwrap().offset, 11);
         // Blank lines only: their breaks are not in the text, so no offset.
         let map = SourceMap::parse("k: |+\n\n\nz: 1\n").unwrap();
         assert_eq!(map.locate("#.k").unwrap().start.line, 1);
@@ -561,6 +605,9 @@ workflows:
         // An indentless sequence of flow items starts at its first `-`.
         assert_eq!(range("a:\n- [1]\n- [2]\nb: 1\n", "#.a"), (3, 14));
         assert_eq!(range("a:\n- [1]\n- [2]\nb: 1\n", "#.a[0]"), (5, 8));
+        // An alias of a collection holding an alias: the definition's range.
+        assert_eq!(range("a: &x [1]\nb: &y [*x]\nc: *y\n", "#.c"), (16, 20));
+        assert_eq!(range("a: &x [1]\nb: &y\n  - *x\nc: *y\n", "#.c"), (18, 22));
         // A mapping inside a flow sequence ends at its own value.
         assert_eq!(range("a: [x: y, z: w]\n", "#.a[0]"), (4, 8));
         assert_eq!(range("a: [x: y, z: w]\n", "#.a"), (3, 15));
@@ -570,6 +617,45 @@ workflows:
             range("a:\n  - x\n  - |\n    t\n\n  - z\n", "#.a[1]"),
             (19, 20)
         );
+    }
+
+    #[test]
+    fn an_indentless_sequence_starts_at_its_dash_whatever_its_first_item() {
+        let start = |text: &str, path: &str| {
+            SourceMap::parse(text)
+                .unwrap()
+                .locate(path)
+                .unwrap()
+                .start
+                .offset
+        };
+        for text in [
+            "a:\n- &k x\n- y\nb: 1\n",
+            "a:\n- !t x\n- y\n",
+            "a:\n- |\n  x\n- y\nb: 1\n",
+            "a:\n- >-\n- y\n",
+            "a:\n- {k: 1}\n",
+            "a:\n- - 1\n",
+        ] {
+            assert_eq!(start(text, "#.a"), 3, "{text:?}");
+        }
+        assert_eq!(start("x: &q 1\na:\n- *q\n- y\n", "#.a"), 11);
+        assert_eq!(start("a: &x\n  - 1\nb:\n- *x\n", "#.b"), 15);
+        assert_eq!(
+            start("steps:\n- &s\n  stepId: a\n- stepId: b\n", "#.steps"),
+            7
+        );
+        // A block map in an item, and a flow sequence in one, are not moved.
+        assert_eq!(start("- a: 1\n", "#[0]"), 2);
+        assert_eq!(start("- [1, 2]\n", "#[0]"), 2);
+    }
+
+    #[test]
+    fn an_explicit_key_without_a_value_is_at_the_key() {
+        let map = SourceMap::parse("x:\n  a: 1\n  ? b\nc: 2\n").unwrap();
+        let b = map.locate("#.x.b").unwrap();
+        assert_eq!((b.start.offset, b.end.offset), (15, 15));
+        assert_eq!(map.locate("#.x").unwrap().end.offset, 15);
     }
 
     #[test]
@@ -587,6 +673,22 @@ workflows:
         let map = SourceMap::parse("\u{feff}a: 1\nb: 2\n").unwrap();
         assert_eq!(at(&map, "#.a"), (1, 4));
         assert_eq!(at(&map, "#.b"), (2, 4));
+    }
+
+    /// Minified JSON is one long line: nothing may rescan it per value.
+    #[test]
+    fn a_minified_document_maps_in_linear_time() {
+        let item = r#"{"a":[1,"x"],"b":{"c":"y"}}"#;
+        let text = format!("[{}]", vec![item; 20_000].join(","));
+        let started = std::time::Instant::now();
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(map.locate("#[19999].b.c").unwrap().start.line, 1);
+        // Quadratic took tens of seconds here; linear takes well under one.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
