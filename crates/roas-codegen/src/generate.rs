@@ -207,6 +207,19 @@ pub fn generate(
             config.rust.module
         )));
     }
+    // Nor may it share its name with a crate a substitution imports: the
+    // module would hide that crate in the file that declares it.
+    if let Some((key, _)) = config.substitutions.iter().find(|(_, s)| {
+        s.rust
+            .as_ref()
+            .and_then(|r| r.import.as_deref())
+            .is_some_and(|import| import.replace('-', "_") == config.rust.module)
+    }) {
+        return Err(GenerateError::Config(format!(
+            "`rust.module = {:?}` is the crate substitution `{key}` imports; choose another module name or label",
+            config.rust.module
+        )));
+    }
     if config.rust.crate_name.is_some() {
         return Err(GenerateError::Unsupported(
             "`rust.crate_name` (generating a crate)".into(),

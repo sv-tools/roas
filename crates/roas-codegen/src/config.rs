@@ -233,7 +233,8 @@ impl ConfigFile {
 /// A module named like a crate the user's code or the generated code
 /// names (`std`, `core`, `serde`, ...) hides that crate for every path in
 /// the file that declares it; one named `lib` or `main` would be a crate
-/// root's file.
+/// root's file. Crates a substitution imports are checked in `generate`,
+/// where the configuration is known.
 fn shadows_a_crate(module: &str) -> bool {
     matches!(
         module,

@@ -689,3 +689,18 @@ fn the_header_names_the_file_not_its_location() {
         "//! Types generated from `x\\n#![deny(warnings)]\\n//!.json`."
     );
 }
+
+#[test]
+fn a_module_named_like_an_imported_crate_is_refused() {
+    let error = generate(
+        &document(pet()),
+        &rust_config(
+            "[rust]\nmodule = \"chrono\"\n[substitutions.date-time.rust]\nname = \"chrono::DateTime<chrono::Utc>\"\nimport = \"chrono\"\n",
+        ),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("substitution `date-time` imports")),
+        "{error}"
+    );
+}
