@@ -848,14 +848,14 @@ fn sources(
 /// `options` adapted to the registry, with a source map for every external
 /// Arazzo document the entry reaches whose text was read (`texts`) or
 /// fetched, so preparation can say where in it a finding is. `maps` keeps
-/// the maps already parsed, by retrieval URI.
+/// what was already parsed, by retrieval URI, with the value it is of.
 fn scoped(
     options: &Options,
     registry: &SourceRegistry,
     root: roas_arazzo_executor::DocumentId,
-    texts: &BTreeMap<Url, String>,
-    fetched: Option<&Failures>,
-    maps: &mut BTreeMap<Url, SourceMap>,
+    texts: &Texts,
+    fetched: Option<&SharedFetches>,
+    maps: &mut BTreeMap<Url, (Value, Option<SourceMap>)>,
 ) -> Result<Options> {
     let mut options = options.clone();
     let fetched = fetched.map(|fetched| fetched.borrow());
@@ -872,15 +872,26 @@ fn scoped(
             }
             next.push(target);
             let uri = document.retrieval_uri();
-            if !maps.contains_key(uri)
-                && let Some(map) = texts
+            // Only a text that parsed to the very value registered: one URL
+            // can answer two fetches differently, and only one is kept.
+            let value = document.value();
+            if maps.get(uri).is_none_or(|(parsed, _)| parsed != value) {
+                let map = texts
                     .get(uri)
-                    .or_else(|| fetched.as_ref()?.texts.get(uri))
-                    .and_then(|text| SourceMap::parse(text).ok())
-            {
-                maps.insert(uri.clone(), map);
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        fetched
+                            .as_ref()
+                            .and_then(|fetched| fetched.texts.get(uri))
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .find(|(parsed, _)| parsed == value)
+                    .and_then(|(_, text)| SourceMap::parse(text).ok());
+                maps.insert(uri.clone(), (value.clone(), map));
             }
-            if let Some(map) = maps.get(uri) {
+            if let Some((_, Some(map))) = maps.get(uri) {
                 options = options.document_source_map(document.identity().as_str(), map.clone());
             }
         }
@@ -911,7 +922,7 @@ fn seeded_registry(
     value: &Value,
     from: &InputSource,
     args: &ArazzoRunArgs,
-    texts: &mut BTreeMap<Url, String>,
+    texts: &mut Texts,
 ) -> Result<(SourceRegistry, roas_arazzo_executor::DocumentId)> {
     let mut registry = SourceRegistry::new();
     let root = registry.insert(base_uri(from, None)?.as_str(), value.clone())?;
@@ -926,10 +937,8 @@ fn seeded_registry(
         let (text, document, _) = read_input_text(&from, None)
             .with_context(|| format!("reading source description {path}"))?;
         let retrieval = base_uri(&from, None)?;
+        keep_text(texts, &retrieval, &document, text);
         let id = registry.insert(retrieval.as_str(), document)?;
-        // Under where this file was read from: a copy the registry folds
-        // into an earlier document must not replace that one's text.
-        texts.insert(retrieval, text);
         supplied.push((name.to_owned(), id));
     }
     for path in &args.source_document {
@@ -937,8 +946,8 @@ fn seeded_registry(
         let (text, document, _) = read_input_text(&from, None)
             .with_context(|| format!("reading source document {}", path.display()))?;
         let retrieval = base_uri(&from, None)?;
+        keep_text(texts, &retrieval, &document, text);
         registry.insert_reference_document(retrieval.as_str(), document)?;
-        texts.insert(retrieval, text);
     }
     for (name, id) in supplied {
         registry.override_source(root, &name, id)?;
@@ -948,7 +957,7 @@ fn seeded_registry(
 
 /// The `--load` loader, with each fetcher wrapped to remember its failures
 /// and the text it fetched, and to stop after `budget` distinct URLs.
-fn remembering_loader(kinds: &[LoaderKind], budget: usize) -> (Loader, Failures) {
+fn remembering_loader(kinds: &[LoaderKind], budget: usize) -> (Loader, SharedFetches) {
     let fetches = Rc::new(RefCell::new(Fetches {
         budget,
         ..Fetches::default()
@@ -968,7 +977,7 @@ struct Fetches {
     asked: BTreeSet<Url>,
     failed: BTreeMap<Url, LoaderError>,
     /// The text of each fetched Arazzo document, by its final retrieval URI.
-    texts: BTreeMap<Url, String>,
+    texts: Texts,
 }
 
 /// A fetcher that can also say what text it parsed a document from.
@@ -990,7 +999,21 @@ impl TextFetcher for Fetcher {
     }
 }
 
-type Failures = Rc<RefCell<Fetches>>;
+type SharedFetches = Rc<RefCell<Fetches>>;
+
+/// Every Arazzo text read at a URI, with the value it parsed to.
+type Texts = BTreeMap<Url, Vec<(Value, String)>>;
+
+/// Keep `text`, which parsed to `value`, if it is an Arazzo document's:
+/// only those have findings placed in their text.
+fn keep_text(texts: &mut Texts, uri: &Url, value: &Value, text: String) {
+    if value.get("arazzo").is_some() {
+        texts
+            .entry(uri.clone())
+            .or_default()
+            .push((value.clone(), text));
+    }
+}
 
 /// A fetcher that answers a URL it already failed on with the same error,
 /// without asking again, and refuses new URLs past the operation's budget.
@@ -998,11 +1021,11 @@ type Failures = Rc<RefCell<Fetches>>;
 /// start its document budget afresh.
 struct Remembering<F> {
     inner: F,
-    fetches: Failures,
+    fetches: SharedFetches,
 }
 
 impl<F> Remembering<F> {
-    fn new(inner: F, fetches: &Failures) -> Self {
+    fn new(inner: F, fetches: &SharedFetches) -> Self {
         Self {
             inner,
             fetches: Rc::clone(fetches),
@@ -1045,14 +1068,14 @@ impl<F: TextFetcher> ResourceFetcher for Remembering<F> {
 
     fn fetch_document(&mut self, uri: &Url) -> Result<LoadedDocument, LoaderError> {
         let (document, text) = self.remember(uri, |inner| inner.fetch_document_text(uri))?;
-        // Only an Arazzo document's findings are placed in its text.
-        if let Some(text) = text
-            && document.document.get("arazzo").is_some()
-        {
-            self.fetches
-                .borrow_mut()
-                .texts
-                .insert(document.retrieval_uri.clone(), text);
+        if let Some(text) = text {
+            let retrieval = document.retrieval_uri.clone();
+            keep_text(
+                &mut self.fetches.borrow_mut().texts,
+                &retrieval,
+                &document.document,
+                text,
+            );
         }
         Ok(document)
     }
@@ -1914,6 +1937,71 @@ workflows:
             shown.contains(&format!(
                 "{identity} #.workflows[0].steps[0].successCriteria[0].condition \
                  at line 14, column 65: "
+            )),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_document_is_located_in_the_text_it_was_parsed_from() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        let (_, child, api) = malformed_external_workflow();
+        let first = std::fs::read_to_string(&child.0).unwrap();
+        // The same final URL answers the second fetch with other text.
+        let second = format!("#\n#\n#\n#\n#\n{}", first.replace("title: C", "title: D"));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let base = format!("http://{}", listener.local_addr().expect("an address"));
+        std::thread::spawn(move || {
+            let mut served = 0;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().expect("a clone"));
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                let response = if line.starts_with("GET /b ") {
+                    served += 1;
+                    let body = if served == 1 { &first } else { &second };
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/yaml\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else if line.starts_with("GET /a ") || line.starts_with("GET /c ") {
+                    "HTTP/1.1 302 Found\r\nLocation: /b\r\nContent-Length: 0\r\n\
+                     Connection: close\r\n\r\n"
+                        .to_owned()
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_owned()
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        let entry = TempFile::write(
+            "refetched-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": format!("{base}/a"), "type": "arazzo" },
+                    { "name": "again", "url": format!("{base}/c"), "type": "arazzo" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.shared.child",
+                    "parameters": [{ "name": "id", "value": "$inputs.petId" }] }] }]
+            }),
+        );
+        let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.base_url = Vec::new();
+        args.load = vec![LoaderKind::Http];
+        args.load_all_sources = true;
+        args.quiet = true;
+        let shown = format!("{:#}", run_arazzo_run(args).unwrap_err());
+        assert!(
+            shown.contains(&format!(
+                "{base}/b #.workflows[0].steps[0].successCriteria[0].condition \
+                 at line 13, column 65: "
             )),
             "{shown}"
         );
