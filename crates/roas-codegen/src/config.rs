@@ -15,6 +15,7 @@ use thiserror::Error;
 /// The language to generate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Target {
     Rust,
     Go,
@@ -23,6 +24,7 @@ pub enum Target {
 /// How generated types are spread over files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Layout {
     /// One file per module or package. The default, and the only layout
     /// under which a "footer after all generated code" means what it
@@ -36,6 +38,7 @@ pub enum Layout {
 /// How a substituted type is spelled in one language.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TypeSpelling {
     /// The type as it appears in generated code, such as
     /// `chrono::DateTime<chrono::Utc>` or `time.Time`.
@@ -48,6 +51,7 @@ pub struct TypeSpelling {
 /// A user-provided type standing in for a schema or a `format`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Substitution {
     pub rust: Option<TypeSpelling>,
     pub go: Option<TypeSpelling>,
@@ -57,6 +61,7 @@ pub struct Substitution {
 /// the description.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct FieldConfig {
     /// Extra Rust attributes, appended as separate lines.
     pub attrs: Vec<String>,
@@ -70,6 +75,7 @@ pub struct FieldConfig {
 /// the description.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TypeConfig {
     /// Extra Rust container attributes.
     pub attrs: Vec<String>,
@@ -83,6 +89,7 @@ pub struct TypeConfig {
 /// Rust settings as a file may state them.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RustConfigFile {
     /// The generated module's name: the file is `<module>.rs`. Default
     /// `types`. Targets sharing an output directory need different ones.
@@ -96,6 +103,7 @@ pub struct RustConfigFile {
 /// Go settings as a file may state them.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct GoConfigFile {
     pub package: Option<String>,
     pub module_path: Option<String>,
@@ -105,6 +113,7 @@ pub struct GoConfigFile {
 /// validated beyond the shape.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default, deny_unknown_fields, rename_all = "snake_case")]
+#[non_exhaustive]
 pub struct ConfigFile {
     pub target: Option<Target>,
     pub layout: Option<Layout>,
@@ -200,12 +209,7 @@ impl ConfigFile {
             rust: RustConfig {
                 module: match self.rust.module {
                     Some(module) => {
-                        let valid = !crate::rust::naming::is_keyword(&module)
-                            && module.starts_with(|c: char| c.is_ascii_lowercase())
-                            && module
-                                .bytes()
-                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-                        if !valid {
+                        if !is_module_name(&module) {
                             return Err(ConfigError::InvalidModule(module));
                         }
                         module
@@ -224,6 +228,16 @@ impl ConfigFile {
             types: self.types,
         })
     }
+}
+
+/// A lowercase Rust module name: a letter, then letters, digits or `_`,
+/// and not a keyword. The file name the Rust backend writes.
+pub(crate) fn is_module_name(module: &str) -> bool {
+    !crate::rust::naming::is_keyword(module)
+        && module.starts_with(|c: char| c.is_ascii_lowercase())
+        && module
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// A Rust module name derived from free text such as a label or a file
@@ -258,6 +272,7 @@ pub fn rust_module_name(text: &str) -> String {
 
 /// Rust settings, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RustConfig {
     /// The generated module's name; the file is `<module>.rs`.
     pub module: String,
@@ -268,6 +283,7 @@ pub struct RustConfig {
 
 /// Go settings, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GoConfig {
     pub package: String,
     pub module_path: Option<String>,
@@ -277,6 +293,7 @@ pub struct GoConfig {
 /// generator needs an answer, no `Deserialize`, no `Default` — obtained
 /// only through [`ConfigFile::build`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Config {
     pub target: Target,
     pub layout: Layout,
@@ -297,6 +314,7 @@ pub struct Config {
 
 /// Why a configuration could not be loaded or resolved.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("cannot read configuration file {path}")]
     Read {

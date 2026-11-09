@@ -19,13 +19,16 @@ fn document(components: serde_json::Value) -> roas_codegen::ValidatedSourceDocum
     validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid")
 }
 
+fn target(target: Target) -> ConfigFile {
+    let mut file = ConfigFile::default();
+    file.target = Some(target);
+    file
+}
+
 fn rust_config(toml: &str) -> roas_codegen::Config {
     ConfigFile::from_toml(toml, Path::new("/"))
         .unwrap()
-        .merge(ConfigFile {
-            target: Some(Target::Rust),
-            ..Default::default()
-        })
+        .merge(target(Target::Rust))
         .build()
         .unwrap()
 }
@@ -349,12 +352,7 @@ fn unsupported_configuration_is_refused_up_front() {
     )
     .unwrap_err();
     assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
-    let go = ConfigFile {
-        target: Some(Target::Go),
-        ..Default::default()
-    }
-    .build()
-    .unwrap();
+    let go = target(Target::Go).build().unwrap();
     let error = generate(&document(pet()), &go).unwrap_err();
     assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
     let error = generate(&document(pet()), &rust_config("exact_numbers = true\n")).unwrap_err();

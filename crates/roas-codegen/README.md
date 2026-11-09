@@ -18,7 +18,9 @@ let bytes = std::fs::read("openapi.json")?;
 let document = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///openapi.json")?)?;
 let document = validate(document, Default::default())?;
 
-let config = ConfigFile { target: Some(Target::Rust), ..Default::default() }.build()?;
+let mut file = ConfigFile::default();
+file.target = Some(Target::Rust);
+let config = file.build()?;
 let generation = generate(&document, &config)?;
 for file in &generation.files {
     std::fs::write(file.path.file_name().unwrap(), &file.contents)?;

@@ -74,6 +74,7 @@ impl Generation {
 /// output; this is about the configuration, the templates or the
 /// toolchain, and no output is meaningful.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum GenerateError {
     #[error("configuration: {0}")]
     Config(String),
@@ -184,6 +185,14 @@ pub fn generate(
         return Err(GenerateError::Unsupported(
             "`template_dir` (user template overrides)".into(),
         ));
+    }
+    // `Config`'s fields are public, so what `ConfigFile::build` checked may
+    // have been changed since; the module names the file written.
+    if !crate::config::is_module_name(&config.rust.module) {
+        return Err(GenerateError::Config(format!(
+            "`rust.module = {:?}` must be a lowercase Rust module name",
+            config.rust.module
+        )));
     }
     if config.rust.crate_name.is_some() {
         return Err(GenerateError::Unsupported(

@@ -58,8 +58,9 @@ pub(crate) struct GenerateArgs {
     pub(crate) target: Option<GenerateTarget>,
 
     /// Names this generation target in the output directory's manifest, so
-    /// several targets can share one directory. Defaults to the input file's
-    /// name, or `api` for stdin.
+    /// several targets can share one directory, and names the generated
+    /// file unless the configuration sets `rust.module`. Defaults to the
+    /// input file's name, or `api` for stdin.
     #[arg(long)]
     pub(crate) label: Option<String>,
 
@@ -87,13 +88,16 @@ pub(crate) struct GenerateArgs {
     #[arg(long)]
     pub(crate) allow_partial: bool,
 
-    /// Take over what a run would otherwise refuse: overwrite existing files
-    /// no generation target owns, and let this description take a label
-    /// recorded for a different source (after moving or renaming it). Off
-    /// by default, since such a file is probably hand-written and such a
-    /// label probably belongs to another description.
+    /// Overwrite existing files no generation target owns. Off by default,
+    /// since such a file is probably hand-written.
     #[arg(long)]
     pub(crate) force: bool,
+
+    /// Let this description take a label recorded for a different source,
+    /// after moving or renaming it. Off by default, since such a label
+    /// probably belongs to another description.
+    #[arg(long)]
+    pub(crate) replace_source: bool,
 
     /// Write nothing; fail if the output directory differs from what would
     /// be generated.
@@ -274,11 +278,9 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         .as_deref()
         .map(str::to_ascii_lowercase)
         .unwrap_or_else(|| default_label(&source));
-    let mut flags = ConfigFile {
-        target: args.target.map(Target::from),
-        allow_codegen_extensions: args.allow_codegen_extensions.then_some(true),
-        ..Default::default()
-    };
+    let mut flags = ConfigFile::default();
+    flags.target = args.target.map(Target::from);
+    flags.allow_codegen_extensions = args.allow_codegen_extensions.then_some(true);
     // The generated file is named after the label unless the configuration
     // names the module, so descriptions sharing a directory do not collide.
     if file.rust.module.is_none() {
@@ -352,7 +354,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         let mut check_options = WriteOptions::new(label.clone());
         check_options.allow_partial = args.allow_partial;
         check_options.source_id = source_id(&source, &args.out);
-        check_options.replace_source = args.force;
+        check_options.replace_source = args.replace_source;
         let report = check(&generation, &args.out, &check_options)?;
         if report.is_clean() {
             eprintln!("{}: up to date", args.out.display());
@@ -382,7 +384,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
 
     let mut write_options = WriteOptions::new(label);
     write_options.overwrite_unowned = args.force;
-    write_options.replace_source = args.force;
+    write_options.replace_source = args.replace_source;
     write_options.allow_partial = args.allow_partial;
     write_options.source_id = source_id(&source, &args.out);
     let report = write(&generation, &args.out, &write_options)?;
@@ -469,6 +471,7 @@ mod tests {
             strict: false,
             allow_partial: false,
             force: false,
+            replace_source: false,
             check: false,
         }
     }
@@ -775,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn force_lets_a_moved_description_keep_its_label() {
+    fn replace_source_lets_a_moved_description_keep_its_label() {
         let dir = TempDir::new("moved");
         std::fs::create_dir_all(dir.0.join("spec")).unwrap();
         std::fs::create_dir_all(dir.0.join("api")).unwrap();
@@ -786,10 +789,16 @@ mod tests {
         let after = dir.0.join("api/pets.json");
         std::fs::rename(&before, &after).unwrap();
         let error = format!("{:#}", run_generate(args(&after, &out)).unwrap_err());
-        assert!(error.contains("--force"), "{error}");
+        assert!(error.contains("--replace-source"), "{error}");
         let mut forced = args(&after, &out);
         forced.force = true;
-        run_generate(forced).unwrap();
+        assert!(
+            run_generate(forced).is_err(),
+            "--force alone does not move a label"
+        );
+        let mut moved = args(&after, &out);
+        moved.replace_source = true;
+        run_generate(moved).unwrap();
         run_generate(args(&after, &out)).unwrap();
     }
 

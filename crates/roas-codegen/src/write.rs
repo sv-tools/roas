@@ -155,7 +155,7 @@ pub enum WriteError {
     )]
     ConflictingPaths(PathBuf, PathBuf),
     #[error(
-        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; if the description moved, allow replacing the recorded source (`roas openapi generate --force`) or delete the label's manifest; if it is a different description, give it its own label"
+        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; if the description moved, allow replacing the recorded source (`roas openapi generate --replace-source`) or delete the label's manifest; if it is a different description, give it its own label"
     )]
     SourceMismatch {
         label: String,
@@ -192,6 +192,12 @@ struct Manifest {
     #[serde(default)]
     source: String,
     files: BTreeMap<String, String>,
+    /// The hash each file had before the run that wrote this manifest
+    /// started replacing it. Only a pending manifest has entries: if that
+    /// run is interrupted, a file may still hold its old content, which is
+    /// as much ours as the new.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    replacing: BTreeMap<String, String>,
 }
 
 impl Manifest {
@@ -202,6 +208,13 @@ impl Manifest {
             && self.language == other.language
             && self.source == other.source
             && self.files == other.files
+            && self.replacing == other.replacing
+    }
+
+    /// Whether `content` is something this manifest wrote at `path`.
+    fn wrote(&self, path: &str, content: &[u8]) -> bool {
+        let actual = hash(content);
+        self.files.get(path) == Some(&actual) || self.replacing.get(path) == Some(&actual)
     }
 }
 
@@ -533,6 +546,43 @@ fn aliases(
     out
 }
 
+/// The ownership refusals both [`write()`] and [`check()`] apply, so a
+/// directory that checks clean or out of date is one a write could update.
+fn check_ownership(
+    out_dir: &Path,
+    manifest_file: &str,
+    previous: &Manifest,
+    planned: &BTreeMap<String, &str>,
+    aliased: &BTreeMap<String, String>,
+    options: &WriteOptions,
+) -> Result<(), WriteError> {
+    let others = other_owners(out_dir, manifest_file)?;
+    for (path, content) in planned {
+        if let Some(manifest) = others.get(&path.to_ascii_lowercase()) {
+            return Err(WriteError::OwnedByOther {
+                path: PathBuf::from(path),
+                manifest: manifest.clone(),
+            });
+        }
+        check_path(out_dir, path)?;
+        let on_disk = out_dir.join(path);
+        if !options.overwrite_unowned
+            && !previous.files.contains_key(path)
+            && !aliased.values().any(|new| new == path)
+            && on_disk.exists()
+            // Already exactly what would be written: taking it over loses
+            // nothing, which is how a deleted manifest is recovered.
+            && fs::read(&on_disk).ok().as_deref() != Some(content.as_bytes())
+        {
+            return Err(WriteError::Unowned(PathBuf::from(path)));
+        }
+    }
+    for path in previous.files.keys() {
+        check_path(out_dir, path)?;
+    }
+    check_path(out_dir, manifest_file)
+}
+
 fn error_count(generation: &Generation) -> usize {
     generation
         .diagnostics
@@ -564,7 +614,23 @@ fn manifest_for(
         language: language(target).into(),
         source: source.to_owned(),
         files,
+        replacing: BTreeMap::new(),
     }
+}
+
+/// The `replacing` entries a finished run keeps: those of files it still
+/// owns without having written them, which may hold either content.
+fn still_replacing(
+    previous: &Manifest,
+    owned: &BTreeMap<String, String>,
+    planned: &BTreeMap<String, &str>,
+) -> BTreeMap<String, String> {
+    previous
+        .replacing
+        .iter()
+        .filter(|(p, _)| owned.contains_key(*p) && !planned.contains_key(*p))
+        .map(|(p, h)| (p.clone(), h.clone()))
+        .collect()
 }
 
 fn manifest_text(manifest: &Manifest) -> String {
@@ -664,50 +730,45 @@ pub fn write(
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
-    let others = other_owners(out_dir, &manifest_file)?;
     let planned = planned(generation)?;
     for path in previous.files.keys() {
         check_path(out_dir, path)?;
     }
     let aliased = aliases(out_dir, &previous.files, &planned);
-
     // Every check before the first write.
-    for (path, content) in &planned {
-        if let Some(manifest) = others.get(&path.to_ascii_lowercase()) {
-            return Err(WriteError::OwnedByOther {
-                path: PathBuf::from(path),
-                manifest: manifest.clone(),
-            });
-        }
-        check_path(out_dir, path)?;
-        let on_disk = out_dir.join(path);
-        if !options.overwrite_unowned
-            && !previous.files.contains_key(path)
-            && !aliased.values().any(|new| new == path)
-            && on_disk.exists()
-            // Already exactly what would be written: taking it over loses
-            // nothing, which is how a deleted manifest is recovered.
-            && fs::read(&on_disk).ok().as_deref() != Some(content.as_bytes())
-        {
-            return Err(WriteError::Unowned(PathBuf::from(path)));
-        }
-    }
-    check_path(out_dir, &manifest_file)?;
+    check_ownership(
+        out_dir,
+        &manifest_file,
+        &previous,
+        &planned,
+        &aliased,
+        options,
+    )?;
 
     let hashes: BTreeMap<String, String> = planned
         .iter()
         .map(|(p, c)| (p.clone(), hash(c.as_bytes())))
         .collect();
 
-    // Claim ownership of everything this run may touch before touching it.
+    // Claim ownership of everything this run may touch before touching it,
+    // keeping what each file held before in case the run is interrupted.
+    let mut replacing = previous.replacing.clone();
+    for (path, new) in &hashes {
+        if let Some(old) = previous.files.get(path)
+            && old != new
+        {
+            replacing.entry(path.clone()).or_insert_with(|| old.clone());
+        }
+    }
     let mut pending = previous.files.clone();
     pending.extend(hashes.clone());
-    let pending = manifest_for(
+    let mut pending = manifest_for(
         &options.label,
         target,
         &source_of(&previous, options),
         pending,
     );
+    pending.replacing = replacing;
     fs::create_dir_all(out_dir).map_err(io(out_dir))?;
     if !pending.same_as(&previous) {
         write_atomic(&manifest_path, manifest_text(&pending).as_bytes())?;
@@ -730,10 +791,10 @@ pub fn write(
     let aliased: BTreeSet<String> = aliased.into_keys().collect();
     let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
     let _ = hashes;
-    for (path, recorded) in &removable {
+    for (path, _) in &removable {
         let on_disk = out_dir.join(path);
         match fs::read(&on_disk) {
-            Ok(current) if &hash(&current) == recorded => {
+            Ok(current) if previous.wrote(path, &current) => {
                 fs::remove_file(&on_disk).map_err(io(&on_disk))?;
                 report.removed.push(PathBuf::from(path));
             }
@@ -747,12 +808,14 @@ pub fn write(
             }
         }
     }
-    let final_manifest = manifest_for(
+    let replacing = still_replacing(&previous, &owned, &planned);
+    let mut final_manifest = manifest_for(
         &options.label,
         target,
         &source_of(&previous, options),
         owned,
     );
+    final_manifest.replacing = replacing;
     let on_disk = read_manifest(&manifest_path)?;
     if !on_disk.is_some_and(|m| m.same_as(&final_manifest)) {
         write_atomic(&manifest_path, manifest_text(&final_manifest).as_bytes())?;
@@ -763,8 +826,9 @@ pub fn write(
 /// Compare `out_dir` with what [`write()`] would leave there, without
 /// writing anything: file contents, owned paths and the manifest itself.
 /// It applies the same refusals as [`write()`] — error diagnostics without
-/// `allow_partial`, symbolic links, non-directories — so a directory that
-/// checks clean is one the generator could also update.
+/// `allow_partial`, symbolic links, non-directories, paths another target
+/// owns, unowned files in the way — so a directory reported out of date is
+/// one a write could update.
 pub fn check(
     generation: &Generation,
     out_dir: &Path,
@@ -781,10 +845,18 @@ pub fn check(
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
     let planned = planned(generation)?;
-    check_path(out_dir, &manifest_file)?;
-    for path in planned.keys().chain(previous.files.keys()) {
+    for path in previous.files.keys() {
         check_path(out_dir, path)?;
     }
+    let aliased = aliases(out_dir, &previous.files, &planned);
+    check_ownership(
+        out_dir,
+        &manifest_file,
+        &previous,
+        &planned,
+        &aliased,
+        options,
+    )?;
     let mut report = CheckReport::default();
     for (path, content) in &planned {
         match fs::read(out_dir.join(path)) {
@@ -801,21 +873,21 @@ pub fn check(
             }
         }
     }
-    let aliased: BTreeSet<String> = aliases(out_dir, &previous.files, &planned)
-        .into_keys()
-        .collect();
+    let aliased: BTreeSet<String> = aliased.into_keys().collect();
     let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
     for (path, _) in removable {
         if out_dir.join(&path).exists() {
             report.stale.push(PathBuf::from(path));
         }
     }
-    let expected = manifest_for(
+    let replacing = still_replacing(&previous, &owned, &planned);
+    let mut expected = manifest_for(
         &options.label,
         target,
         &source_of(&previous, options),
         owned,
     );
+    expected.replacing = replacing;
     report.manifest_outdated =
         !read_manifest(&manifest_path)?.is_some_and(|m| m.same_as(&expected));
     Ok(report)
@@ -1470,7 +1542,7 @@ mod tests {
         let mut after = WriteOptions::new("pets");
         after.source_id = Some("../api/pets".into());
         let error = write(&generation(&[("pets.rs", "b")]), &dir.0, &after).unwrap_err();
-        assert!(error.to_string().contains("--force"), "{error}");
+        assert!(error.to_string().contains("--replace-source"), "{error}");
         after.replace_source = true;
         write(&generation(&[("pets.rs", "b")]), &dir.0, &after).unwrap();
         assert_eq!(fs::read_to_string(dir.0.join("pets.rs")).unwrap(), "b");
@@ -1620,5 +1692,70 @@ mod tests {
         );
         let report = write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
         assert_eq!(report.manifest, PathBuf::from(".roas-codegen-api-go.json"));
+    }
+
+    #[test]
+    fn check_refuses_what_write_refuses() {
+        let dir = TempDir::new("check-refuses");
+        fs::write(dir.0.join("types.rs"), "hand written").unwrap();
+        let g = generation(&[("types.rs", "generated")]);
+        assert!(matches!(
+            check(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::Unowned(_))
+        ));
+        let mut forced = WriteOptions::new("api");
+        forced.overwrite_unowned = true;
+        assert!(!check(&g, &dir.0, &forced).unwrap().is_clean());
+        write(
+            &generation(&[("pets.rs", "p")]),
+            &dir.0,
+            &WriteOptions::new("pets"),
+        )
+        .unwrap();
+        assert!(matches!(
+            check(
+                &generation(&[("pets.rs", "p")]),
+                &dir.0,
+                &WriteOptions::new("api")
+            ),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+    }
+
+    #[test]
+    fn an_interrupted_rewrite_still_lets_the_old_content_go_stale() {
+        let dir = TempDir::new("interrupted");
+        write(
+            &generation(&[("old.rs", "v1"), ("keep.rs", "k")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        // A run that would write v2 stops after its pending manifest.
+        let manifest = dir.0.join(".roas-codegen-api-rust.json");
+        let mut pending = read_manifest(&manifest).unwrap().unwrap();
+        pending
+            .replacing
+            .insert("old.rs".into(), pending.files["old.rs"].clone());
+        pending.files.insert("old.rs".into(), hash(b"v2"));
+        fs::write(&manifest, manifest_text(&pending)).unwrap();
+
+        let next = generation(&[("keep.rs", "k")]);
+        assert_eq!(
+            check(&next, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .stale,
+            vec![PathBuf::from("old.rs")]
+        );
+        let report = write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(report.removed, vec![PathBuf::from("old.rs")]);
+        assert!(report.kept_edited.is_empty());
+        let finished = read_manifest(&manifest).unwrap().unwrap();
+        assert!(finished.replacing.is_empty());
+        assert!(
+            check(&next, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
     }
 }

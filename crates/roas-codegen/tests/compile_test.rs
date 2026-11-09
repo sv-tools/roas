@@ -151,12 +151,9 @@ fn generated_rust_compiles_and_behaves() {
     let doc =
         SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap()).unwrap();
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
-    let config = ConfigFile {
-        target: Some(Target::Rust),
-        ..Default::default()
-    }
-    .build()
-    .unwrap();
+    let mut config = ConfigFile::default();
+    config.target = Some(Target::Rust);
+    let config = config.build().unwrap();
     let generation = generate(&doc, &config).expect("generates");
     assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
 
