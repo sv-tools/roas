@@ -1,6 +1,6 @@
 //! Turning a [`Generation`] into files, safely.
 //!
-//! `generate` never touches disk; this module does, under three rules.
+//! `generate` never touches disk; this module does, under these rules.
 //!
 //! - **Ownership is recorded.** A manifest in the output directory lists
 //!   every file a generation target wrote, with a content hash. Its name
@@ -137,7 +137,7 @@ pub enum WriteError {
     )]
     OwnedByOther { path: PathBuf, manifest: PathBuf },
     #[error(
-        "{0} already exists and was not written by this generator; move it, or allow overwriting unowned files (`--force` on the command line)"
+        "{0} already exists and was not written by this generator; move it, or allow overwriting unowned files"
     )]
     Unowned(PathBuf),
     #[error("generated path {0} is reserved for the generator's own manifest and temporary files")]
@@ -155,7 +155,7 @@ pub enum WriteError {
     )]
     ConflictingPaths(PathBuf, PathBuf),
     #[error(
-        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; if the description moved, allow replacing the recorded source (`roas openapi generate --replace-source`) or delete the label's manifest; if it is a different description, give it its own label"
+        "label {label:?} belongs to output generated from {previous:?}, not {current:?}; if the description moved, allow replacing the recorded source or delete the label's manifest; if it is a different description, give it its own label"
     )]
     SourceMismatch {
         label: String,
@@ -313,6 +313,17 @@ fn key(path: &Path) -> Result<String, WriteError> {
     Ok(parts.join("/"))
 }
 
+/// Whether any component of a manifest key is a name the writer uses for
+/// itself: a directory named like a manifest would be read as one, and an
+/// entry naming the lock or a manifest would let a run delete it.
+fn is_reserved(key: &str) -> bool {
+    key.to_ascii_lowercase().split('/').any(|name| {
+        (name.starts_with(MANIFEST_PREFIX) && name.ends_with(MANIFEST_SUFFIX))
+            || name.contains(TMP_MARKER)
+            || name == LOCK_FILE
+    })
+}
+
 fn read_manifest(path: &Path) -> Result<Option<Manifest>, WriteError> {
     match fs::read(path) {
         Ok(bytes) => {
@@ -324,7 +335,13 @@ fn read_manifest(path: &Path) -> Result<Option<Manifest>, WriteError> {
             // A manifest is a file in the repository, so whoever controls
             // the repository controls it: an entry that leaves the output
             // directory must never reach a delete or a write.
-            for file in manifest.files.keys() {
+            for file in manifest.files.keys().chain(manifest.replacing.keys()) {
+                if is_reserved(file) {
+                    return Err(WriteError::Manifest {
+                        path: path.to_path_buf(),
+                        reason: format!("entry {file:?} names one of the generator's own files"),
+                    });
+                }
                 if key(Path::new(file)).ok().as_deref() != Some(file.as_str()) {
                     return Err(WriteError::Manifest {
                         path: path.to_path_buf(),
@@ -384,13 +401,7 @@ fn planned(generation: &Generation) -> Result<BTreeMap<String, &str>, WriteError
     for file in &generation.files {
         let key = key(&file.path)?;
         let lower = key.to_ascii_lowercase();
-        // Any component: a directory named like a manifest would be read
-        // as one by the next run.
-        if lower.split('/').any(|name| {
-            (name.starts_with(MANIFEST_PREFIX) && name.ends_with(MANIFEST_SUFFIX))
-                || name.contains(TMP_MARKER)
-                || name == LOCK_FILE
-        }) {
+        if is_reserved(&key) {
             return Err(WriteError::ReservedPath(file.path.clone()));
         }
         if let Some(other) = seen.insert(lower, file.path.clone()) {
@@ -509,41 +520,75 @@ fn outcome(
     (owned, removable)
 }
 
-/// Whether two paths name one file: a case-only rename on a
-/// case-insensitive disk. Paths that do not both exist are distinct.
+/// What identifies a file on disk, whatever spelling reaches it.
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// What identifies a file on disk: the final path, which carries the
+/// spelling stored on disk.
+#[cfg(not(unix))]
+fn file_id(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path).ok()
+}
+
+/// Whether two paths name one file, as differently cased or normalized
+/// spellings do on a case-insensitive disk. Missing paths are distinct.
+#[cfg(test)]
 fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::metadata(a), fs::metadata(b)) {
-        #[cfg(unix)]
-        (Ok(a), Ok(b)) => {
-            use std::os::unix::fs::MetadataExt;
-            a.dev() == b.dev() && a.ino() == b.ino()
-        }
-        // Without inode numbers, assume the disk is case-insensitive, as
-        // other platforms' usually are: keeping a stale file is safe,
-        // deleting the new one is not.
-        #[cfg(not(unix))]
-        (Ok(_), Ok(_)) => true,
-        _ => false,
-    }
+    matches!((file_id(a), file_id(b)), (Some(a), Some(b)) if a == b)
 }
 
 /// Previous paths that are, on this disk, the same file as a planned path
-/// spelled differently, keyed to the planned path.
+/// spelled differently, keyed to the planned path. Decided by file
+/// identity alone: what the disk folds (case beyond ASCII, Unicode
+/// normalization) is not for this code to guess.
 fn aliases(
     out_dir: &Path,
     previous: &BTreeMap<String, String>,
     planned: &BTreeMap<String, &str>,
 ) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for old in previous.keys().filter(|p| !planned.contains_key(*p)) {
-        let lower = old.to_ascii_lowercase();
-        if let Some(new) = planned.keys().find(|p| p.to_ascii_lowercase() == lower)
-            && same_file(&out_dir.join(old), &out_dir.join(new))
-        {
-            out.insert(old.clone(), new.clone());
-        }
+    let ids: BTreeMap<_, &String> = planned
+        .keys()
+        .filter_map(|p| file_id(&out_dir.join(p)).map(|id| (id, p)))
+        .collect();
+    previous
+        .keys()
+        .filter(|p| !planned.contains_key(*p))
+        .filter_map(|old| {
+            let id = file_id(&out_dir.join(old))?;
+            ids.get(&id).map(|new| (old.clone(), (*new).clone()))
+        })
+        .collect()
+}
+
+/// Give an aliased file its new spelling. Writing through the new name
+/// keeps the old directory entry's spelling on a case-insensitive disk,
+/// and an unchanged file is not written at all, so the manifest would
+/// record a name the disk does not show. Only the file name is changed;
+/// a rename that also changes a directory's case leaves that directory.
+fn respell(out_dir: &Path, old: &str, new: &str) -> Result<(), WriteError> {
+    let parent = |p: &str| p.rsplit_once('/').map(|(d, _)| d.to_owned());
+    if parent(old) != parent(new) {
+        return Ok(());
     }
-    out
+    let from = out_dir.join(old);
+    let to = out_dir.join(new);
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = to.with_file_name(format!(".rename{TMP_MARKER}{}-{n}", std::process::id()));
+    if tmp.exists() {
+        return Err(WriteError::Io {
+            path: tmp,
+            source: std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+        });
+    }
+    fs::rename(&from, &tmp).map_err(io(&from))?;
+    fs::rename(&tmp, &to).map_err(io(&to))
 }
 
 /// The ownership refusals both [`write()`] and [`check()`] apply, so a
@@ -558,7 +603,23 @@ fn check_ownership(
 ) -> Result<(), WriteError> {
     let others = other_owners(out_dir, manifest_file)?;
     for (path, content) in planned {
-        if let Some(manifest) = others.get(&path.to_ascii_lowercase()) {
+        let lower = path.to_ascii_lowercase();
+        // The same path, a file where this one needs a directory, or a
+        // directory this one would replace with a file.
+        let ancestors = lower
+            .match_indices('/')
+            .map(|(i, _)| &lower[..i])
+            .collect::<Vec<_>>();
+        let conflict = others.get(&lower).or_else(|| {
+            ancestors.iter().find_map(|a| others.get(*a)).or_else(|| {
+                others
+                    .range(format!("{lower}/")..)
+                    .next()
+                    .filter(|(k, _)| k.starts_with(&format!("{lower}/")))
+                    .map(|(_, m)| m)
+            })
+        });
+        if let Some(manifest) = conflict {
             return Err(WriteError::OwnedByOther {
                 path: PathBuf::from(path),
                 manifest: manifest.clone(),
@@ -591,7 +652,6 @@ fn error_count(generation: &Generation) -> usize {
         .count()
 }
 
-/// The manifest exactly as it is written, so a check can compare bytes.
 /// The source a manifest records: the caller's, or the one already there
 /// when the caller gave none, so a run without an identity does not erase it.
 fn source_of(previous: &Manifest, options: &WriteOptions) -> String {
@@ -754,10 +814,19 @@ pub fn write(
     // keeping what each file held before in case the run is interrupted.
     let mut replacing = previous.replacing.clone();
     for (path, new) in &hashes {
-        if let Some(old) = previous.files.get(path)
-            && old != new
-        {
-            replacing.entry(path.clone()).or_insert_with(|| old.clone());
+        let Some(recorded) = previous.files.get(path) else {
+            continue;
+        };
+        // What the file holds now, when it is ours: after an interrupted
+        // run that may be either hash the previous manifest records.
+        let current = match fs::read(out_dir.join(path)) {
+            Ok(bytes) if previous.wrote(path, &bytes) => hash(&bytes),
+            _ => recorded.clone(),
+        };
+        if &current == new {
+            replacing.remove(path);
+        } else {
+            replacing.insert(path.clone(), current);
         }
     }
     let mut pending = previous.files.clone();
@@ -774,6 +843,9 @@ pub fn write(
         write_atomic(&manifest_path, manifest_text(&pending).as_bytes())?;
     }
 
+    for (old, new) in &aliased {
+        respell(out_dir, old, new)?;
+    }
     let mut report = WriteReport {
         manifest: PathBuf::from(&manifest_file),
         ..Default::default()
@@ -790,7 +862,6 @@ pub fn write(
 
     let aliased: BTreeSet<String> = aliased.into_keys().collect();
     let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
-    let _ = hashes;
     for (path, _) in &removable {
         let on_disk = out_dir.join(path);
         match fs::read(&on_disk) {
@@ -1542,7 +1613,10 @@ mod tests {
         let mut after = WriteOptions::new("pets");
         after.source_id = Some("../api/pets".into());
         let error = write(&generation(&[("pets.rs", "b")]), &dir.0, &after).unwrap_err();
-        assert!(error.to_string().contains("--replace-source"), "{error}");
+        assert!(
+            matches!(error, WriteError::SourceMismatch { .. }),
+            "{error}"
+        );
         after.replace_source = true;
         write(&generation(&[("pets.rs", "b")]), &dir.0, &after).unwrap();
         assert_eq!(fs::read_to_string(dir.0.join("pets.rs")).unwrap(), "b");
@@ -1605,8 +1679,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|n| n.ends_with(".rs"))
             .collect();
-        assert_eq!(names.len(), 1, "{names:?}");
-        assert_eq!(names[0].to_ascii_lowercase(), "types.rs");
+        assert_eq!(names, vec!["types.rs".to_owned()]);
         assert_eq!(fs::read_to_string(dir.0.join("types.rs")).unwrap(), "two");
         if insensitive {
             assert!(report.removed.is_empty(), "{report:?}");
@@ -1757,5 +1830,124 @@ mod tests {
                 .unwrap()
                 .is_clean()
         );
+    }
+
+    #[test]
+    fn an_unchanged_case_only_rename_takes_the_new_spelling() {
+        let dir = TempDir::new("respell");
+        write(
+            &generation(&[("Types.rs", "same")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        write(
+            &generation(&[("types.rs", "same")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let names: Vec<String> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".rs"))
+            .collect();
+        assert_eq!(names, vec!["types.rs".to_owned()]);
+    }
+
+    #[test]
+    fn a_non_ascii_case_variant_is_never_deleted_as_stale() {
+        let dir = TempDir::new("unicode-case");
+        write(
+            &generation(&[("\u{c4}.rs", "same")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let next = generation(&[("\u{e4}.rs", "same")]);
+        write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(fs::read_to_string(dir.0.join("\u{e4}.rs")).unwrap(), "same");
+        assert!(
+            check(&next, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+    }
+
+    #[test]
+    fn another_targets_directories_and_files_are_not_replaced() {
+        let dir = TempDir::new("other-tree");
+        write(
+            &generation(&[("nested/a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("one"),
+        )
+        .unwrap();
+        fs::remove_dir_all(dir.0.join("nested")).unwrap();
+        let mut forced = WriteOptions::new("two");
+        forced.overwrite_unowned = true;
+        for path in ["nested", "nested/a.rs/b.rs"] {
+            assert!(
+                matches!(
+                    write(&generation(&[(path, "x")]), &dir.0, &forced),
+                    Err(WriteError::OwnedByOther { .. })
+                ),
+                "{path}"
+            );
+        }
+        write(&generation(&[("nested2.rs", "x")]), &dir.0, &forced).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_retried_interrupted_run_remembers_what_is_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("retry");
+        let manifest = dir.0.join(".roas-codegen-api-rust.json");
+        let opts = WriteOptions::new("api");
+        write(
+            &generation(&[("sub/x.rs", "v1"), ("keep.rs", "k")]),
+            &dir.0,
+            &opts,
+        )
+        .unwrap();
+        // Run 1 wrote v2 and stopped before its final manifest.
+        fs::write(dir.0.join("sub/x.rs"), "v2").unwrap();
+        let mut pending = read_manifest(&manifest).unwrap().unwrap();
+        pending.replacing.insert("sub/x.rs".into(), hash(b"v1"));
+        pending.files.insert("sub/x.rs".into(), hash(b"v2"));
+        fs::write(&manifest, manifest_text(&pending)).unwrap();
+        // Run 2 plans v3 and fails before writing it.
+        let sub = dir.0.join("sub");
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = write(
+            &generation(&[("sub/x.rs", "v3"), ("keep.rs", "k")]),
+            &dir.0,
+            &opts,
+        );
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err(), "{failed:?}");
+        assert_eq!(fs::read_to_string(sub.join("x.rs")).unwrap(), "v2");
+        // Run 3 no longer generates it: still ours, so removed.
+        let report = write(&generation(&[("keep.rs", "k")]), &dir.0, &opts).unwrap();
+        assert_eq!(report.removed, vec![PathBuf::from("sub/x.rs")]);
+        assert!(report.kept_edited.is_empty());
+    }
+
+    #[test]
+    fn manifests_naming_the_generators_own_files_are_refused() {
+        let dir = TempDir::new("reserved-entry");
+        let manifest = dir.0.join(".roas-codegen-api-rust.json");
+        let mut bad = manifest_for("api", Target::Rust, "", BTreeMap::new());
+        bad.files.insert(LOCK_FILE.into(), hash(b""));
+        fs::write(&manifest, manifest_text(&bad)).unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("a.rs", "a")]),
+                &dir.0,
+                &WriteOptions::new("api")
+            ),
+            Err(WriteError::Manifest { .. })
+        ));
     }
 }

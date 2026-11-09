@@ -241,6 +241,19 @@ fn show(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
+/// The writer's errors name library options; say which flag sets them.
+fn hint(error: roas_codegen::WriteError) -> anyhow::Error {
+    let flag = match &error {
+        roas_codegen::WriteError::Unowned(_) => Some("--force"),
+        roas_codegen::WriteError::SourceMismatch { .. } => Some("--replace-source"),
+        _ => None,
+    };
+    match flag {
+        Some(flag) => anyhow!("{error} (pass {flag})"),
+        None => error.into(),
+    }
+}
+
 pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
     let (input, uri) = read_description(&source, args.format)?;
@@ -355,7 +368,8 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         check_options.allow_partial = args.allow_partial;
         check_options.source_id = source_id(&source, &args.out);
         check_options.replace_source = args.replace_source;
-        let report = check(&generation, &args.out, &check_options)?;
+        check_options.overwrite_unowned = args.force;
+        let report = check(&generation, &args.out, &check_options).map_err(hint)?;
         if report.is_clean() {
             eprintln!("{}: up to date", args.out.display());
             return if failing > 0 {
@@ -387,7 +401,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     write_options.replace_source = args.replace_source;
     write_options.allow_partial = args.allow_partial;
     write_options.source_id = source_id(&source, &args.out);
-    let report = write(&generation, &args.out, &write_options)?;
+    let report = write(&generation, &args.out, &write_options).map_err(hint)?;
     for path in &report.kept_edited {
         eprintln!(
             "warning: {} is no longer generated but was edited, so it was kept and is no longer tracked",
