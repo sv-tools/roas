@@ -79,11 +79,13 @@ fn the_worked_example_generates_as_the_plan_shows() {
         !code.contains("Int64"),
         "no integer in this example:\n{code}"
     );
-    assert!(
-        generation.diagnostics.is_empty(),
-        "{:?}",
-        generation.diagnostics
-    );
+    // Unformatted only says rustfmt is not available where this runs.
+    let diagnostics: Vec<_> = generation
+        .diagnostics
+        .iter()
+        .filter(|d| !matches!(d.kind, roas_codegen::DiagnosticKind::Unformatted))
+        .collect();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let deps: Vec<&str> = generation
         .dependencies
         .rust

@@ -557,6 +557,15 @@ mod tests {
         }}
     }"##;
 
+    /// Whether `rustfmt` runs here: without it the output is unformatted
+    /// and carries a warning, which these tests do not expect.
+    fn have_rustfmt() -> bool {
+        std::process::Command::new("rustfmt")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
     fn args(file: &Path, out: &Path) -> GenerateArgs {
         GenerateArgs {
             file: Some(file.to_path_buf()),
@@ -577,6 +586,9 @@ mod tests {
 
     #[test]
     fn generates_then_checks_clean_then_detects_drift() {
+        if !have_rustfmt() {
+            return; // the output and --check depend on it
+        }
         let dir = TempDir::new("cycle");
         let spec = dir.0.join("pet store.json");
         std::fs::write(&spec, PET).unwrap();
@@ -624,6 +636,9 @@ mod tests {
 
     #[test]
     fn check_after_a_partial_write_is_clean() {
+        if !have_rustfmt() {
+            return; // the output and --check depend on it
+        }
         let dir = TempDir::new("partial-check");
         let spec = dir.0.join("api.json");
         std::fs::write(
@@ -646,6 +661,9 @@ mod tests {
 
     #[test]
     fn strict_promotes_warnings() {
+        if !have_rustfmt() {
+            return; // the output and --check depend on it
+        }
         let dir = TempDir::new("strict");
         let spec = dir.0.join("api.json");
         std::fs::write(
