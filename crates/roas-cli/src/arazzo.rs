@@ -16,8 +16,6 @@ use roas_arazzo::{v1_0, v1_1};
 use roas_arazzo_executor::{
     Client, Options, SourceLoadOptions, SourceRegistry, prepare, required_sources,
 };
-use roas_file_fetcher::FileFetcher;
-use roas_http_fetcher::HttpFetcher;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,7 +24,8 @@ use std::rc::Rc;
 use url::Url;
 
 use crate::{
-    InputFormat, InputSource, LoaderKind, read_input, resolve_input_source, serialize_spec,
+    InputFormat, InputSource, LoaderKind, build_loader_with, read_input, resolve_input_source,
+    serialize_spec,
 };
 
 /// Arazzo specification version, mirroring [`crate::overlay::OverlayVersion`].
@@ -756,21 +755,7 @@ fn remembering_loader(kinds: &[LoaderKind], budget: usize) -> Loader {
         budget,
         ..Fetches::default()
     }));
-    let mut loader = Loader::new();
-    for kind in kinds {
-        match kind {
-            LoaderKind::File => {
-                loader.register_fetcher("file://", Remembering::new(FileFetcher::new(), &failed));
-            }
-            LoaderKind::Http => {
-                // One `HttpFetcher` (one connection pool) serves both prefixes.
-                let fetcher = HttpFetcher::new();
-                loader.register_fetcher("http://", Remembering::new(fetcher.clone(), &failed));
-                loader.register_fetcher("https://", Remembering::new(fetcher, &failed));
-            }
-        }
-    }
-    loader
+    build_loader_with(kinds, |fetcher| Remembering::new(fetcher, &failed)).unwrap_or_default()
 }
 
 /// What the fetchers of one loading operation have asked for, across its
@@ -1523,7 +1508,7 @@ mod tests {
     #[test]
     fn a_loading_diagnostic_says_why_as_well_as_what() {
         let fetches = Rc::new(RefCell::new(Fetches::default()));
-        let mut fetcher = Remembering::new(FileFetcher::new(), &fetches);
+        let mut fetcher = Remembering::new(roas_file_fetcher::FileFetcher::new(), &fetches);
         let spent = fetcher
             .fetch(&Url::parse("file:///budget/spent.json").unwrap())
             .unwrap_err();

@@ -48,7 +48,8 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use roas::loader::Loader;
+use roas::LoadedDocument;
+use roas::loader::{Loader, LoaderError, ResourceFetcher};
 use roas_file_fetcher::FileFetcher;
 use roas_http_fetcher::HttpFetcher;
 use std::fs;
@@ -265,6 +266,37 @@ pub(crate) fn read_input(
 }
 
 pub(crate) fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {
+    build_loader_with(kinds, |fetcher| fetcher)
+}
+
+/// A fetcher `--load` can register.
+pub(crate) enum Fetcher {
+    File(FileFetcher),
+    Http(HttpFetcher),
+}
+
+impl ResourceFetcher for Fetcher {
+    fn fetch(&mut self, uri: &url::Url) -> Result<serde_json::Value, LoaderError> {
+        match self {
+            Fetcher::File(fetcher) => fetcher.fetch(uri),
+            Fetcher::Http(fetcher) => fetcher.fetch(uri),
+        }
+    }
+
+    fn fetch_document(&mut self, uri: &url::Url) -> Result<LoadedDocument, LoaderError> {
+        match self {
+            Fetcher::File(fetcher) => fetcher.fetch_document(uri),
+            Fetcher::Http(fetcher) => fetcher.fetch_document(uri),
+        }
+    }
+}
+
+/// [`build_loader`], with each fetcher passed through `wrap` before it is
+/// registered.
+pub(crate) fn build_loader_with<W: ResourceFetcher + 'static>(
+    kinds: &[LoaderKind],
+    mut wrap: impl FnMut(Fetcher) -> W,
+) -> Option<Loader> {
     if kinds.is_empty() {
         return None;
     }
@@ -272,14 +304,14 @@ pub(crate) fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {
     for kind in kinds {
         match kind {
             LoaderKind::File => {
-                loader.register_fetcher("file://", FileFetcher::new());
+                loader.register_fetcher("file://", wrap(Fetcher::File(FileFetcher::new())));
             }
             LoaderKind::Http => {
                 // Build one `HttpFetcher` and clone it across both prefixes so
                 // a single connection pool serves `http://` and `https://`.
                 let fetcher = HttpFetcher::new();
-                loader.register_fetcher("http://", fetcher.clone());
-                loader.register_fetcher("https://", fetcher);
+                loader.register_fetcher("http://", wrap(Fetcher::Http(fetcher.clone())));
+                loader.register_fetcher("https://", wrap(Fetcher::Http(fetcher)));
             }
         }
     }
