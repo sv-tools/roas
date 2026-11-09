@@ -248,13 +248,6 @@ fn check_go(config: &Config) -> Result<(), GenerateError> {
             config.go.file
         )));
     }
-    if let Some(path) = &config.go.module_path
-        && !go::naming::is_module_path(path)
-    {
-        return Err(GenerateError::Config(format!(
-            "`go.module_path = {path:?}` is not a Go module path"
-        )));
-    }
     Ok(())
 }
 

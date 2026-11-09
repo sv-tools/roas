@@ -290,19 +290,12 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
                 )));
             }
             imports.push(quote(import));
-            // The standard library is no dependency to declare, nor is a
-            // package of the module being generated; a module path has a
-            // dot in its first element.
-            let own = config
-                .go
-                .module_path
-                .as_ref()
-                .is_some_and(|module| import.starts_with(&format!("{module}/")));
-            if !own
-                && import
-                    .split('/')
-                    .next()
-                    .is_some_and(|first| first.contains('.'))
+            // The standard library is no dependency to declare; a module
+            // path has a dot in its first element.
+            if import
+                .split('/')
+                .next()
+                .is_some_and(|first| first.contains('.'))
             {
                 dependencies.push(GoDependency::new(import.clone()));
             }

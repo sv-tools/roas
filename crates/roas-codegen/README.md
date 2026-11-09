@@ -112,7 +112,7 @@ Go identifiers are exported and ASCII. A property name a struct tag cannot carry
 
 ## Configuration
 
-The Rust output is one module, `<rust.module>.rs`, `types.rs` by default; the Go output is one file, `<go.file>.go`, also `types.go` by default, in package `go.package`, `api` by default. Targets sharing a directory need different names. `go.module_path` also writes a `go.mod` declaring that module beside the file, so the output builds as a module of its own; it is refused when a substitution imports another module, whose version a generated `go.mod` could not know.
+The Rust output is one module, `<rust.module>.rs`, `types.rs` by default; the Go output is one file, `<go.file>.go`, also `types.go` by default, in package `go.package`, `api` by default. Targets sharing a directory need different names. The output is types for a package in your own module; no `go.mod` is generated.
 
 `ConfigFile` is what a TOML file may say: everything optional, unknown keys rejected, relative paths resolved against the file's own directory. `Config` is what generation consumes, and `ConfigFile::build` is the one place a missing `target` is refused.
 

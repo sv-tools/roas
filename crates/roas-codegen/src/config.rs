@@ -110,9 +110,6 @@ pub struct GoConfigFile {
     /// The generated file's stem: the file is `<file>.go`. Default
     /// `types`. Targets sharing an output directory need different ones.
     pub file: Option<String>,
-    /// Generate a `go.mod` declaring this module beside the file, which
-    /// makes the output a module of its own.
-    pub module_path: Option<String>,
 }
 
 /// What a configuration file may say. Everything optional; nothing
@@ -194,7 +191,6 @@ impl ConfigFile {
         self.rust.derives.extend(over.rust.derives);
         self.go.package = over.go.package.or(self.go.package);
         self.go.file = over.go.file.or(self.go.file);
-        self.go.module_path = over.go.module_path.or(self.go.module_path);
         self.substitutions.extend(over.substitutions);
         self.types.extend(over.types);
         self
@@ -245,12 +241,6 @@ impl ConfigFile {
                         file
                     }
                     None => "types".to_owned(),
-                },
-                module_path: match self.go.module_path {
-                    Some(path) if !crate::go::naming::is_module_path(&path) => {
-                        return Err(ConfigError::InvalidModulePath(path));
-                    }
-                    other => other,
                 },
             },
             substitutions: self.substitutions,
@@ -338,7 +328,6 @@ pub struct GoConfig {
     pub package: String,
     /// The generated file's stem; the file is `<file>.go`.
     pub file: String,
-    pub module_path: Option<String>,
 }
 
 /// What generation consumes. Fully resolved: no `Option` where the
@@ -394,10 +383,6 @@ pub enum ConfigError {
         "`go.file = {0:?}` must be a lowercase file stem `go build` reads as plain source: a letter, then letters, digits or `_`; no `_test`, `_<os>` or `_<arch>` suffix, and not a name Windows reserves"
     )]
     InvalidGoFile(String),
-    #[error(
-        "`go.module_path = {0:?}` is not a module path Go accepts for a module others import: it starts with a lowercase domain such as `example.com`, then `/`-separated elements of ASCII letters, digits, `-`, `.`, `_` and `~`, none empty, starting or ending with a dot, or named like a Windows device, and a final `/vN` is a major version 2 or above"
-    )]
-    InvalidModulePath(String),
 }
 
 #[cfg(test)]
