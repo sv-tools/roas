@@ -11,6 +11,7 @@ use crate::{
     AsyncHttpClient, CriterionError, ExecutionError, ExecutionFailure, ExecutionReport,
     ExpressionError, HttpClient, Options, Run, SelectError,
 };
+use roas_arazzo::source_map::{SourcePosition, SourceRange};
 use roas_arazzo::v1_1::{
     Criterion, CriterionKind, CriterionType, Description, ExpressionKind, Parameter,
     ParameterLocation, ReusableOr, SourceType, Step, ValueOrSelector, Workflow,
@@ -55,6 +56,14 @@ pub struct PreparationDiagnostic {
     pub path: String,
     /// Zero-based UTF-8 byte offset in that string field, when available.
     pub offset: Option<usize>,
+    /// Where the field's value is written, when its document has a
+    /// [`SourceMap`](roas_arazzo::source_map::SourceMap)
+    /// ([`Options::source_map`](crate::Options::source_map)).
+    pub span: Option<SourceRange>,
+    /// Where `offset` is in the original text — through quotes, escapes
+    /// and folding — when the document has a source map and the raw
+    /// scalar decodes back to the parsed value exactly.
+    pub position: Option<SourcePosition>,
     /// The underlying structural/static error or non-fatal portability advice.
     pub issue: PreparationIssue,
 }
@@ -73,8 +82,14 @@ impl fmt::Display for PreparationDiagnostic {
             write!(f, "{document} ")?;
         }
         write!(f, "{}", self.path)?;
-        if let Some(offset) = self.offset {
-            write!(f, " at byte {offset}")?;
+        match (self.position, self.span, self.offset) {
+            (Some(position), _, _) => write!(f, " at {position}")?,
+            (None, Some(span), Some(offset)) => {
+                write!(f, " at {}, byte {offset} of the value", span.start)?;
+            }
+            (None, Some(span), None) => write!(f, " at {}", span.start)?,
+            (None, None, Some(offset)) => write!(f, " at byte {offset}")?,
+            (None, None, None) => {}
         }
         match &self.issue {
             PreparationIssue::Model(error) => write!(f, ": {}", error.message),
@@ -567,12 +582,19 @@ impl<'d> Compiler<'d> {
     }
 
     fn finding(&mut self, site: &Site<'d>, offset: Option<usize>, issue: PreparationIssue) {
+        let map = self.scope().source_map.as_deref();
+        let span = map.and_then(|map| map.locate(&site.path));
+        let position = map
+            .zip(offset)
+            .and_then(|(map, offset)| map.locate_in(&site.path, offset));
         self.diagnostics.push(PreparationDiagnostic {
             document: self.documents.get(self.current).identity.map(str::to_owned),
             workflow_id: site.workflow.map(|workflow| workflow.workflow_id.clone()),
             step_id: site.step.map(|step| step.step_id.clone()),
             path: site.path.clone(),
             offset,
+            span,
+            position,
             issue,
         });
     }

@@ -241,6 +241,16 @@ pub(crate) fn read_input(
     source: &InputSource,
     format: Option<InputFormat>,
 ) -> Result<(serde_json::Value, InputFormat)> {
+    let (_, value, format) = read_input_text(source, format)?;
+    Ok((value, format))
+}
+
+/// [`read_input`], also returning the text it read, for commands that
+/// report where in it a problem is.
+pub(crate) fn read_input_text(
+    source: &InputSource,
+    format: Option<InputFormat>,
+) -> Result<(String, serde_json::Value, InputFormat)> {
     let resolved = match source {
         InputSource::File(p) => format.unwrap_or_else(|| {
             if path_looks_like_yaml(p) {
@@ -264,7 +274,7 @@ pub(crate) fn read_input(
         }
     };
     let value = parse_value(&raw, resolved == InputFormat::Yaml)?;
-    Ok((value, resolved))
+    Ok((raw, value, resolved))
 }
 
 pub(crate) fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {

@@ -44,6 +44,7 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+roas-arazzo = { version = "0.3", path = "../roas-arazzo", features = ["source-map"] }
 serde.workspace = true
 serde-saphyr.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

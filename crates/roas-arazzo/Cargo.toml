@@ -30,12 +30,15 @@ v1_1 = []
 # `clap::ValueEnum` impls for `validation::ValidationOptions`, for
 # downstream CLIs.
 clap = ["dep:clap"]
+# `source_map::SourceMap::parse`: locate fields in the original JSON / YAML text.
+source-map = ["dep:serde-saphyr"]
 
 [dependencies]
 clap = { workspace = true, optional = true }
 enumset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde-saphyr = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde-saphyr.workspace = true

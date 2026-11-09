@@ -16,7 +16,21 @@ use serde_json::Value;
 /// alias bombs, nesting past 64 levels, documents past 10M nodes or
 /// 64 MiB of scalar text, and an anchored node past 1M events.
 pub(crate) fn from_str(raw: &str) -> Result<Value, serde_saphyr::Error> {
-    let options = serde_saphyr::options! {
+    serde_saphyr::from_str_with_options::<crate::yaml_value::JsonValue>(raw, options())
+        .map(crate::yaml_value::JsonValue::into_inner)
+}
+
+/// Read `raw` as YAML straight into `T`, with the options of [`from_str`].
+/// Only for errors: deserializing from the text names the line and column
+/// a `serde_json::Value` no longer knows.
+pub(crate) fn from_str_as<T: serde::de::DeserializeOwned>(
+    raw: &str,
+) -> Result<T, serde_saphyr::Error> {
+    serde_saphyr::from_str_with_options(raw, options())
+}
+
+fn options() -> serde_saphyr::Options {
+    serde_saphyr::options! {
         // Same options in every roas crate; keep the copies in step
         // (`grep -rn 'strict_booleans: true' crates`). The budget is raised
         // from the defaults (250k nodes, 1M events, 50k aliases, 50k anchors,
@@ -46,9 +60,7 @@ pub(crate) fn from_str(raw: &str) -> Result<Value, serde_saphyr::Error> {
         non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
         merge_keys: serde_saphyr::MergeKeyPolicy::Merge,
         duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
-    };
-    serde_saphyr::from_str_with_options::<crate::yaml_value::JsonValue>(raw, options)
-        .map(crate::yaml_value::JsonValue::into_inner)
+    }
 }
 
 /// Write `value` as YAML. Strings that a YAML 1.1 reader would take for

@@ -11,11 +11,13 @@ use clap::{Subcommand, ValueEnum};
 use enumset::EnumSet;
 use roas::LoadedDocument;
 use roas::loader::{Loader, LoaderError, ResourceFetcher};
-use roas_arazzo::validation::{Error as ArazzoError, Validate, ValidationOptions};
+use roas_arazzo::source_map::SourceMap;
+use roas_arazzo::validation::{Error as ArazzoError, Validate, ValidationError, ValidationOptions};
 use roas_arazzo::{v1_0, v1_1};
 use roas_arazzo_executor::{
     Client, Options, SourceLoadOptions, SourceRegistry, prepare, required_sources,
 };
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,8 +26,8 @@ use std::rc::Rc;
 use url::Url;
 
 use crate::{
-    InputFormat, InputSource, LoaderKind, build_loader_with, read_input, resolve_input_source,
-    serialize_spec,
+    InputFormat, InputSource, LoaderKind, build_loader_with, read_input, read_input_text,
+    resolve_input_source, serialize_spec,
 };
 
 /// Arazzo specification version, mirroring [`crate::overlay::OverlayVersion`].
@@ -137,6 +139,58 @@ pub(crate) fn detect_or_use_arazzo(
             serde_json::from_value(value).context("deserializing as Arazzo 1.1")?,
         ),
     })
+}
+
+/// An Arazzo description read from the command line, with where its
+/// fields are in the text.
+pub(crate) struct ReadArazzo {
+    pub(crate) detected: DetectedArazzo,
+    pub(crate) value: Value,
+    pub(crate) format: InputFormat,
+    /// `None` when the text cannot be mapped; findings then name paths only.
+    pub(crate) map: Option<SourceMap>,
+}
+
+/// Read, detect and deserialize an Arazzo description. A description that
+/// does not fit the model is read again from its text, so the error names
+/// a line and column.
+pub(crate) fn read_arazzo(source: &InputSource, format: Option<InputFormat>) -> Result<ReadArazzo> {
+    let (raw, value, format) = read_input_text(source, format)?;
+    let version = detect_arazzo(&value)?;
+    let detected = detect_or_use_arazzo(Some(version), value.clone())
+        .map_err(|error| typed_error_at(&raw, format, version).unwrap_or(error))?;
+    Ok(ReadArazzo {
+        detected,
+        value,
+        format,
+        map: SourceMap::parse(raw).ok(),
+    })
+}
+
+/// The typed parse again, straight from the text. `None` when that parse
+/// succeeds after all (the two readers disagree): the first error stands.
+fn typed_error_at(raw: &str, format: InputFormat, version: ArazzoVersion) -> Option<anyhow::Error> {
+    fn at<T: DeserializeOwned>(raw: &str, format: InputFormat) -> Option<String> {
+        match format {
+            InputFormat::Json => serde_json::from_str::<T>(raw).err().map(|e| e.to_string()),
+            InputFormat::Yaml => crate::yaml::from_str_as::<T>(raw)
+                .err()
+                .map(|e| e.to_string()),
+        }
+    }
+    let message = match version {
+        ArazzoVersion::V1_0 => at::<v1_0::Description>(raw, format),
+        ArazzoVersion::V1_1 => at::<v1_1::Description>(raw, format),
+    }?;
+    Some(anyhow!("deserializing as {}: {message}", version.label()))
+}
+
+/// A validation finding, with its line and column when the map has them.
+fn located(map: Option<&SourceMap>, error: &ValidationError) -> String {
+    match map.and_then(|map| map.locate(&error.path)) {
+        Some(range) => format!("{} at {}: {}", error.path, range.start, error.message),
+        None => error.to_string(),
+    }
 }
 
 #[derive(Subcommand)]
@@ -320,8 +374,12 @@ pub(crate) fn run_arazzo(cmd: ArazzoCommand) -> Result<()> {
 
 fn run_arazzo_validate(args: ArazzoValidateArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
-    let (value, input_format) = read_input(&source, args.format)?;
-    let detected = detect_or_use_arazzo(None, value)?;
+    let ReadArazzo {
+        detected,
+        format: input_format,
+        map,
+        ..
+    } = read_arazzo(&source, args.format)?;
 
     let mut options = EnumSet::<ValidationOptions>::empty();
     for ignore in &args.ignore {
@@ -339,7 +397,7 @@ fn run_arazzo_validate(args: ArazzoValidateArgs) -> Result<()> {
         }
         Err(err) => {
             for e in &err.errors {
-                eprintln!("- {e}");
+                eprintln!("- {}", located(map.as_ref(), e));
             }
             Err(anyhow!(
                 "{}: Arazzo validation failed ({} error{})",
@@ -353,8 +411,11 @@ fn run_arazzo_validate(args: ArazzoValidateArgs) -> Result<()> {
 
 fn run_arazzo_convert(args: ArazzoConvertArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
-    let (value, input_format) = read_input(&source, args.format)?;
-    let detected = detect_or_use_arazzo(None, value)?;
+    let ReadArazzo {
+        detected,
+        format: input_format,
+        ..
+    } = read_arazzo(&source, args.format)?;
 
     let converted = detected.convert_to(args.to)?;
     let value = converted.into_value()?;
@@ -365,8 +426,7 @@ fn run_arazzo_convert(args: ArazzoConvertArgs) -> Result<()> {
 
 fn run_arazzo_list(args: ArazzoListArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
-    let (value, _) = read_input(&source, args.format)?;
-    let detected = detect_or_use_arazzo(None, value)?;
+    let detected = read_arazzo(&source, args.format)?.detected;
     let description = match detected {
         DetectedArazzo::V1_1(description) => description,
         DetectedArazzo::V1_0(description) => v1_1::Description::from(description),
@@ -436,8 +496,12 @@ fn inputs_of(workflow: &v1_1::Workflow) -> Vec<String> {
 
 fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     let source = resolve_input_source(args.file.as_deref())?;
-    let (value, input_format) = read_input(&source, args.format)?;
-    let detected = detect_or_use_arazzo(None, value.clone())?;
+    let ReadArazzo {
+        detected,
+        value,
+        format: input_format,
+        map,
+    } = read_arazzo(&source, args.format)?;
     // One interpreter: a v1.0 description is upconverted first.
     let description = match detected {
         DetectedArazzo::V1_1(description) => description,
@@ -453,7 +517,7 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     }
     if let Err(errors) = description.validate(checks) {
         for error in &errors.errors {
-            eprintln!("- {error}");
+            eprintln!("- {}", located(map.as_ref(), error));
         }
         return Err(anyhow!(
             "{}: the description does not validate ({} error{}), so nothing was run",
@@ -471,6 +535,9 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
             } else {
                 roas_arazzo_executor::InputValidation::Draft202012
             });
+    if let Some(map) = map {
+        options = options.source_map(map);
+    }
     for schema in &args.schema {
         let (uri, path) = split_pair(schema, "--schema")?;
         let (document, _) = read_input(&InputSource::File(PathBuf::from(path)), None)
@@ -1057,6 +1124,13 @@ mod tests {
             std::fs::write(&path, serde_json::to_string(value).unwrap()).unwrap();
             Self(path)
         }
+
+        /// `text` as written, for tests about where in it something is.
+        fn text(name: &str, text: &str) -> Self {
+            let file = Self::write(name, &Value::Null);
+            std::fs::write(&file.0, text).unwrap();
+            file
+        }
     }
 
     impl Drop for TempFile {
@@ -1161,6 +1235,102 @@ mod tests {
             asked
         });
         (base, join)
+    }
+
+    const LOCATED: &str = "arazzo: 1.1.0
+info:
+  title: \"\"
+  version: \"1.0.0\"
+sourceDescriptions:
+  - name: petStore
+    url: https://api.example.com/openapi.json
+    type: openapi
+workflows:
+  - workflowId: buyPet
+    steps:
+      - stepId: findPet
+        operationId: getPetById
+        parameters:
+          - name: petId
+            in: path
+            value: $inputs.petId
+        successCriteria:
+          - condition: \"$statusCode == 'caf\\u00e9' && (\"
+";
+
+    #[test]
+    fn validation_findings_name_their_line_and_column() {
+        let file = TempFile::text("located.yaml", LOCATED);
+        let read = read_arazzo(&InputSource::File(file.0.clone()), None).unwrap();
+        let errors = read.detected.validate(EnumSet::empty()).unwrap_err();
+        let title = errors
+            .errors
+            .iter()
+            .find(|error| error.path == "#.info.title")
+            .unwrap();
+        assert!(
+            located(read.map.as_ref(), title).starts_with("#.info.title at line 3, column 10: "),
+            "{}",
+            located(read.map.as_ref(), title)
+        );
+        // Without a map, or for a path the text does not have: as before.
+        assert_eq!(located(None, title), title.to_string());
+        let unmapped = TempFile::text(
+            "unmapped.yaml",
+            &LOCATED.replace("title: \"\"", "title: [\"\"]"),
+        );
+        assert!(read_arazzo(&InputSource::File(unmapped.0.clone()), None).is_err());
+    }
+
+    #[test]
+    fn a_description_that_does_not_fit_the_model_names_where() {
+        let yaml = TempFile::text(
+            "typed.yaml",
+            &LOCATED.replace("workflowId: buyPet", "workflowId: [1]"),
+        );
+        let error = read_arazzo(&InputSource::File(yaml.0.clone()), None)
+            .err()
+            .unwrap();
+        let shown = format!("{error:#}");
+        assert!(
+            shown.starts_with("deserializing as Arazzo 1.1: "),
+            "{shown}"
+        );
+        assert!(shown.contains("line 10"), "{shown}");
+        let json = TempFile::text(
+            "typed.json",
+            "{\"arazzo\": \"1.0.1\",\n \"info\": {\"title\": 7, \"version\": \"1\"},\n \"sourceDescriptions\": [], \"workflows\": []}",
+        );
+        let error = read_arazzo(&InputSource::File(json.0.clone()), None)
+            .err()
+            .unwrap();
+        let shown = format!("{error:#}");
+        assert!(
+            shown.starts_with("deserializing as Arazzo 1.0: "),
+            "{shown}"
+        );
+        assert!(shown.contains("line 2"), "{shown}");
+        // When the text reader accepts what the value reader did not, the
+        // original error stands.
+        assert!(typed_error_at(LOCATED, InputFormat::Yaml, ArazzoVersion::V1_1).is_none());
+    }
+
+    #[test]
+    fn run_reports_where_a_malformed_condition_is() {
+        let (_, openapi) = runnable();
+        let text = LOCATED.replace("title: \"\"", "title: T");
+        let description = TempFile::text("located-run.yaml", &text);
+        let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
+        args.quiet = true;
+        let error = run_arazzo(ArazzoCommand::Run(args.into())).unwrap_err();
+        let shown = format!("{error:#}");
+        assert!(
+            shown.contains(
+                "#.workflows[0].steps[0].successCriteria[0].condition at line 19, column "
+            ),
+            "{shown}"
+        );
+        assert!(!shown.contains(" at byte "), "{shown}");
     }
 
     fn runnable() -> (TempFile, TempFile) {

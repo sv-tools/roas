@@ -66,6 +66,20 @@ YAML descriptions work the same way — parse with `serde-saphyr` (or any other 
 
 `ValidationOptions` (EnumSet): `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion`. Behind the `clap` feature, the enum implements `clap::ValueEnum` so downstream CLIs can surface it directly.
 
+## Source locations
+
+Behind the `source-map` feature, `source_map::SourceMap::parse(text)` reads the JSON or YAML text a description came from and answers where a diagnostic's `path` is written: `locate(path)` for the value, `locate_key(path)` for the member name, and `locate_in(path, offset)` for a byte offset inside a string value, mapped back through quotes, escapes (`\u00e9`, surrogate pairs), YAML line folding and block-scalar indentation. Positions are UTF-8 byte offsets with one-based lines and columns counted in characters; an editor speaking UTF-16 converts at its own boundary. When the raw scalar does not decode back to exactly the parsed value, `locate_in` returns `None` rather than guess. The map is a sidecar: the typed models are unchanged and stay usable without it.
+
+```rust
+# #[cfg(feature = "source-map")] {
+use roas_arazzo::source_map::SourceMap;
+
+let map = SourceMap::parse("info:\n  title: \"caf\\u00e9\"\n").unwrap();
+let title = map.locate("#.info.title").unwrap();
+assert_eq!((title.start.line, title.start.column), (2, 10));
+# }
+```
+
 Runtime-expression grammar, `sourceDescriptions` / `$ref` resolution, and deep JSON Schema semantics for `inputs` are out of scope for this release.
 
 ## License

@@ -73,6 +73,7 @@
 #![cfg_attr(not(any(feature = "v1_0", feature = "v1_1")), allow(dead_code))]
 
 pub mod common;
+pub mod source_map;
 
 #[cfg(test)]
 mod test_yaml;

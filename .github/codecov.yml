@@ -121,6 +121,9 @@ component_management:
         - crates/roas-arazzo/src/lib.rs
         - crates/roas-arazzo/src/validation.rs
         - crates/roas-arazzo/src/common/**
+        - crates/roas-arazzo/src/source_map.rs
+        - crates/roas-arazzo/src/source_map/**
+        - crates/roas-arazzo/tests/source_map_test.rs
     - component_id: arazzo-v1_0
       name: arazzo-v1.0
       paths:
