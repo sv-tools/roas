@@ -77,8 +77,9 @@ pub(crate) fn diff(raw: &Value, known: &Value) -> UnknownMembers {
                 for (name, value) in raw {
                     let member = format!("{path}.{name}");
                     match known.get(name) {
+                        // A field, or an extension the object allows.
                         Some(kept) => children.push((member, value, kept)),
-                        // An extension the object allows is kept.
+                        // As a known field left empty is: see the module docs.
                         None if is_empty(value) => {}
                         None => members.push(UnknownMember {
                             path: member,

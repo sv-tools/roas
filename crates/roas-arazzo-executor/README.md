@@ -426,7 +426,7 @@ is guessed: `position` stays `None` and the byte offset is shown.
 Give `Options::unknown_members` what `roas_arazzo`'s `Description::unknown_members`
 listed for the description, and each member is a `PreparationIssue::UnknownMember`
 error located at its name: the specification allows only its fields and `x-`
-extensions, and a member the model dropped, such as a misspelt `successCriteria`,
+extensions (a Reusable Object allows none), and a member the model dropped, such as a misspelt `successCriteria`,
 would otherwise be silently ignored by the run. External Arazzo documents in the
 `SourceRegistry` are checked the same way without being asked. Only checked
 preparation locates findings; errors of the lazy `execute` / `Run::start` path carry
