@@ -159,6 +159,8 @@ pub enum WriteError {
     NotADirectory(PathBuf),
     #[error("{0} is a directory where a generated file goes")]
     IsADirectory(PathBuf),
+    #[error("{0} must be a regular file: the generator takes its lock on it")]
+    BadLock(PathBuf),
     #[error("{0} is a symbolic link; generated files are never written through one")]
     Symlink(PathBuf),
     #[error("{0} is locked: another generation is writing to this directory")]
@@ -247,7 +249,7 @@ struct DirLock {
 
 impl DirLock {
     fn acquire(out_dir: &Path) -> Result<DirLock, WriteError> {
-        check_path(out_dir, LOCK_FILE)?;
+        check_lock(out_dir)?;
         let path = out_dir.join(LOCK_FILE);
         let file = fs::OpenOptions::new()
             .read(true)
@@ -284,6 +286,18 @@ impl Drop for DirLock {
         // Without that check the file stays, reused by the next run.
         #[cfg(unix)]
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// The lock path must be a regular file or absent; [`check()`] looks too,
+/// so it never passes a directory a write would refuse.
+fn check_lock(out_dir: &Path) -> Result<(), WriteError> {
+    let path = out_dir.join(LOCK_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.is_file() => Err(WriteError::BadLock(path)),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(WriteError::Io { path, source }),
     }
 }
 
@@ -731,11 +745,18 @@ fn check_ownership(
 /// wrote. The rest were edited and are kept.
 fn going(
     out_dir: &Path,
+    manifest_file: &str,
     previous: &Manifest,
     removable: &[(String, String)],
 ) -> Result<BTreeSet<String>, WriteError> {
+    // A file another manifest also lists, as after merging two branches
+    // that each added a target, is not this target's alone to delete.
+    let others = other_owners(out_dir, manifest_file)?;
     let mut out = BTreeSet::new();
     for (path, _) in removable {
+        if others.contains_key(&path.to_ascii_lowercase()) {
+            continue;
+        }
         if read_recorded(&out_dir.join(path))?.is_some_and(|bytes| previous.wrote(path, &bytes)) {
             out.insert(path.clone());
         }
@@ -1053,7 +1074,7 @@ pub fn write(
     let aliased = aliases(out_dir, &previous.files, &planned);
     let old_spellings: BTreeSet<String> = aliased.keys().cloned().collect();
     let (owned, removable) = outcome(&previous.files, &planned, &old_spellings, errors > 0);
-    let going = going(out_dir, &previous, &removable)?;
+    let going = going(out_dir, &manifest_file, &previous, &removable)?;
     // Every check before the first write.
     check_ownership(
         out_dir,
@@ -1201,6 +1222,7 @@ pub fn check(
     let target = generation.target;
     let manifest_file = manifest_name(&options.label, target)?;
     check_out_dir(out_dir)?;
+    check_lock(out_dir)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -1212,7 +1234,7 @@ pub fn check(
         .into_keys()
         .collect();
     let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
-    let going = going(out_dir, &previous, &removable)?;
+    let going = going(out_dir, &manifest_file, &previous, &removable)?;
     check_ownership(
         out_dir,
         &manifest_file,
@@ -1224,6 +1246,12 @@ pub fn check(
     )?;
     let mut report = CheckReport::default();
     for (path, content) in &planned {
+        // Reached through a stale spelling a write removes first: written
+        // afresh.
+        if is_going(out_dir, &going, path) {
+            report.missing.push(PathBuf::from(path));
+            continue;
+        }
         match read_recorded(&out_dir.join(path))? {
             Some(current) if current == content.as_bytes() => {}
             Some(_) => report.changed.push(PathBuf::from(path)),
@@ -1866,7 +1894,10 @@ mod tests {
             &WriteOptions::new("api"),
         )
         .unwrap();
-        assert!(!dir.0.join(LOCK_FILE).exists(), "the lock is released");
+        #[cfg(unix)]
+        assert!(!dir.0.join(LOCK_FILE).exists(), "the lock file is removed");
+        // Released on every platform: it can be taken again.
+        drop(DirLock::acquire(&dir.0).unwrap());
         let mut options = WriteOptions::new("api");
         options.overwrite_unowned = true;
         let error = write(&generation(&[(LOCK_FILE, "x")]), &dir.0, &options).unwrap_err();
@@ -2474,7 +2505,9 @@ mod tests {
             &WriteOptions::new("api"),
         )
         .unwrap();
+        #[cfg(unix)]
         assert!(!dir.0.join(LOCK_FILE).exists());
+        drop(DirLock::acquire(&dir.0).unwrap());
     }
 
     #[cfg(unix)]
@@ -2737,5 +2770,65 @@ mod tests {
         write(&next, &dir.0, &opts).unwrap();
         assert_eq!(fs::read_to_string(dir.0.join("foo.rs")).unwrap(), "v2");
         assert_eq!(fs::read_to_string(&backup).unwrap(), "v1");
+    }
+
+    #[test]
+    fn a_lock_path_that_is_no_file_fails_check_as_it_fails_write() {
+        let dir = TempDir::new("bad-lock");
+        fs::create_dir(dir.0.join(LOCK_FILE)).unwrap();
+        let g = generation(&[("a.rs", "a")]);
+        assert!(matches!(
+            check(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::BadLock(_))
+        ));
+        assert!(matches!(
+            write(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::BadLock(_))
+        ));
+    }
+
+    #[test]
+    fn a_stale_file_another_manifest_lists_is_kept() {
+        let dir = TempDir::new("co-owned");
+        write(
+            &generation(&[("x.rs", "x"), ("y.rs", "y")]),
+            &dir.0,
+            &WriteOptions::new("aaa"),
+        )
+        .unwrap();
+        let mut other = manifest_for("bbb", Target::Rust, "", BTreeMap::new());
+        other.files.insert("x.rs".into(), hash(b"x"));
+        fs::write(
+            dir.0.join(".roas-codegen-bbb-rust.json"),
+            manifest_text(&other),
+        )
+        .unwrap();
+        let next = generation(&[("y.rs", "y")]);
+        let checked = check(&next, &dir.0, &WriteOptions::new("aaa")).unwrap();
+        assert!(checked.stale.is_empty(), "{checked:?}");
+        let report = write(&next, &dir.0, &WriteOptions::new("aaa")).unwrap();
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(dir.0.join("x.rs").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_lists_a_file_rewritten_through_a_linked_old_spelling() {
+        let dir = TempDir::new("linked-check");
+        write(
+            &generation(&[("Foo.rs", "same")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        if !same_file(&dir.0.join("Foo.rs"), &dir.0.join("foo.rs")) {
+            return;
+        }
+        fs::hard_link(dir.0.join("Foo.rs"), dir.0.join("backup")).unwrap();
+        let next = generation(&[("foo.rs", "same")]);
+        let checked = check(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(checked.missing, vec![PathBuf::from("foo.rs")]);
+        let report = write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(report.written, vec![PathBuf::from("foo.rs")]);
     }
 }
