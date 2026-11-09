@@ -9,19 +9,24 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Subcommand, ValueEnum};
 use enumset::EnumSet;
+use roas::LoadedDocument;
+use roas::loader::{Loader, LoaderError, ResourceFetcher};
 use roas_arazzo::validation::{Error as ArazzoError, Validate, ValidationOptions};
 use roas_arazzo::{v1_0, v1_1};
 use roas_arazzo_executor::{
     Client, Options, SourceLoadOptions, SourceRegistry, prepare, required_sources,
 };
+use roas_file_fetcher::FileFetcher;
+use roas_http_fetcher::HttpFetcher;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use url::Url;
 
 use crate::{
-    InputFormat, InputSource, LoaderKind, build_loader, read_input, resolve_input_source,
-    serialize_spec,
+    InputFormat, InputSource, LoaderKind, read_input, resolve_input_source, serialize_spec,
 };
 
 /// Arazzo specification version, mirroring [`crate::overlay::OverlayVersion`].
@@ -602,84 +607,54 @@ fn sources(
     from: &InputSource,
     args: &ArazzoRunArgs,
 ) -> Result<(Options, bool, Vec<String>)> {
-    let mut registry = SourceRegistry::new();
-    let root = registry.insert(base_uri(from, None)?.as_str(), value)?;
-    // Index every explicitly supplied document before linking any source.
-    let mut supplied = Vec::new();
-    for source in &args.source {
-        let (name, path) = split_pair(source, "--source")?;
-        if registry.source(root, name).is_none() {
-            bail!("`--source {name}=…` names no source description of this document");
-        }
-        let from = InputSource::File(PathBuf::from(path));
-        let (document, _) = read_input(&from, None)
-            .with_context(|| format!("reading source description {path}"))?;
-        let id = registry.insert(base_uri(&from, None)?.as_str(), document)?;
-        supplied.push((name.to_owned(), id));
-    }
-    for path in &args.source_document {
-        let from = InputSource::File(path.clone());
-        let (document, _) = read_input(&from, None)
-            .with_context(|| format!("reading source document {}", path.display()))?;
-        registry.insert_reference_document(base_uri(&from, None)?.as_str(), document)?;
-    }
-    for (name, id) in supplied {
-        registry.override_source(root, &name, id)?;
-    }
     let explicit: BTreeSet<String> = args
         .source
         .iter()
         .filter_map(|source| source.split_once('=').map(|(name, _)| name.to_owned()))
         .collect();
-    let mut loader = build_loader(&args.load).unwrap_or_default();
+    let mut loader = remembering_loader(&args.load);
+    let mut load_options = SourceLoadOptions::default();
+    load_options.max_documents = args.source_max_documents;
+    load_options.max_depth = args.source_max_depth;
+    load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
     // Loading an external Arazzo document can reveal calls back into this
-    // one, whose workflows may need entry sources nobody asked for yet: load
-    // again until the required selection stops growing.
-    // A later pass traverses only the aliases it adds, so a source that
-    // already failed is not fetched again; the passes' reports are merged.
-    let mut selection = explicit;
-    let mut traversed = BTreeSet::new();
-    let mut merged: Option<roas_arazzo_executor::SourceLoadReport> = None;
-    let report = loop {
-        let needed = required_sources(
-            description,
-            &options.clone().source_registry(&registry, root)?,
-        )?;
-        selection.extend(needed);
-        let mut load_options = SourceLoadOptions::default();
-        load_options.root_sources =
-            (!args.load_all_sources).then(|| selection.difference(&traversed).cloned().collect());
-        load_options.max_documents = args.source_max_documents;
-        load_options.max_depth = args.source_max_depth;
-        load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
-        let pass = registry.load_sources(root, &mut loader, &load_options)?;
-        traversed.clone_from(&selection);
-        let report = match merged.take() {
-            None => pass,
-            Some(mut report) => {
-                report.diagnostics.extend(pass.diagnostics);
-                report
-                    .reference_diagnostics
-                    .extend(pass.reference_diagnostics);
-                report.cycles.extend(pass.cycles);
-                report.fetch_attempts += pass.fetch_attempts;
-                report
+    // one, whose workflows may need entry sources nobody asked for yet. Each
+    // pass is one complete load of the whole selection into a fresh registry,
+    // so links, budgets and diagnostics are those of a single load; the
+    // loader keeps what was fetched, and remembers what failed, across passes.
+    let mut selection: Option<BTreeSet<String>> = None;
+    let (mut registry, root, report) = loop {
+        let (mut registry, root) = seeded_registry(&value, from, args)?;
+        let selected = match selection.take() {
+            Some(selected) => selected,
+            None => {
+                let mut selected = explicit.clone();
+                selected.extend(required_sources(
+                    description,
+                    &options.clone().source_registry(&registry, root)?,
+                )?);
+                selected
             }
         };
+        load_options.root_sources = (!args.load_all_sources).then(|| selected.clone());
+        let report = registry.load_sources(root, &mut loader, &load_options)?;
+        if args.load_all_sources {
+            break (registry, root, report);
+        }
         // A static error in a newly linked document is preparation's to
         // report, with the loading diagnostics beside it.
         let Ok(grown) = required_sources(
             description,
             &options.clone().source_registry(&registry, root)?,
         ) else {
-            break report;
+            break (registry, root, report);
         };
         // Each further pass strictly grows the selection of declared aliases,
         // so this terminates.
-        if args.load_all_sources || grown.is_subset(&selection) {
-            break report;
+        if grown.is_subset(&selected) {
+            break (registry, root, report);
         }
-        merged = Some(report);
+        selection = Some(selected.union(&grown).cloned().collect());
     };
     let diagnostics = report
         .diagnostics
@@ -711,6 +686,141 @@ fn sources(
         .iter()
         .any(|source| source.target.is_some());
     Ok((options.source_registry(&registry, root)?, any, diagnostics))
+}
+
+/// A registry holding the entry and every document named on the command
+/// line, with `--source` overrides applied and nothing linked yet.
+fn seeded_registry(
+    value: &Value,
+    from: &InputSource,
+    args: &ArazzoRunArgs,
+) -> Result<(SourceRegistry, roas_arazzo_executor::DocumentId)> {
+    let mut registry = SourceRegistry::new();
+    let root = registry.insert(base_uri(from, None)?.as_str(), value.clone())?;
+    // Index every explicitly supplied document before linking any source.
+    let mut supplied = Vec::new();
+    for source in &args.source {
+        let (name, path) = split_pair(source, "--source")?;
+        if registry.source(root, name).is_none() {
+            bail!("`--source {name}=…` names no source description of this document");
+        }
+        let from = InputSource::File(PathBuf::from(path));
+        let (document, _) = read_input(&from, None)
+            .with_context(|| format!("reading source description {path}"))?;
+        let id = registry.insert(base_uri(&from, None)?.as_str(), document)?;
+        supplied.push((name.to_owned(), id));
+    }
+    for path in &args.source_document {
+        let from = InputSource::File(path.clone());
+        let (document, _) = read_input(&from, None)
+            .with_context(|| format!("reading source document {}", path.display()))?;
+        registry.insert_reference_document(base_uri(&from, None)?.as_str(), document)?;
+    }
+    for (name, id) in supplied {
+        registry.override_source(root, &name, id)?;
+    }
+    Ok((registry, root))
+}
+
+/// The `--load` loader, with each fetcher wrapped to remember its failures.
+fn remembering_loader(kinds: &[LoaderKind]) -> Loader {
+    let failed = Failures::default();
+    let mut loader = Loader::new();
+    for kind in kinds {
+        match kind {
+            LoaderKind::File => {
+                loader.register_fetcher("file://", Remembering::new(FileFetcher::new(), &failed));
+            }
+            LoaderKind::Http => {
+                // One `HttpFetcher` (one connection pool) serves both prefixes.
+                let fetcher = HttpFetcher::new();
+                loader.register_fetcher("http://", Remembering::new(fetcher.clone(), &failed));
+                loader.register_fetcher("https://", Remembering::new(fetcher, &failed));
+            }
+        }
+    }
+    loader
+}
+
+type Failures = Rc<RefCell<BTreeMap<Url, LoaderError>>>;
+
+/// A fetcher that answers a URL it already failed on with the same error,
+/// without asking again. The loader caches only successes, and a later
+/// loading pass would otherwise repeat every failed request.
+struct Remembering<F> {
+    inner: F,
+    failed: Failures,
+}
+
+impl<F> Remembering<F> {
+    fn new(inner: F, failed: &Failures) -> Self {
+        Self {
+            inner,
+            failed: Rc::clone(failed),
+        }
+    }
+
+    fn remember<T>(
+        &mut self,
+        uri: &Url,
+        fetch: impl FnOnce(&mut F) -> Result<T, LoaderError>,
+    ) -> Result<T, LoaderError> {
+        if let Some(error) = self.failed.borrow().get(uri) {
+            return Err(replay(error));
+        }
+        fetch(&mut self.inner).inspect_err(|error| {
+            self.failed.borrow_mut().insert(uri.clone(), replay(error));
+        })
+    }
+}
+
+impl<F: ResourceFetcher> ResourceFetcher for Remembering<F> {
+    fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
+        self.remember(uri, |inner| inner.fetch(uri))
+    }
+
+    fn fetch_document(&mut self, uri: &Url) -> Result<LoadedDocument, LoaderError> {
+        self.remember(uri, |inner| inner.fetch_document(uri))
+    }
+}
+
+/// A copy of a loading error that reads the same: diagnostics show the
+/// top-level message, and the source keeps the original's text.
+fn replay(error: &LoaderError) -> LoaderError {
+    match error {
+        LoaderError::NoFetcherRegistered { uri } => {
+            LoaderError::NoFetcherRegistered { uri: uri.clone() }
+        }
+        LoaderError::UnsupportedFetcherUri(uri) => LoaderError::UnsupportedFetcherUri(uri.clone()),
+        LoaderError::InvalidFileUri(uri) => LoaderError::InvalidFileUri(uri.clone()),
+        LoaderError::MissingBaseUri(uri) => LoaderError::MissingBaseUri(uri.clone()),
+        LoaderError::InvalidFragment(uri) => LoaderError::InvalidFragment(uri.clone()),
+        LoaderError::InvalidUri { uri, source } => LoaderError::InvalidUri {
+            uri: uri.clone(),
+            source: *source,
+        },
+        LoaderError::ReadFile { path, source } => LoaderError::ReadFile {
+            path: path.clone(),
+            source: std::io::Error::new(source.kind(), source.to_string()),
+        },
+        LoaderError::Parse { uri, source } => LoaderError::Parse {
+            uri: uri.clone(),
+            source: serde::de::Error::custom(source),
+        },
+        LoaderError::PointerNotFound { uri, reference } => LoaderError::PointerNotFound {
+            uri: uri.clone(),
+            reference: reference.clone(),
+        },
+        LoaderError::Fetch { uri, source } => LoaderError::Fetch {
+            uri: uri.clone(),
+            source: source.to_string().into(),
+        },
+        // A variant added later: its message is kept, if not its shape.
+        other => LoaderError::Fetch {
+            uri: String::new(),
+            source: other.to_string().into(),
+        },
+    }
 }
 
 /// `--base-url a.b.api=URL`: follow loaded Arazzo aliases `a`, then `b`, and
@@ -1280,6 +1390,191 @@ mod tests {
             1,
             "{asked:?}"
         );
+    }
+
+    #[test]
+    fn a_replayed_loading_error_reads_like_the_original() {
+        let errors = [
+            LoaderError::NoFetcherRegistered { uri: "x:a".into() },
+            LoaderError::UnsupportedFetcherUri("x:b".into()),
+            LoaderError::InvalidFileUri("x:c".into()),
+            LoaderError::MissingBaseUri("#/d".into()),
+            LoaderError::InvalidFragment("x:e#%".into()),
+            LoaderError::InvalidUri {
+                uri: "::".into(),
+                source: url::ParseError::RelativeUrlWithoutBase,
+            },
+            LoaderError::ReadFile {
+                path: PathBuf::from("/missing"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "gone"),
+            },
+            LoaderError::Parse {
+                uri: "file:///p".into(),
+                source: serde_json::from_str::<Value>("{").unwrap_err(),
+            },
+            LoaderError::PointerNotFound {
+                uri: "file:///q".into(),
+                reference: "#/r".into(),
+            },
+            LoaderError::Fetch {
+                uri: "http://h/s".into(),
+                source: "refused".into(),
+            },
+        ];
+        for error in errors {
+            let replayed = replay(&error);
+            assert_eq!(replayed.to_string(), error.to_string());
+            assert_eq!(
+                std::error::Error::source(&replayed).map(ToString::to_string),
+                std::error::Error::source(&error).map(ToString::to_string),
+            );
+        }
+    }
+
+    /// Run `sources` for an entry `entry(child_name)` whose linked document is
+    /// `child(entry_name)`, both loaded with `--load file,http`.
+    fn load_back_call(
+        name: &str,
+        child: impl FnOnce(&str) -> Value,
+        entry: impl FnOnce(&str) -> Value,
+        api: &TempFile,
+    ) -> (Options, v1_1::Description, Vec<String>) {
+        let entry_file = TempFile::write(&format!("{name}-entry.json"), &json!({}));
+        let entry_name = entry_file
+            .0
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let child = TempFile::write(&format!("{name}-child.json"), &child(&entry_name));
+        let value = entry(child.0.file_name().unwrap().to_str().unwrap());
+        std::fs::write(&entry_file.0, serde_json::to_string(&value).unwrap()).unwrap();
+        let parsed: v1_1::Description = serde_json::from_value(value.clone()).unwrap();
+        let mut args = run_args(&entry_file, api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File, LoaderKind::Http];
+        let (options, _, diagnostics) = sources(
+            Options::new(),
+            &parsed,
+            value,
+            &InputSource::File(entry_file.0.clone()),
+            &args,
+        )
+        .unwrap();
+        (options, parsed, diagnostics)
+    }
+
+    #[test]
+    fn a_failed_source_of_a_diamond_document_is_fetched_and_reported_once() {
+        let (gone, gone_join) = server(2, 404, "{}");
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        // `other` names the same document as `shared`, and is needed only once
+        // the call back into the entry is seen: the second pass revisits it.
+        let child = |entry: &str| {
+            json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry, "type": "arazzo" },
+                    { "name": "gone", "url": format!("{gone}/gone.json"), "type": "openapi" },
+                    { "name": "api", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "child", "steps": [{
+                        "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" }] },
+                    { "workflowId": "leaf", "steps": [{
+                        "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                        "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                ]
+            })
+        };
+        let (options, parsed, diagnostics) = load_back_call(
+            "diamond",
+            child,
+            |child| {
+                json!({
+                    "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                    "sourceDescriptions": [
+                        { "name": "shared", "url": child, "type": "arazzo" },
+                        { "name": "other", "url": child, "type": "arazzo" }
+                    ],
+                    "workflows": [
+                        { "workflowId": "buyPet", "steps": [{
+                            "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                        { "workflowId": "helper", "steps": [{
+                            "stepId": "leaf", "workflowId": "$sourceDescriptions.other.leaf" }] }
+                    ]
+                })
+            },
+            &api,
+        );
+        let _ = std::net::TcpStream::connect(gone.trim_start_matches("http://"));
+        let asked = gone_join.join().unwrap();
+        assert_eq!(
+            asked.iter().filter(|line| line.starts_with("GET ")).count(),
+            1,
+            "{asked:?}"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|line| line.contains("`gone`"))
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+        prepare(&parsed, &options).unwrap();
+    }
+
+    #[test]
+    fn a_later_pass_links_a_source_whose_identity_it_supplies() {
+        let (_, _, api) = external_workflow();
+        // The linked document's `api` URL cannot be fetched, but the entry's
+        // `extra` source — selected only once the call back is seen — is that
+        // document, by its `$self`.
+        let unreachable = "http://127.0.0.1:1/reconcile-api.json";
+        let mut identified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&api.0).unwrap()).unwrap();
+        identified["openapi"] = json!("3.2.0");
+        identified["$self"] = json!(unreachable);
+        let extra = TempFile::write("reconcile-api.json", &identified);
+        let extra_name = extra.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = |entry: &str| {
+            json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry, "type": "arazzo" },
+                    { "name": "api", "url": unreachable, "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [
+                    { "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" },
+                    { "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                      "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }]
+            })
+        };
+        let (options, parsed, diagnostics) = load_back_call(
+            "reconcile",
+            child,
+            |child| {
+                json!({
+                    "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                    "sourceDescriptions": [
+                        { "name": "shared", "url": child, "type": "arazzo" },
+                        { "name": "extra", "url": extra_name, "type": "openapi" }
+                    ],
+                    "workflows": [
+                        { "workflowId": "buyPet", "steps": [{
+                            "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                        { "workflowId": "helper", "steps": [{
+                            "stepId": "get", "operationId": "$sourceDescriptions.extra.getThing",
+                            "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                    ]
+                })
+            },
+            &api,
+        );
+        prepare(&parsed, &options).unwrap_or_else(|error| panic!("{error}\n{diagnostics:?}"));
     }
 
     /// An entry linking `shared` to `child_url`, loaded with `--load file`.
