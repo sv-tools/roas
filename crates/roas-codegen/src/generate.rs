@@ -218,11 +218,6 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
             config.rust.module
         )));
     }
-    if config.rust.crate_name.is_some() {
-        return Err(GenerateError::Unsupported(
-            "`rust.crate_name` (generating a crate)".into(),
-        ));
-    }
     if !matches!(
         config.rust.edition.as_str(),
         "2015" | "2018" | "2021" | "2024"
