@@ -206,18 +206,23 @@ fn node(
         } else if let Some(at) = empty_first_item(text, &kind, first, start) {
             start = at;
         }
-        end = match text.as_bytes().get(start) {
+        // A replayed alias is its definition: reuse the range measured
+        // there, which saw where its own nested aliases are written — and
+        // do not measure it again per alias.
+        let known = (replayed || alias)
+            .then(|| ends.get(&start).copied())
+            .flatten();
+        end = match (known, text.as_bytes().get(start)) {
+            (Some(known), _) => known,
             // Only a collection of the delimiter's kind: `[a]: 1` in a flow
             // sequence is a one-pair map that starts at its key's `[`.
-            Some(b'[') if !indentless && matches!(kind, Kind::Seq(_)) => closing(text, start, end),
-            Some(b'{') if matches!(kind, Kind::Map(_)) => closing(text, start, end),
+            (None, Some(b'[')) if !indentless && matches!(kind, Kind::Seq(_)) => {
+                closing(text, start, end)
+            }
+            (None, Some(b'{')) if matches!(kind, Kind::Map(_)) => closing(text, start, end),
             _ => colon(text, end),
         };
-        // A replayed alias is its definition: reuse the range measured
-        // there, which saw where its own nested aliases are written.
-        if replayed || alias {
-            end = ends.get(&start).copied().unwrap_or(end);
-        } else {
+        if !(replayed || alias) {
             ends.insert(start, end);
         }
         text_end = end;
@@ -334,13 +339,23 @@ fn scan(text: &str, start: usize, end: usize) -> usize {
             // `"a" : "b"` is still a JSON-like key's `:`.
             b' ' | b'\t' | b'\n' | b'\r' => (space, quoted) = (true, was_quoted),
             // An anchor or tag before a node keeps its place a token start.
+            // A verbatim tag `!<…>` runs to its `>`.
+            b'!' if token && bytes.get(at + 1) == Some(&b'<') => {
+                at += text[at..]
+                    .find('>')
+                    .map_or(text.len() - at, |close| close + 1);
+                continue;
+            }
             b'&' | b'!' if token => {
                 at += text[at..]
                     .find([' ', '\t', '\n', '\r', ',', '[', ']', '{', '}'])
                     .unwrap_or(text.len() - at);
                 continue;
             }
-            b':' | b'?' => {
+            // `?` is an indicator only where a token starts: `a ? b` is
+            // one plain scalar.
+            b'?' => {}
+            b':' => {
                 let next = bytes.get(at + 1).copied();
                 token = was_quoted
                     || matches!(
@@ -903,6 +918,16 @@ workflows:
             ),
             ("obj: {a: x&y, b: '!}', <<: [{m: 1}]}\n", "#.obj", (5, 36)),
             ("obj: {a: x?y, b: x:y, <<: {m: 1}} # }\n", "#.obj", (5, 33)),
+            // JSON-like keys spaced from `:`, properties, `?` mid-scalar.
+            ("{\"a\": {\"b\" :\",\"}, \"c\": \"d\"}", "#.a", (6, 16)),
+            ("{\"a\": {\"b\" :\"}\"}, \"c\": \"d\"}", "#.a", (6, 16)),
+            ("a: [[&x ' #'],\n  [b]]", "#.a[0]", (4, 13)),
+            ("k: [&x 'a]b', c]", "#.k", (3, 16)),
+            ("k: [!!str ' #', b]", "#.k", (3, 18)),
+            ("k: [[a ? 'x], 'y']", "#.k[0]", (4, 12)),
+            ("k: [!<tag:a]> x, y]", "#.k", (3, 19)),
+            ("k: {a: [!<tag:a]> x, y], <<: {m: 1}}", "#.k", (3, 36)),
+            ("k: {a: [a ? 'x], <<: {m: ']'}}", "#.k", (3, 30)),
             // A one-pair map whose key is a flow sequence.
             ("k: [[a]: 1]\n", "#.k[0]", (4, 10)),
             ("k: [[a]: [b]]\n", "#.k[0]", (4, 12)),
@@ -917,6 +942,25 @@ workflows:
                 &text[found.start.offset..found.end.offset]
             );
         }
+    }
+
+    /// An alias reuses its anchor's range instead of measuring it again.
+    #[test]
+    fn many_aliases_of_a_large_collection_map_in_linear_time() {
+        let text = format!(
+            "a: &x [1{}]\nb: [{}]\n",
+            " ".repeat(100_000),
+            vec!["*x"; 10_000].join(",")
+        );
+        let started = std::time::Instant::now();
+        let map = SourceMap::parse(text.clone()).unwrap();
+        let alias = map.locate("#.b[9999]").unwrap();
+        assert_eq!((alias.start.offset, alias.end.offset), (6, 100_009));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
