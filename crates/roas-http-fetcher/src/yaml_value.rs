@@ -6,8 +6,9 @@
 //! `Value`, the later of two such keys silently replaces the earlier, and with
 //! `<<` merge keys the inherited entry arrives last, so it would overwrite the
 //! explicit one. Building the `Value` here reports that collision instead,
-//! the same way a literal duplicate key is reported. A key that is not a
-//! string (`200`, `true`, `null`) becomes its JSON text, as before.
+//! the same way a literal duplicate key is reported. Keys are read as strings,
+//! as `serde_json::Value` reads them, so each keeps its spelling (`1.10`,
+//! `0x10`); a null or collection key is still an error.
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
@@ -87,11 +88,7 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
         let mut entries = Map::new();
-        while let Some(JsonValue(key)) = map.next_key()? {
-            let key = match key {
-                Value::String(key) => key,
-                other => other.to_string(),
-            };
+        while let Some(key) = map.next_key::<String>()? {
             let JsonValue(value) = map.next_value()?;
             if entries.contains_key(&key) {
                 return Err(de::Error::custom(format!(

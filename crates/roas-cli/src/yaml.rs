@@ -144,15 +144,25 @@ mod tests {
         );
     }
 
+    /// Keys are read as strings, so a number-looking key keeps its spelling
+    /// and two spellings of one number are two keys.
     #[test]
-    fn yaml_non_string_keys_become_their_json_text() {
-        // `null` and `~` are the same JSON key, so together they collide.
-        let err = parse("r: { null: a, ~: b }\n").unwrap_err();
-        assert!(err.contains("appears twice once read as JSON"), "{err}");
+    fn yaml_keys_keep_their_spelling() {
         assert_eq!(
-            parse("r: { null: a, true: c, 1.5: d }\n").unwrap(),
-            json!({ "r": { "null": "a", "true": "c", "1.5": "d" } }),
+            parse("r: { 1.10: a, 1.1: b, 0x10: c, 1e3: d, True: e, 017: f }\n").unwrap(),
+            json!({ "r": { "1.10": "a", "1.1": "b", "0x10": "c", "1e3": "d", "True": "e", "017": "f" } }),
         );
+    }
+
+    #[test]
+    fn yaml_null_and_collection_keys_are_an_error() {
+        for yaml in [
+            "r: { null: a }\n",
+            "r: { ~: a }\n",
+            "r:\n  ? [1, 2]\n  : a\n",
+        ] {
+            parse(yaml).unwrap_err();
+        }
     }
 
     #[test]
