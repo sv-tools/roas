@@ -1556,6 +1556,13 @@ fn shared(
 /// show. `None` when the exact name is there, or the variant is not the
 /// same single-link file.
 fn misspelled(out_dir: &Path, key: &str, listings: &mut Listings) -> Option<String> {
+    misspelled_entry(out_dir, key, listings).and_then(|(stored, single)| single.then_some(stored))
+}
+
+/// [`misspelled`]'s entry, whatever its link count, with whether it is the
+/// file's only name. A hard-linked one is not renamed, but rewritten: that
+/// gives the planned name a file of its own, which can then be respelled.
+fn misspelled_entry(out_dir: &Path, key: &str, listings: &mut Listings) -> Option<(String, bool)> {
     let path = out_dir.join(key);
     let name = key.rsplit('/').next()?;
     // Stored as planned, as nearly every file is: one listing per directory
@@ -1582,11 +1589,12 @@ fn misspelled(out_dir: &Path, key: &str, listings: &mut Listings) -> Option<Stri
         }
     }
     let stored = variant?;
-    let on_disk = path.with_file_name(&stored);
-    single_link(&on_disk).then(|| match key.rsplit_once('/') {
+    let single = single_link(&path.with_file_name(&stored));
+    let stored = match key.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/{stored}"),
         None => stored,
-    })
+    };
+    Some((stored, single))
 }
 
 /// Whether a previous path is, on this disk, the file a planned path names
@@ -2008,9 +2016,13 @@ pub fn write(
                 .push((PathBuf::from(stored), PathBuf::from(path)));
         }
     }
+    let mut linked = Listings::default();
     for (path, content) in &planned {
         let on_disk = out_dir.join(path);
-        if read_recorded(&on_disk)?.as_deref() == Some(content.as_bytes()) {
+        // Identical, but stored under another spelling held by a hard link:
+        // rewritten, so it can be respelled below.
+        let misspelled_link = misspelled_entry(out_dir, path, &mut linked).is_some();
+        if !misspelled_link && read_recorded(&on_disk)?.as_deref() == Some(content.as_bytes()) {
             report.unchanged.push(PathBuf::from(path));
         } else {
             write_atomic(&on_disk, content.as_bytes())?;
@@ -2104,6 +2116,8 @@ pub fn check(
         }
     }
     let manifest_path = out_dir.join(&manifest_file);
+    // As read now, to see whether a write rooted here ran meanwhile.
+    let manifest_at_start = fs::read(&manifest_path).ok();
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
     for path in previous.files.keys() {
@@ -2135,7 +2149,7 @@ pub fn check(
             continue;
         }
         // Stored under another spelling: a write renames it.
-        if misspelled(out_dir, path, &mut listings).is_some() {
+        if misspelled_entry(out_dir, path, &mut listings).is_some() {
             report.changed.push(PathBuf::from(path));
             continue;
         }
@@ -2179,22 +2193,24 @@ pub fn check(
     expected.replacing = replacing;
     report.manifest_outdated =
         !read_manifest(&manifest_path)?.is_some_and(|m| m.same_as(&expected));
-    if let Some(lock) = appeared(out_dir, &unlocked) {
+    let manifest_changed = fs::read(&manifest_path).ok() != manifest_at_start;
+    if let Some(lock) = appeared(out_dir, &unlocked, manifest_changed) {
         return Err(WriteError::Locked(lock));
     }
     Ok(report)
 }
 
 /// A write that ran during a `check` which had no lock file to hold there:
-/// in the output directory, any lock file that appeared; elsewhere, one
-/// still held exclusively, since a sibling run creating an enclosing root's
-/// lock file for its own shared lock touches nothing here.
-fn appeared(out_dir: &Path, unlocked: &[PathBuf]) -> Option<PathBuf> {
+/// a lock file that appeared and is still held exclusively, or, in the
+/// output directory, one that appeared while its manifest changed (a write
+/// here that already finished). A lock file a nested or sibling run made
+/// only for its own shared lock touches nothing this check compared.
+fn appeared(out_dir: &Path, unlocked: &[PathBuf], manifest_changed: bool) -> Option<PathBuf> {
     unlocked.iter().find_map(|dir| {
         let lock = dir.join(LOCK_FILE);
         fs::symlink_metadata(&lock).ok()?;
-        let held =
-            dir == out_dir || matches!(DirLock::share(dir, false), Err(WriteError::Locked(_)));
+        let held = matches!(DirLock::share(dir, false), Err(WriteError::Locked(_)))
+            || (dir == out_dir && manifest_changed);
         held.then_some(lock)
     })
 }
@@ -4537,17 +4553,17 @@ mod tests {
         let root = dir.0.clone();
         fs::create_dir_all(&out).unwrap();
         let unlocked = vec![root.clone(), out.clone()];
-        assert_eq!(appeared(&out, &unlocked), None);
-        // A sibling's shared lock file in the enclosing root: not a write.
+        assert_eq!(appeared(&out, &unlocked, false), None);
+        // Lock files made for shared locks only: no write here.
         fs::write(root.join(LOCK_FILE), "").unwrap();
-        assert_eq!(appeared(&out, &unlocked), None);
-        // Held exclusively there: a write of that root is running.
-        let held = DirLock::acquire(&root).unwrap();
-        assert_eq!(appeared(&out, &unlocked), Some(root.join(LOCK_FILE)));
-        drop(held);
-        // Any lock file in the output directory itself.
         fs::write(out.join(LOCK_FILE), "").unwrap();
-        assert_eq!(appeared(&out, &unlocked), Some(out.join(LOCK_FILE)));
+        assert_eq!(appeared(&out, &unlocked, false), None);
+        // Held exclusively: a write is running there.
+        let held = DirLock::acquire(&root).unwrap();
+        assert_eq!(appeared(&out, &unlocked, false), Some(root.join(LOCK_FILE)));
+        drop(held);
+        // In the output directory, a changed manifest: a write ran and ended.
+        assert_eq!(appeared(&out, &unlocked, true), Some(out.join(LOCK_FILE)));
     }
 
     #[test]
@@ -4571,5 +4587,34 @@ mod tests {
             write(&g, &dir.0, &WriteOptions::new("api")),
             Err(WriteError::DirectorySpelling { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_identical_linked_misspelling_gets_the_planned_name() {
+        let dir = TempDir::new("linked-identical");
+        fs::write(dir.0.join("A.rs"), "same").unwrap();
+        if !same_file(&dir.0.join("A.rs"), &dir.0.join("a.rs")) {
+            return;
+        }
+        fs::hard_link(dir.0.join("A.rs"), dir.0.join("backup")).unwrap();
+        let g = generation(&[("a.rs", "same")]);
+        assert!(
+            !check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert!(
+            check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+        let names: Vec<String> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".rs"))
+            .collect();
+        assert_eq!(names, vec!["a.rs".to_owned()]);
     }
 }

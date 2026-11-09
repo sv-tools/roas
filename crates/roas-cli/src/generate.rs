@@ -265,10 +265,15 @@ fn without_format_extension(path: &Path) -> PathBuf {
 /// The default label: the input file's stem, made safe for a manifest name.
 fn default_label(source: &InputSource) -> String {
     let stem = match source {
-        InputSource::File(path) if !is_pipe(path) => without_format_extension(path)
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        // As stored, like the header and source: two spellings of one file
+        // (case, Unicode normalization) give one label.
+        InputSource::File(path) if !is_pipe(path) => {
+            let stored = stored_path(path).unwrap_or_else(|_| path.clone());
+            without_format_extension(&stored)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        }
         InputSource::File(_) => String::new(),
         InputSource::Stdin => String::new(),
     };
