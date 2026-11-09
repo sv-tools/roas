@@ -119,9 +119,10 @@ pub(crate) struct GenerateArgs {
     pub(crate) print_context: bool,
 
     /// Also write the files as the templates render them, before the syntax
-    /// check and the formatter, into this directory: what to look at when a
-    /// template produces code the formatter refuses.
-    #[arg(long)]
+    /// check and the formatter, into this existing directory, which must be
+    /// apart from the output directory: what to look at when a template
+    /// produces code the formatter refuses.
+    #[arg(long, conflicts_with = "check")]
     pub(crate) dump_rendered: Option<PathBuf>,
 }
 
@@ -457,6 +458,44 @@ fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
     }
 }
 
+/// Whether two existing directories are one, by identity rather than by
+/// name: case and Unicode normalization make names an unreliable test.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        matches!(
+            (std::fs::metadata(a), std::fs::metadata(b)),
+            (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+    }
+}
+
+/// Whether the dump directory, which must exist, is the output directory,
+/// holds it, or sits inside it. Compared by identity along every existing
+/// ancestor, so no spelling of either path can hide the overlap.
+fn overlaps(dump: &Path, out: &Path) -> Result<bool> {
+    if !dump.is_dir() {
+        bail!(
+            "--dump-rendered {} must be an existing directory",
+            dump.display()
+        );
+    }
+    let resolved =
+        |path: &Path| resolve(path).ok_or_else(|| anyhow!("cannot resolve {}", path.display()));
+    let (dump, out) = (resolved(dump)?, resolved(out)?);
+    // The output directory, or the part of it that exists, inside the dump.
+    if out.ancestors().any(|a| same_dir(a, &dump)) {
+        return Ok(true);
+    }
+    // The dump inside the output directory, which then exists.
+    Ok(out.is_dir() && dump.ancestors().any(|a| same_dir(a, &out)))
+}
+
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // As the library reads it, so the recorded source is computed too.
     if args.out.as_os_str().is_empty() {
@@ -554,13 +593,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     if let Some(dir) = &args.dump_rendered {
         // The dump is raw text with no ownership rules: it must not land
         // where generated files and their manifests live.
-        let resolved =
-            |path: &Path| resolve(path).ok_or_else(|| anyhow!("cannot resolve {}", path.display()));
-        // Compared without case: on a case-insensitive disk `GEN` and
-        // `gen` are one directory even before either exists.
-        let folded = |path: PathBuf| PathBuf::from(path.to_string_lossy().to_lowercase());
-        let (dump, out) = (folded(resolved(dir)?), folded(resolved(&args.out)?));
-        if dump.starts_with(&out) || out.starts_with(&dump) {
+        if overlaps(dir, &args.out)? {
             bail!(
                 "--dump-rendered {} overlaps the output directory {}; dump somewhere else",
                 dir.display(),
@@ -1050,6 +1083,7 @@ mod tests {
         // --template-dir applies, and --dump-rendered keeps the raw text.
         let mut custom = args(&spec, &out);
         custom.template_dir = Some(templates.clone());
+        std::fs::create_dir_all(dir.0.join("rendered")).unwrap();
         custom.dump_rendered = Some(dir.0.join("rendered"));
         run_generate(custom).unwrap();
         let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
@@ -1059,45 +1093,58 @@ mod tests {
         // A dump into the output directory, or around it, is refused before
         // anything is written there.
         std::fs::write(out.join("api.rs"), "hand written").unwrap();
+        std::fs::create_dir_all(out.join("raw")).unwrap();
         for dump in [out.clone(), out.join("raw"), dir.0.clone()] {
             let mut overlapping = args(&spec, &out);
-            overlapping.check = true;
             overlapping.dump_rendered = Some(dump);
             let error = run_generate(overlapping).unwrap_err().to_string();
             assert!(error.contains("overlaps the output directory"), "{error}");
         }
         // Nor through a `..` past a directory that does not exist yet.
         let mut sneaky = args(&spec, &out);
-        sneaky.check = true;
+        std::fs::create_dir_all(dir.0.join("missing")).unwrap();
         sneaky.dump_rendered = Some(dir.0.join("missing/../out"));
         let error = run_generate(sneaky).unwrap_err().to_string();
         assert!(error.contains("overlaps the output directory"), "{error}");
         // Nor by spelling the output directory in another case.
         let mut cased = args(&spec, &out);
-        cased.check = true;
         cased.dump_rendered = Some(dir.0.join("OUT/raw"));
         let error = run_generate(cased).unwrap_err().to_string();
-        assert!(error.contains("overlaps the output directory"), "{error}");
+        // A case-sensitive disk has no `OUT`; a case-insensitive one finds
+        // the output directory under that name.
+        assert!(
+            error.contains("overlaps the output directory") || error.contains("existing directory"),
+            "{error}"
+        );
+        // A dump directory that does not exist is refused, never created.
+        let mut fresh = args(&spec, &out);
+        fresh.dump_rendered = Some(dir.0.join("nowhere"));
+        let error = run_generate(fresh).unwrap_err().to_string();
+        assert!(error.contains("existing directory"), "{error}");
+        assert!(!dir.0.join("nowhere").exists());
+        // Every refusal came before anything was written.
+        assert_eq!(
+            std::fs::read_to_string(out.join("api.rs")).unwrap(),
+            "hand written"
+        );
         // A link left in the dump directory is replaced, not followed.
         #[cfg(unix)]
         {
             let raw = dir.0.join("raw");
             std::fs::create_dir_all(&raw).unwrap();
-            std::os::unix::fs::symlink(out.join("api.rs"), raw.join("api.rs")).unwrap();
+            let sentinel = dir.0.join("sentinel.rs");
+            std::fs::write(&sentinel, "keep me").unwrap();
+            std::os::unix::fs::symlink(&sentinel, raw.join("api.rs")).unwrap();
             let mut linked = args(&spec, &out);
-            linked.check = true;
             linked.dump_rendered = Some(raw.clone());
-            let _ = run_generate(linked);
+            run_generate(linked).unwrap();
             assert!(
                 !std::fs::symlink_metadata(raw.join("api.rs"))
                     .unwrap()
                     .is_symlink()
             );
+            assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep me");
         }
-        assert_eq!(
-            std::fs::read_to_string(out.join("api.rs")).unwrap(),
-            "hand written"
-        );
     }
 
     #[test]

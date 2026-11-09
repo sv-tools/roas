@@ -324,22 +324,7 @@ pub(crate) fn render(
     let rendered = template
         .render(Value::from_serialize(context))
         .map_err(|e| error(format!("{e:#}")))?;
-    // An override that writes the marker line itself gets it once; a line
-    // that only starts with the same text is someone else's. The defaults
-    // never write it, so without overrides the output is left as it was.
-    let body = Some(rendered.as_str())
-        .filter(|_| template_dir.is_some())
-        .and_then(|rendered| rendered.strip_prefix(MARKER))
-        .and_then(|rest| {
-            if rest.is_empty() {
-                Some(rest)
-            } else {
-                rest.strip_prefix("\r\n")
-                    .or_else(|| rest.strip_prefix('\n'))
-            }
-        })
-        .unwrap_or(&rendered);
-    Ok(format!("{MARKER}\n{separator}{body}"))
+    Ok(format!("{MARKER}\n{separator}{rendered}"))
 }
 
 #[cfg(test)]

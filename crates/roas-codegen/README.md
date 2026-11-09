@@ -180,7 +180,7 @@ The defaults include one another by plain name, so an override of an included te
 | `go/alias.go.jinja` | `doc`, `trailing` |
 | `go/field.go.jinja` | `doc`, `decl` |
 
-The generated-code marker stays first in every file whatever the templates do, and a `header` or `footer` override with `{{ super() }}` adds to the configuration's `header` rather than replacing it.
+The generated-code marker is written first in every file by the renderer, whatever the templates do, and a `header` override with `{{ super() }}` keeps the configuration's `header` rather than replacing it.
 
 Templates lay out what the backend decided; they never decide a type. The context is a view model in which every type is already spelled for the target, every name is final and every literal quoted: a file with `template_api`, `source`, `header`, `imports`, `extra_imports`, `support` and `types`, each type with its `kind` (`struct`, `enum`, `union_tagged`, `union_open`, `composed_open`, `newtype`, `alias`), `name`, `raw_name`, `doc` and the parts its kind has (`fields`, `variants`, `branches`, `inner`, `tag`). Inside a type template the type is `t`; inside a field or variant template the member is `f` or `v`. `--print-context` prints the exact context for a description, which is the reference; `template_context` returns it from the library. The backend-owned parts — Rust's serde attributes, Go's `json` struct tag — arrive already in the context, so an override that replaces a field's `attrs` or `decl` should keep them, or it changes the wire format. The output is still checked — with `syn` for Rust, `gofmt` for Go — and when a template produces code that does not parse, `render` (or `--dump-rendered DIR`) gives the text before the check, to see what the template wrote.
 

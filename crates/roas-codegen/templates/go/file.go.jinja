@@ -7,11 +7,11 @@
 // members, members that must not be null, integers read exactly from
 // their tokens, and enum membership.
 package {{ package }}
-{% if imports or extra_imports %}
-import (
-{% block imports %}{% for line in imports %}	{{ line }}
+{% set import_specs %}{% block imports %}{% for line in imports %}	{{ line }}
 {% endfor %}{% for line in extra_imports %}	{{ line }}
-{% endfor %}{% endblock %})
+{% endfor %}{% endblock %}{% endset %}{% if import_specs | trim %}
+import (
+{{ import_specs }})
 {% endif %}
 {% block body %}{% if types %}{% include "go/support.go.jinja" %}{% endif %}
 {% for t in types %}
