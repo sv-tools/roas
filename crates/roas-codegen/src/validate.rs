@@ -14,6 +14,7 @@ use thiserror::Error;
 /// Generation starts from this set; a caller adds to it.
 pub fn generation_options() -> EnumSet<Options> {
     roas::validation::IGNORE_UNUSED
+        | Options::IgnoreUnusedPathItems
         | Options::IgnoreMissingTags
         | Options::IgnoreNonUniqOperationIDs
         | Options::IgnoreEmptyInfoTitle
@@ -107,5 +108,15 @@ impl fmt::Display for SourceValidationError {
             write!(f, "\n- {error}")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unused_path_items_are_exempt_too() {
+        assert!(
+            super::generation_options().contains(roas::validation::Options::IgnoreUnusedPathItems)
+        );
     }
 }

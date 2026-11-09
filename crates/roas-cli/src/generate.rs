@@ -251,7 +251,15 @@ fn resolve(path: &Path) -> Option<PathBuf> {
             for part in &parts[split..] {
                 out.push(part);
             }
-            return Some(normalize(&out));
+            // A `..` through a directory that did not exist yet was
+            // resolved by text; what remains may still pass through links,
+            // so it is resolved again, now without any `..`.
+            let normalized = normalize(&out);
+            return if normalized == out {
+                Some(normalized)
+            } else {
+                resolve(&normalized)
+            };
         }
     }
     None
@@ -963,5 +971,16 @@ mod tests {
         bad.label = Some("My API".into());
         let error = format!("{:#}", run_generate(bad).unwrap_err());
         assert!(error.contains("\"My API\""), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_after_a_dot_dot_through_a_missing_directory_are_resolved() {
+        let dir = TempDir::new("dotdot-link");
+        std::fs::create_dir_all(dir.0.join("real/deep")).unwrap();
+        std::os::unix::fs::symlink(dir.0.join("real/deep"), dir.0.join("link")).unwrap();
+        let through = resolve(&dir.0.join("missing/../link/out")).unwrap();
+        let direct = resolve(&dir.0.join("real/deep/out")).unwrap();
+        assert_eq!(through, direct);
     }
 }
