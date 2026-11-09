@@ -3023,6 +3023,10 @@ mod tests {
         // Run 2 plans v3 and fails before writing it.
         let sub = dir.0.join("sub");
         fs::set_permissions(&sub, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::write(sub.join("probe"), "").is_ok() {
+            fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+            return; // running as root: permissions do not stop it
+        }
         let failed = write(
             &generation(&[("sub/x.rs", "v3"), ("keep.rs", "k")]),
             &dir.0,
