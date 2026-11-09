@@ -107,8 +107,12 @@ pub struct CheckReport {
     pub changed: Vec<PathBuf>,
     /// Would be generated, but absent.
     pub missing: Vec<PathBuf>,
-    /// Owned by the previous run and no longer generated.
+    /// Owned by the previous run and no longer generated: a write removes
+    /// them.
     pub stale: Vec<PathBuf>,
+    /// No longer generated, but edited since: a write keeps them and stops
+    /// tracking them.
+    pub stale_edited: Vec<PathBuf>,
     /// The manifest is absent, or differs from the one a [`write()`]
     /// would leave in anything but the writer's version.
     pub manifest_outdated: bool,
@@ -120,6 +124,7 @@ impl CheckReport {
         self.changed.is_empty()
             && self.missing.is_empty()
             && self.stale.is_empty()
+            && self.stale_edited.is_empty()
             && !self.manifest_outdated
     }
 }
@@ -133,7 +138,11 @@ pub enum WriteError {
     #[error("generated path {0} must be relative and stay inside the output directory")]
     UnsafePath(PathBuf),
     #[error(
-        "{path} is owned by another generation target (manifest {manifest}); use a different output directory or label, or, if that target is this description under an old label, reuse that label or delete its manifest"
+        "generated path {0} must be ASCII: disks disagree on which other spellings name the same file"
+    )]
+    NonAsciiPath(PathBuf),
+    #[error(
+        "{path} is owned by another generation target (manifest {manifest}); use a different output directory, or a label or module name that generates a different file; if that target is this description under an old label, reuse that label or delete its manifest"
     )]
     OwnedByOther { path: PathBuf, manifest: PathBuf },
     #[error(
@@ -168,7 +177,7 @@ pub enum WriteError {
     HasErrors(usize),
     #[error("manifest {path} cannot be read: {reason}")]
     Manifest { path: PathBuf, reason: String },
-    #[error("{path}: {source}")]
+    #[error("cannot access {path}")]
     Io {
         path: PathBuf,
         #[source]
@@ -299,11 +308,18 @@ fn key(path: &Path) -> Result<String, WriteError> {
     let mut parts = Vec::new();
     for component in path.components() {
         match component {
-            Component::Normal(part) => parts.push(
-                part.to_str()
-                    .ok_or_else(|| WriteError::UnsafePath(path.to_path_buf()))?
-                    .to_owned(),
-            ),
+            Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| WriteError::UnsafePath(path.to_path_buf()))?;
+                // Case-insensitive disks fold more than ASCII case, and some
+                // normalize Unicode; ownership compares ASCII case only, so
+                // anything else could let two spellings share one file.
+                if !part.is_ascii() {
+                    return Err(WriteError::NonAsciiPath(path.to_path_buf()));
+                }
+                parts.push(part.to_owned());
+            }
             _ => return Err(WriteError::UnsafePath(path.to_path_buf())),
         }
     }
@@ -377,9 +393,10 @@ fn other_owners(out_dir: &Path, ours: &str) -> Result<BTreeMap<String, PathBuf>,
     for entry in entries {
         let entry = entry.map_err(io(out_dir))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.eq_ignore_ascii_case(ours)
-            || !name.starts_with(MANIFEST_PREFIX)
-            || !name.ends_with(MANIFEST_SUFFIX)
+        let lower = name.to_ascii_lowercase();
+        if lower == ours.to_ascii_lowercase()
+            || !lower.starts_with(MANIFEST_PREFIX)
+            || !lower.ends_with(MANIFEST_SUFFIX)
         {
             continue;
         }
@@ -599,6 +616,7 @@ fn check_ownership(
     previous: &Manifest,
     planned: &BTreeMap<String, &str>,
     aliased: &BTreeMap<String, String>,
+    going: &BTreeSet<String>,
     options: &WriteOptions,
 ) -> Result<(), WriteError> {
     let others = other_owners(out_dir, manifest_file)?;
@@ -625,7 +643,13 @@ fn check_ownership(
                 manifest: manifest.clone(),
             });
         }
-        check_path(out_dir, path)?;
+        match check_path(out_dir, path) {
+            // This target's own stale file, removed before anything is
+            // written, where the new path needs a directory.
+            Err(WriteError::NotADirectory(blocker))
+                if blocker.to_str().is_some_and(|b| going.contains(b)) => {}
+            other => other?,
+        }
         let on_disk = out_dir.join(path);
         if !options.overwrite_unowned
             && !previous.files.contains_key(path)
@@ -642,6 +666,18 @@ fn check_ownership(
         check_path(out_dir, path)?;
     }
     check_path(out_dir, manifest_file)
+}
+
+/// The stale files a run removes: those still holding what this target
+/// wrote. The rest were edited and are kept.
+fn going(out_dir: &Path, previous: &Manifest, removable: &[(String, String)]) -> BTreeSet<String> {
+    removable
+        .iter()
+        .filter(|(path, _)| {
+            fs::read(out_dir.join(path)).is_ok_and(|bytes| previous.wrote(path, &bytes))
+        })
+        .map(|(path, _)| path.clone())
+        .collect()
 }
 
 fn error_count(generation: &Generation) -> usize {
@@ -795,6 +831,9 @@ pub fn write(
         check_path(out_dir, path)?;
     }
     let aliased = aliases(out_dir, &previous.files, &planned);
+    let old_spellings: BTreeSet<String> = aliased.keys().cloned().collect();
+    let (owned, removable) = outcome(&previous.files, &planned, &old_spellings, errors > 0);
+    let going = going(out_dir, &previous, &removable);
     // Every check before the first write.
     check_ownership(
         out_dir,
@@ -802,6 +841,7 @@ pub fn write(
         &previous,
         &planned,
         &aliased,
+        &going,
         options,
     )?;
 
@@ -813,6 +853,17 @@ pub fn write(
     // Claim ownership of everything this run may touch before touching it,
     // keeping what each file held before in case the run is interrupted.
     let mut replacing = previous.replacing.clone();
+    // A file reached through an old spelling is replaced like any other:
+    // until it is rewritten, it holds what the old spelling recorded.
+    for (old, new) in &aliased {
+        let current = match fs::read(out_dir.join(old)) {
+            Ok(bytes) if previous.wrote(old, &bytes) => hash(&bytes),
+            _ => previous.files[old].clone(),
+        };
+        if current != hashes[new] {
+            replacing.insert(new.clone(), current);
+        }
+    }
     for (path, new) in &hashes {
         let Some(recorded) = previous.files.get(path) else {
             continue;
@@ -850,18 +901,7 @@ pub fn write(
         manifest: PathBuf::from(&manifest_file),
         ..Default::default()
     };
-    for (path, content) in &planned {
-        let on_disk = out_dir.join(path);
-        if fs::read(&on_disk).ok().as_deref() == Some(content.as_bytes()) {
-            report.unchanged.push(PathBuf::from(path));
-        } else {
-            write_atomic(&on_disk, content.as_bytes())?;
-            report.written.push(PathBuf::from(path));
-        }
-    }
-
-    let aliased: BTreeSet<String> = aliased.into_keys().collect();
-    let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
+    // Stale files go first: one may sit where a new path needs a directory.
     for (path, _) in &removable {
         let on_disk = out_dir.join(path);
         match fs::read(&on_disk) {
@@ -879,6 +919,16 @@ pub fn write(
             }
         }
     }
+    for (path, content) in &planned {
+        let on_disk = out_dir.join(path);
+        if fs::read(&on_disk).ok().as_deref() == Some(content.as_bytes()) {
+            report.unchanged.push(PathBuf::from(path));
+        } else {
+            write_atomic(&on_disk, content.as_bytes())?;
+            report.written.push(PathBuf::from(path));
+        }
+    }
+
     let replacing = still_replacing(&previous, &owned, &planned);
     let mut final_manifest = manifest_for(
         &options.label,
@@ -919,13 +969,18 @@ pub fn check(
     for path in previous.files.keys() {
         check_path(out_dir, path)?;
     }
-    let aliased = aliases(out_dir, &previous.files, &planned);
+    let aliased: BTreeSet<String> = aliases(out_dir, &previous.files, &planned)
+        .into_keys()
+        .collect();
+    let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
+    let going = going(out_dir, &previous, &removable);
     check_ownership(
         out_dir,
         &manifest_file,
         &previous,
         &planned,
-        &aliased,
+        &aliases(out_dir, &previous.files, &planned),
+        &going,
         options,
     )?;
     let mut report = CheckReport::default();
@@ -933,7 +988,13 @@ pub fn check(
         match fs::read(out_dir.join(path)) {
             Ok(current) if current == content.as_bytes() => {}
             Ok(_) => report.changed.push(PathBuf::from(path)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // A stale file of ours where its directory will be.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
                 report.missing.push(PathBuf::from(path))
             }
             Err(e) => {
@@ -944,11 +1005,11 @@ pub fn check(
             }
         }
     }
-    let aliased: BTreeSet<String> = aliased.into_keys().collect();
-    let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
     for (path, _) in removable {
-        if out_dir.join(&path).exists() {
+        if going.contains(&path) {
             report.stale.push(PathBuf::from(path));
+        } else if out_dir.join(&path).exists() {
+            report.stale_edited.push(PathBuf::from(path));
         }
     }
     let replacing = still_replacing(&previous, &owned, &planned);
@@ -1051,7 +1112,8 @@ mod tests {
             CheckReport {
                 changed: vec!["a.rs".into()],
                 missing: vec![],
-                stale: vec!["b.rs".into(), "c.rs".into()],
+                stale: vec!["b.rs".into()],
+                stale_edited: vec!["c.rs".into()],
                 manifest_outdated: true
             }
         );
@@ -1856,22 +1918,109 @@ mod tests {
     }
 
     #[test]
-    fn a_non_ascii_case_variant_is_never_deleted_as_stale() {
-        let dir = TempDir::new("unicode-case");
+    fn non_ascii_generated_paths_are_refused() {
+        let dir = TempDir::new("non-ascii");
+        for path in ["\u{c4}.rs", "sub/e\u{301}.rs"] {
+            assert!(
+                matches!(
+                    write(
+                        &generation(&[(path, "x")]),
+                        &dir.0,
+                        &WriteOptions::new("api")
+                    ),
+                    Err(WriteError::NonAsciiPath(_))
+                ),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifests_stored_in_another_case_still_own_their_files() {
+        let dir = TempDir::new("manifest-case");
         write(
-            &generation(&[("\u{c4}.rs", "same")]),
+            &generation(&[("a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("one"),
+        )
+        .unwrap();
+        fs::rename(
+            dir.0.join(".roas-codegen-one-rust.json"),
+            dir.0.join(".ROAS-CODEGEN-one-rust.JSON"),
+        )
+        .unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("a.rs", "a")]),
+                &dir.0,
+                &WriteOptions::new("two")
+            ),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+    }
+
+    #[test]
+    fn an_own_stale_file_gives_way_to_a_directory() {
+        let dir = TempDir::new("file-to-dir");
+        write(
+            &generation(&[("models", "m")]),
             &dir.0,
             &WriteOptions::new("api"),
         )
         .unwrap();
-        let next = generation(&[("\u{e4}.rs", "same")]);
-        write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
-        assert_eq!(fs::read_to_string(dir.0.join("\u{e4}.rs")).unwrap(), "same");
-        assert!(
-            check(&next, &dir.0, &WriteOptions::new("api"))
-                .unwrap()
-                .is_clean()
-        );
+        let next = generation(&[("models/x.rs", "x")]);
+        let report = check(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(report.stale, vec![PathBuf::from("models")]);
+        let report = write(&next, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert_eq!(report.removed, vec![PathBuf::from("models")]);
+        assert_eq!(fs::read_to_string(dir.0.join("models/x.rs")).unwrap(), "x");
+        // Edited, it stays in the way.
+        write(
+            &generation(&[("other", "o")]),
+            &dir.0,
+            &WriteOptions::new("b"),
+        )
+        .unwrap();
+        fs::write(dir.0.join("other"), "edited").unwrap();
+        let mut forced = WriteOptions::new("b");
+        forced.overwrite_unowned = true;
+        assert!(matches!(
+            write(&generation(&[("other/y.rs", "y")]), &dir.0, &forced),
+            Err(WriteError::NotADirectory(_))
+        ));
+    }
+
+    #[test]
+    fn an_interrupted_respelling_is_still_recognised() {
+        let dir = TempDir::new("respell-interrupted");
+        let manifest = dir.0.join(".roas-codegen-api-rust.json");
+        write(
+            &generation(&[("Types.rs", "old")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        if !same_file(&dir.0.join("Types.rs"), &dir.0.join("types.rs")) {
+            return; // case-sensitive: the spellings are separate files
+        }
+        // Stop the rename to types.rs before its content is written: the
+        // pending manifest is written, then the run fails on the file.
+        let failed = {
+            let mut m = read_manifest(&manifest).unwrap().unwrap();
+            m.files.insert("types.rs".into(), hash(b"new"));
+            m.replacing.insert("types.rs".into(), hash(b"old"));
+            fs::write(&manifest, manifest_text(&m)).unwrap();
+            m
+        };
+        assert!(failed.wrote("types.rs", b"old"));
+        let report = write(
+            &generation(&[("keep.rs", "k")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(report.kept_edited.is_empty(), "{report:?}");
+        assert!(!dir.0.join("Types.rs").exists());
     }
 
     #[test]

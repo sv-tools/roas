@@ -382,6 +382,10 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
             ("changed", &report.changed),
             ("missing", &report.missing),
             ("stale", &report.stale),
+            (
+                "no longer generated but edited (kept, untracked)",
+                &report.stale_edited,
+            ),
         ] {
             if !paths.is_empty() {
                 eprintln!("{what}: {}", show(paths));
