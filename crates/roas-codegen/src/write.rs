@@ -1679,8 +1679,10 @@ pub fn write(
     // can still remove an empty directory it made while an enclosing run
     // that started after it is about to write there; that run makes the
     // directory again.) Then this run's own directory, exclusively; only after
-    // that are nested roots' lock files looked for, so of two overlapping
-    // runs at least one sees the other's.
+    // that are all other roots looked for again — enclosing ones too, so one
+    // whose lock file appeared meanwhile is not missed — and nested roots'
+    // lock files: of two overlapping runs, each takes its own lock before
+    // looking for the other's, so at least one sees it.
     let mut enclosing = Vec::new();
     for (dir, create) in other_roots(out_dir, std::iter::empty()) {
         created.shared.extend(DirLock::share(&dir, create)?);

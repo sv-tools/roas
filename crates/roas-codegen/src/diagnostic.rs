@@ -102,8 +102,9 @@ pub enum DiagnosticKind {
     /// A component that is a bare `$ref` leading back to itself through
     /// other bare references: nothing to generate.
     ReferenceCycle,
-    /// `rustfmt` could not be run, so the output is unformatted and will
-    /// not match a formatted run byte for byte.
+    /// `rustfmt` did not format the output — not installed, failed, or
+    /// could not be set up; the message says why — so it is unformatted and
+    /// will not match a formatted run byte for byte.
     Unformatted,
 }
 
