@@ -4,8 +4,8 @@
 
 use roas::validation::{IGNORE_UNUSED, Options};
 use roas_codegen::{
-    ConfigError, ConfigFile, DiagnosticKind, GenerateError, Generation, Input, Severity,
-    SourceDocument, Target, generate, validate,
+    ConfigError, ConfigFile, GenerateError, Generation, Input, SourceDocument, Target, generate,
+    validate,
 };
 use std::path::Path;
 use url::Url;
@@ -122,7 +122,7 @@ fn nothing_to_generate_is_a_bare_package() {
 }
 
 #[test]
-fn a_member_no_struct_tag_can_name_suppresses_its_type_and_holders() {
+fn a_member_no_struct_tag_can_name_is_written_by_its_struct() {
     let components = serde_json::json!({
         "Odd": {"type": "object", "properties": {"a,b": {"type": "string"}}},
         "Holder": {"type": "object", "properties": {"odd": {"$ref": "#/components/schemas/Odd"}}},
@@ -132,22 +132,35 @@ fn a_member_no_struct_tag_can_name_suppresses_its_type_and_holders() {
         return;
     };
     let generation = generation.unwrap();
-    let errors: Vec<_> = generation
-        .diagnostics
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .collect();
-    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
+    let code = &generation.files[0].contents;
+    let squeezed = squeezed(code);
+    assert!(squeezed.contains("type Odd struct"), "{squeezed}");
+    assert!(squeezed.contains("type Holder struct"), "{squeezed}");
+    // The tag skips it; the struct writes it, extras in key order.
+    assert!(squeezed.contains("AB *string `json:\"-\"`"), "{squeezed}");
     assert!(
-        matches!(&errors[0].kind, DiagnosticKind::UnrepresentableName { name } if name == "a,b")
+        squeezed.contains("func (v Odd) MarshalJSONTo(e *jsontext.Encoder) error {"),
+        "{squeezed}"
     );
-    assert_eq!(errors[0].pointer, "/components/schemas/Odd/properties/a,b");
-    let code = squeezed(&generation.files[0].contents);
-    assert!(!code.contains("type Odd struct"), "{code}");
-    assert!(!code.contains("type Holder struct"), "{code}");
-    // `-` is named with a trailing comma; a space is fine.
-    assert!(code.contains("`json:\"-,omitzero\"`"), "{code}");
-    assert!(code.contains("`json:\"x y,omitzero\"`"), "{code}");
+    assert!(
+        squeezed.contains("e.WriteToken(jsontext.String(\"a,b\"))"),
+        "{squeezed}"
+    );
+    assert!(
+        squeezed.contains("slices.Sorted(maps.Keys(v.AdditionalProperties))"),
+        "{squeezed}"
+    );
+    assert!(
+        !squeezed.contains("func (v Fine) MarshalJSONTo"),
+        "{squeezed}"
+    );
+    // `-` is named with an option; a space is fine.
+    assert!(squeezed.contains("`json:\"-,omitzero\"`"), "{squeezed}");
+    assert!(squeezed.contains("`json:\"x y,omitzero\"`"), "{squeezed}");
+    if let Some(Err(error)) = vet(code, "odd") {
+        panic!("go vet failed\n{error}\n{code}");
+    }
 }
 
 #[test]
@@ -190,10 +203,13 @@ fn substitutions_use_their_go_spelling_and_imports() {
     let components = serde_json::json!({
         "Pet": {"type": "object", "properties": {
             "id": {"type": "string", "format": "uuid"},
-            "born": {"type": "string", "format": "date-time"}
+            "born": {"type": "string", "format": "date-time"},
+            "price": {"type": "string", "format": "decimal"}
         }}
     });
-    let toml = "[substitutions.uuid.go]\nname = \"uuid.UUID\"\nimport = \"github.com/google/uuid\"\n[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n";
+    // `uuid` and `time` are the standard library's (Go 1.27); a module
+    // outside it is listed as a dependency.
+    let toml = "[substitutions.uuid.go]\nname = \"uuid.UUID\"\nimport = \"uuid\"\n[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n[substitutions.decimal.go]\nname = \"decimal.Decimal\"\nimport = \"example.com/money/decimal\"\n";
     let Some(generation) = go(components.clone(), toml) else {
         return;
     };
@@ -204,7 +220,8 @@ fn substitutions_use_their_go_spelling_and_imports() {
         "{code}"
     );
     assert!(code.contains("Born Nullable[time.Time]"), "{code}");
-    assert!(code.contains("\"github.com/google/uuid\""), "{code}");
+    assert!(code.contains("\"uuid\""), "{code}");
+    assert!(code.contains("\"example.com/money/decimal\""), "{code}");
     assert!(code.contains("\"time\""), "{code}");
     assert!(code.contains("v *time.Time) error {"), "{code}");
     // The standard library is no dependency.
@@ -214,7 +231,7 @@ fn substitutions_use_their_go_spelling_and_imports() {
         .iter()
         .map(|d| d.import.as_str())
         .collect();
-    assert_eq!(deps, ["github.com/google/uuid"]);
+    assert_eq!(deps, ["example.com/money/decimal"]);
 
     let error = go(
         components.clone(),
@@ -246,12 +263,14 @@ fn the_file_and_package_are_configurable_and_checked() {
     let file = &generation.unwrap().files[0];
     assert_eq!(file.path, Path::new("pets.go"));
     assert!(file.contents.contains("\npackage petstore\n"));
+    // The output is a package in the user's own module: no go.mod, so no
+    // module path to set.
+    assert!(
+        ConfigFile::from_toml("[go]\nmodule_path = \"example.com/pets\"\n", Path::new("/"))
+            .is_err()
+    );
     // Rust-only settings do not stop a Go run.
     assert!(go(pet(), "[rust]\nedition = \"2027\"\n").unwrap().is_ok());
-    let error = go(pet(), "[go]\nmodule_path = \"example.com/pets\"\n")
-        .unwrap()
-        .unwrap_err();
-    assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
     for (toml, bad) in [
         ("[go]\npackage = \"type\"\n", "package"),
         ("[go]\npackage = \"Pets\"\n", "package"),
@@ -359,9 +378,8 @@ fn every_kind_renders_and_survives_gofmt() {
     );
 }
 
-/// `go vet` over a generated file in a module of its own, or why it could
-/// not run: Go 1.27 or later is needed.
-fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
+/// Whether Go 1.27 or later is here to build generated code with.
+fn have_go() -> bool {
     let version = std::process::Command::new("go")
         .args(["env", "GOVERSION"])
         .env("GOTOOLCHAIN", "local")
@@ -379,6 +397,15 @@ fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
             "ROAS_CODEGEN_REQUIRE_GO is set but go is {version:?}"
         );
         eprintln!("skipped: go is {version:?}");
+        return false;
+    }
+    true
+}
+
+/// `go vet` over a generated file in a module of its own; `None` without
+/// Go 1.27 or later.
+fn vet(code: &str, tag: &str) -> Option<Result<(), String>> {
+    if !have_go() {
         return None;
     }
     let dir = std::env::temp_dir().join(format!("roas-codegen-vet-{tag}-{}", std::process::id()));

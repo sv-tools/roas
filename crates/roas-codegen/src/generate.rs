@@ -248,11 +248,6 @@ fn check_go(config: &Config) -> Result<(), GenerateError> {
             config.go.file
         )));
     }
-    if config.go.module_path.is_some() {
-        return Err(GenerateError::Unsupported(
-            "`go.module_path` (generating a module)".into(),
-        ));
-    }
     Ok(())
 }
 

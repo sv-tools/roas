@@ -110,7 +110,6 @@ pub struct GoConfigFile {
     /// The generated file's stem: the file is `<file>.go`. Default
     /// `types`. Targets sharing an output directory need different ones.
     pub file: Option<String>,
-    pub module_path: Option<String>,
 }
 
 /// What a configuration file may say. Everything optional; nothing
@@ -192,7 +191,6 @@ impl ConfigFile {
         self.rust.derives.extend(over.rust.derives);
         self.go.package = over.go.package.or(self.go.package);
         self.go.file = over.go.file.or(self.go.file);
-        self.go.module_path = over.go.module_path.or(self.go.module_path);
         self.substitutions.extend(over.substitutions);
         self.types.extend(over.types);
         self
@@ -244,7 +242,6 @@ impl ConfigFile {
                     }
                     None => "types".to_owned(),
                 },
-                module_path: self.go.module_path,
             },
             substitutions: self.substitutions,
             types: self.types,
@@ -331,7 +328,6 @@ pub struct GoConfig {
     pub package: String,
     /// The generated file's stem; the file is `<file>.go`.
     pub file: String,
-    pub module_path: Option<String>,
 }
 
 /// What generation consumes. Fully resolved: no `Option` where the

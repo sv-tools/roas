@@ -118,6 +118,12 @@ fn main() {
     must_fail::<Holder>(r#"{}"#, "needed is required");
     assert_eq!(round_trip::<Dash>(r#"{"-":"x"}"#), r#"{"-":"x"}"#);
     assert_eq!(
+        round_trip::<Odd>(r#"{"":1,"a,b":"x","q\"t":null,"x`y":true,"zz":2,"aa":3}"#),
+        r#"{"":1,"a,b":"x","q\"t":null,"x`y":true,"aa":3,"zz":2}"#
+    );
+    assert_eq!(round_trip::<Odd>(r#"{"a,b":"x"}"#), r#"{"a,b":"x"}"#);
+    must_fail::<Odd>(r#"{"":1}"#, "a,b is required");
+    assert_eq!(
         round_trip::<Wrapper>(r#"{"owner":{"name":null,"x":1}}"#),
         r#"{"owner":{"name":null,"x":1}}"#
     );
@@ -178,6 +184,14 @@ fn description() -> serde_json::Value {
     raw["components"]["schemas"]["Wrapper"] = serde_json::json!({
         "type": "object", "additionalProperties": false,
         "properties": {"owner": {"$ref": "#/components/schemas/Owner"}}
+    });
+    // Member names no Go struct tag can carry, beside a catch-all.
+    raw["components"]["schemas"]["Odd"] = serde_json::json!({
+        "type": "object", "required": ["a,b"],
+        "properties": {
+            "": {"type": "integer"}, "a,b": {"type": "string"},
+            "q\"t": {"type": ["string", "null"]}, "x`y": {"type": "boolean"}
+        }
     });
     // A member named `-`, which a bare `json:"-"` tag would skip.
     raw["components"]["schemas"]["Dash"] = serde_json::json!({
@@ -251,6 +265,7 @@ fn generated_rust_compiles_and_behaves() {
 const GO_MAIN: &str = r##"package main
 
 import (
+	jsonv1 "encoding/json"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -398,6 +413,18 @@ func main() {
 	check(roundTrip[api.Holder](`{"needed":{"a":[1]}}`), `{"needed":{"a":[1]}}`)
 	mustFail[api.Holder](`{}`, "needed is required")
 	check(roundTrip[api.Dash](`{"-":"x"}`), `{"-":"x"}`)
+	odd := "{\"\":1,\"a,b\":\"x\",\"q\\\"t\":null,\"x`y\":true,\"zz\":2,\"aa\":3}"
+	check(roundTrip[api.Odd](odd), "{\"\":1,\"a,b\":\"x\",\"q\\\"t\":null,\"x`y\":true,\"aa\":3,\"zz\":2}")
+	check(roundTrip[api.Odd](`{"a,b":"x"}`), `{"a,b":"x"}`)
+	// encoding/json v1 calls the encoder on a value it cannot address, too.
+	var oddValue api.Odd
+	if err := json.Unmarshal([]byte(odd), &oddValue); err != nil {
+		panic(err)
+	}
+	v1, err := jsonv1.Marshal(map[string]api.Odd{"k": oddValue})
+	check(err, nil)
+	check(string(v1), "{\"k\":{\"\":1,\"a,b\":\"x\",\"q\\\"t\":null,\"x`y\":true,\"aa\":3,\"zz\":2}}")
+	mustFail[api.Odd](`{"":1}`, "a,b is required")
 	check(roundTrip[api.Wrapper](`{"owner":{"name":null,"x":1}}`), `{"owner":{"name":null,"x":1}}`)
 	mustFail[api.Wrapper](`{"zz":1}`, "Wrapper is closed")
 	// A malformed literal is a syntax error, not a null.
