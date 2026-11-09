@@ -224,6 +224,22 @@ pub(crate) fn is_invisible(c: char) -> bool {
 /// One comment line's text, with anything that would end the line or
 /// hide what it says escaped.
 pub(crate) fn comment_text(text: &str) -> String {
+    // `gofmt` reads a `// +build ...` line anywhere as a build constraint
+    // and moves it to the top, where it can exclude the whole file; the
+    // escaped `+` reads the same and constrains nothing.
+    let trimmed = text.trim_start();
+    let constraint = trimmed
+        .strip_prefix("+build")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    let text = if constraint {
+        format!(
+            "{}\\u{{2b}}{}",
+            &text[..text.len() - trimmed.len()],
+            &trimmed[1..]
+        )
+    } else {
+        text.to_owned()
+    };
     text.chars()
         .flat_map(|c| {
             if (c.is_control() && c != '\t') || is_invisible(c) {
@@ -289,6 +305,9 @@ mod tests {
         assert_eq!(quote("\u{202E}"), "\"\\u202e\"");
         assert_eq!(quote("\u{1}"), "\"\\u0001\"");
         assert_eq!(comment_text("a\u{0}b"), "a\\u{0}b");
+        assert_eq!(comment_text("+build ignore"), "\\u{2b}build ignore");
+        assert_eq!(comment_text("  +build"), "  \\u{2b}build");
+        assert_eq!(comment_text("+builder"), "+builder");
     }
 
     #[test]

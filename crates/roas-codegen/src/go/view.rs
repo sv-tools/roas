@@ -605,6 +605,16 @@ impl Builder<'_> {
                                 false,
                             )
                         }
+                        // `omitzero` asks a pointer's pointee `IsZero` when it
+                        // has one — `time.Time` does — so a present zero value
+                        // would be dropped; `Nullable` asks only for absence.
+                        (false, false) if self.substituted(&field.ty) => {
+                            self.support.nullable = true;
+                            (
+                                format!("Nullable[{}]", self.spell(unboxed(&field.ty))?),
+                                true,
+                            )
+                        }
                         (false, false) => {
                             let inner = self.spell(&field.ty)?;
                             if inner.starts_with('*') {
@@ -762,6 +772,25 @@ impl Builder<'_> {
                         return self.extern_holds_null(component.unwrap_or_default());
                     }
                     TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_) => return true,
+                    TypeKind::Newtype(inner) | TypeKind::Alias(inner) => inner,
+                    _ => return false,
+                },
+                _ => return false,
+            };
+        }
+        false
+    }
+
+    /// Whether the type is a substitution, directly or through aliases and
+    /// newtypes over one (emitted as aliases).
+    fn substituted(&self, ty: &TypeRef) -> bool {
+        let mut ty = ty;
+        for _ in 0..=self.ir.types.len() {
+            ty = match ty {
+                TypeRef::Extern(_) => return true,
+                TypeRef::Boxed(inner) => inner,
+                TypeRef::Named(id) => match &self.ir.types[id].kind {
+                    TypeKind::Extern => return true,
                     TypeKind::Newtype(inner) | TypeKind::Alias(inner) => inner,
                     _ => return false,
                 },

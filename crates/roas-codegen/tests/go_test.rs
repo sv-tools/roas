@@ -200,10 +200,10 @@ fn substitutions_use_their_go_spelling_and_imports() {
     let generation = generation.unwrap();
     let code = squeezed(&generation.files[0].contents);
     assert!(
-        code.contains("Id *uuid.UUID `json:\"id,omitzero\"`"),
+        code.contains("Id Nullable[uuid.UUID] `json:\"id,omitzero\"`"),
         "{code}"
     );
-    assert!(code.contains("Born *time.Time"), "{code}");
+    assert!(code.contains("Born Nullable[time.Time]"), "{code}");
     assert!(code.contains("\"github.com/google/uuid\""), "{code}");
     assert!(code.contains("\"time\""), "{code}");
     assert!(code.contains("_ *time.Time) error"), "{code}");
@@ -438,6 +438,11 @@ fn every_single_kind_compiles_on_its_own() {
             "struct",
             serde_json::json!({"S": {"type": "object", "required": ["a"], "properties": {"a": {"type": ["string", "null"]}}}}),
         ),
+        // A description line gofmt would read as a build constraint.
+        (
+            "build",
+            serde_json::json!({"B": {"type": "object", "description": "Values:\n+build ignore", "properties": {"a": {"type": "string", "title": "+build linux"}}}}),
+        ),
         // A substitution may be an interface, which takes no methods.
         (
             "interface",
@@ -485,6 +490,27 @@ fn a_substitution_spelled_like_a_null_holder_refuses_no_null() {
     );
     assert!(
         code.contains("J Nullable[jsontext.Value] `json:\"j\"`"),
+        "{code}"
+    );
+}
+
+#[test]
+fn an_optional_substitution_keeps_its_zero_value() {
+    let components = serde_json::json!({
+        "Event": {"type": "object", "properties": {"at": {"type": "string", "format": "date-time"}}}
+    });
+    let toml = "[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n";
+    let Some(generation) = go(components, toml) else {
+        return;
+    };
+    let code = squeezed(&generation.unwrap().files[0].contents);
+    // `*time.Time` with `omitzero` would drop a present zero time.
+    assert!(
+        code.contains("At Nullable[time.Time] `json:\"at,omitzero\"`"),
+        "{code}"
+    );
+    assert!(
+        code.contains("case \"at\":\nif d.PeekKind() == 'n'"),
         "{code}"
     );
 }
