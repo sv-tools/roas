@@ -295,6 +295,18 @@ mod yaml_tests {
         }
     }
 
+    /// The number map YAML output carries under `arbitrary_precision` reads
+    /// back the way `serde_json` reads it, with the feature on or off.
+    #[test]
+    fn yaml_arbitrary_precision_number_map_matches_serde_json() {
+        let json = r#"{"n":{"$serde_json::private::Number":"12.50"}}"#;
+        let expected: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parse("n: { \"$serde_json::private::Number\": \"12.50\" }\n").unwrap(),
+            expected
+        );
+    }
+
     #[test]
     fn yaml_alias_bomb_is_rejected_by_the_budget() {
         // Billion laughs: each level aliases the previous one ten times, so

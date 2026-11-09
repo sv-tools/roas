@@ -98,9 +98,11 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
             }
             entries.insert(key, value);
         }
-        // With `serde_json/arbitrary_precision` a number is written out as
-        // this one-key map; `serde_json::Value` reads it back as the number,
-        // and so does this, by handing the map to `serde_json` itself.
+        // serde-saphyr never produces this map itself; it appears only when a
+        // document spells the key out, as YAML written by a build with
+        // `serde_json/arbitrary_precision` does for every number. Hand it to
+        // `serde_json`, which reads it back as the number in such a build and
+        // keeps the object otherwise, as `serde_json::Value` would.
         if entries.len() == 1 && entries.contains_key("$serde_json::private::Number") {
             return serde_json::from_value(Value::Object(entries)).map_err(de::Error::custom);
         }
