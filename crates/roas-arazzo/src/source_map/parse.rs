@@ -98,6 +98,21 @@ fn span(text: &str, spanned: &Spanned<Raw>) -> (usize, usize) {
     (start.min(text.len()), end.min(text.len()))
 }
 
+/// Where the `*name` a node is used through ends, if it is used through
+/// one. serde-saphyr also marks every node of an inline merge (`<<: {…}`)
+/// as referenced at the merge's value: those are written where they are,
+/// and only a reference that is an alias token makes an alias.
+fn alias_end(text: &str, spanned: &Spanned<Raw>) -> Option<usize> {
+    if spanned.referenced == spanned.defined {
+        return None;
+    }
+    let used = spanned.referenced.span();
+    let start = used.byte_offset()? as usize;
+    text.get(start..)?
+        .starts_with('*')
+        .then(|| start + used.byte_len().map_or(0, |len| len as usize))
+}
+
 /// What the definition pass measured, for replays to reuse.
 #[derive(Default)]
 struct Memo {
@@ -114,10 +129,8 @@ struct Memo {
 /// definition: the `*name` belongs to the alias alone. `memo` holds the
 /// end measured for each collection defined so far, by its start.
 fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (Node, usize) {
-    let alias = spanned.referenced != spanned.defined;
-    let used = spanned.referenced.span();
-    let used = used.byte_offset().map_or(0, |offset| offset as usize)
-        + used.byte_len().map_or(0, |len| len as usize);
+    let alias = alias_end(text, &spanned).is_some();
+    let used = alias_end(text, &spanned).unwrap_or(0);
     let (mut start, mut end) = span(text, &spanned);
     let mut text_end = end;
     match spanned.value {
@@ -145,18 +158,14 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
                     // `*a`, key and value alike: like a replay, it is
                     // where its definition is.
                     let merged =
-                        key.referenced != key.defined && key.referenced == value.referenced;
+                        alias_end(text, &key).is_some() && key.referenced == value.referenced;
                     let again = inner || merged;
                     // An alias key (`*k :`) is named at its anchor but
                     // written here: what follows it is measured from here.
-                    let key_used = if !again && key.referenced != key.defined {
-                        let used = key.referenced.span();
-                        used.byte_offset().map_or(0, |offset| offset as usize)
-                            + used.byte_len().map_or(0, |len| len as usize)
-                    } else {
-                        key_end
-                    }
-                    .min(text.len());
+                    let key_used = alias_end(text, &key)
+                        .filter(|_| !again)
+                        .unwrap_or(key_end)
+                        .min(text.len());
                     let name = match key.value {
                         Raw::String(name) => name,
                         // `1: x` reads as the member `"1"`.
@@ -170,22 +179,29 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
                     let reported = value.start;
                     let empty =
                         value.start == value.end && matches!(value.kind, Kind::Scalar(None));
+                    // A merge's members come after the map's own, so a replay
+                    // may come before its definition: then it is measured
+                    // as the definition would be, from the key's anchor.
+                    let known = again.then(|| memo.placed.get(&reported).copied()).flatten();
                     let place = if !empty {
                         None
-                    } else if again {
-                        memo.placed.get(&reported).copied()
-                    } else if text
-                        .get(key_used..value.start)
-                        // An alias to an empty value sits back at its anchor.
-                        .is_some_and(|gap| gap.contains(['\n', '\r']))
-                    {
-                        let at = colon(text, key_used);
-                        memo.placed.insert(reported, at);
-                        Some(at)
+                    } else if known.is_some() {
+                        known
                     } else {
-                        None
+                        let gap = text.get(key_used..value.start);
+                        // An alias to an empty value sits back at its anchor.
+                        let at = if gap.is_some_and(|gap| gap.contains(['\n', '\r'])) {
+                            colon(text, key_used)
+                        } else {
+                            value.start
+                        };
+                        // Moved or not, replays reuse it.
+                        if !again {
+                            memo.placed.insert(reported, at);
+                        }
+                        Some(at)
                     };
-                    if let Some(at) = place {
+                    if let Some(at) = place.filter(|&at| at != value.start) {
                         (value.start, value.end, value.text_end, value_end) = (at, at, at, at);
                     }
                     end = end.max(key_used).max(value_end);
@@ -1103,6 +1119,61 @@ workflows:
         let text = "k: {a: ?'x, <<: {m: 1}}\n";
         let map = SourceMap::parse(text).unwrap();
         assert_eq!(map.locate("#.k").unwrap().end.offset, 23);
+    }
+
+    /// An inline merge's members are written where they are: they are
+    /// located as if the `<<` were any other key.
+    #[test]
+    fn an_inline_merge_is_measured_where_it_is_written() {
+        for (merged, path, plain, plain_path) in [
+            (
+                "c:\n  <<:\n    ? k\n  z: 1\n",
+                "#.c.k",
+                "c:\n  mm:\n    ? k\n  z: 1\n",
+                "#.c.mm.k",
+            ),
+            (
+                "c:\n  <<:\n    ? k\n    j: 2\n",
+                "#.c.k",
+                "c:\n  mm:\n    ? k\n    j: 2\n",
+                "#.c.mm.k",
+            ),
+            (
+                "c: {<<: {? k\n  }, z: 1}\n",
+                "#.c.k",
+                "c: {mm: {? k\n  }, z: 1}\n",
+                "#.c.mm.k",
+            ),
+            (
+                "<<:\n  k2: {? k3\n    }\n",
+                "#.k2.k3",
+                "mm:\n  k2: {? k3\n    }\n",
+                "#.mm.k2.k3",
+            ),
+            (
+                "a: &x 1\nb:\n  <<:\n    j:\n      - *x\n  z: 1\n",
+                "#.b.j",
+                "a: &x 1\nb:\n  mm:\n    j:\n      - *x\n  z: 1\n",
+                "#.b.mm.j",
+            ),
+        ] {
+            let found = SourceMap::parse(merged).unwrap().locate(path).unwrap();
+            let expected = SourceMap::parse(plain).unwrap().locate(plain_path).unwrap();
+            assert_eq!(
+                (found.start.offset, found.end.offset),
+                (expected.start.offset, expected.end.offset),
+                "{merged:?}"
+            );
+        }
+        // An inline map beside an alias in a merge list.
+        let text = "a: &a {q: 1}\nc:\n  <<: [*a, {? k\n   }]\n  z: 1\n";
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(map.locate("#.c.k").unwrap().start.line, 3);
+        // A replay of a map whose definition holds an inline merge.
+        let text = "<<:\n  k3: &a4\n    k15:\n      ? k23\n  k25: 1\nx: *a4\n";
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(map.locate("#.k3"), map.locate("#.x"));
+        assert_eq!(map.locate("#.k3").unwrap().end.line, 4);
     }
 
     #[test]
