@@ -269,7 +269,8 @@ fn parse_yaml(bytes: &[u8]) -> Result<serde_json::Value, serde_saphyr::Error> {
         merge_keys: serde_saphyr::MergeKeyPolicy::Merge,
         duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
     };
-    serde_saphyr::from_slice_with_options(bytes, options)
+    serde_saphyr::from_slice_with_options::<crate::yaml_value::JsonValue>(bytes, options)
+        .map(crate::yaml_value::JsonValue::into_inner)
 }
 
 #[cfg(test)]
@@ -329,6 +330,44 @@ mod yaml_tests {
     fn yaml_duplicate_key_is_an_error() {
         let err = parse("a: 1\na: 2\n").unwrap_err();
         assert!(err.contains("duplicate mapping key"), "{err}");
+    }
+
+    /// `200` and `"200"` are different YAML keys but the same JSON one.
+    /// Through a `<<` merge the inherited entry would otherwise overwrite the
+    /// explicit one, in either direction.
+    #[test]
+    fn yaml_keys_colliding_as_json_are_an_error() {
+        for yaml in [
+            "base: &b { 200: { description: inherited } }\n\
+             responses:\n  <<: *b\n  \"200\": { description: explicit }\n",
+            "base: &b { \"200\": { description: inherited } }\n\
+             responses:\n  <<: *b\n  200: { description: explicit }\n",
+            "responses:\n  200: a\n  \"200\": b\n",
+        ] {
+            let err = parse(yaml).unwrap_err();
+            assert!(err.contains("appears twice once read as JSON"), "{err}");
+        }
+    }
+
+    #[test]
+    fn yaml_merge_keeps_the_explicit_entry_when_keys_match() {
+        let yaml = "base: &b { 200: { description: inherited }, 404: { description: nf } }\n\
+                    responses:\n  <<: *b\n  200: { description: explicit }\n";
+        assert_eq!(
+            parse(yaml).unwrap()["responses"],
+            json!({ "200": { "description": "explicit" }, "404": { "description": "nf" } }),
+        );
+    }
+
+    #[test]
+    fn yaml_non_string_keys_become_their_json_text() {
+        // `null` and `~` are the same JSON key, so together they collide.
+        let err = parse("r: { null: a, ~: b }\n").unwrap_err();
+        assert!(err.contains("appears twice once read as JSON"), "{err}");
+        assert_eq!(
+            parse("r: { null: a, true: c, 1.5: d }\n").unwrap(),
+            json!({ "r": { "null": "a", "true": "c", "1.5": "d" } }),
+        );
     }
 
     #[test]

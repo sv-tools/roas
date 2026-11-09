@@ -68,6 +68,7 @@ mod overlay;
 mod preview;
 mod versioned;
 mod yaml;
+mod yaml_value;
 
 use arazzo::ArazzoCommand;
 use asyncapi::AsyncApiCommand;
