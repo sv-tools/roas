@@ -269,6 +269,9 @@ pub fn prepare<'d>(
 /// document are its own and are not listed (graph loading traverses them in full).
 /// This performs structural/static checks but no IO or operation lookup. After
 /// supplying these sources, call [`prepare`] to resolve and check their contents.
+/// A supplied external document can call back into this one and so need more
+/// of its sources: when sources are loaded selectively, call this again after
+/// each load and load the additions until the set stops growing.
 /// # Errors
 /// Located document, expression, reference and capability errors independent of
 /// source contents. Unrelated workflows' operation requirements are not visited.

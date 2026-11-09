@@ -144,7 +144,10 @@ sources (including links back to the owner, which name the entry description).
 Without a registry, or before the source is linked, the reference fails with
 `ExecutionError::ExternalWorkflow` naming the missing alias. `required_sources`
 lists the entry's Arazzo aliases that the selected workflow reaches, and graph
-loading traverses each linked Arazzo document's own sources in full.
+loading traverses each linked Arazzo document's own sources in full. A linked
+document that calls back into the entry can need more entry sources, so a
+selective loader calls `required_sources` again after each load and loads the
+additions until the set stops growing.
 
 The called workflow runs on the same engine as a local call, in its own
 document's scope:
@@ -163,7 +166,9 @@ document's scope:
 - `StepRecord::document` carries the declaring document's canonical identity for
   steps of external workflows (`None` for the entry description), and the calling
   step's `Performed::Workflow` names the reference as written.
-  `PreparationDiagnostic::document` locates findings the same way.
+  `PreparationDiagnostic::document` locates findings the same way, and a
+  runtime error raised in an external document comes wrapped in
+  `ExecutionError::InDocument { document, error }`.
 
 Preparation compiles the statically reachable workflow graph across documents and
 structurally validates every external document it enters. A `dependsOn` cycle,
@@ -590,10 +595,14 @@ fail with `ExecutionError::Unsupported`. They now resolve through a source regis
 and fail with the new `ExecutionError::ExternalWorkflow` when the source is
 undeclared, not Arazzo, unsupplied, or lacks the workflow. `StepRecord::document`,
 `PreparationDiagnostic::document` and the `document` field of
-`InputError::Schema` / `InputError::Invalid` are new. Patterns that list every
+`InputError::Schema` / `InputError::Invalid` are new, as is
+`ExecutionError::InDocument`, which wraps operation, expression, criterion and
+request errors raised in an external document (entry-description errors stay
+unwrapped). Patterns that list every
 field of those variants need `..`. Code that builds these structs or matches
 every enum variant must be updated. A workflow id missing from an external
-document stays bare and is reported as `ExternalWorkflow` naming that document.
+document stays bare and is reported as `ExternalWorkflow` inside `InDocument`
+naming that document.
 An explicit `Options::source` entry for an Arazzo alias also decides which
 document `$sourceDescriptions.<alias>.<id>` runs. An owned value cannot hold an
 Arazzo document, so it is reported as an error. Local calls, their reports and their diagnostics are

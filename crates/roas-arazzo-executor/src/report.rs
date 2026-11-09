@@ -277,6 +277,18 @@ pub enum ExecutionError {
         /// Why it names nothing runnable.
         reason: String,
     },
+    /// An error raised while running a workflow of an external Arazzo
+    /// document. The entry description's errors are never wrapped, nor are
+    /// errors that already name their document ([`ExecutionError::Input`])
+    /// or belong to the whole run (limits, the client, driving errors).
+    #[error("in {document}: {error}")]
+    InDocument {
+        /// Canonical identity of the external document.
+        document: String,
+        /// What went wrong there.
+        #[source]
+        error: Box<ExecutionError>,
+    },
     /// The step's operation could not be found.
     #[error(transparent)]
     Operation(#[from] OperationError),

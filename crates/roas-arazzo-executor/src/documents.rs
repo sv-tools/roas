@@ -118,10 +118,11 @@ impl<'d> Documents<'d> {
                 .map(|index| (doc, index))
                 .ok_or_else(|| {
                     match self.get(doc).identity {
-                        // Keep the id bare; name the external document beside it.
-                        Some(identity) => ExecutionError::ExternalWorkflow {
+                        // Keep the id bare; the run names the external
+                        // document around it, as preparation's diagnostic does.
+                        Some(_) => ExecutionError::ExternalWorkflow {
                             reference: reference.to_owned(),
-                            reason: format!("document {identity} has no workflow `{reference}`"),
+                            reason: format!("this document has no workflow `{reference}`"),
                         },
                         None => ExecutionError::UnknownWorkflow(reference.to_owned()),
                     }

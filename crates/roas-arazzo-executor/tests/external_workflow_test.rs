@@ -898,9 +898,11 @@ fn a_local_target_missing_inside_an_external_document_keeps_the_id_bare() {
     )
     .unwrap_err();
     assert!(
-        matches!(&error, ExecutionError::ExternalWorkflow { reference, reason }
-            if reference == "missing"
-                && reason == &format!("document {SHARED} has no workflow `missing`")),
+        matches!(&error, ExecutionError::InDocument { document, error }
+            if document == SHARED
+                && matches!(&**error, ExecutionError::ExternalWorkflow { reference, reason }
+                    if reference == "missing"
+                        && reason == "this document has no workflow `missing`")),
         "{error}"
     );
     let error = prepare(&graph.description, &graph.options("main")).unwrap_err();
@@ -1119,4 +1121,102 @@ mod input_validation {
         assert!(report.steps.iter().all(|step| step.document.is_none()));
         assert_eq!(report.steps.len(), 3);
     }
+}
+
+fn in_shared(error: &ExecutionError) -> &ExecutionError {
+    match error {
+        ExecutionError::InDocument { document, error } if document == SHARED => error,
+        other => panic!("expected an error located in {SHARED}, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_lazy_run_names_the_external_document_an_operation_error_comes_from() {
+    let mut documents = standard();
+    documents[2].1["workflows"][0]["steps"][0]["operationId"] =
+        json!("$sourceDescriptions.api.missingOp");
+    let graph = Graph::new(&documents);
+    let error = execute(
+        &graph.description,
+        &graph.options("main"),
+        &mut Fake::new().reply(200, &ok("root")).reply(200, &ok("local")),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(in_shared(&error), ExecutionError::Operation(_)),
+        "{error}"
+    );
+    assert!(
+        error.to_string().starts_with(&format!("in {SHARED}: ")),
+        "{error}"
+    );
+}
+
+#[test]
+fn runtime_errors_of_external_workflows_name_their_document_on_every_path() {
+    let mut documents = standard();
+    // Not a static error: the input is only found missing when the
+    // workflow's outputs are named, after its frame is left.
+    documents[2].1["workflows"][0]["outputs"]["late"] = json!("$inputs.missing");
+    let graph = Graph::new(&documents);
+    let options = graph.options("main");
+    let client = || {
+        Fake::new()
+            .reply(200, &ok("root"))
+            .reply(200, &ok("local"))
+            .reply(200, &ok("external"))
+    };
+    let lazy = execute(&graph.description, &options, &mut client()).unwrap_err();
+    let checked = prepare(&graph.description, &options)
+        .unwrap()
+        .execute(&mut client())
+        .unwrap_err();
+    assert!(!matches!(
+        in_shared(&lazy),
+        ExecutionError::InDocument { .. }
+    ));
+    assert_eq!(lazy.to_string(), checked.to_string());
+    assert!(std::error::Error::source(&lazy).is_some());
+}
+
+#[test]
+fn a_call_back_into_the_entry_reports_its_errors_unwrapped() {
+    let mut documents = standard();
+    let root = &mut documents[0].1;
+    root["$self"] = json!(ROOT);
+    root["workflows"].as_array_mut().unwrap().push(json!({
+        "workflowId": "helper",
+        "steps": [{
+            "stepId": "get",
+            "operationId": "$sourceDescriptions.api.getThing",
+            "parameters": [{ "name": "id", "in": "query", "value": "helper" }]
+        }],
+        "outputs": { "late": "$steps.nope.outputs.value" }
+    }));
+    let shared = &mut documents[2].1;
+    shared["sourceDescriptions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "name": "root", "url": "../root.arazzo.json", "type": "arazzo" }));
+    shared["workflows"][0]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .insert(
+            0,
+            json!({ "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" }),
+        );
+    let graph = Graph::new(&documents);
+    let error = execute(
+        &graph.description,
+        &graph.options("main"),
+        &mut Fake::new()
+            .reply(200, &ok("root"))
+            .reply(200, &ok("local"))
+            .reply(200, &ok("helper")),
+    )
+    .unwrap_err();
+    assert!(
+        !matches!(error, ExecutionError::InDocument { .. }) && error.to_string().contains("nope"),
+        "the entry's own workflow failed, unwrapped: {error}"
+    );
 }

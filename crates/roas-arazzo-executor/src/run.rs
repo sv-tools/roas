@@ -580,13 +580,16 @@ impl<'d> Run<'d> {
             }
 
             let index = frame.order[frame.at];
+            let doc = frame.doc;
             let step = &frame.workflow.steps[index];
             if step.workflow_id.is_some() {
-                self.call(index)?;
+                self.call(index).map_err(|error| self.located(doc, error))?;
                 continue;
             }
 
-            let (request, exchange) = self.build(index)?;
+            let (request, exchange) = self
+                .build(index)
+                .map_err(|error| self.located(doc, error))?;
             let attempt = self
                 .frames
                 .last()
@@ -641,6 +644,7 @@ impl<'d> Run<'d> {
             url: pending.exchange.request.url.clone(),
             status,
         };
+        let doc = self.frames.last().expect("a frame to complete in").doc;
         // No criteria means the status is the whole judgement.
         self.complete(
             pending.step,
@@ -653,6 +657,29 @@ impl<'d> Run<'d> {
                 elapsed,
             },
         )
+        .map_err(|error| self.located(doc, error))
+    }
+
+    /// Name the external document an error was raised in, so an
+    /// operation, expression or criterion error of a linked document is
+    /// not mistaken for one of the entry's.
+    fn located(&self, doc: Doc, error: ExecutionError) -> ExecutionError {
+        let Some(identity) = self.documents.get(doc).identity else {
+            return error;
+        };
+        match error {
+            ExecutionError::Input(_)
+            | ExecutionError::InDocument { .. }
+            | ExecutionError::Limit { .. }
+            | ExecutionError::Client(_)
+            | ExecutionError::NotWaiting
+            | ExecutionError::Awaiting { .. }
+            | ExecutionError::Stopped => error,
+            error => ExecutionError::InDocument {
+                document: identity.to_owned(),
+                error: Box::new(error),
+            },
+        }
     }
 
     // ---- the steps of a run -----------------------------------------
@@ -833,13 +860,14 @@ impl<'d> Run<'d> {
                 ambient(&self.ambients, frame.doc),
             );
             if frame.outcome == Outcome::Succeeded {
-                evaluate_outputs(&frame.workflow.outputs, &scope)?
+                evaluate_outputs(&frame.workflow.outputs, &scope)
             } else {
                 // A workflow that stopped early names outputs from steps
                 // that never ran. Those go with the steps; anything else
                 // wrong with an output is still worth saying.
-                evaluate_what_ran(&frame.workflow.outputs, &scope)?
+                evaluate_what_ran(&frame.workflow.outputs, &scope)
             }
+            .map_err(|error| self.located(frame.doc, error))?
         };
         self.finished[frame.doc.0].insert(
             frame.workflow.workflow_id.clone(),
