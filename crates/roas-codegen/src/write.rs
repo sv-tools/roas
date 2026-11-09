@@ -1953,7 +1953,14 @@ pub fn check(
     // the output directory's exclusively, so `check` never reads one half
     // done. Like a write, it fails at once rather than wait, and refuses a
     // lock file it cannot open.
-    let mut _locks: Vec<DirLock> = DirLock::share(out_dir, false)?.into_iter().collect();
+    let mut _locks: Vec<DirLock> = Vec::new();
+    // Where there was no lock file to hold (a fresh checkout ignores them),
+    // one appearing by the end means a write ran meanwhile.
+    let mut unlocked: Vec<PathBuf> = Vec::new();
+    match DirLock::share(out_dir, false)? {
+        Some(lock) => _locks.push(lock),
+        None => unlocked.push(out_dir.to_path_buf()),
+    }
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -1961,7 +1968,10 @@ pub fn check(
     // The lock paths a write would take, so a directory a write refuses
     // never checks as merely out of date.
     for (dir, _) in other_roots(out_dir, planned.keys()) {
-        _locks.extend(DirLock::share(&dir, false)?);
+        match DirLock::share(&dir, false)? {
+            Some(lock) => _locks.push(lock),
+            None => unlocked.push(dir),
+        }
     }
     for path in previous.files.keys() {
         check_links(out_dir, path)?;
@@ -2032,6 +2042,12 @@ pub fn check(
     expected.replacing = replacing;
     report.manifest_outdated =
         !read_manifest(&manifest_path)?.is_some_and(|m| m.same_as(&expected));
+    if let Some(dir) = unlocked
+        .iter()
+        .find(|dir| fs::symlink_metadata(dir.join(LOCK_FILE)).is_ok())
+    {
+        return Err(WriteError::Locked(dir.join(LOCK_FILE)));
+    }
     Ok(report)
 }
 
