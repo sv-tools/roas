@@ -91,15 +91,6 @@ impl<'d> Documents<'d> {
             .map(|index| Doc(*index))
     }
 
-    /// A human-readable workflow name: its id, qualified by the document
-    /// identity outside the entry description.
-    pub(crate) fn label(&self, doc: Doc, workflow_id: &str) -> String {
-        match self.get(doc).identity {
-            Some(identity) => format!("{workflow_id} of {identity}"),
-            None => workflow_id.to_owned(),
-        }
-    }
-
     /// Resolve a workflow reference written in `doc`: a local `workflowId`,
     /// or `$sourceDescriptions.<name>.<workflowId>` naming an Arazzo source.
     pub(crate) fn resolve(
@@ -241,6 +232,5 @@ mod tests {
             Some("shared")
         );
         assert_eq!(Documents::alias("w"), None);
-        assert_eq!(documents.label(Doc::ENTRY, "w"), "w");
     }
 }

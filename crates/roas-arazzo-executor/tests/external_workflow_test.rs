@@ -1382,7 +1382,7 @@ fn a_queued_external_dependencys_step_order_error_names_its_document() {
 }
 
 #[test]
-fn a_dependency_cycle_inside_another_document_is_labelled_with_it() {
+fn a_dependency_cycle_inside_another_document_names_it_once() {
     let graph = pair(
         json!([{ "workflowId": "main", "dependsOn": ["$sourceDescriptions.b.w"],
             "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }]),
@@ -1394,11 +1394,31 @@ fn a_dependency_cycle_inside_another_document_is_labelled_with_it() {
         ]),
     );
     let error = lazily(&graph, "main", 0);
-    let expected = format!("w of {B}");
     assert!(
-        matches!(&error, ExecutionError::Circular(at) if *at == expected),
+        matches!(located_in(&error, B), ExecutionError::Circular(at) if at == "w"),
         "{error}"
     );
+    let options = Options::new()
+        .workflow("main")
+        .source_registry(&graph.registry, graph.root)
+        .unwrap();
+    let error = prepare(&graph.description, &options).unwrap_err();
+    let cycles: Vec<_> = error
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            matches!(
+                diagnostic.issue,
+                PreparationIssue::Execution(ExecutionError::Circular(_))
+            )
+        })
+        .collect();
+    assert!(!cycles.is_empty(), "{error}");
+    for diagnostic in cycles {
+        assert_eq!(diagnostic.document.as_deref(), Some(B));
+        let line = diagnostic.to_string();
+        assert_eq!(line.matches(B).count(), 1, "{line}");
+    }
 }
 
 #[test]

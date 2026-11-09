@@ -526,8 +526,14 @@ impl<'d> Compiler<'d> {
     /// dependency cannot be ordered yet; [`Self::target`] lists its source.
     fn dependency_error(&mut self, site: &Site<'d>, error: ExecutionError) {
         match error {
-            // An unresolvable `dependsOn` of another document: compiling that
-            // document reports it at its own site.
+            // Raised in the document being compiled: its diagnostic names it.
+            ExecutionError::InDocument { document, error }
+                if self.documents.get(self.current).identity == Some(document.as_str()) =>
+            {
+                self.dependency_error(site, *error);
+            }
+            // Raised in another document: compiling that document reports it
+            // at its own site.
             ExecutionError::InDocument { .. } => {}
             ExecutionError::ExternalWorkflow { .. } if !self.resolve_operations => {}
             error => self.error(site, error),

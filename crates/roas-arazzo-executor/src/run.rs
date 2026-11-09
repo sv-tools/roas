@@ -1818,8 +1818,12 @@ fn visit<'d>(
         return Ok(());
     }
     if !visiting.insert(key.clone()) {
-        return Err(ExecutionError::Circular(
-            documents.label(doc, &workflow.workflow_id),
+        // The cycle closes in `doc`: it names that document, as any other
+        // error raised there does.
+        return Err(locate(
+            documents,
+            doc,
+            ExecutionError::Circular(workflow.workflow_id.clone()),
         ));
     }
     for reference in &workflow.depends_on {
