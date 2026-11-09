@@ -1121,6 +1121,29 @@ mod input_validation {
         assert!(report.steps.iter().all(|step| step.document.is_none()));
         assert_eq!(report.steps.len(), 3);
     }
+
+    #[test]
+    fn an_external_input_schema_diagnostic_names_its_document_once() {
+        let mut documents = standard();
+        documents[2].1["workflows"][0]["inputs"] = json!({ "$ref": "#/components/inputs/missing" });
+        let graph = Graph::new(&documents);
+        let options = graph
+            .options("main")
+            .input_validation(InputValidation::Draft202012);
+        let error = prepare(&graph.description, &options).unwrap_err();
+        let diagnostic = error
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.path.ends_with(".inputs"))
+            .expect("an input-schema diagnostic");
+        assert_eq!(diagnostic.document.as_deref(), Some(SHARED));
+        let line = diagnostic.to_string();
+        assert_eq!(line.matches(SHARED).count(), 1, "{line}");
+        assert!(
+            line.contains("workflow `child` has an invalid input schema"),
+            "{line}"
+        );
+    }
 }
 
 fn in_shared(error: &ExecutionError) -> &ExecutionError {

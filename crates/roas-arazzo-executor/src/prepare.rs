@@ -615,8 +615,9 @@ impl<'d> Compiler<'d> {
                 workflow,
             )
         {
-            let identity = self.documents.get(self.current).identity;
-            self.error(&site.field("inputs"), error.in_document(identity));
+            // The diagnostic's `document` names the document; the error
+            // itself names it only where it travels alone, from a run.
+            self.error(&site.field("inputs"), error);
         }
         for (index, id) in workflow.depends_on.iter().enumerate() {
             self.target(id, &site.item("dependsOn", index), false);

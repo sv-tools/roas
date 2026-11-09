@@ -595,7 +595,8 @@ fail with `ExecutionError::Unsupported`. They now resolve through a source regis
 and fail with the new `ExecutionError::ExternalWorkflow` when the source is
 undeclared, not Arazzo, unsupplied, or lacks the workflow. `StepRecord::document`,
 `PreparationDiagnostic::document` and the `document` field of
-`InputError::Schema` / `InputError::Invalid` are new, as is
+`InputError::Schema` / `InputError::Invalid` (set on errors from a run; a
+preparation diagnostic names the document itself) are new, as is
 `ExecutionError::InDocument`, which wraps operation, expression, criterion and
 request errors raised in an external document (entry-description errors stay
 unwrapped). Patterns that list every
