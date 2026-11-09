@@ -525,18 +525,22 @@ impl<'d> Compiler<'d> {
     /// `dependsOn` ordering errors. Before sources are supplied, an external
     /// dependency cannot be ordered yet; [`Self::target`] lists its source.
     fn dependency_error(&mut self, site: &Site<'d>, error: ExecutionError) {
-        match error {
+        let error = match error {
             // Raised in the document being compiled: its diagnostic names it.
             ExecutionError::InDocument { document, error }
                 if self.documents.get(self.current).identity == Some(document.as_str()) =>
             {
-                self.dependency_error(site, *error);
+                *error
             }
-            // Raised in another document: compiling that document reports it
-            // at its own site.
-            ExecutionError::InDocument { .. } => {}
-            ExecutionError::ExternalWorkflow { .. } if !self.resolve_operations => {}
-            error => self.error(site, error),
+            // Raised in another document — or, unwrapped, in the entry while
+            // an external document's walk passed through it: compiling that
+            // document reports it at its own site.
+            ExecutionError::InDocument { .. } => return,
+            _ if self.current != Doc::ENTRY => return,
+            error => error,
+        };
+        if self.resolve_operations || !matches!(error, ExecutionError::ExternalWorkflow { .. }) {
+            self.error(site, error);
         }
     }
 

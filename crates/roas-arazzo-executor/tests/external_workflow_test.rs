@@ -1491,3 +1491,40 @@ fn an_external_operation_path_by_canonical_url_waits_for_its_sources() {
     let graph = Graph::new(&documents);
     prepare(&graph.description, &graph.options("main")).unwrap();
 }
+
+#[test]
+fn an_entry_dependency_error_reached_from_another_document_stays_with_the_entry() {
+    for x in [
+        json!({ "workflowId": "x", "dependsOn": ["missing"],
+            "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }),
+        json!({ "workflowId": "x", "dependsOn": ["y"],
+            "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }),
+    ] {
+        let graph = pair(
+            json!([
+                { "workflowId": "main", "dependsOn": ["$sourceDescriptions.b.w"],
+                  "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] },
+                x,
+                { "workflowId": "y", "dependsOn": ["x"],
+                  "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }
+            ]),
+            json!([{ "workflowId": "w", "dependsOn": ["$sourceDescriptions.a.x"],
+                "steps": [{ "stepId": "ping", "operationId": "$sourceDescriptions.api.ping" }] }]),
+        );
+        let lazy = lazily(&graph, "main", 0);
+        assert!(!matches!(lazy, ExecutionError::InDocument { .. }), "{lazy}");
+        let options = Options::new()
+            .workflow("main")
+            .source_registry(&graph.registry, graph.root)
+            .unwrap();
+        let error = prepare(&graph.description, &options).unwrap_err();
+        assert!(
+            error
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.document.is_none()),
+            "the external document is valid: {error}"
+        );
+        assert!(!error.diagnostics.is_empty());
+    }
+}

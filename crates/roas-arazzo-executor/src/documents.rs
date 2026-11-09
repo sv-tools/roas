@@ -9,8 +9,6 @@ use crate::{ExecutionError, Options};
 use roas_arazzo::v1_1::{Description, SourceType, Workflow};
 use std::collections::BTreeMap;
 
-/// A document in a run's table. [`Doc::ENTRY`] is the description the run
-/// was started with; every other handle names an external Arazzo document.
 /// How to supply an external Arazzo document, in this build.
 #[cfg(feature = "source-graph")]
 const SUPPLY_ARAZZO: &str =
@@ -18,6 +16,8 @@ const SUPPLY_ARAZZO: &str =
 #[cfg(not(feature = "source-graph"))]
 const SUPPLY_ARAZZO: &str = "external workflows need the `source-graph` feature";
 
+/// A document in a run's table. [`Doc::ENTRY`] is the description the run
+/// was started with; every other handle names an external Arazzo document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Doc(pub(crate) usize);
 
