@@ -1,42 +1,4 @@
-//! Turning a [`Generation`] into files, safely.
-//!
-//! `generate` never touches disk; this module does, under these rules.
-//!
-//! - **Ownership is recorded.** A manifest in the output directory lists
-//!   every file a generation target wrote, with a content hash. Its name
-//!   is derived from the target — a caller-chosen label plus the language
-//!   — so the next run finds it, and two targets can share a directory:
-//!   `petstore` Rust and `billing` Rust each keep their own manifest.
-//! - **Nothing is taken that is not owned.** A path another target's
-//!   manifest owns is refused, compared case-insensitively since the disk
-//!   may be. So is an existing file no manifest owns, unless the caller
-//!   allows overwriting it or it already holds exactly the generated
-//!   content, in which case it is adopted under the planned spelling.
-//! - **One run at a time.** An operating-system lock on the output
-//!   directory's `.roas-codegen.lock` spans the whole run, exclusive, so
-//!   two targets sharing a directory cannot both pass the ownership checks
-//!   and then race. Other output roots the run can reach — enclosing ones,
-//!   and nested ones it writes into — are locked shared: siblings under
-//!   one root run side by side, while overlapping roots exclude each
-//!   other. Locks end with the process, so a killed run does not block the
-//!   next; lock files stay, as they mark the roots.
-//! - **Nothing below the output directory is followed.** A symbolic link
-//!   as the output directory or on any generated path is refused. The
-//!   path *to* the output directory is the caller's choice and is used as
-//!   given: refusing links there would reject ordinary layouts, such as
-//!   macOS's `/tmp`.
-//! - **Ownership is claimed before anything is written.** Every check runs
-//!   first. Then a pending manifest is written that owns both the previous
-//!   run's files and this run's, each file is written to a temporary
-//!   sibling and renamed into place, and the final manifest replaces the
-//!   pending one. A run that stops midway leaves every file it touched
-//!   owned, so the next run simply rewrites whatever differs. A directory
-//!   holding hand-written files cannot be replaced atomically as a set, so
-//!   the guarantee is per file, not per batch.
-//!
-//! Only files recorded in the previous manifest are removed as stale, and
-//! only when they still hold what was generated: an edited file is kept
-//! and reported.
+//! Turning a [`Generation`] into files, safely: see [`write()`].
 
 use crate::config::Target;
 use crate::generate::Generation;
@@ -286,7 +248,8 @@ impl DirLock {
         let (file, made) = match open(true) {
             Ok(file) => (file, true),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                (open(false).map_err(io(&path))?, false)
+                // Locking needs no write access to an existing file.
+                (fs::File::open(&path).map_err(io(&path))?, false)
             }
             Err(source) => return Err(WriteError::Io { path, source }),
         };
@@ -554,6 +517,11 @@ fn resolved(out_dir: &Path) -> Option<PathBuf> {
                     }
                 }
                 lexical.extend(tail.iter().rev());
+                // Nothing left to resolve: no ancestor exists at all, as
+                // on a missing drive.
+                if lexical == out_dir {
+                    return None;
+                }
                 return resolved(&lexical);
             }
         }
@@ -1449,7 +1417,45 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
     result
 }
 
-/// Write a generation into `out_dir` under the ownership rules above.
+/// Write a generation into `out_dir`.
+///
+/// `generate` never touches disk; this does, under these rules.
+///
+/// - **Ownership is recorded.** A manifest in the output directory lists
+///   every file a generation target wrote, with a content hash. Its name
+///   is derived from the target — a caller-chosen label plus the language
+///   — so the next run finds it, and two targets can share a directory:
+///   `petstore` Rust and `billing` Rust each keep their own manifest.
+/// - **Nothing is taken that is not owned.** A path another target's
+///   manifest owns is refused, compared case-insensitively since the disk
+///   may be. So is an existing file no manifest owns, unless the caller
+///   allows overwriting it or it already holds exactly the generated
+///   content, in which case it is adopted under the planned spelling.
+/// - **One run at a time.** An operating-system lock on the output
+///   directory's `.roas-codegen.lock` spans the whole run, exclusive, so
+///   two targets sharing a directory cannot both pass the ownership checks
+///   and then race. Other output roots the run can reach — enclosing ones,
+///   and nested ones it writes into — are locked shared: siblings under
+///   one root run side by side, while overlapping roots exclude each
+///   other. Locks end with the process, so a killed run does not block the
+///   next; lock files stay, as they mark the roots.
+/// - **Nothing below the output directory is followed.** A symbolic link
+///   as the output directory or on any generated path is refused. The
+///   path *to* the output directory is the caller's choice and is used as
+///   given: refusing links there would reject ordinary layouts, such as
+///   macOS's `/tmp`.
+/// - **Ownership is claimed before anything is written.** Every check runs
+///   first. Then a pending manifest is written that owns both the previous
+///   run's files and this run's, each file is written to a temporary
+///   sibling and renamed into place, and the final manifest replaces the
+///   pending one. A run that stops midway leaves every file it touched
+///   owned, so the next run simply rewrites whatever differs. A directory
+///   holding hand-written files cannot be replaced atomically as a set, so
+///   the guarantee is per file, not per batch.
+///
+/// Only files recorded in the previous manifest are removed as stale, and
+/// only when they still hold what was generated: an edited file is kept
+/// and reported.
 ///
 /// Refuses a generation that carries any `Error` diagnostic unless
 /// [`WriteOptions::allow_partial`] is set: writing it would replace good
@@ -3651,6 +3657,20 @@ mod tests {
             &dir.0.join("b"),
             &WriteOptions::new("b"),
         );
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+        result.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_own_lock_file_still_locks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("ro-own-lock");
+        let g = generation(&[("a.rs", "a")]);
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        let lock = dir.0.join(LOCK_FILE);
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
+        let result = write(&g, &dir.0, &WriteOptions::new("api"));
         fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
         result.unwrap();
     }

@@ -188,12 +188,36 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
     let out: Vec<_> = out.components().collect();
     let common = file.iter().zip(&out).take_while(|(a, b)| a == b).count();
     let mut parts: Vec<String> = std::iter::repeat_n("..".to_owned(), out.len() - common).collect();
-    parts.extend(
-        file[common..]
-            .iter()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
-    );
+    parts.extend(file[common..].iter().map(|c| lossless(c.as_os_str())));
     Some(parts.join("/"))
+}
+
+/// A path component as text that keeps every byte, so two different
+/// names never record one source: `%` and bytes that are not UTF-8 are
+/// written as `%XX`.
+fn lossless(name: &std::ffi::OsStr) -> String {
+    if let Some(text) = name.to_str() {
+        return text.replace('%', "%25");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut out = String::new();
+        for chunk in name.as_bytes().utf8_chunks() {
+            out.push_str(&chunk.valid().replace('%', "%25"));
+            for byte in chunk.invalid() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        out
+    }
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        name.encode_wide()
+            .map(|unit| format!("%u{unit:04X}"))
+            .collect()
+    }
 }
 
 /// The canonical form of `path`, resolving its deepest existing ancestor
@@ -841,6 +865,17 @@ mod tests {
         moved.replace_source = true;
         run_generate(moved).unwrap();
         run_generate(args(&after, &out)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn source_ids_keep_every_byte() {
+        use std::os::unix::ffi::OsStrExt;
+        let a = std::ffi::OsStr::from_bytes(b"spec\x80");
+        let b = std::ffi::OsStr::from_bytes(b"spec\x81");
+        assert_ne!(lossless(a), lossless(b));
+        assert_eq!(lossless(a), "spec%80");
+        assert_eq!(lossless(std::ffi::OsStr::new("a%80")), "a%2580");
     }
 
     #[test]
