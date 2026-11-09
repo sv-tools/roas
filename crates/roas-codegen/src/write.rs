@@ -56,6 +56,13 @@ pub struct WriteOptions {
     /// suppressed. Even when on, files the previous run wrote are kept
     /// rather than removed as stale.
     pub allow_partial: bool,
+    /// What this label was generated from, recorded in the manifest. When
+    /// set, a later run under the same label from a different source is
+    /// refused, so two descriptions cannot overwrite each other's output.
+    /// The `roas` command line uses the description's path relative to
+    /// the output directory, without its extension, so moving between
+    /// JSON and YAML keeps the label.
+    pub source_id: Option<String>,
 }
 
 impl WriteOptions {
@@ -64,6 +71,7 @@ impl WriteOptions {
             label: label.into(),
             overwrite_unowned: false,
             allow_partial: false,
+            source_id: None,
         }
     }
 }
@@ -170,7 +178,7 @@ struct Manifest {
     version: String,
     label: String,
     language: String,
-    /// The description's file name; two descriptions may not share a label.
+    /// [`WriteOptions::source_id`], when the caller set one.
     #[serde(default)]
     source: String,
     files: BTreeMap<String, String>,
@@ -450,6 +458,15 @@ fn error_count(generation: &Generation) -> usize {
 }
 
 /// The manifest exactly as it is written, so a check can compare bytes.
+/// The source a manifest records: the caller's, or the one already there
+/// when the caller gave none, so a run without an identity does not erase it.
+fn source_of(previous: &Manifest, options: &WriteOptions) -> String {
+    options
+        .source_id
+        .clone()
+        .unwrap_or_else(|| previous.source.clone())
+}
+
 fn manifest_for(
     label: &str,
     target: Target,
@@ -475,16 +492,13 @@ fn manifest_text(manifest: &Manifest) -> String {
 /// Refuse a run whose description differs from the one that owns the
 /// label: two descriptions with the same file name in different folders
 /// would otherwise overwrite each other's output without a word.
-fn check_source(
-    previous: &Manifest,
-    generation: &Generation,
-    label: &str,
-) -> Result<(), WriteError> {
-    if !previous.source.is_empty() && previous.source != generation.source {
+fn check_source(previous: &Manifest, options: &WriteOptions) -> Result<(), WriteError> {
+    let current = options.source_id.as_deref().unwrap_or_default();
+    if !previous.source.is_empty() && !current.is_empty() && previous.source != current {
         return Err(WriteError::SourceMismatch {
-            label: label.to_owned(),
+            label: options.label.clone(),
             previous: previous.source.clone(),
-            current: generation.source.clone(),
+            current: current.to_owned(),
         });
     }
     Ok(())
@@ -561,7 +575,7 @@ pub fn write(
     let _lock = DirLock::acquire(out_dir)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
-    check_source(&previous, generation, &options.label)?;
+    check_source(&previous, options)?;
     let others = other_owners(out_dir, &manifest_file)?;
     let planned = planned(generation)?;
 
@@ -597,7 +611,12 @@ pub fn write(
     // Claim ownership of everything this run may touch before touching it.
     let mut pending = previous.files.clone();
     pending.extend(hashes.clone());
-    let pending = manifest_for(&options.label, target, &generation.source, pending);
+    let pending = manifest_for(
+        &options.label,
+        target,
+        &source_of(&previous, options),
+        pending,
+    );
     fs::create_dir_all(out_dir).map_err(io(out_dir))?;
     if !pending.same_as(&previous) {
         write_atomic(&manifest_path, manifest_text(&pending).as_bytes())?;
@@ -636,7 +655,12 @@ pub fn write(
             }
         }
     }
-    let final_manifest = manifest_for(&options.label, target, &generation.source, owned);
+    let final_manifest = manifest_for(
+        &options.label,
+        target,
+        &source_of(&previous, options),
+        owned,
+    );
     let on_disk = read_manifest(&manifest_path)?;
     if !on_disk.is_some_and(|m| m.same_as(&final_manifest)) {
         write_atomic(&manifest_path, manifest_text(&final_manifest).as_bytes())?;
@@ -663,7 +687,7 @@ pub fn check(
     check_out_dir(out_dir)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
-    check_source(&previous, generation, &options.label)?;
+    check_source(&previous, options)?;
     let planned = planned(generation)?;
     check_path(out_dir, &manifest_file)?;
     for path in planned.keys().chain(previous.files.keys()) {
@@ -691,7 +715,12 @@ pub fn check(
             report.stale.push(PathBuf::from(path));
         }
     }
-    let expected = manifest_for(&options.label, target, &generation.source, owned);
+    let expected = manifest_for(
+        &options.label,
+        target,
+        &source_of(&previous, options),
+        owned,
+    );
     report.manifest_outdated =
         !read_manifest(&manifest_path)?.is_some_and(|m| m.same_as(&expected));
     Ok(report)
@@ -700,7 +729,7 @@ pub fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generate::{Dependencies, GeneratedFile};
+    use crate::generate::GeneratedFile;
 
     struct TempDir(PathBuf);
 
@@ -726,18 +755,15 @@ mod tests {
     }
 
     fn generation(files: &[(&str, &str)]) -> Generation {
-        Generation {
-            source: "test.json".into(),
-            files: files
+        Generation::new(
+            files
                 .iter()
                 .map(|(p, c)| GeneratedFile {
                     path: PathBuf::from(p),
                     contents: (*c).to_owned(),
                 })
                 .collect(),
-            diagnostics: Vec::new(),
-            dependencies: Dependencies::default(),
-        }
+        )
     }
 
     #[test]
@@ -1270,40 +1296,44 @@ mod tests {
     #[test]
     fn a_label_owned_by_another_description_is_refused() {
         let dir = TempDir::new("source");
+        let mut pets = WriteOptions::new("openapi");
+        pets.source_id = Some("../pets/openapi".into());
         write(
             &generation(&[("openapi.rs", "pets")]),
             &dir.0,
             Target::Rust,
-            &WriteOptions::new("openapi"),
+            &pets,
         )
         .unwrap();
-        let mut billing = generation(&[("openapi.rs", "billing")]);
-        billing.source = "other.json".into();
+        let mut billing = WriteOptions::new("openapi");
+        billing.source_id = Some("../billing/openapi".into());
+        let g = generation(&[("openapi.rs", "billing")]);
         for result in [
-            write(
-                &billing,
-                &dir.0,
-                Target::Rust,
-                &WriteOptions::new("openapi"),
-            )
-            .map(|_| ()),
-            check(
-                &billing,
-                &dir.0,
-                Target::Rust,
-                &WriteOptions::new("openapi"),
-            )
-            .map(|_| ()),
+            write(&g, &dir.0, Target::Rust, &billing).map(|_| ()),
+            check(&g, &dir.0, Target::Rust, &billing).map(|_| ()),
         ] {
             let error = result.unwrap_err();
             assert!(
-                matches!(&error, WriteError::SourceMismatch { previous, current, .. } if previous == "test.json" && current == "other.json"),
+                matches!(&error, WriteError::SourceMismatch { previous, current, .. } if previous == "../pets/openapi" && current == "../billing/openapi"),
                 "{error}"
             );
         }
         assert_eq!(
             fs::read_to_string(dir.0.join("openapi.rs")).unwrap(),
             "pets"
+        );
+        // A run without an identity keeps the recorded one.
+        write(
+            &generation(&[("openapi.rs", "pets2")]),
+            &dir.0,
+            Target::Rust,
+            &WriteOptions::new("openapi"),
+        )
+        .unwrap();
+        assert!(
+            fs::read_to_string(dir.0.join(".roas-codegen-openapi-rust.json"))
+                .unwrap()
+                .contains("../pets/openapi")
         );
     }
 

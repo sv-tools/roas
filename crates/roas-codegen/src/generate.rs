@@ -28,16 +28,24 @@ pub struct Dependencies {
 /// The result of a generation: files in memory, everything the
 /// generator had to say, and the dependency list.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Generation {
-    /// The description's file name, as the generated header quotes it.
-    /// The writer records it so two descriptions cannot share a label.
-    pub source: String,
     pub files: Vec<GeneratedFile>,
     pub diagnostics: Vec<Diagnostic>,
     pub dependencies: Dependencies,
 }
 
 impl Generation {
+    /// A generation made of files alone, for callers that produce their
+    /// own and want [`write`](crate::write()) to manage them.
+    pub fn new(files: Vec<GeneratedFile>) -> Self {
+        Generation {
+            files,
+            diagnostics: Vec::new(),
+            dependencies: Dependencies::default(),
+        }
+    }
+
     /// True when any diagnostic is an error, meaning some type was not
     /// emitted.
     pub fn has_errors(&self) -> bool {
@@ -182,7 +190,6 @@ pub fn generate(
             message: format!("`jsonSchemaDialect: {dialect}` is not a dialect this generator understands, so no schema is generated; only the OAS dialect and Draft 2020-12 are"),
         });
         return Ok(Generation {
-            source: source_name(document.uri()),
             files: Vec::new(),
             diagnostics,
             dependencies: Dependencies::default(),
@@ -260,7 +267,6 @@ pub fn generate(
     });
     diagnostics.dedup();
     Ok(Generation {
-        source: source_name(document.uri()),
         files: output.files,
         diagnostics,
         dependencies: Dependencies {

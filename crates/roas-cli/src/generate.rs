@@ -16,7 +16,7 @@ use roas_codegen::{
     write,
 };
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use url::Url;
 
 use crate::versioned::path_looks_like_yaml;
@@ -163,6 +163,28 @@ fn default_label(source: &InputSource) -> String {
     }
 }
 
+/// What a label was generated from: the description's path relative to the
+/// output directory, `/`-separated and without its extension. Two files
+/// called `openapi.yaml` in different folders differ; converting
+/// `petstore.json` to `petstore.yaml` does not. Stdin has no identity.
+fn source_id(source: &InputSource, out: &Path) -> Option<String> {
+    let InputSource::File(path) = source else {
+        return None;
+    };
+    let file = std::path::absolute(path.with_extension("")).ok()?;
+    let out = std::path::absolute(out).ok()?;
+    let file: Vec<_> = file.components().collect();
+    let out: Vec<_> = out.components().collect();
+    let common = file.iter().zip(&out).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = std::iter::repeat_n("..".to_owned(), out.len() - common).collect();
+    parts.extend(
+        file[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    Some(parts.join("/"))
+}
+
 fn show(paths: &[PathBuf]) -> String {
     paths
         .iter()
@@ -245,8 +267,19 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         )
     };
     if failing > 0 && !args.allow_partial {
+        let (what, hint) = if args.check {
+            (
+                "cannot check",
+                "pass --allow-partial to check the partial output",
+            )
+        } else {
+            (
+                "nothing written",
+                "pass --allow-partial to write what was generated",
+            )
+        };
         bail!(
-            "{}: {failing} {}{}; nothing written (pass --allow-partial to write what was generated)",
+            "{}: {failing} {}{}; {what} ({hint})",
             source.display(),
             if args.strict { "diagnostic" } else { "error" },
             if failing == 1 { "" } else { "s" }
@@ -265,6 +298,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
         }
         let mut check_options = WriteOptions::new(label.clone());
         check_options.allow_partial = args.allow_partial;
+        check_options.source_id = source_id(&source, &args.out);
         let report = check(&generation, &args.out, target, &check_options)?;
         if report.is_clean() {
             eprintln!("{}: up to date", args.out.display());
@@ -295,6 +329,7 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
     let mut write_options = WriteOptions::new(label);
     write_options.overwrite_unowned = args.force;
     write_options.allow_partial = args.allow_partial;
+    write_options.source_id = source_id(&source, &args.out);
     let report = write(&generation, &args.out, target, &write_options)?;
     for path in &report.kept_edited {
         eprintln!(
@@ -333,7 +368,6 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     struct TempDir(PathBuf);
 
@@ -597,6 +631,57 @@ mod tests {
                 .unwrap()
                 .contains("pub struct Pet {")
         );
+    }
+
+    #[test]
+    fn same_file_name_in_another_folder_is_refused_and_renames_are_not() {
+        let dir = TempDir::new("siblings");
+        std::fs::create_dir_all(dir.0.join("pets")).unwrap();
+        std::fs::create_dir_all(dir.0.join("billing")).unwrap();
+        let pets = dir.0.join("pets/openapi.json");
+        let billing = dir.0.join("billing/openapi.json");
+        std::fs::write(&pets, PET).unwrap();
+        std::fs::write(&billing, PET.replace("Pet", "Invoice")).unwrap();
+        let out = dir.0.join("out");
+        run_generate(args(&pets, &out)).unwrap();
+        let error = format!("{:#}", run_generate(args(&billing, &out)).unwrap_err());
+        assert!(error.contains("its own label"), "{error}");
+        assert!(
+            std::fs::read_to_string(out.join("openapi.rs"))
+                .unwrap()
+                .contains("pub struct Pet {")
+        );
+        // The same description moved from JSON to YAML keeps its label.
+        let yaml = dir.0.join("pets/openapi.yaml");
+        std::fs::write(&yaml, "openapi: 3.2.0\ninfo: {title: t, version: '1'}\npaths: {}\ncomponents:\n  schemas:\n    Pet: {type: object, required: [name], properties: {name: {type: string}}}\n").unwrap();
+        std::fs::remove_file(&pets).unwrap();
+        run_generate(args(&yaml, &out)).unwrap();
+    }
+
+    #[test]
+    fn check_mode_errors_say_cannot_check() {
+        let dir = TempDir::new("check-errors");
+        let spec = dir.0.join("api.json");
+        std::fs::write(
+            &spec,
+            r##"{"openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+                "components": {"schemas": {"Bad": {"not": {"type": "string"}}}}}"##,
+        )
+        .unwrap();
+        let mut check = args(&spec, &dir.0.join("out"));
+        check.check = true;
+        let error = run_generate(check).unwrap_err().to_string();
+        assert!(error.contains("cannot check"), "{error}");
+    }
+
+    #[test]
+    fn source_ids_are_relative_to_the_output_directory() {
+        let id = source_id(
+            &InputSource::File("/repo/specs/pets/openapi.yaml".into()),
+            Path::new("/repo/src/api"),
+        );
+        assert_eq!(id.as_deref(), Some("../../specs/pets/openapi"));
+        assert_eq!(source_id(&InputSource::Stdin, Path::new("/x")), None);
     }
 
     #[test]
