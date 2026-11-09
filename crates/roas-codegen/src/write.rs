@@ -1684,8 +1684,12 @@ pub fn write(
     // looking for the other's, so at least one sees it.
     let mut enclosing = Vec::new();
     for (dir, create) in other_roots(out_dir, std::iter::empty()) {
-        created.shared.extend(DirLock::share(&dir, create)?);
-        enclosing.push(dir);
+        // Only one actually locked is done: one whose lock file vanished
+        // or could not be made is looked at again below.
+        if let Some(lock) = DirLock::share(&dir, create)? {
+            created.shared.push(lock);
+            enclosing.push(dir);
+        }
     }
     created.dir_all(out_dir)?;
     check_out_dir(out_dir)?;

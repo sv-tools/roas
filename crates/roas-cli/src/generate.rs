@@ -116,8 +116,13 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
             // As stored on disk, so the generated header names the file the
             // same way however its path was typed (case on macOS/Windows),
             // just as the recorded source does.
-            let absolute = std::fs::canonicalize(path)
-                .with_context(|| format!("resolving {}", path.display()))?;
+            // A pipe (`<(...)`, `/dev/stdin`) has no stored name to resolve.
+            let absolute = if is_regular_file(path) {
+                std::fs::canonicalize(path)
+            } else {
+                std::path::absolute(path)
+            }
+            .with_context(|| format!("resolving {}", path.display()))?;
             let uri = Url::from_file_path(&absolute).map_err(|()| {
                 anyhow!("{} cannot be expressed as a file URL", absolute.display())
             })?;
@@ -145,6 +150,11 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
         Input::Json(bytes)
     };
     Ok((input, uri))
+}
+
+/// Whether `path` names a regular file, as opposed to a pipe or device.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file())
 }
 
 /// `path` without a description's format extension (`.json`, `.yaml`,
@@ -194,11 +204,15 @@ fn default_label(source: &InputSource) -> String {
 /// output directory, `/`-separated and without a `.json`/`.yaml`/`.yml`
 /// extension. Two files
 /// called `openapi.yaml` in different folders differ; converting
-/// `petstore.json` to `petstore.yaml` does not. Stdin has no identity.
+/// `petstore.json` to `petstore.yaml` does not. Stdin and pipes have no identity.
 fn source_id(source: &InputSource, out: &Path) -> Option<String> {
     let InputSource::File(path) = source else {
         return None;
     };
+    // A pipe has no lasting identity: like stdin, it records none.
+    if !is_regular_file(path) {
+        return None;
+    }
     // Resolve symlinks so one file has one identity however its path is
     // spelled (`$PWD`, macOS `/tmp` → `/private/tmp`). The output directory
     // may not exist yet, so its deepest existing ancestor is resolved.
@@ -1008,5 +1022,13 @@ mod tests {
         std::fs::write(&other, PET.replace("Pet", "Invoice")).unwrap();
         let error = format!("{:#}", run_generate(args(&other, &out)).unwrap_err());
         assert!(error.contains("--replace-source"), "{error}");
+    }
+
+    #[test]
+    fn a_pipe_records_no_source() {
+        assert_eq!(
+            source_id(&InputSource::File("/dev/null".into()), Path::new("out")),
+            None
+        );
     }
 }
