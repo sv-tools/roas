@@ -108,6 +108,10 @@ pub enum GenerateError {
     InvalidOutput { path: String, reason: String },
     #[error("not supported yet: {0}")]
     Unsupported(String),
+    /// Nothing in the description can be generated at all, such as under
+    /// an unknown dialect; the diagnostics say why.
+    #[error("nothing can be generated: {}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
+    NothingToGenerate(Vec<Diagnostic>),
     /// A tool the target needs is missing or failed: generating Go needs
     /// `gofmt`, which is also its syntax check.
     #[error("toolchain: {0}")]
@@ -443,7 +447,9 @@ pub fn template_context(
     config: &Config,
 ) -> Result<serde_json::Value, GenerateError> {
     let prepared = prepare(document, config)?;
-    let ir = prepared.ir.unwrap_or_default();
+    let Some(ir) = prepared.ir else {
+        return Err(GenerateError::NothingToGenerate(prepared.diagnostics));
+    };
     match config.target {
         Target::Rust => rust::context(&ir, config, &prepared.source),
         Target::Go => go::context(&ir, config, &prepared.source),
@@ -458,7 +464,9 @@ pub fn render(
     config: &Config,
 ) -> Result<Vec<GeneratedFile>, GenerateError> {
     let prepared = prepare(document, config)?;
-    let ir = prepared.ir.unwrap_or_default();
+    let Some(ir) = prepared.ir else {
+        return Err(GenerateError::NothingToGenerate(prepared.diagnostics));
+    };
     match config.target {
         Target::Rust => rust::render(&ir, config, &prepared.source),
         Target::Go => go::render(&ir, config, &prepared.source),

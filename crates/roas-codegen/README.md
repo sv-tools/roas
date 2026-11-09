@@ -164,7 +164,7 @@ A mismatch is an error, not a mystery. An override usually extends the default o
 {% endblock %}
 ```
 
-The defaults include one another by plain name, so an override of an included template (`rust/field.rs.jinja`) applies wherever it is used, and an override can include new partials from the same directory. A template that extends another may only fill blocks the templates it extends declare — minijinja would ignore any other block without a word, so a typo or a renamed block is an error instead.
+The defaults include one another by plain name, so an override of an included template (`rust/field.rs.jinja`) applies wherever it is used, and an override can include new partials from the same directory. A template that extends another may only fill blocks the templates it extends declare — minijinja would ignore any other block without a word, so a typo or a renamed block is an error instead. For that check, `extends` names its template as one string literal; a block nested inside a filled block is a new declaration a further override can fill.
 
 | Template | Blocks |
 | --- | --- |

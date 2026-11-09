@@ -457,6 +457,29 @@ fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
     }
 }
 
+/// A path as the filesystem resolves it: its longest existing ancestor
+/// canonical (symbolic links followed), the rest appended.
+fn resolved(path: &Path) -> Result<PathBuf> {
+    let absolute =
+        std::path::absolute(path).with_context(|| format!("resolving {}", path.display()))?;
+    let mut existing = absolute.as_path();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            let mut out = canonical;
+            out.extend(rest.iter().rev());
+            return Ok(out);
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return Ok(absolute),
+        }
+    }
+}
+
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // As the library reads it, so the recorded source is computed too.
     if args.out.as_os_str().is_empty() {
@@ -535,6 +558,16 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         return Ok(());
     }
     if let Some(dir) = &args.dump_rendered {
+        // The dump is raw text with no ownership rules: it must not land
+        // where generated files and their manifests live.
+        let (dump, out) = (resolved(dir)?, resolved(&args.out)?);
+        if dump.starts_with(&out) || out.starts_with(&dump) {
+            bail!(
+                "--dump-rendered {} overlaps the output directory {}; dump somewhere else",
+                dir.display(),
+                args.out.display()
+            );
+        }
         for file in roas_codegen::render(&document, &config)? {
             let path = dir.join(&file.path);
             if let Some(parent) = path.parent() {
@@ -1000,6 +1033,20 @@ mod tests {
         assert!(code.ends_with("// custom footer\n"), "{code}");
         let raw = std::fs::read_to_string(dir.0.join("rendered/api.rs")).unwrap();
         assert!(raw.contains("// custom footer"), "{raw}");
+        // A dump into the output directory, or around it, is refused before
+        // anything is written there.
+        std::fs::write(out.join("api.rs"), "hand written").unwrap();
+        for dump in [out.clone(), out.join("raw"), dir.0.clone()] {
+            let mut overlapping = args(&spec, &out);
+            overlapping.check = true;
+            overlapping.dump_rendered = Some(dump);
+            let error = run_generate(overlapping).unwrap_err().to_string();
+            assert!(error.contains("overlaps the output directory"), "{error}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(out.join("api.rs")).unwrap(),
+            "hand written"
+        );
     }
 
     #[test]

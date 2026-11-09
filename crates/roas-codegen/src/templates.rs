@@ -128,59 +128,150 @@ fn walk(dir: &Path, prefix: &str, out: &mut BTreeMap<String, String>) -> Result<
     Ok(())
 }
 
-/// The names a template declares with `{% block NAME %}`, in order.
-fn blocks(source: &str) -> Vec<String> {
-    tags(source, "block")
-}
-
-/// The template a template extends, when it names one literally.
-fn extends(source: &str) -> Option<String> {
-    let at = tag_at(source, "extends")?;
-    let rest = source[at..].trim_start();
-    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-    let end = rest[1..].find(quote)?;
-    Some(rest[1..=end].to_owned())
-}
-
-/// The first word after each `{% <keyword>` tag.
-fn tags(source: &str, keyword: &str) -> Vec<String> {
+/// The statement tags of a template, `{% ... %}`, as their inner text,
+/// read the way minijinja's default syntax reads them: comments
+/// (`{# ... #}`) and `{% raw %}` sections are skipped, and a `%}` inside a
+/// quoted string does not end a tag.
+fn statements(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = source;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        if let Some(comment) = after.strip_prefix('#') {
+            rest = match comment.find("#}") {
+                Some(end) => &comment[end + 2..],
+                None => "",
+            };
+            continue;
+        }
+        let (close, inner_start) = match after.chars().next() {
+            Some('%') => ("%}", &after[1..]),
+            Some('{') => ("}}", &after[1..]),
+            _ => {
+                rest = after;
+                continue;
+            }
+        };
+        let (inner, remainder) = until_close(inner_start, close);
+        rest = remainder;
+        if close != "%}" {
+            continue;
+        }
+        let tag = inner.trim_matches(['-', '+', '~']).trim();
+        if tag == "raw" {
+            // Everything up to the matching `endraw` is text.
+            rest = skip_raw(rest);
+            continue;
+        }
+        out.push(tag.to_owned());
+    }
+    out
+}
+
+/// The text of a tag up to `close`, honouring quoted strings, and what
+/// follows it.
+fn until_close<'s>(text: &'s str, close: &str) -> (&'s str, &'s str) {
+    let mut quote = None;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        match quote {
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if text[i..].starts_with(close) => {
+                return (&text[..i], &text[i + close.len()..]);
+            }
+            None => {}
+        }
+    }
+    (text, "")
+}
+
+fn skip_raw(text: &str) -> &str {
+    let mut rest = text;
     while let Some(open) = rest.find("{%") {
-        rest = &rest[open + 2..];
-        let body = rest.trim_start_matches(['-', '+']).trim_start();
-        if let Some(after) = body.strip_prefix(keyword)
-            && after.starts_with(char::is_whitespace)
-        {
-            let name: String = after
-                .trim_start()
+        let (inner, remainder) = until_close(&rest[open + 2..], "%}");
+        if inner.trim_matches(['-', '+', '~']).trim() == "endraw" {
+            return remainder;
+        }
+        rest = remainder;
+    }
+    ""
+}
+
+/// The word after `keyword` in a statement, if the statement is one.
+fn argument<'s>(statement: &'s str, keyword: &str) -> Option<&'s str> {
+    statement
+        .strip_prefix(keyword)
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map(str::trim)
+}
+
+/// The names a template declares with `{% block NAME %}`, in order.
+fn blocks(source: &str) -> Vec<String> {
+    statements(source)
+        .iter()
+        .filter_map(|s| argument(s, "block"))
+        .filter_map(|rest| {
+            let name: String = rest
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
                 .collect();
-            if !name.is_empty() {
-                out.push(name);
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+/// The blocks a template fills at its top level: a block nested inside
+/// another is a new declaration a descendant may fill, not a fill.
+fn top_level_blocks(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    for statement in statements(source) {
+        if let Some(rest) = argument(&statement, "block") {
+            if depth == 0 {
+                out.push(
+                    rest.chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect(),
+                );
             }
+            depth += 1;
+        } else if statement == "endblock" || argument(&statement, "endblock").is_some() {
+            depth = depth.saturating_sub(1);
         }
     }
     out
 }
 
-/// Where the argument of the first `{% <keyword>` tag starts.
-fn tag_at(source: &str, keyword: &str) -> Option<usize> {
-    let mut offset = 0;
-    while let Some(open) = source[offset..].find("{%") {
-        let start = offset + open + 2;
-        let body = &source[start..];
-        let trimmed = body.trim_start_matches(['-', '+']).trim_start();
-        let skipped = body.len() - trimmed.len();
-        if let Some(after) = trimmed.strip_prefix(keyword)
-            && after.starts_with(char::is_whitespace)
-        {
-            return Some(start + skipped + keyword.len());
-        }
-        offset = start;
-    }
-    None
+/// The template a template extends. It must be named by one string
+/// literal, or its blocks could not be checked against it.
+fn extends(source: &str) -> Result<Option<String>, String> {
+    let statements = statements(source);
+    let Some(rest) = statements.iter().find_map(|s| argument(s, "extends")) else {
+        return Ok(None);
+    };
+    let literal = rest
+        .chars()
+        .next()
+        .filter(|c| *c == '"' || *c == '\'')
+        .and_then(|quote| {
+            let end = rest[1..].find(quote)?;
+            rest[end + 2..]
+                .trim()
+                .is_empty()
+                .then(|| rest[1..=end].to_owned())
+        });
+    literal.map(Some).ok_or_else(|| {
+        format!("`extends {rest}` must name its template as one string literal, so its blocks can be checked")
+    })
 }
 
 /// A template that extends another may only fill blocks its ancestors
@@ -197,7 +288,7 @@ fn check_blocks(
         }
     };
     for (name, source) in user {
-        let Some(mut parent) = extends(source) else {
+        let Some(mut parent) = extends(source).map_err(|e| error(format!("{name}: {e}")))? else {
             continue;
         };
         let mut declared = BTreeSet::new();
@@ -214,12 +305,12 @@ fn check_blocks(
                 )));
             };
             declared.extend(blocks(parent_source));
-            match extends(parent_source) {
+            match extends(parent_source).map_err(|e| error(format!("{parent}: {e}")))? {
                 Some(next) => parent = next,
                 None => break,
             }
         }
-        for block in blocks(source) {
+        for block in top_level_blocks(source) {
             if !declared.contains(&block) {
                 return Err(error(format!(
                     "{name} fills block `{block}`, which no template it extends declares, so it would never apply; it declares {}",
@@ -296,9 +387,11 @@ pub(crate) fn render(
     let rendered = template
         .render(Value::from_serialize(context))
         .map_err(|e| error(format!("{e:#}")))?;
-    // An override that writes the marker itself gets it once.
+    // An override that writes the marker line itself gets it once; a line
+    // that only starts with the same text is someone else's.
     let body = rendered
         .strip_prefix(MARKER)
+        .filter(|rest| rest.is_empty() || rest.starts_with(['\n', '\r']))
         .map(|rest| rest.trim_start_matches(['\n', '\r']))
         .unwrap_or(&rendered);
     Ok(format!("{MARKER}\n{separator}{body}"))
@@ -312,11 +405,23 @@ mod tests {
     fn block_and_extends_tags_are_read() {
         let source = "{%- extends 'builtin/rust/struct.rs.jinja' %}{% block derives -%}x{% endblock %}{%+ block attrs %}{% endblock attrs %}";
         assert_eq!(
-            extends(source).as_deref(),
+            extends(source).unwrap().as_deref(),
             Some("builtin/rust/struct.rs.jinja")
         );
         assert_eq!(blocks(source), ["derives", "attrs"]);
-        assert_eq!(extends("{% include \"x\" %}"), None);
+        assert_eq!(extends("{% include \"x\" %}"), Ok(None));
+        assert!(extends("{% extends p %}").is_err());
+        assert!(extends("{% extends \"a\" if c else \"b\" %}").is_err());
+        assert_eq!(
+            top_level_blocks(
+                "{% block a %}{% block b %}{% endblock %}{% endblock a %}{% block c %}{% endblock %}"
+            ),
+            ["a", "c"]
+        );
+        // Comments, raw sections and quoted `%}` are not tags.
+        let source = "{# {% extends 'a' %}{% block old %} #}{% extends \"b\" %}{% raw %}{% block raw %}{% endraw %}{{ '%}' }}{% block kept %}{% endblock %}{% set x = '%}{% block fake %}' %}";
+        assert_eq!(extends(source).unwrap().as_deref(), Some("b"));
+        assert_eq!(blocks(source), ["kept"]);
     }
 
     #[test]
@@ -325,7 +430,7 @@ mod tests {
         for (path, source) in embedded().unwrap() {
             env.get_template(&path).unwrap();
             env.get_template(&format!("builtin/{path}")).unwrap();
-            assert!(extends(&source).is_none(), "{path} extends nothing");
+            assert_eq!(extends(&source), Ok(None), "{path} extends nothing");
         }
     }
 }
