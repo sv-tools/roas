@@ -34,7 +34,9 @@
 //! A value's range is its own text: an aliased value is its anchor's
 //! text, a flow collection runs to its closing delimiter, and a block
 //! collection to its last key or value. A `<<` merge key is not seen as
-//! a member, so a block map ending in one ends before it.
+//! a member, so a block map ending in one ends before it. An anchor
+//! defined inside a merged member that the map's own key overrides is
+//! never seen as written, so an alias of it is measured on its own.
 
 #[cfg(feature = "source-map")]
 mod parse;

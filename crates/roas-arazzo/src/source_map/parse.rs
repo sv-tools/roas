@@ -108,10 +108,12 @@ fn alias_end(text: &str, spanned: &Spanned<Raw>) -> Option<usize> {
     }
     let used = spanned.referenced.span();
     let start = used.byte_offset()? as usize;
-    text.get(start..)?
-        .starts_with('*')
-        .then(|| start + used.byte_len().map_or(0, |len| len as usize))
+    let len = used.byte_len().filter(|&len| len > 0)? as usize;
+    text.get(start..)?.starts_with('*').then(|| start + len)
 }
+
+/// A map member as serde-saphyr reports it.
+type Member = (Spanned<Raw>, Spanned<Raw>);
 
 /// What the definition pass measured, for replays to reuse.
 #[derive(Default)]
@@ -149,73 +151,93 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
     let inner = replayed || alias;
     let mut first = None;
     let kind = match spanned.value {
-        Raw::Map(members) => Kind::Map(
-            members
+        Raw::Map(members) => Kind::Map({
+            // serde-saphyr lists a map's own members before merged ones;
+            // measure them in the order they are written, so a definition
+            // is seen before any replay of it, then keep serde's order.
+            let mut order: Vec<(usize, usize, Member)> = members
                 .into_iter()
-                .map(|(key, value)| {
-                    let (key_start, key_end) = span(text, &key);
-                    // A member merged in by `<<: *a` is referenced at the
-                    // `*a`, key and value alike: like a replay, it is
-                    // where its definition is.
-                    let merged =
-                        alias_end(text, &key).is_some() && key.referenced == value.referenced;
-                    let again = inner || merged;
-                    // An alias key (`*k :`) is named at its anchor but
-                    // written here: what follows it is measured from here.
-                    let key_used = alias_end(text, &key)
-                        .filter(|_| !again)
-                        .unwrap_or(key_end)
-                        .min(text.len());
-                    let name = match key.value {
-                        Raw::String(name) => name,
-                        // `1: x` reads as the member `"1"`.
-                        _ => text[key_start..key_end].to_owned(),
-                    };
-                    let (mut value, mut value_end) = node(text, value, inner, memo);
-                    // `? key` with no value: its empty value is given the
-                    // next token's place, on a later line. It belongs
-                    // right after the key (or its `:`) — where the
-                    // definition put it, for a replayed or merged member.
-                    let reported = value.start;
-                    let empty =
-                        value.start == value.end && matches!(value.kind, Kind::Scalar(None));
-                    // A merge's members come after the map's own, so a replay
-                    // may come before its definition: then it is measured
-                    // as the definition would be, from the key's anchor.
-                    let known = again.then(|| memo.placed.get(&reported).copied()).flatten();
-                    let place = if !empty {
-                        None
-                    } else if known.is_some() {
-                        known
+                .enumerate()
+                .map(|(index, (key, value))| {
+                    let written = if alias_end(text, &key).is_some() {
+                        key.referenced.span().byte_offset().unwrap_or(0) as usize
                     } else {
-                        let gap = text.get(key_used..value.start);
-                        // An alias to an empty value sits back at its anchor.
-                        let at = if gap.is_some_and(|gap| gap.contains(['\n', '\r'])) {
-                            colon(text, key_used)
-                        } else {
-                            value.start
-                        };
-                        // Moved or not, replays reuse it.
-                        if !again {
-                            memo.placed.insert(reported, at);
-                        }
-                        Some(at)
+                        span(text, &key).0
                     };
-                    if let Some(at) = place.filter(|&at| at != value.start) {
-                        (value.start, value.end, value.text_end, value_end) = (at, at, at, at);
-                    }
-                    end = end.max(key_used).max(value_end);
-                    (
-                        Key {
-                            name,
-                            start: key_start,
-                            end: key_end,
-                        },
-                        value,
-                    )
+                    (written, index, (key, value))
                 })
-                .collect(),
-        ),
+                .collect();
+            order.sort_by_key(|&(written, index, _)| (written, index));
+            let mut out: Vec<(usize, (Key, Node))> = order
+                .into_iter()
+                .map(|(_, index, (key, value))| {
+                    (index, {
+                        let (key_start, key_end) = span(text, &key);
+                        // A member merged in by `<<: *a` is referenced at the
+                        // `*a`, key and value alike: like a replay, it is
+                        // where its definition is.
+                        let merged =
+                            alias_end(text, &key).is_some() && key.referenced == value.referenced;
+                        let again = inner || merged;
+                        // An alias key (`*k :`) is named at its anchor but
+                        // written here: what follows it is measured from here.
+                        let key_used = alias_end(text, &key)
+                            .filter(|_| !again)
+                            .unwrap_or(key_end)
+                            .min(text.len());
+                        let name = match key.value {
+                            Raw::String(name) => name,
+                            // `1: x` reads as the member `"1"`.
+                            _ => text[key_start..key_end].to_owned(),
+                        };
+                        let (mut value, mut value_end) = node(text, value, inner, memo);
+                        // `? key` with no value: its empty value is given the
+                        // next token's place, on a later line. It belongs
+                        // right after the key (or its `:`) — where the
+                        // definition put it, for a replayed or merged member.
+                        let reported = value.start;
+                        let empty =
+                            value.start == value.end && matches!(value.kind, Kind::Scalar(None));
+                        // A merge's members come after the map's own, so a replay
+                        // may come before its definition: then it is measured
+                        // as the definition would be, from the key's anchor.
+                        let known = again.then(|| memo.placed.get(&reported).copied()).flatten();
+                        let place = if !empty {
+                            None
+                        } else if known.is_some() {
+                            known
+                        } else {
+                            let gap = text.get(key_used..value.start);
+                            // An alias to an empty value sits back at its anchor.
+                            let at = if gap.is_some_and(|gap| gap.contains(['\n', '\r'])) {
+                                colon(text, key_used)
+                            } else {
+                                value.start
+                            };
+                            // Moved or not, replays reuse it.
+                            if !again {
+                                memo.placed.insert(reported, at);
+                            }
+                            Some(at)
+                        };
+                        if let Some(at) = place.filter(|&at| at != value.start) {
+                            (value.start, value.end, value.text_end, value_end) = (at, at, at, at);
+                        }
+                        end = end.max(key_used).max(value_end);
+                        (
+                            Key {
+                                name,
+                                start: key_start,
+                                end: key_end,
+                            },
+                            value,
+                        )
+                    })
+                })
+                .collect();
+            out.sort_by_key(|&(index, _)| index);
+            out.into_iter().map(|(_, member)| member).collect()
+        }),
         Raw::Seq(items) => Kind::Seq(
             items
                 .into_iter()
@@ -1119,6 +1141,43 @@ workflows:
         let text = "k: {a: ?'x, <<: {m: 1}}\n";
         let map = SourceMap::parse(text).unwrap();
         assert_eq!(map.locate("#.k").unwrap().end.offset, 23);
+    }
+
+    #[test]
+    fn replays_and_inline_merges_agree_with_their_definitions() {
+        // An inline merge whose first member is an alias key.
+        let text = "a: &k name\n<<:\n  *k : 1\n  b: [c: *k]\n";
+        let map = SourceMap::parse(text).unwrap();
+        let item = map.locate("#.b[0]").unwrap();
+        assert_eq!((item.start.offset, item.end.offset), (30, 35));
+        assert_eq!(map.locate("#").unwrap().end.offset, 36);
+        let text = "a: &k name\n<<:\n  *k :\n    x: 1\n    *k :\n";
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(map.locate("#.name.name").unwrap().start.line, 5);
+        // A replay listed before the merged definition it replays.
+        for (text, defined, again) in [
+            (
+                "x: &v 1\nk1:\n  <<: &a1\n    m:\n      j: *v\n  k8: *a1\n",
+                "#.k1.m",
+                "#.k1.k8.m",
+            ),
+            (
+                "x: &a2 1\nk1: {<<: &a1 {k4: [k6: *a2]}, k8: *a1}\n",
+                "#.k1.k4[0]",
+                "#.k1.k8.k4[0]",
+            ),
+            (
+                "a: &k name\nm:\n  <<: &b\n    ? *k\n    z: 1\n  c: *b\n",
+                "#.m.name",
+                "#.m.c.name",
+            ),
+        ] {
+            let map = SourceMap::parse(text).unwrap();
+            assert_eq!(map.locate(defined), map.locate(again), "{text:?}");
+        }
+        let text = "x: &v 1\nk1:\n  <<: &a1\n    m:\n      j: *v\n  k8: *a1\n";
+        let m = SourceMap::parse(text).unwrap().locate("#.k1.m").unwrap();
+        assert_eq!((m.start.offset, m.end.offset), (35, 40));
     }
 
     /// An inline merge's members are written where they are: they are
