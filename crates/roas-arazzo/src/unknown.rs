@@ -39,7 +39,9 @@ pub struct UnknownMembers {
     /// description keeps it here when it is upconverted to v1.1. Empty when
     /// the value has no string `arazzo` member.
     pub version: String,
-    /// The unknown members, in document order.
+    /// The unknown members, depth first, members of an object in the
+    /// order its `serde_json` map iterates: sorted by name, or as written
+    /// with `serde_json`'s `preserve_order` feature.
     pub members: Vec<UnknownMember>,
 }
 
@@ -66,7 +68,7 @@ pub fn message(name: &str, version: &str, extensions_allowed: bool) -> String {
 /// into, serialized again — does not have.
 pub(crate) fn diff(raw: &Value, known: &Value) -> UnknownMembers {
     let mut members = Vec::new();
-    // Depth first, in document order: children are pushed in reverse.
+    // Depth first, in map order: children are pushed in reverse.
     let mut pending = vec![("#".to_owned(), raw, known)];
     while let Some((path, raw, known)) = pending.pop() {
         match (raw, known) {
@@ -134,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn members_the_model_dropped_are_listed_in_document_order() {
+    fn members_the_model_dropped_are_listed_depth_first() {
         let raw = json!({
             "arazzo": "1.0.1",
             "a": { "kept": 1, "lost": 2, "x-ext": 3 },

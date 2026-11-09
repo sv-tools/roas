@@ -246,17 +246,20 @@ fn located(map: Option<&SourceMap>, error: &ValidationError) -> String {
 }
 
 /// A warning for each member the model dropped, located in the text when
-/// the map has it.
+/// the map has it, and then in the order of the text.
 fn unknown_warnings(map: Option<&SourceMap>, unknown: &UnknownMembers) -> Vec<String> {
-    unknown
+    let mut warnings: Vec<_> = unknown
         .members
         .iter()
         .map(|member| {
-            let at = map
+            let start = map
                 .and_then(|map| map.locate_key(&member.path))
-                .map(|range| format!(" at {}", range.start))
+                .map(|range| range.start);
+            let at = start
+                .as_ref()
+                .map(|start| format!(" at {start}"))
                 .unwrap_or_default();
-            format!(
+            let warning = format!(
                 "warning: {}{at}: {}",
                 member.path,
                 roas_arazzo::unknown::message(
@@ -264,9 +267,13 @@ fn unknown_warnings(map: Option<&SourceMap>, unknown: &UnknownMembers) -> Vec<St
                     &unknown.version,
                     member.extensions_allowed
                 )
-            )
+            );
+            // Unlocated members after the located ones, as listed.
+            (start.map_or(usize::MAX, |start| start.offset), warning)
         })
-        .collect()
+        .collect();
+    warnings.sort_by_key(|(offset, _)| *offset);
+    warnings.into_iter().map(|(_, warning)| warning).collect()
 }
 
 #[derive(Subcommand)]
@@ -1661,32 +1668,45 @@ workflows:
 
     #[test]
     fn unknown_members_are_located_warnings() {
-        let text = LOCATED
-            .replace("title: \"\"", "title: T\n  summery: S")
-            .replace(
-                "        successCriteria:",
-                "        timeoutMs: 5\n        successCriteria:",
-            );
+        // `aRetry` sorts before `timeoutMs` but is written after it.
+        let text = format!(
+            "{}        aRetry: 1\n",
+            LOCATED
+                .replace("title: \"\"", "title: T\n  summery: S")
+                .replace(
+                    "        successCriteria:",
+                    "        timeoutMs: 5\n        successCriteria:",
+                )
+        );
         let file = TempFile::text("unknown.yaml", &text);
         let read = read_arazzo_as(&InputSource::File(file.0.clone()), None, true).unwrap();
         let unknown = read
             .detected
             .unknown_members(read.value.as_ref().unwrap())
             .unwrap();
+        let hint = "is not a field of Arazzo 1.1.0; an extension's name starts with `x-`";
         assert_eq!(
             unknown_warnings(read.source_map().as_ref(), &unknown),
             [
-                "warning: #.info.summery at line 4, column 3: `summery` is not a field of \
-                 Arazzo 1.1.0; an extension's name starts with `x-`",
-                "warning: #.workflows[0].steps[0].timeoutMs at line 19, column 9: `timeoutMs` \
-                 is not a field of Arazzo 1.1.0; an extension's name starts with `x-`",
+                format!("warning: #.info.summery at line 4, column 3: `summery` {hint}"),
+                format!(
+                    "warning: #.workflows[0].steps[0].timeoutMs at line 19, column 9: \
+                     `timeoutMs` {hint}"
+                ),
+                format!(
+                    "warning: #.workflows[0].steps[0].aRetry at line 22, column 9: `aRetry` {hint}"
+                ),
             ]
         );
-        // Without a map, the path alone.
+        // Without a map, the path alone, as listed.
+        let unlocated = unknown_warnings(None, &unknown);
         assert!(
-            unknown_warnings(None, &unknown)[0].starts_with("warning: #.info.summery: "),
-            "{:?}",
-            unknown_warnings(None, &unknown)
+            unlocated[0].starts_with("warning: #.info.summery: "),
+            "{unlocated:?}"
+        );
+        assert!(
+            unlocated[1].starts_with("warning: #.workflows[0].steps[0].aRetry: "),
+            "{unlocated:?}"
         );
     }
 
