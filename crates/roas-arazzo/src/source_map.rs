@@ -132,7 +132,8 @@ impl fmt::Debug for SourceMap {
 #[derive(Debug, PartialEq)]
 enum Token<'p> {
     Key(&'p str),
-    Index(usize),
+    /// The digits as written: `[00]` is not `[0]` to a member name.
+    Index(&'p str),
 }
 
 impl SourceMap {
@@ -219,11 +220,14 @@ impl SourceMap {
 /// `#.a.b[0][1].c` → `a`, `b`, `0`, `1`, `c`. A leading `#` is optional;
 /// `None` when a bracket is not a closed run of digits.
 fn tokens(path: &str) -> Option<Vec<Token<'_>>> {
-    let path = path.strip_prefix('#').unwrap_or(path);
-    let path = path.strip_prefix('.').unwrap_or(path);
+    let mut path = path.strip_prefix('#').unwrap_or(path);
     let mut tokens = Vec::new();
-    if path.is_empty() {
-        return Some(tokens);
+    match path.strip_prefix('.') {
+        // `#.` is the member named `""`, not the document.
+        Some("") => return Some(vec![Token::Key("")]),
+        Some(rest) => path = rest,
+        None if path.is_empty() => return Some(tokens),
+        None => {}
     }
     for segment in path.split('.') {
         let (name, mut rest) = segment.split_at(segment.find('[').unwrap_or(segment.len()));
@@ -237,7 +241,7 @@ fn tokens(path: &str) -> Option<Vec<Token<'_>>> {
             if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
-            tokens.push(Token::Index(index.parse().ok()?));
+            tokens.push(Token::Index(index));
             rest = after;
         }
         if !rest.is_empty() {
@@ -271,7 +275,11 @@ fn walk<'n>(
             found.push((node, key));
         }
         (Some(Token::Index(index)), Kind::Seq(items)) => {
-            if let Some(item) = items.get(*index) {
+            if let Some(item) = index
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| items.get(index))
+            {
                 walk(item, &tokens[1..], None, found);
             }
         }
@@ -285,8 +293,9 @@ fn walk<'n>(
                             name.push_str(part);
                         }
                         Token::Index(index) => {
-                            use std::fmt::Write;
-                            let _ = write!(name, "[{index}]");
+                            name.push('[');
+                            name.push_str(index);
+                            name.push(']');
                         }
                     }
                 }
@@ -350,14 +359,15 @@ mod tests {
     fn paths_tokenize_into_names_and_indices() {
         assert_eq!(tokens("#"), Some(vec![]));
         assert_eq!(tokens(""), Some(vec![]));
+        assert_eq!(tokens("#."), Some(vec![Token::Key("")]));
         assert_eq!(
             tokens("#.workflows[0].steps[12][3].type.version"),
             Some(vec![
                 Token::Key("workflows"),
-                Token::Index(0),
+                Token::Index("0"),
                 Token::Key("steps"),
-                Token::Index(12),
-                Token::Index(3),
+                Token::Index("12"),
+                Token::Index("3"),
                 Token::Key("type"),
                 Token::Key("version"),
             ])
@@ -465,6 +475,8 @@ mod tests {
         let map = SourceMap::new(text.into(), literal);
         assert_eq!(map.locate("#.items[0]").unwrap().start.offset, 21);
         assert_eq!(map.locate_key("#.items[0]").unwrap().end.offset, 19);
+        // Leading zeros are part of a member name, not an index.
+        assert_eq!(map.locate("#.items[00]"), None);
         assert_eq!(format!("{map:?}"), "SourceMap { bytes: 23, lines: 3, .. }");
     }
 

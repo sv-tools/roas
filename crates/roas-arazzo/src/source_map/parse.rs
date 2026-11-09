@@ -32,7 +32,7 @@ impl SourceMap {
                     message: error.to_string(),
                 }
             })?;
-        let root = node(&text, root);
+        let (root, _) = node(&text, root);
         Ok(Self::new(text, root))
     }
 }
@@ -95,8 +95,21 @@ fn span(text: &str, spanned: &Spanned<Raw>) -> (usize, usize) {
     (start.min(text.len()), end.min(text.len()))
 }
 
-fn node(text: &str, spanned: Spanned<Raw>) -> Node {
-    let (start, mut end) = span(text, &spanned);
+/// The node, and where its occurrence ends: for an alias, the end of the
+/// `*name` that uses it rather than of the anchored value, so the
+/// collection holding the alias is measured where the alias is written.
+fn node(text: &str, spanned: Spanned<Raw>) -> (Node, usize) {
+    let alias = spanned.referenced != spanned.defined;
+    let used = spanned.referenced.span();
+    let used = used.byte_offset().map_or(0, |offset| offset as usize)
+        + used.byte_len().map_or(0, |len| len as usize);
+    let (mut start, mut end) = span(text, &spanned);
+    if start == end
+        && matches!(spanned.value, Raw::String(_) | Raw::Other)
+        && let Some(header) = super::scalar::empty_block(text, start)
+    {
+        (start, end) = (header, header);
+    }
     let kind = match spanned.value {
         Raw::Map(members) => Kind::Map(
             members
@@ -108,8 +121,8 @@ fn node(text: &str, spanned: Spanned<Raw>) -> Node {
                         // `1: x` reads as the member `"1"`.
                         _ => text[key_start..key_end].to_owned(),
                     };
-                    let value = node(text, value);
-                    end = end.max(value.end);
+                    let (value, value_end) = node(text, value);
+                    end = end.max(value_end);
                     (
                         Key {
                             name,
@@ -125,8 +138,8 @@ fn node(text: &str, spanned: Spanned<Raw>) -> Node {
             items
                 .into_iter()
                 .map(|item| {
-                    let item = node(text, item);
-                    end = end.max(item.end);
+                    let (item, item_end) = node(text, item);
+                    end = end.max(item_end);
                     item
                 })
                 .collect(),
@@ -137,7 +150,8 @@ fn node(text: &str, spanned: Spanned<Raw>) -> Node {
     if !matches!(kind, Kind::Scalar(_)) {
         end = closing(text, start, end);
     }
-    Node { start, end, kind }
+    let occurrence = if alias { used.min(text.len()) } else { end };
+    (Node { start, end, kind }, occurrence)
 }
 
 /// A flow collection's span covers only its opening `[` / `{`, and its
@@ -378,6 +392,10 @@ workflows:
         assert_eq!(end("{\"a\": {\"b\": [1, \"x\" ]} , }", "#.a"), 22);
         assert_eq!(end("{\"a\": {\"b\": [1, \"x\" ]} , }", "#"), 26);
         assert_eq!(end("a: [1, # one\n  2\n  ]\n", "#.a"), 20);
+        // A trailing alias is measured where it is written, not at its anchor.
+        assert_eq!(end("a: &one abc\nb: [*one]\n", "#.b"), 21);
+        assert_eq!(end("a: &one abc\nb: {k: *one}\n", "#.b"), 24);
+        assert_eq!(end("a: &one abc\nb:\n  - *one\nc: 1\n", "#.b"), 23);
         // Block collections have no delimiter: they end at their last item.
         assert_eq!(end("a:\n  - 1\n  - 2\nb: 3\n", "#.a"), 14);
     }
@@ -398,6 +416,26 @@ workflows:
             .join()
             .unwrap();
         assert_eq!(outcome, (true, true));
+    }
+
+    #[test]
+    fn an_empty_block_scalar_is_where_its_header_is() {
+        for text in ["k: |\nz: 1\n", "k: |-  # none\n\nz: 1\n", "- >-\n- 2\n"] {
+            let map = SourceMap::parse(text).unwrap();
+            let path = if text.starts_with('-') { "#[0]" } else { "#.k" };
+            let range = map.locate(path).unwrap();
+            assert_eq!(range.start.line, 1, "{text:?}");
+            assert_eq!(range.start, range.end, "{text:?}");
+            assert_eq!(
+                map.locate_in(path, 0).map(|at| at.line),
+                Some(1),
+                "{text:?}"
+            );
+        }
+        // Blank lines only: their breaks are not in the text, so no offset.
+        let map = SourceMap::parse("k: |+\n\n\nz: 1\n").unwrap();
+        assert_eq!(map.locate("#.k").unwrap().start.line, 1);
+        assert_eq!(map.locate_in("#.k", 0), None);
     }
 
     #[test]

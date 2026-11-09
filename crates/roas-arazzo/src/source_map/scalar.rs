@@ -273,26 +273,49 @@ enum Block {
 /// it. `None` for anything else, including an explicit indentation
 /// indicator, whose indentation this does not reconstruct.
 fn block_header(text: &str, start: usize) -> Option<Block> {
+    header(text, start).map(|(style, _)| style)
+}
+
+/// Where an empty block scalar is written: just after its header.
+/// `serde-saphyr` gives `k: |-` with no content a zero-length span on
+/// the token after it, which belongs to another field.
+#[cfg_attr(not(feature = "source-map"), allow(dead_code))]
+pub(super) fn empty_block(text: &str, at: usize) -> Option<usize> {
+    header(text, at).map(|(_, end)| end)
+}
+
+/// The block style announced before `start`, and where its indicator ends.
+fn header(text: &str, start: usize) -> Option<(Block, usize)> {
     let line = line_start(text, start);
     if !text[line..start].bytes().all(|byte| byte == b' ') {
         return None;
     }
-    let header = text[..line]
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())?;
-    let header = match header.find(" #") {
-        Some(comment) => &header[..comment],
-        None => header,
+    // The last non-blank line before this one.
+    let mut end = line;
+    let (from, content) = loop {
+        let previous = line_start(text, end.checked_sub(1)?);
+        let content = text[previous..end].trim_end_matches(['\n', '\r']);
+        if !content.trim().is_empty() {
+            break (previous, content);
+        }
+        end = previous;
     };
-    let indicator = header.trim_end().rsplit([' ', '\t']).next()?;
+    // A comment starts at a `#` after white space.
+    let comment = content
+        .char_indices()
+        .find(|&(at, c)| c == '#' && content[..at].ends_with([' ', '\t']))
+        .map_or(content.len(), |(at, _)| at);
+    let head = content[..comment].trim_end();
+    let indicator = &head[head.rfind([' ', '\t']).map_or(0, |at| at + 1)..];
     let mut chars = indicator.chars();
     let style = match chars.next()? {
         '|' => Block::Literal,
         '>' => Block::Folded,
         _ => return None,
     };
-    chars.all(|c| c == '-' || c == '+').then_some(style)
+    chars
+        .all(|c| c == '-' || c == '+')
+        .then_some((style, from + head.len()))
 }
 
 fn block(raw: &str, start: usize, indent: usize, style: Block, out: &mut Decoded) {
@@ -499,6 +522,18 @@ mod tests {
         );
         let text = "k: |x\n  x\n";
         assert_eq!(block_header(text, text.rfind('x').unwrap()), None);
+        // A tab before the comment, and a `#` that starts no comment.
+        let text = "k: |\t# note\n  x\n";
+        assert_eq!(
+            block_header(text, text.rfind('x').unwrap()),
+            Some(Block::Literal)
+        );
+        let text = "k: a#|\n  x\n";
+        assert_eq!(block_header(text, text.rfind('x').unwrap()), None);
+        // An empty block is written at its header, not at what follows.
+        let text = "k: |-\n\nz: 1\n";
+        assert_eq!(empty_block(text, text.find('z').unwrap()), Some(5));
+        assert_eq!(empty_block("z", 0), None);
         // Not at the start of its line.
         let text = "k: |\n  a b\n";
         assert_eq!(block_header(text, text.find('b').unwrap()), None);
