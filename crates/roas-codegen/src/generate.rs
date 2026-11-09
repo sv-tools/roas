@@ -306,7 +306,7 @@ pub fn generate(
             kind: DiagnosticKind::Unformatted,
             schema_id: SchemaId::new(document.uri().clone(), ""),
             pointer: String::new(),
-            message: "rustfmt could not be run, so the output is not formatted; it differs from a formatted run".into(),
+            message: "rustfmt did not run or failed, so the output is not formatted; it differs from a formatted run".into(),
         });
     }
     diagnostics.sort_by(|a, b| {

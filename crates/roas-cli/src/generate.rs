@@ -144,11 +144,27 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
     Ok((input, uri))
 }
 
+/// `path` without a description's format extension (`.json`, `.yaml`,
+/// `.yml`), and with any other one kept: `api.v1` and `api.v2` are two
+/// descriptions, `pets.json` and `pets.yaml` one.
+fn without_format_extension(path: &Path) -> PathBuf {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext)
+            if ["json", "yaml", "yml"]
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known)) =>
+        {
+            path.with_extension("")
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
 /// The default label: the input file's stem, made safe for a manifest name.
 fn default_label(source: &InputSource) -> String {
     let stem = match source {
-        InputSource::File(path) => path
-            .file_stem()
+        InputSource::File(path) => without_format_extension(path)
+            .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
         InputSource::Stdin => String::new(),
@@ -182,7 +198,7 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
     // Resolve symlinks so one file has one identity however its path is
     // spelled (`$PWD`, macOS `/tmp` → `/private/tmp`). The output directory
     // may not exist yet, so its deepest existing ancestor is resolved.
-    let file = resolve(path)?.with_extension("");
+    let file = without_format_extension(&resolve(path)?);
     let out = resolve(out)?;
     let file: Vec<_> = file.components().collect();
     let out: Vec<_> = out.components().collect();
@@ -380,7 +396,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
                 } else {
                     "nothing written"
                 },
-                "rustfmt could not be run; install it (`rustup component add rustfmt`)",
+                "rustfmt did not run or failed; make sure it is installed (`rustup component add rustfmt`) and can run here",
             )
         } else if args.check {
             (
@@ -404,7 +420,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     if args.check {
         if unformatted {
             bail!(
-                "--check needs rustfmt: without it the output is unformatted and cannot match a formatted run; install rustfmt (`rustup component add rustfmt`)"
+                "--check needs rustfmt: without it the output is unformatted and cannot match a formatted run; rustfmt did not run or failed, so make sure it is installed (`rustup component add rustfmt`) and can run here"
             );
         }
         let mut check_options = WriteOptions::new(label.clone());
@@ -876,6 +892,22 @@ mod tests {
         assert_ne!(lossless(a), lossless(b));
         assert_eq!(lossless(a), "spec%80");
         assert_eq!(lossless(std::ffi::OsStr::new("a%80")), "a%2580");
+    }
+
+    #[test]
+    fn only_format_extensions_are_dropped() {
+        assert_eq!(
+            without_format_extension(Path::new("a/api.v1")),
+            Path::new("a/api.v1")
+        );
+        assert_eq!(
+            without_format_extension(Path::new("a/pets.YAML")),
+            Path::new("a/pets")
+        );
+        assert_ne!(
+            default_label(&InputSource::File("api.v1".into())),
+            default_label(&InputSource::File("api.v2".into()))
+        );
     }
 
     #[test]

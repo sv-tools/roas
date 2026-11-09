@@ -271,6 +271,11 @@ impl DirLock {
                 };
                 (file, false)
             }
+            // The directory went away: a refused run that made it is
+            // cleaning up, so another run was here.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(WriteError::Locked(path));
+            }
             Err(source) => return Err(WriteError::Io { path, source }),
         };
         match file.try_lock() {
@@ -616,7 +621,9 @@ fn other_roots<'a>(
 }
 
 /// Directories a run created, removed again (if empty) unless the run
-/// succeeds, so a refused run leaves nothing behind. Lock files other runs
+/// succeeds, so a refused run leaves no directory or lock file of its own
+/// behind (a lock file it made in an enclosing root, which already holds
+/// a manifest, stays, as all lock files do). Lock files other runs
 /// made are never touched.
 struct Created {
     dirs: Vec<PathBuf>,
@@ -656,10 +663,12 @@ impl Drop for Created {
         if let Some(path) = lock.as_ref().and_then(|l| l.made.as_ref()) {
             let _ = fs::remove_file(path);
         }
-        drop(lock);
+        // Directories too, before the lock goes: a run that made the lock
+        // file made the directory, and no other run can be past its lock.
         for dir in self.dirs.iter().rev() {
             let _ = fs::remove_dir(dir);
         }
+        drop(lock);
     }
 }
 
@@ -1708,6 +1717,13 @@ pub fn check(
     // never checks as merely out of date.
     for (dir, _) in other_roots(out_dir, planned.keys()) {
         check_lock(&dir)?;
+        // A write takes a shared lock here and refuses one it cannot open.
+        let lock = dir.join(LOCK_FILE);
+        match fs::File::open(&lock) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(WriteError::Io { path: lock, source }),
+        }
     }
     for path in previous.files.keys() {
         check_links(out_dir, path)?;
