@@ -721,9 +721,6 @@ impl Created {
 impl Drop for Created {
     fn drop(&mut self) {
         let lock = self.lock.take();
-        // On success everything stays, even a directory made only on the
-        // way (`scratch` in `scratch/../gen`): the path the caller gave
-        // needs it to resolve the next time.
         if self.keep {
             return;
         }
@@ -1416,9 +1413,26 @@ fn check_links(out_dir: &Path, key: &str) -> Result<(), WriteError> {
 fn current_if_empty(out_dir: &Path) -> PathBuf {
     let normalized: PathBuf = out_dir.components().collect();
     if normalized.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        normalized
+        return PathBuf::from(".");
+    }
+    // A `..` would need every directory before it to exist (`scratch` in
+    // `scratch/../gen`), and one made for that would be gone in a fresh
+    // checkout. So the part before the last name is resolved as
+    // `resolved` does, existing directories by the filesystem and the
+    // rest by text; the last name is kept, so a link there is still seen.
+    if !normalized
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return normalized;
+    }
+    let Some(name) = normalized.file_name() else {
+        return resolved(&normalized).unwrap_or(normalized);
+    };
+    let parent = normalized.parent().unwrap_or(Path::new("."));
+    match resolved(parent) {
+        Some(parent) => parent.join(name),
+        None => normalized,
     }
 }
 
@@ -1531,7 +1545,11 @@ fn misspelled(out_dir: &Path, key: &str) -> Option<String> {
         if stored == name {
             return None;
         }
-        if file_id(&entry.path()).is_some_and(|id| id == wanted) {
+        // A regular file only: a symlink to it is another entry, which a
+        // rename must never replace.
+        if entry.file_type().is_ok_and(|t| t.is_file())
+            && file_id(&entry.path()).is_some_and(|id| id == wanted)
+        {
             variant = Some(stored);
         }
     }
@@ -1931,22 +1949,11 @@ pub fn check(
     let target = generation.target;
     let manifest_file = manifest_name(&options.label, target)?;
     check_out_dir(out_dir)?;
-    check_lock(out_dir)?;
-    // A write opens it, read-write or read-only; one it cannot open fails.
-    match fs::File::open(out_dir.join(LOCK_FILE)) {
-        Ok(_) => {}
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) => {}
-        Err(source) => {
-            return Err(WriteError::Io {
-                path: out_dir.join(LOCK_FILE),
-                source,
-            });
-        }
-    }
+    // Shared locks, held for the whole comparison: a running write holds
+    // the output directory's exclusively, so `check` never reads one half
+    // done. Like a write, it fails at once rather than wait, and refuses a
+    // lock file it cannot open.
+    let mut _locks: Vec<DirLock> = DirLock::share(out_dir, false)?.into_iter().collect();
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -1954,14 +1961,7 @@ pub fn check(
     // The lock paths a write would take, so a directory a write refuses
     // never checks as merely out of date.
     for (dir, _) in other_roots(out_dir, planned.keys()) {
-        check_lock(&dir)?;
-        // A write takes a shared lock here and refuses one it cannot open.
-        let lock = dir.join(LOCK_FILE);
-        match fs::File::open(&lock) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(WriteError::Io { path: lock, source }),
-        }
+        _locks.extend(DirLock::share(&dir, false)?);
     }
     for path in previous.files.keys() {
         check_links(out_dir, path)?;
@@ -4340,16 +4340,58 @@ mod tests {
     }
 
     #[test]
-    fn a_path_through_a_directory_made_on_the_way_checks_clean() {
+    fn a_path_through_a_missing_directory_checks_clean_without_it() {
         let dir = TempDir::new("on-the-way");
         let out = dir.0.join("scratch/../gen");
         let g = generation(&[("a.rs", "a")]);
         write(&g, &out, &WriteOptions::new("api")).unwrap();
         assert!(dir.0.join("gen/a.rs").is_file());
+        assert!(!dir.0.join("scratch").exists(), "nothing made on the way");
         assert!(
             check(&g, &out, &WriteOptions::new("api"))
                 .unwrap()
                 .is_clean()
+        );
+    }
+
+    #[test]
+    fn check_waits_for_no_running_write() {
+        let dir = TempDir::new("check-locked");
+        let g = generation(&[("a.rs", "a")]);
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        let running = DirLock::acquire(&dir.0).unwrap();
+        assert!(matches!(
+            check(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::Locked(_))
+        ));
+        drop(running);
+        assert!(
+            check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_misspelled_file_is_never_taken_for_it() {
+        let dir = TempDir::new("misspelled-link");
+        fs::write(dir.0.join("Types.rs"), "same").unwrap();
+        if !same_file(&dir.0.join("Types.rs"), &dir.0.join("types.rs")) {
+            return;
+        }
+        std::os::unix::fs::symlink("Types.rs", dir.0.join("zlink")).unwrap();
+        write(
+            &generation(&[("types.rs", "same")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(
+            fs::symlink_metadata(dir.0.join("zlink"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
     }
 }
