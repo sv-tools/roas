@@ -170,7 +170,12 @@ fn stored_path(path: &Path) -> std::io::Result<PathBuf> {
     let entry = std::fs::symlink_metadata(&typed)?;
     // The name as typed when it is stored that way; otherwise the one entry
     // that is the same file (another case), never another hard link.
-    let entries: Vec<_> = std::fs::read_dir(&parent)?.flatten().collect();
+    // A directory that can be searched but not listed: the typed name is
+    // all there is to go on.
+    let Ok(entries) = std::fs::read_dir(&parent) else {
+        return Ok(typed);
+    };
+    let entries: Vec<_> = entries.flatten().collect();
     if entries.iter().any(|e| e.file_name() == name) {
         return Ok(typed);
     }

@@ -1821,7 +1821,7 @@ pub fn write(
     let aliased = aliases(out_dir, &previous.files, &planned);
     let mut old_spellings: BTreeSet<String> = aliased.keys().cloned().collect();
     old_spellings.extend(gone_spellings(out_dir, &previous.files, &planned));
-    let (owned, removable) = outcome(&previous.files, &planned, &old_spellings, errors > 0);
+    let (mut owned, removable) = outcome(&previous.files, &planned, &old_spellings, errors > 0);
     let going = going(out_dir, &manifest_file, &previous, &removable)?;
     // Every check before the first write.
     check_ownership(
@@ -1952,6 +1952,21 @@ pub fn write(
             report.written.push(PathBuf::from(path));
         }
     }
+    // A write through a name the disk folds lands in the entry stored under
+    // the old spelling. One that kept its old spelling only because a hard
+    // link held it is a single file now: it gets the planned spelling, and
+    // any old record of it goes, in this run rather than the next.
+    let mut after = Listings::default();
+    for path in report.written.clone() {
+        let key = path.to_string_lossy().into_owned();
+        if let Some(stored) = misspelled(out_dir, &key, &mut after) {
+            respell(out_dir, &stored, &key)?;
+            report.renamed.push((PathBuf::from(stored), path));
+        }
+    }
+    for old in aliases(out_dir, &previous.files, &planned).keys() {
+        owned.remove(old);
+    }
 
     let replacing = still_replacing(&previous, &owned, &planned);
     let mut final_manifest = manifest_for(
@@ -1988,6 +2003,8 @@ pub fn check(
     }
     let target = generation.target;
     let manifest_file = manifest_name(&options.label, target)?;
+    // In `write`'s order, so both give the same error for the same input.
+    let planned = planned(generation)?;
     check_out_dir(out_dir)?;
     // Shared locks, held for the whole comparison: a running write holds
     // the output directory's exclusively, so `check` never reads one half
@@ -2004,7 +2021,6 @@ pub fn check(
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
-    let planned = planned(generation)?;
     // The lock paths a write would take, so a directory a write refuses
     // never checks as merely out of date.
     for (dir, _) in other_roots(out_dir, planned.keys()) {
@@ -4450,5 +4466,22 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_forced_write_over_a_linked_old_spelling_settles_in_one_run() {
+        let dir = TempDir::new("linked-force");
+        fs::write(dir.0.join("A.rs"), "hand").unwrap();
+        if !same_file(&dir.0.join("A.rs"), &dir.0.join("a.rs")) {
+            return;
+        }
+        fs::hard_link(dir.0.join("A.rs"), dir.0.join("backup")).unwrap();
+        let g = generation(&[("a.rs", "generated")]);
+        let mut forced = WriteOptions::new("api");
+        forced.overwrite_unowned = true;
+        write(&g, &dir.0, &forced).unwrap();
+        assert!(check(&g, &dir.0, &forced).unwrap().is_clean());
+        assert_eq!(fs::read_to_string(dir.0.join("backup")).unwrap(), "hand");
     }
 }
