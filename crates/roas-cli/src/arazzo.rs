@@ -635,7 +635,11 @@ fn sources(
     // Loading an external Arazzo document can reveal calls back into this
     // one, whose workflows may need entry sources nobody asked for yet: load
     // again until the required selection stops growing.
+    // A later pass traverses only the aliases it adds, so a source that
+    // already failed is not fetched again; the passes' reports are merged.
     let mut selection = explicit;
+    let mut traversed = BTreeSet::new();
+    let mut merged: Option<roas_arazzo_executor::SourceLoadReport> = None;
     let report = loop {
         let needed = required_sources(
             description,
@@ -643,11 +647,25 @@ fn sources(
         )?;
         selection.extend(needed);
         let mut load_options = SourceLoadOptions::default();
-        load_options.root_sources = (!args.load_all_sources).then(|| selection.clone());
+        load_options.root_sources =
+            (!args.load_all_sources).then(|| selection.difference(&traversed).cloned().collect());
         load_options.max_documents = args.source_max_documents;
         load_options.max_depth = args.source_max_depth;
         load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
-        let report = registry.load_sources(root, &mut loader, &load_options)?;
+        let pass = registry.load_sources(root, &mut loader, &load_options)?;
+        traversed.clone_from(&selection);
+        let report = match merged.take() {
+            None => pass,
+            Some(mut report) => {
+                report.diagnostics.extend(pass.diagnostics);
+                report
+                    .reference_diagnostics
+                    .extend(pass.reference_diagnostics);
+                report.cycles.extend(pass.cycles);
+                report.fetch_attempts += pass.fetch_attempts;
+                report
+            }
+        };
         // A static error in a newly linked document is preparation's to
         // report, with the loading diagnostics beside it.
         let Ok(grown) = required_sources(
@@ -661,6 +679,7 @@ fn sources(
         if args.load_all_sources || grown.is_subset(&selection) {
             break report;
         }
+        merged = Some(report);
     };
     let diagnostics = report
         .diagnostics
@@ -1202,6 +1221,65 @@ mod tests {
         let asked = join.join().unwrap();
         assert_eq!(asked.len(), 1);
         assert!(asked[0].starts_with("GET /things?id=1 "), "{asked:?}");
+    }
+
+    #[test]
+    fn a_later_loading_pass_does_not_fetch_a_failed_source_again() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (gone, gone_join) = server(2, 404, "{}");
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write("refetch-entry.json", &json!({}));
+        let entry_name = entry.0.file_name().unwrap().to_str().unwrap().to_owned();
+        // `gone` fails in the first pass; the call back into the entry then
+        // asks for `extra`, which needs a second pass.
+        let child = TempFile::write(
+            "refetch-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry_name, "type": "arazzo" },
+                    { "name": "gone", "url": format!("{gone}/gone.json"), "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        std::fs::write(
+            &entry.0,
+            serde_json::to_string(&json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": child_name, "type": "arazzo" },
+                    { "name": "extra", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "buyPet", "steps": [{
+                        "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                    { "workflowId": "helper", "steps": [{
+                        "stepId": "get", "operationId": "$sourceDescriptions.extra.getThing",
+                        "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = run_args(&entry, &api, &base);
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File, LoaderKind::Http];
+        args.base_url = vec![format!("extra={base}")];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        assert_eq!(join.join().unwrap().len(), 1);
+        // Release the second accept if the failed source was not asked again.
+        let _ = std::net::TcpStream::connect(gone.trim_start_matches("http://"));
+        let asked = gone_join.join().unwrap();
+        assert_eq!(
+            asked.iter().filter(|line| line.starts_with("GET ")).count(),
+            1,
+            "{asked:?}"
+        );
     }
 
     /// An entry linking `shared` to `child_url`, loaded with `--load file`.
