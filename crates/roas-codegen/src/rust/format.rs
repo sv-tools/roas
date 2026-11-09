@@ -18,14 +18,19 @@ pub(crate) fn validate(text: &str, path: &str) -> Result<(), GenerateError> {
         })
 }
 
-/// Format with `rustfmt`, or `None` when it cannot be run.
+/// Format with `rustfmt`, or say why it could not be done.
 ///
 /// The output must not depend on where the generator runs, so `rustfmt`
 /// never searches for a configuration: it gets an empty one explicitly,
 /// which means rustfmt's defaults for the configured edition everywhere. The
 /// `rustfmt` version still matters, as it would for any formatted file.
-pub(crate) fn format(text: &str, edition: &str) -> Option<String> {
-    let config = PrivateConfig::create()?;
+pub(crate) fn format(text: &str, edition: &str) -> Result<String, String> {
+    let config = PrivateConfig::create().ok_or_else(|| {
+        format!(
+            "no private configuration could be created in the temporary directory {}",
+            std::env::temp_dir().display()
+        )
+    })?;
     let mut child = Command::new("rustfmt")
         .args(["--edition", edition, "--emit", "stdout", "--config-path"])
         .arg(config.file())
@@ -33,7 +38,7 @@ pub(crate) fn format(text: &str, edition: &str) -> Option<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+        .map_err(|e| format!("rustfmt could not be started: {e}"))?;
     // rustfmt may exit before reading everything; the child is reaped
     // either way, so a long-running caller collects no zombies.
     let written = child
@@ -43,13 +48,15 @@ pub(crate) fn format(text: &str, edition: &str) -> Option<String> {
     if !written {
         let _ = child.kill();
         let _ = child.wait();
-        return None;
+        return Err("rustfmt stopped reading its input".into());
     }
-    let output = child.wait_with_output().ok()?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("rustfmt could not be waited on: {e}"))?;
     if !output.status.success() {
-        return None;
+        return Err(format!("rustfmt failed ({})", output.status));
     }
-    String::from_utf8(output.stdout).ok()
+    String::from_utf8(output.stdout).map_err(|_| "rustfmt's output is not UTF-8".into())
 }
 
 /// An empty `rustfmt.toml` in a directory only this call created: the name

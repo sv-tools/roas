@@ -414,7 +414,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
                 } else {
                     "nothing written"
                 },
-                "rustfmt did not run or failed; make sure it is installed (`rustup component add rustfmt`) and can run here",
+                "rustfmt did not format the output; the warning above says why (rustfmt installs with `rustup component add rustfmt`)",
             )
         } else if args.check {
             (
@@ -438,7 +438,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     if args.check {
         if unformatted {
             bail!(
-                "--check needs rustfmt: without it the output is unformatted and cannot match a formatted run; rustfmt did not run or failed, so make sure it is installed (`rustup component add rustfmt`) and can run here"
+                "--check needs formatted output, which cannot match an unformatted run; rustfmt did not format it, and the warning above says why (rustfmt installs with `rustup component add rustfmt`)"
             );
         }
         let mut check_options = WriteOptions::new(label.clone());

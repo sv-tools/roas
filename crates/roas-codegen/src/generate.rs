@@ -300,13 +300,15 @@ pub fn generate(
         Target::Go => return Err(GenerateError::Unsupported("the Go backend".into())),
     };
     diagnostics.extend(output.diagnostics);
-    if !output.formatted {
+    if let Some(reason) = output.unformatted {
         diagnostics.push(Diagnostic {
             severity: Severity::Warning,
             kind: DiagnosticKind::Unformatted,
             schema_id: SchemaId::new(document.uri().clone(), ""),
             pointer: String::new(),
-            message: "rustfmt did not run or failed, so the output is not formatted; it differs from a formatted run".into(),
+            message: format!(
+                "the output is not formatted, so it differs from a formatted run: {reason}"
+            ),
         });
     }
     diagnostics.sort_by(|a, b| {
