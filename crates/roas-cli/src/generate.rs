@@ -119,8 +119,8 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
             // A pipe (`<(...)`, `/dev/stdin`) has no stored name: it is
             // named like stdin.
             let uri = if is_regular_file(path) {
-                let absolute = std::fs::canonicalize(path)
-                    .with_context(|| format!("resolving {}", path.display()))?;
+                let absolute =
+                    stored_path(path).with_context(|| format!("resolving {}", path.display()))?;
                 Url::from_file_path(&absolute).map_err(|()| {
                     anyhow!("{} cannot be expressed as a file URL", absolute.display())
                 })?
@@ -151,6 +151,45 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
         Input::Json(bytes)
     };
     Ok((input, uri))
+}
+
+/// The description's path with its directories resolved and its own name
+/// as stored: a symlinked description (a "current" link) is named by the
+/// link, not its target, so repointing the link keeps the label, source
+/// and header; and the name has the case on disk, however it was typed.
+fn stored_path(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("no file name"))?;
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let parent = std::fs::canonicalize(parent)?;
+    let typed = parent.join(name);
+    let entry = std::fs::symlink_metadata(&typed)?;
+    let stored = std::fs::read_dir(&parent)?.flatten().find_map(|e| {
+        if e.file_name() == name {
+            return Some(e.file_name());
+        }
+        same_entry(&entry, &e.path()).then(|| e.file_name())
+    });
+    Ok(parent.join(stored.unwrap_or_else(|| name.to_owned())))
+}
+
+/// Whether `other` is the directory entry `entry` describes.
+fn same_entry(entry: &std::fs::Metadata, other: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(other)
+            .is_ok_and(|m| m.dev() == entry.dev() && m.ino() == entry.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (entry, other);
+        false
+    }
 }
 
 /// Whether `path` names a lasting file, as opposed to a pipe, a device or
@@ -230,7 +269,7 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
     // Resolve symlinks so one file has one identity however its path is
     // spelled (`$PWD`, macOS `/tmp` → `/private/tmp`). The output directory
     // may not exist yet, so its deepest existing ancestor is resolved.
-    let file = without_format_extension(&resolve(path)?);
+    let file = without_format_extension(&stored_path(path).ok()?);
     let out = resolve(out)?;
     let file: Vec<_> = file.components().collect();
     let out: Vec<_> = out.components().collect();
@@ -1053,6 +1092,26 @@ mod tests {
         assert_eq!(
             source_id(&InputSource::File("/dev/null".into()), Path::new("out")),
             None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_description_is_named_by_its_link() {
+        let dir = TempDir::new("current-link");
+        std::fs::create_dir_all(dir.0.join("versions")).unwrap();
+        std::fs::write(dir.0.join("versions/v1.json"), PET).unwrap();
+        std::fs::write(dir.0.join("versions/v2.json"), PET).unwrap();
+        let link = dir.0.join("openapi.json");
+        std::os::unix::fs::symlink("versions/v1.json", &link).unwrap();
+        let out = dir.0.join("gen");
+        run_generate(args(&link, &out)).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("versions/v2.json", &link).unwrap();
+        run_generate(args(&link, &out)).unwrap();
+        assert_eq!(
+            source_id(&InputSource::File(link.clone()), &out).as_deref(),
+            Some("../openapi")
         );
     }
 }

@@ -722,6 +722,12 @@ impl Drop for Created {
     fn drop(&mut self) {
         let lock = self.lock.take();
         if self.keep {
+            // Directories made only on the way, as `scratch` in
+            // `scratch/../gen`, are empty and go; the output directory
+            // and its parents hold files and stay.
+            for dir in self.dirs.iter().rev() {
+                let _ = fs::remove_dir(dir);
+            }
             return;
         }
         // Still locked while removed, so no run can take it in between;
@@ -1644,6 +1650,12 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), WriteError> {
     let result = (|| {
         file.write_all(content).map_err(io(&tmp))?;
         file.sync_all().map_err(io(&tmp))?;
+        // The file it replaces keeps its permissions, read-only included.
+        if let Ok(old) = fs::symlink_metadata(path)
+            && old.is_file()
+        {
+            fs::set_permissions(&tmp, old.permissions()).map_err(io(&tmp))?;
+        }
         fs::rename(&tmp, path).map_err(io(path))
     })();
     if result.is_err() {
@@ -4301,5 +4313,45 @@ mod tests {
             .filter(|n| n.ends_with(".rs"))
             .collect();
         assert_eq!(names, vec!["k.rs".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rewritten_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("keep-mode");
+        write(
+            &generation(&[("a.rs", "1")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        fs::set_permissions(dir.0.join("a.rs"), fs::Permissions::from_mode(0o444)).unwrap();
+        write(
+            &generation(&[("a.rs", "2")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let mode = fs::metadata(dir.0.join("a.rs"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        fs::set_permissions(dir.0.join("a.rs"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(mode, 0o444);
+    }
+
+    #[test]
+    fn a_directory_made_only_on_the_way_is_removed() {
+        let dir = TempDir::new("on-the-way");
+        write(
+            &generation(&[("a.rs", "a")]),
+            &dir.0.join("scratch/../gen"),
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(dir.0.join("gen/a.rs").is_file());
+        assert!(!dir.0.join("scratch").exists());
     }
 }
