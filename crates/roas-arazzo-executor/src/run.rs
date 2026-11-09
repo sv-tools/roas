@@ -64,6 +64,8 @@ pub struct Options {
     pub(crate) validation: enumset::EnumSet<roas_arazzo::validation::ValidationOptions>,
     pub(crate) portability_lints: bool,
     pub(crate) source_map: Option<std::sync::Arc<roas_arazzo::source_map::SourceMap>>,
+    pub(crate) document_source_maps:
+        BTreeMap<String, std::sync::Arc<roas_arazzo::source_map::SourceMap>>,
     headers: Vec<(String, String)>,
     limits: Limits,
 }
@@ -102,6 +104,29 @@ impl Options {
     #[must_use]
     pub fn source_map(mut self, map: roas_arazzo::source_map::SourceMap) -> Self {
         self.source_map = Some(std::sync::Arc::new(map));
+        self
+    }
+
+    /// [`Self::source_map`] for an external Arazzo document: where the
+    /// fields of the document with this canonical `identity` sit in the
+    /// text it was read from. `identity` is compared as written with
+    /// [`PreparationDiagnostic::document`]: the document's resolved
+    /// `$self`, or the URI it was retrieved from (`SourceDocument::identity`
+    /// with the `source-graph` feature). A later map for the same identity
+    /// replaces the earlier one.
+    ///
+    /// Set it on the options passed to [`crate::prepare`], before or after
+    /// `source_registry`: every document's map is read from there.
+    ///
+    /// [`PreparationDiagnostic::document`]: crate::PreparationDiagnostic::document
+    #[must_use]
+    pub fn document_source_map(
+        mut self,
+        identity: impl Into<String>,
+        map: roas_arazzo::source_map::SourceMap,
+    ) -> Self {
+        self.document_source_maps
+            .insert(identity.into(), std::sync::Arc::new(map));
         self
     }
     /// Options with nothing set: the first workflow, no inputs, no

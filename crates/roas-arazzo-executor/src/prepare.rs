@@ -58,7 +58,9 @@ pub struct PreparationDiagnostic {
     pub offset: Option<usize>,
     /// Where the field's value is written, when its document has a
     /// [`SourceMap`](roas_arazzo::source_map::SourceMap)
-    /// ([`Options::source_map`](crate::Options::source_map)).
+    /// ([`Options::source_map`](crate::Options::source_map), or
+    /// [`Options::document_source_map`](crate::Options::document_source_map)
+    /// for an external document).
     pub span: Option<SourceRange>,
     /// Where `offset` is in the original text — through quotes, escapes
     /// and folding — when the document has a source map and the raw
@@ -584,11 +586,16 @@ impl<'d> Compiler<'d> {
     fn finding(&mut self, site: &Site<'d>, offset: Option<usize>, issue: PreparationIssue) {
         // `#…` paths are in the document; others (`options.inputs`) name
         // what the caller passed, which no text of the document holds.
-        let map = self
-            .scope()
-            .source_map
-            .as_deref()
-            .filter(|_| site.path.starts_with('#'));
+        // Every document's map is the caller's, on the options it passed.
+        let map = match self.documents.get(self.current).identity {
+            None => self.options.source_map.as_deref(),
+            Some(identity) => self
+                .options
+                .document_source_maps
+                .get(identity)
+                .map(AsRef::as_ref),
+        }
+        .filter(|_| site.path.starts_with('#'));
         let span = map.and_then(|map| match &issue {
             // A finding about a member's name is where the name is written.
             PreparationIssue::Model(error) if error.is_about_key() => map.locate_key(&site.path),

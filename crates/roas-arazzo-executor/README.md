@@ -419,7 +419,9 @@ Give `Options::source_map` a `roas_arazzo::source_map::SourceMap` (built with
 and each finding also carries `span` (where its field's value is written, or its
 name for a finding about the name) and `position` (where `offset` falls in that text, through escapes
 and YAML folding); its display then reads `… at line 12, column 31: …` instead of
-`… at byte 9`. Without a map, or for a value the map cannot decode exactly, nothing
+`… at byte 9`. A finding inside an external Arazzo document uses the map given for
+that document's identity with `Options::document_source_map(identity, map)`, where
+`identity` is what the finding's `document` names. Without a map, or for a value the map cannot decode exactly, nothing
 is guessed: `position` stays `None` and the byte offset is shown. Only checked
 preparation locates findings; errors of the lazy `execute` / `Run::start` path carry
 no field paths.
