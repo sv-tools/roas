@@ -937,13 +937,16 @@ fn check_source(previous: &Manifest, options: &WriteOptions) -> Result<(), Write
 /// Remove the temporary files a killed run left beside the files it was
 /// writing. They hold generated content only, and with the lock held no
 /// other run can be writing them. Only directories this run writes into
-/// are looked at, and only regular files named the way [`write_atomic`]
-/// names them.
-fn remove_leftover_temps(out_dir: &Path, generation: &Generation) -> Result<(), WriteError> {
+/// are looked at, built from planned paths that already passed every
+/// check, and only regular files named the way [`write_atomic`] names them.
+fn remove_leftover_temps(
+    out_dir: &Path,
+    planned: &BTreeMap<String, &str>,
+) -> Result<(), WriteError> {
     let mut dirs = BTreeSet::from([out_dir.to_path_buf()]);
-    for file in &generation.files {
-        if let Some(parent) = out_dir.join(&file.path).parent() {
-            dirs.insert(parent.to_path_buf());
+    for key in planned.keys() {
+        if let Some((parent, _)) = key.rsplit_once('/') {
+            dirs.insert(out_dir.join(parent));
         }
     }
     for dir in dirs {
@@ -1034,7 +1037,6 @@ pub fn write(
     fs::create_dir_all(out_dir).map_err(io(out_dir))?;
     check_out_dir(out_dir)?;
     let _lock = DirLock::acquire(out_dir)?;
-    remove_leftover_temps(out_dir, generation)?;
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -1056,6 +1058,9 @@ pub fn write(
         &going,
         options,
     )?;
+    // Only now: every planned path is known to stay inside the output
+    // directory and to reach it through no link.
+    remove_leftover_temps(out_dir, &planned)?;
 
     let hashes: BTreeMap<String, String> = planned
         .iter()
@@ -2642,5 +2647,37 @@ mod tests {
         )
         .unwrap();
         assert!(report.renamed.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn rejected_paths_never_lead_the_temp_cleanup_outside() {
+        let root = TempDir::new("cleanup-outside");
+        let out = root.0.join("out");
+        let outside = root.0.join("x");
+        fs::create_dir_all(&out).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join(format!(".other.rs{TMP_MARKER}1-2-3"));
+        fs::write(&victim, "not ours").unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("../x/a.rs", "a")]),
+                &out,
+                &WriteOptions::new("api")
+            ),
+            Err(WriteError::UnsafePath(_))
+        ));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, out.join("link")).unwrap();
+            assert!(matches!(
+                write(
+                    &generation(&[("link/a.rs", "a")]),
+                    &out,
+                    &WriteOptions::new("api")
+                ),
+                Err(WriteError::Symlink(_))
+            ));
+        }
+        assert!(victim.exists());
     }
 }
