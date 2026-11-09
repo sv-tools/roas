@@ -250,6 +250,11 @@ fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
         E::OwnedByOther { .. } | E::ReservedPath(_) | E::IsADirectory(_) => {
             anyhow!("{}: {error}", out.display())
         }
+        // Relative below the output directory, absolute for the directory
+        // itself.
+        E::Symlink(path) | E::NotADirectory(path) if path.is_relative() => {
+            anyhow!("{}: {error}", out.display())
+        }
         E::SourceMismatch {
             label,
             previous,

@@ -11,10 +11,11 @@
 //!   manifest owns is refused, compared case-insensitively since the disk
 //!   may be. So is an existing file no manifest owns, unless the caller
 //!   allows overwriting it or it already holds exactly the generated
-//!   content, in which case it is adopted under the planned spelling. One run at a time: an operating-system lock on
-//!   a file in the output directory spans the whole run, so two targets
-//!   cannot both pass the ownership checks and then race, and it ends with
-//!   the process, so a killed run does not block the next.
+//!   content, in which case it is adopted under the planned spelling.
+//! - **One run at a time.** An operating-system lock on a file in the
+//!   output directory spans the whole run, so two targets cannot both pass
+//!   the ownership checks and then race. It ends with the process, so a
+//!   killed run does not block the next.
 //! - **Nothing below the output directory is followed.** A symbolic link
 //!   as the output directory or on any generated path is refused. The
 //!   path *to* the output directory is the caller's choice and is used as
@@ -742,6 +743,12 @@ fn check_ownership(
         }
     }
     for path in previous.files.keys() {
+        // No longer generated: only a link matters. A file or directory in
+        // its way means it is gone, which is what the run is after anyway.
+        if !planned.contains_key(path) {
+            check_links(out_dir, path)?;
+            continue;
+        }
         check_recorded(out_dir, path, going)?;
     }
     check_path(out_dir, manifest_file)
@@ -2957,5 +2964,34 @@ mod tests {
                 .kept_edited
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn an_obsolete_record_behind_a_file_does_not_block() {
+        let dir = TempDir::new("obsolete-behind-file");
+        let manifest = dir.0.join(".roas-codegen-api-rust.json");
+        write(
+            &generation(&[("models", "m")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        // Pending manifest of a run towards models/x.rs that stopped early.
+        let mut pending = read_manifest(&manifest).unwrap().unwrap();
+        pending.files.insert("models/x.rs".into(), hash(b"x"));
+        fs::write(&manifest, manifest_text(&pending)).unwrap();
+        let back = generation(&[("models", "m")]);
+        assert!(
+            !check(&back, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+        write(&back, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert!(
+            check(&back, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
+        assert_eq!(fs::read_to_string(dir.0.join("models")).unwrap(), "m");
     }
 }
