@@ -9,17 +9,16 @@ use std::fmt;
 use thiserror::Error;
 
 /// The `roas` validation checks that say nothing about the schemas being
-/// generated: unused components, undeclared tags, empty titles, versions
-/// and response descriptions, duplicate operation ids, malformed URLs.
+/// generated: unused components and path items, undeclared tags, empty
+/// titles, versions, response descriptions and external-documentation
+/// URLs, duplicate operation ids, malformed URLs.
 /// Generation starts from this set; a caller adds to it.
 pub fn generation_options() -> EnumSet<Options> {
     roas::validation::IGNORE_UNUSED
+        | roas::validation::IGNORE_EMPTY_REQUIRED_FIELDS
         | Options::IgnoreUnusedPathItems
         | Options::IgnoreMissingTags
         | Options::IgnoreNonUniqOperationIDs
-        | Options::IgnoreEmptyInfoTitle
-        | Options::IgnoreEmptyInfoVersion
-        | Options::IgnoreEmptyResponseDescription
         | Options::IgnoreInvalidUrls
 }
 
@@ -115,8 +114,8 @@ impl fmt::Display for SourceValidationError {
 mod tests {
     #[test]
     fn unused_path_items_are_exempt_too() {
-        assert!(
-            super::generation_options().contains(roas::validation::Options::IgnoreUnusedPathItems)
-        );
+        let options = super::generation_options();
+        assert!(options.contains(roas::validation::Options::IgnoreUnusedPathItems));
+        assert!(options.contains(roas::validation::Options::IgnoreEmptyExternalDocumentationUrl));
     }
 }

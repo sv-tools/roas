@@ -10,13 +10,15 @@ A description goes in, is version-detected, parsed, normalized to OpenAPI 3.2 an
 ## Quick start
 
 ```rust
-use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
+use roas_codegen::{
+    ConfigFile, Input, SourceDocument, Target, generate, generation_options, validate,
+};
 use url::Url;
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let bytes = std::fs::read("openapi.json")?;
 let document = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///openapi.json")?)?;
-let document = validate(document, Default::default())?;
+let document = validate(document, generation_options())?;
 
 let mut file = ConfigFile::default();
 file.target = Some(Target::Rust);
@@ -31,7 +33,7 @@ for diagnostic in &generation.diagnostics {
 # Ok(()) }
 ```
 
-`generate` returns files in memory, never touching disk, together with every diagnostic and the dependency list the generated code needs — `serde` and `serde_json` with `raw_value`, plus whatever a type substitution imports. Nothing generated depends on `roas`.
+`generate` returns files in memory, writing no output files, together with every diagnostic and the dependency list the generated code needs — `serde` and `serde_json` with `raw_value`, plus whatever a type substitution imports. Nothing generated depends on `roas`.
 
 ## What the Rust output looks like
 

@@ -10,13 +10,15 @@
 //! Rust backend is here; Go is next.
 //!
 //! ```no_run
-//! use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
+//! use roas_codegen::{
+//!     ConfigFile, Input, SourceDocument, Target, generate, generation_options, validate,
+//! };
 //! use url::Url;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let bytes = std::fs::read("openapi.json")?;
 //! let document = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///openapi.json")?)?;
-//! let document = validate(document, Default::default())?;
+//! let document = validate(document, generation_options())?;
 //! let mut file = ConfigFile::default();
 //! file.target = Some(Target::Rust);
 //! let config = file.build()?;
