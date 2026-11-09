@@ -30,6 +30,48 @@ const BUILTIN_IMPORTS: &[(&str, &str)] = &[
     ("fmt", "fmt"),
 ];
 
+/// Lowercase names the templates declare, at package level or locally; an
+/// import used under one of them would not compile.
+const TEMPLATE_NAMES: &[&str] = &[
+    "decodeOptions",
+    "refuseNull",
+    "readTag",
+    "integerToken",
+    "v",
+    "u",
+    "d",
+    "e",
+    "n",
+    "raw",
+    "err",
+    "ok",
+    "zero",
+    "tag",
+    "typ",
+    "value",
+    "s",
+    "token",
+    "name",
+    "present",
+    "members",
+    "member",
+    "limit",
+    "text",
+    "negative",
+    "mantissa",
+    "exponent",
+    "digits",
+    "negativeExponent",
+    "whole",
+    "fraction",
+    "scale",
+    "ceiling",
+    "magnitude",
+    "digit",
+    "i",
+    "j",
+];
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub(crate) struct SupportView {
     pub nullable: bool,
@@ -50,6 +92,14 @@ pub(crate) struct FieldView {
     /// The whole struct tag, as a Go string literal.
     pub tag: String,
     pub doc: Vec<String>,
+    /// `raw_name` as a Go string literal.
+    pub literal: String,
+    /// The decoder refuses a `null` for this member.
+    pub non_null: bool,
+    /// The member's slot among the required ones, if it is required.
+    pub required_index: Option<usize>,
+    /// The embedded map collecting members no field names.
+    pub catch_all: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,15 +143,13 @@ pub(crate) struct TypeView {
     pub tag_literal: String,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
-    /// A struct's required members, as a Go `[]string` expression.
-    pub required: String,
-    /// A struct's members that must not be null, likewise.
-    pub non_null: String,
-    /// A struct refusing members it does not name.
-    pub denied: bool,
-    /// A closed struct's member names, as a Go `[]string` expression;
-    /// `nil` for an open one.
-    pub known: String,
+    /// How many of a struct's members are required.
+    pub required_count: usize,
+    /// The value type of a struct's catch-all map; empty when members it
+    /// does not name are refused.
+    pub extra_ty: String,
+    /// The catch-all field's name.
+    pub extra_name: String,
     /// The raw constructor of a composed holder.
     pub from_raw: String,
 }
@@ -200,6 +248,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             .iter()
             .map(|(path, name)| (*name, *path))
             .collect();
+        // A package named like a name the generated code declares would be
+        // shadowed by it, or clash with it.
+        for local in TEMPLATE_NAMES {
+            used.insert(local, "a name the generated code declares");
+        }
         for import in &builder.externs {
             if BUILTIN_IMPORTS.iter().any(|(path, _)| path == import) {
                 continue;
@@ -488,10 +541,9 @@ impl Builder<'_> {
             tag: String::new(),
             tag_literal: String::new(),
             exclusive: false,
-            required: "nil".to_owned(),
-            non_null: "nil".to_owned(),
-            denied: false,
-            known: "nil".to_owned(),
+            required_count: 0,
+            extra_ty: String::new(),
+            extra_name: String::new(),
             from_raw: String::new(),
         };
         if !self.fill_kind(def, &mut view)? {
@@ -511,8 +563,7 @@ impl Builder<'_> {
                 // The methods a generated struct has.
                 fields.reserve("UnmarshalJSONFrom");
                 fields.reserve("MarshalJSONTo");
-                let mut required = Vec::new();
-                let mut non_null = Vec::new();
+                let mut required_count = 0;
                 for field in &s.fields {
                     let config = self.field_config(def, &field.raw_name);
                     let rename = config.and_then(|f| f.rename.clone());
@@ -558,18 +609,20 @@ impl Builder<'_> {
                             )
                         }
                     };
-                    if field.required {
-                        required.push(quote(&field.raw_name));
-                    }
-                    if !field.nullable && !holds_null {
-                        non_null.push(quote(&field.raw_name));
-                    }
+                    let required_index = field.required.then(|| {
+                        required_count += 1;
+                        required_count - 1
+                    });
                     let tag = struct_tag(&field.raw_name, omitzero, &go_tags, &at)?;
                     view.fields.push(FieldView {
                         name,
                         raw_name: field.raw_name.clone(),
                         ty,
                         tag,
+                        literal: quote(&field.raw_name),
+                        non_null: !field.nullable && !holds_null,
+                        required_index,
+                        catch_all: false,
                         doc: Self::doc(
                             field.description.as_deref(),
                             field.default.as_ref(),
@@ -580,26 +633,23 @@ impl Builder<'_> {
                         ),
                     });
                 }
-                view.required = string_slice(&required);
-                view.non_null = string_slice(&non_null);
-                match &s.additional {
-                    Additional::Denied => {
-                        view.denied = true;
-                        let names: Vec<String> =
-                            s.fields.iter().map(|f| quote(&f.raw_name)).collect();
-                        // Empty but not nil: no member is known.
-                        view.known = format!("[]string{{{}}}", names.join(", "));
-                    }
-                    Additional::CatchAll(ty) => {
-                        let inner = self.spell(unboxed(ty))?;
-                        view.fields.push(FieldView {
-                            name: fields.allocate("AdditionalProperties".to_owned()),
-                            raw_name: "additionalProperties".to_owned(),
-                            ty: format!("map[string]{inner}"),
-                            tag: "`json:\",embed\"`".to_owned(),
-                            doc: vec!["Members not named above.".to_owned()],
-                        });
-                    }
+                view.required_count = required_count;
+                if let Additional::CatchAll(ty) = &s.additional {
+                    let inner = self.spell(unboxed(ty))?;
+                    let name = fields.allocate("AdditionalProperties".to_owned());
+                    view.extra_name = name.clone();
+                    view.extra_ty = inner.clone();
+                    view.fields.push(FieldView {
+                        name,
+                        raw_name: "additionalProperties".to_owned(),
+                        ty: format!("map[string]{inner}"),
+                        tag: "`json:\",embed\"`".to_owned(),
+                        doc: vec!["Members not named above.".to_owned()],
+                        literal: String::new(),
+                        non_null: false,
+                        required_index: None,
+                        catch_all: true,
+                    });
                 }
             }
             TypeKind::StringEnum(values) => {
@@ -730,15 +780,6 @@ fn deprecation(deprecated: bool) -> Vec<String> {
         vec!["Deprecated: the description marks this deprecated.".to_owned()]
     } else {
         Vec::new()
-    }
-}
-
-/// A Go `[]string` expression, or `nil` for none.
-fn string_slice(literals: &[String]) -> String {
-    if literals.is_empty() {
-        "nil".to_owned()
-    } else {
-        format!("[]string{{{}}}", literals.join(", "))
     }
 }
 

@@ -96,7 +96,8 @@ fn the_worked_example_generates_as_the_plan_shows() {
         "Name string `json:\"name\"`",
         "Tag Nullable[string] `json:\"tag,omitzero\"`",
         "Status *PetStatus `json:\"status,omitzero\"`",
-        "checkMembers(raw, \"Pet\", []string{\"name\"}, []string{\"name\", \"status\"}, []string{\"name\", \"status\", \"tag\"})",
+        "return fmt.Errorf(\"%s: unknown member %q\", \"Pet\", name)",
+        "if !present[0] {\nreturn fmt.Errorf(\"%s: missing required member %q\", \"Pet\", \"name\")",
         "type PetStatus string",
         "PetStatusAvailable PetStatus = \"available\"",
         "case PetStatusAvailable, PetStatusSold:",
@@ -298,6 +299,17 @@ fn repeated_enum_values_and_clashing_imports() {
         matches!(&error, GenerateError::Config(m) if m.contains("used as `rand`")),
         "{error}"
     );
+    let shadowed = "[substitutions.uuid.go]\nname = \"v.ID\"\nimport = \"example.com/v\"\n";
+    let error = go(
+        serde_json::json!({"P": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}}),
+        shadowed,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("used as `v`")),
+        "{error}"
+    );
 }
 
 #[test]
@@ -338,7 +350,10 @@ fn every_kind_renders_and_survives_gofmt() {
     }
     // A null is a value for `{}` and `type: null`, as in Rust.
     assert!(
-        code.contains("checkMembers(raw, \"Node\", nil, []string{\"next\"}, nil)"),
+        code.contains("case \"next\":\nif d.PeekKind() == 'n' {")
+            && code.contains(
+                "case \"any\":\nif err := json.UnmarshalDecode(d, &v.Any, decodeOptions)"
+            ),
         "{code}"
     );
 }
