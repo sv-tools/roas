@@ -1412,3 +1412,34 @@ fn an_unresolvable_dependency_of_an_external_workflow_names_its_document() {
         "{error}"
     );
 }
+
+#[test]
+fn an_external_operation_path_by_canonical_url_waits_for_its_sources() {
+    const CANONICAL: &str = "https://canonical.example.test/shared-api.json";
+    let mut documents = standard();
+    let step = &mut documents[2].1["workflows"][0]["steps"][0];
+    step.as_object_mut().unwrap().remove("operationId");
+    step["operationPath"] = json!(format!("{CANONICAL}#/paths/~1things/get"));
+    let api = &mut documents[3].1;
+    api["openapi"] = json!("3.2.0");
+    api["$self"] = json!(CANONICAL);
+
+    // Before the external document's API is loaded, the URL names nothing yet.
+    let mut registry = SourceRegistry::new();
+    let root = registry.insert(ROOT, documents[0].1.clone()).unwrap();
+    registry.insert(SHARED, documents[2].1.clone()).unwrap();
+    registry
+        .load_sources(root, &mut Loader::new(), &SourceLoadOptions::default())
+        .unwrap();
+    let description = registry.document(root).unwrap().arazzo().unwrap().clone();
+    let options = Options::new()
+        .workflow("main")
+        .source_registry(&registry, root)
+        .unwrap();
+    let required = required_sources(&description, &options).unwrap();
+    assert_eq!(required, BTreeSet::from(["api".into(), "shared".into()]));
+
+    // Once it is, preparation resolves it by the API's `$self`.
+    let graph = Graph::new(&documents);
+    prepare(&graph.description, &graph.options("main")).unwrap();
+}

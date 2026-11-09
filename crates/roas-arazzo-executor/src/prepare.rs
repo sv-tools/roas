@@ -859,6 +859,10 @@ impl<'d> Compiler<'d> {
                 .and_then(|rest| rest.strip_suffix(".url}"))
             {
                 self.need_source(name, &site);
+            } else if self.current != Doc::ENTRY && !self.resolve_operations {
+                // An external document's sources are not listed: loading
+                // traverses them in full, and which one a URL names is only
+                // known once they are loaded, when preparation checks it.
             } else {
                 let supplied = self.operations().matching_sources(document);
                 let base = self
