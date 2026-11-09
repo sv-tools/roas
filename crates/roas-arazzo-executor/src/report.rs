@@ -285,8 +285,8 @@ pub enum ExecutionError {
     InDocument {
         /// Canonical identity of the external document.
         document: String,
-        /// What went wrong there.
-        #[source]
+        /// What went wrong there. Its message is already part of this one,
+        /// so it is not also reported as the error's source.
         error: Box<ExecutionError>,
     },
     /// The step's operation could not be found.

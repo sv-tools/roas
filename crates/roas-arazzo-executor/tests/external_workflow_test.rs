@@ -1199,7 +1199,12 @@ fn runtime_errors_of_external_workflows_name_their_document_on_every_path() {
         ExecutionError::InDocument { .. }
     ));
     assert_eq!(lazy.to_string(), checked.to_string());
-    assert!(std::error::Error::source(&lazy).is_some());
+    // The message carries the inner error once; it is not repeated as a source.
+    assert!(std::error::Error::source(&lazy).is_none());
+    assert_eq!(
+        lazy.to_string(),
+        format!("in {SHARED}: {}", in_shared(&lazy))
+    );
 }
 
 #[test]
