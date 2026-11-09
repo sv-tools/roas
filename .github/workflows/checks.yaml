@@ -141,6 +141,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      # `roas-codegen`'s Go backend needs `gofmt`, and its compile test
+      # Go 1.27 or later; without them those tests skip themselves.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
       - run: cargo install-tools
       - name: Run tests
         run: cargo llvm-cov nextest ${{ matrix.args }} --all-targets --no-fail-fast --no-tests=pass --verbose
@@ -217,9 +223,32 @@ jobs:
           report_type: test_results
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  GoBackendJob:
+    name: Test the Go backend
+    # The Go tests skip themselves without a toolchain, so a runner that
+    # lost Go would pass silently. This job installs the latest Go and
+    # sets `ROAS_CODEGEN_REQUIRE_GO`, which turns every such skip into a
+    # failure: the generated Go must format, compile, vet and behave.
+    runs-on: ubuntu-latest
+    env:
+      ROAS_CODEGEN_REQUIRE_GO: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - run: go version
+      - run: cargo install-tools
+      - name: Run the Go backend tests
+        run: |
+          cargo nextest run --package roas-codegen --all-features --no-fail-fast \
+            -E 'binary(go_test) | test(go) | test(gofmt)'
+          cargo nextest run --package roas-cli --all-features --no-fail-fast -E 'test(go)'
   Tests:
     name: Wait for testing jobs to finish
-    needs: [TestJob, CrossFeatureTestJob]
+    needs: [TestJob, CrossFeatureTestJob, GoBackendJob]
     runs-on: ubuntu-latest
     steps:
       - run: echo "Testing jobs succeeded"

@@ -5,7 +5,9 @@
 //! and the open holders.
 //!
 //! The Go output gets the same assertions in a Go module of its own; it
-//! needs Go 1.27 or later and is skipped, saying so, without one.
+//! needs Go 1.27 or later and is skipped, saying so, without one —
+//! unless `ROAS_CODEGEN_REQUIRE_GO` is set, as CI does, which makes that
+//! a failure.
 //!
 //! Set `ROAS_CODEGEN_SKIP_COMPILE=1` to skip both where no toolchain or
 //! registry is available.
@@ -380,11 +382,13 @@ fn go_toolchain() -> Result<(), String> {
 
 #[test]
 fn generated_go_compiles_and_behaves() {
-    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() {
+    let required = std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_some();
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() && !required {
         eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
         return;
     }
     if let Err(reason) = go_toolchain() {
+        assert!(!required, "ROAS_CODEGEN_REQUIRE_GO is set: {reason}");
         eprintln!("skipped: {reason}");
         return;
     }

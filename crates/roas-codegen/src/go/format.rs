@@ -54,7 +54,13 @@ mod tests {
     fn gofmt_formats_and_refuses_bad_syntax() {
         let formatted = match super::format("package a\nvar  x =  1\n", "a.go") {
             Ok(formatted) => formatted,
-            Err(GenerateError::Toolchain(_)) => return, // no gofmt here
+            Err(GenerateError::Toolchain(reason)) => {
+                assert!(
+                    std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_none(),
+                    "ROAS_CODEGEN_REQUIRE_GO is set: {reason}"
+                );
+                return; // no gofmt here
+            }
             Err(other) => panic!("{other}"),
         };
         assert_eq!(formatted, "package a\n\nvar x = 1\n");

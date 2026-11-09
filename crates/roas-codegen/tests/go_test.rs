@@ -1,5 +1,6 @@
 //! The Go backend's output and its configuration. Generating Go needs
-//! `gofmt`; without one each test says so and returns.
+//! `gofmt`; without one each test says so and returns, unless
+//! `ROAS_CODEGEN_REQUIRE_GO` is set, as CI does.
 
 use roas::validation::{IGNORE_UNUSED, Options};
 use roas_codegen::{
@@ -36,6 +37,10 @@ fn config(toml: &str) -> roas_codegen::Config {
 fn go(components: serde_json::Value, toml: &str) -> Option<Result<Generation, GenerateError>> {
     match generate(&document(components), &config(toml)) {
         Err(GenerateError::Toolchain(reason)) => {
+            assert!(
+                std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_none(),
+                "ROAS_CODEGEN_REQUIRE_GO is set: {reason}"
+            );
             eprintln!("skipped: {reason}");
             None
         }

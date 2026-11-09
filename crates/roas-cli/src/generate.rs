@@ -897,6 +897,10 @@ mod tests {
     #[test]
     fn go_is_generated_beside_rust_and_checks_clean() {
         if !have_gofmt() || !have_rustfmt() {
+            assert!(
+                std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_none(),
+                "ROAS_CODEGEN_REQUIRE_GO is set but gofmt or rustfmt is missing"
+            );
             return;
         }
         let dir = TempDir::new("go");
