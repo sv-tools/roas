@@ -137,6 +137,16 @@ fn node(
                 .into_iter()
                 .map(|(key, value)| {
                     let (key_start, key_end) = span(text, &key);
+                    // An alias key (`*k :`) is named at its anchor but
+                    // written here: what follows it is measured from here.
+                    let key_used = if !inner && key.referenced != key.defined {
+                        let used = key.referenced.span();
+                        used.byte_offset().map_or(0, |offset| offset as usize)
+                            + used.byte_len().map_or(0, |len| len as usize)
+                    } else {
+                        key_end
+                    }
+                    .min(text.len());
                     let name = match key.value {
                         Raw::String(name) => name,
                         // `1: x` reads as the member `"1"`.
@@ -150,13 +160,13 @@ fn node(
                         && matches!(value.kind, Kind::Scalar(None))
                         // An alias to an empty value sits back at its anchor.
                         && text
-                            .get(key_end..value.start)
+                            .get(key_used..value.start)
                             .is_some_and(|gap| gap.contains(['\n', '\r']))
                     {
-                        let at = colon(text, key_end);
+                        let at = colon(text, key_used);
                         (value.start, value.end, value.text_end, value_end) = (at, at, at, at);
                     }
-                    end = end.max(key_end).max(value_end);
+                    end = end.max(key_used).max(value_end);
                     (
                         Key {
                             name,
@@ -372,9 +382,12 @@ fn scan(text: &str, start: usize, end: usize) -> usize {
                     .unwrap_or(text.len() - at);
                 continue;
             }
-            // `?` is an indicator only where a token starts: `a ? b` is
-            // one plain scalar.
-            b'?' => {}
+            // `?` is an indicator only where a token starts and before
+            // white space: `a ? b` and `?x` are plain scalars.
+            b'?' => {
+                let next = bytes.get(at + 1).copied();
+                token = token && matches!(next, None | Some(b' ' | b'\t' | b'\n' | b'\r'));
+            }
             b':' => {
                 let next = bytes.get(at + 1).copied();
                 token = was_quoted
@@ -1027,6 +1040,20 @@ workflows:
                 &text[found.start.offset..found.end.offset]
             );
         }
+    }
+
+    #[test]
+    fn an_alias_key_without_a_value_is_measured_where_it_is_used() {
+        let text = "x: &k title\ninfo:\n  *k :\n  version: 1\n";
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(map.locate("#.info.title").unwrap().start.line, 3);
+        let text = "x: &k title\ninfo:\n  ? *k\n  version: 1\n";
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(map.locate("#.info.title").unwrap().start.line, 3);
+        // `?x` is a plain scalar, so its `'` opens no quote.
+        let text = "k: {a: ?'x, <<: {m: 1}}\n";
+        let map = SourceMap::parse(text).unwrap();
+        assert_eq!(map.locate("#.k").unwrap().end.offset, 23);
     }
 
     #[test]

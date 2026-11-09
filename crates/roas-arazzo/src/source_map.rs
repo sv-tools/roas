@@ -102,7 +102,8 @@ pub struct SourceMap {
     /// [`CHECKPOINT`] bytes or so along long lines, so a column is never
     /// counted from the start of a minified document's one line.
     checkpoints: Vec<(usize, usize)>,
-    root: Node,
+    /// Boxed, so its address — a cache key — stays put when the map moves.
+    root: Box<Node>,
     /// What lookups worked out, kept so many findings in one large
     /// string or object do not redo it each time.
     cache: Cache,
@@ -132,14 +133,17 @@ fn address(node: &Node) -> usize {
 
 impl Cache {
     fn decoded(&self, node: &Node, build: impl FnOnce() -> Option<Vec<usize>>) -> Option<Table> {
-        let mut decoded = self
-            .decoded
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        decoded
-            .entry(address(node))
-            .or_insert_with(|| build().map(Arc::from))
-            .clone()
+        let lock = || {
+            self.decoded
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        };
+        if let Some(table) = lock().get(&address(node)) {
+            return table.clone();
+        }
+        // Decode without the lock: other strings need not wait for it.
+        let table = build().map(Arc::from);
+        lock().entry(address(node)).or_insert(table).clone()
     }
 
     fn members(&self, node: &Node, members: &[(Key, Node)]) -> Index {
@@ -325,7 +329,7 @@ impl SourceMap {
             text,
             lines,
             checkpoints,
-            root,
+            root: Box::new(root),
             cache: Cache::default(),
         }
     }
