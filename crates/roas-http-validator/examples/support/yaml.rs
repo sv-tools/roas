@@ -12,14 +12,20 @@ pub fn from_str<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, serde_
         // large specs. Depth stays at 64: deeper nesting overflows a 2 MiB
         // thread stack in debug builds. The alias-to-anchor ratio check is off:
         // it rejects any document reusing one anchor 100+ times, a common
-        // pattern in specs. The scalar-size and alias-replay limits stay at
-        // their defaults and still stop an alias bomb.
+        // pattern in specs. Alias replay is raised to 10M events so a large
+        // schema can be aliased thousands of times; the 1M cap on events
+        // recorded under anchors still stops an alias bomb. `!!binary` is
+        // read as its text, as before, not decoded.
         budget: serde_saphyr::budget! {
             max_nodes: 10_000_000,
             max_events: 25_000_000,
             enforce_alias_anchor_ratio: false,
         },
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: 10_000_000,
+        },
         strict_booleans: true,
+        ignore_binary_tag_for_string: true,
         leading_zero_numbers_as_strings: true,
         underscored_numbers_as_strings: true,
         non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,

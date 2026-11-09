@@ -24,7 +24,11 @@ let yaml = || serde_saphyr::options! {
         max_events: 25_000_000,
         enforce_alias_anchor_ratio: false,
     },
+    alias_limits: serde_saphyr::alias_limits! {
+        max_total_replayed_events: 10_000_000,
+    },
     strict_booleans: true,
+    ignore_binary_tag_for_string: true,
     leading_zero_numbers_as_strings: true,
     underscored_numbers_as_strings: true,
     non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,

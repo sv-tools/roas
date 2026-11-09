@@ -20,9 +20,9 @@ pub enum Input {
     /// JSON text. The only way to obtain exact numbers.
     Json(Vec<u8>),
     /// YAML text, read with `serde-saphyr`. An integer within the 64-bit
-    /// range is kept exactly; any other number — one with a fraction or an
-    /// exponent, or an integer past `u64::MAX` or below `i64::MIN` — is
-    /// read through `f64`.
+    /// range is kept exactly; a fraction, an exponent, or an untagged
+    /// decimal integer past `u64::MAX` or below `i64::MIN` is read through
+    /// `f64`.
     Yaml(Vec<u8>),
     /// An already-parsed value of unknown provenance.
     Value(serde_json::Value),
@@ -229,6 +229,7 @@ impl SourceDocument {
 ///
 /// - YAML 1.2 booleans only: `yes` / `on` / `no` / `off` stay strings.
 /// - Integer spellings `017` and `1_000` stay strings rather than becoming numbers.
+/// - `!!binary` scalars are read as their base64 text, not decoded.
 /// - `.inf` / `.nan` pass through (a `serde_json::Value` holds them as `null`).
 /// - `<<: *anchor` merge keys are expanded.
 /// - A duplicate mapping key is an error rather than a silent last-wins.
@@ -244,14 +245,20 @@ fn parse_yaml(bytes: &[u8]) -> Result<serde_json::Value, serde_saphyr::Error> {
         // large specs. Depth stays at 64: deeper nesting overflows a 2 MiB
         // thread stack in debug builds. The alias-to-anchor ratio check is off:
         // it rejects any document reusing one anchor 100+ times, a common
-        // pattern in specs. The scalar-size and alias-replay limits stay at
-        // their defaults and still stop an alias bomb.
+        // pattern in specs. Alias replay is raised to 10M events so a large
+        // schema can be aliased thousands of times; the 1M cap on events
+        // recorded under anchors still stops an alias bomb. `!!binary` is
+        // read as its text, as before, not decoded.
         budget: serde_saphyr::budget! {
             max_nodes: 10_000_000,
             max_events: 25_000_000,
             enforce_alias_anchor_ratio: false,
         },
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: 10_000_000,
+        },
         strict_booleans: true,
+        ignore_binary_tag_for_string: true,
         leading_zero_numbers_as_strings: true,
         underscored_numbers_as_strings: true,
         non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::PassThrough,
@@ -288,6 +295,8 @@ mod yaml_tests {
             ("1.5", json!(1.5)),
             (".inf", json!(null)),
             ("3.1.0", json!("3.1.0")),
+            ("!!binary SGVsbG8=", json!("SGVsbG8=")),
+            ("!!binary /wAB", json!("/wAB")),
         ] {
             assert_eq!(
                 parse(&format!("v: {scalar}\n")).unwrap(),
@@ -333,12 +342,19 @@ mod yaml_tests {
     /// responses, is not a bomb.
     #[test]
     fn yaml_anchor_reused_many_times_is_accepted() {
-        let mut yaml = String::from("err: &err { description: error }\npaths:\n");
-        for i in 0..150 {
-            yaml.push_str(&format!("  p{i}: {{ '500': *err }}\n"));
+        // 40 properties aliased 6,000 times replays over a million events.
+        let props: String = (0..40)
+            .map(|i| format!("    p{i}: {{ type: string }}\n"))
+            .collect();
+        let mut yaml = format!("schema: &s\n  type: object\n  properties:\n{props}responses:\n");
+        for i in 0..6_000 {
+            yaml.push_str(&format!("  r{i}: *s\n"));
         }
         let value = parse(&yaml).unwrap();
-        assert_eq!(value["paths"]["p149"]["500"]["description"], "error");
+        assert_eq!(
+            value["responses"]["r5999"]["properties"]["p39"]["type"],
+            "string"
+        );
     }
 
     #[test]
