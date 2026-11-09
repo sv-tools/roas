@@ -94,7 +94,6 @@ pub struct RustConfigFile {
     /// The generated module's name: the file is `<module>.rs`. Default
     /// `types`. Targets sharing an output directory need different ones.
     pub module: Option<String>,
-    pub crate_name: Option<String>,
     pub edition: Option<String>,
     /// Derives added to every generated container.
     pub derives: Vec<String>,
@@ -186,7 +185,6 @@ impl ConfigFile {
             .or(self.allow_codegen_extensions);
         self.template_dir = over.template_dir.or(self.template_dir);
         self.rust.module = over.rust.module.or(self.rust.module);
-        self.rust.crate_name = over.rust.crate_name.or(self.rust.crate_name);
         self.rust.edition = over.rust.edition.or(self.rust.edition);
         self.rust.derives.extend(over.rust.derives);
         self.go.package = over.go.package.or(self.go.package);
@@ -219,7 +217,6 @@ impl ConfigFile {
                     }
                     None => "types".to_owned(),
                 },
-                crate_name: self.rust.crate_name,
                 edition: self.rust.edition.unwrap_or_else(|| "2024".to_owned()),
                 derives: self.rust.derives,
             },
@@ -315,7 +312,6 @@ pub fn rust_module_name(text: &str) -> String {
 pub struct RustConfig {
     /// The generated module's name; the file is `<module>.rs`.
     pub module: String,
-    pub crate_name: Option<String>,
     pub edition: String,
     pub derives: Vec<String>,
 }
