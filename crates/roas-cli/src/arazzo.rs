@@ -26,7 +26,7 @@ use std::rc::Rc;
 use url::Url;
 
 use crate::{
-    InputFormat, InputSource, LoaderKind, build_loader_with, read_input, read_input_text,
+    Fetcher, InputFormat, InputSource, LoaderKind, build_loader_with, read_input, read_input_text,
     resolve_input_source, serialize_spec,
 };
 
@@ -734,15 +734,20 @@ fn sources(
     // so links, budgets and diagnostics are those of a single load; the
     // loader keeps what was fetched, and remembers what failed, across passes.
     let mut selection: Option<BTreeSet<String>> = None;
+    // The text of every document read or fetched, by where it came from.
+    let mut texts = BTreeMap::new();
+    let mut fetched = None;
     let (mut registry, root, report) = loop {
-        let (mut registry, root) = seeded_registry(&value, from, args)?;
+        let (mut registry, root) = seeded_registry(&value, from, args, &mut texts)?;
         // The budget covers supplied documents plus distinct fetches of the
         // whole loading operation, not of each pass.
         let loader = loader.get_or_insert_with(|| {
-            remembering_loader(
+            let (loader, fetches) = remembering_loader(
                 &args.load,
                 args.source_max_documents.saturating_sub(registry.len()),
-            )
+            );
+            fetched = Some(fetches);
+            loader
         });
         let selected = match selection.take() {
             Some(selected) => selected,
@@ -750,7 +755,7 @@ fn sources(
                 let mut selected = explicit.clone();
                 selected.extend(required_sources(
                     description,
-                    &options.clone().source_registry(&registry, root)?,
+                    &scoped(&options, &registry, root, &texts, fetched.as_ref())?,
                 )?);
                 selected
             }
@@ -764,7 +769,7 @@ fn sources(
         // report, with the loading diagnostics beside it.
         let Ok(grown) = required_sources(
             description,
-            &options.clone().source_registry(&registry, root)?,
+            &scoped(&options, &registry, root, &texts, fetched.as_ref())?,
         ) else {
             break (registry, root, report);
         };
@@ -810,7 +815,48 @@ fn sources(
         .sources(root)?
         .iter()
         .any(|source| source.target.is_some());
-    Ok((options.source_registry(&registry, root)?, any, diagnostics))
+    Ok((
+        scoped(&options, &registry, root, &texts, fetched.as_ref())?,
+        any,
+        diagnostics,
+    ))
+}
+
+/// `options` adapted to the registry, with a source map for every external
+/// Arazzo document the entry reaches whose text was read (`texts`) or
+/// fetched, so preparation can say where in it a finding is.
+fn scoped(
+    options: &Options,
+    registry: &SourceRegistry,
+    root: roas_arazzo_executor::DocumentId,
+    texts: &BTreeMap<Url, String>,
+    fetched: Option<&Failures>,
+) -> Result<Options> {
+    let mut options = options.clone();
+    let fetched = fetched.map(|fetched| fetched.borrow());
+    let mut seen = BTreeSet::from([root]);
+    let mut next = vec![root];
+    while let Some(id) = next.pop() {
+        for link in registry.sources(id)? {
+            let Some(target) = link.target else {
+                continue;
+            };
+            let document = registry.document(target)?;
+            if document.arazzo().is_none() || !seen.insert(target) {
+                continue;
+            }
+            next.push(target);
+            let uri = document.retrieval_uri();
+            if let Some(map) = texts
+                .get(uri)
+                .or_else(|| fetched.as_ref()?.texts.get(uri))
+                .and_then(|text| SourceMap::parse(text).ok())
+            {
+                options = options.document_source_map(document.identity().as_str(), map);
+            }
+        }
+    }
+    Ok(options.source_registry(registry, root)?)
 }
 
 /// An error and what caused it, as one line: a loading diagnostic's own
@@ -836,6 +882,7 @@ fn seeded_registry(
     value: &Value,
     from: &InputSource,
     args: &ArazzoRunArgs,
+    texts: &mut BTreeMap<Url, String>,
 ) -> Result<(SourceRegistry, roas_arazzo_executor::DocumentId)> {
     let mut registry = SourceRegistry::new();
     let root = registry.insert(base_uri(from, None)?.as_str(), value.clone())?;
@@ -847,9 +894,11 @@ fn seeded_registry(
             bail!("`--source {name}=…` names no source description of this document");
         }
         let from = InputSource::File(PathBuf::from(path));
-        let (document, _) = read_input(&from, None)
+        let (text, document, _) = read_input_text(&from, None)
             .with_context(|| format!("reading source description {path}"))?;
-        let id = registry.insert(base_uri(&from, None)?.as_str(), document)?;
+        let retrieval = base_uri(&from, None)?;
+        let id = registry.insert(retrieval.as_str(), document)?;
+        texts.insert(registry.document(id)?.retrieval_uri().clone(), text);
         supplied.push((name.to_owned(), id));
     }
     for path in &args.source_document {
@@ -865,13 +914,15 @@ fn seeded_registry(
 }
 
 /// The `--load` loader, with each fetcher wrapped to remember its failures
-/// and to stop after `budget` distinct URLs.
-fn remembering_loader(kinds: &[LoaderKind], budget: usize) -> Loader {
-    let failed = Rc::new(RefCell::new(Fetches {
+/// and the text it fetched, and to stop after `budget` distinct URLs.
+fn remembering_loader(kinds: &[LoaderKind], budget: usize) -> (Loader, Failures) {
+    let fetches = Rc::new(RefCell::new(Fetches {
         budget,
         ..Fetches::default()
     }));
-    build_loader_with(kinds, |fetcher| Remembering::new(fetcher, &failed)).unwrap_or_default()
+    let loader =
+        build_loader_with(kinds, |fetcher| Remembering::new(fetcher, &fetches)).unwrap_or_default();
+    (loader, fetches)
 }
 
 /// What the fetchers of one loading operation have asked for, across its
@@ -883,6 +934,27 @@ struct Fetches {
     budget: usize,
     asked: BTreeSet<Url>,
     failed: BTreeMap<Url, LoaderError>,
+    /// The text of each fetched document, by its final retrieval URI.
+    texts: BTreeMap<Url, String>,
+}
+
+/// A fetcher that can also say what text it parsed a document from.
+trait TextFetcher: ResourceFetcher {
+    fn fetch_document_text(
+        &mut self,
+        uri: &Url,
+    ) -> Result<(LoadedDocument, Option<String>), LoaderError> {
+        self.fetch_document(uri).map(|document| (document, None))
+    }
+}
+
+impl TextFetcher for Fetcher {
+    fn fetch_document_text(
+        &mut self,
+        uri: &Url,
+    ) -> Result<(LoadedDocument, Option<String>), LoaderError> {
+        Fetcher::fetch_document_text(self, uri).map(|(document, text)| (document, Some(text)))
+    }
 }
 
 type Failures = Rc<RefCell<Fetches>>;
@@ -893,14 +965,14 @@ type Failures = Rc<RefCell<Fetches>>;
 /// start its document budget afresh.
 struct Remembering<F> {
     inner: F,
-    failed: Failures,
+    fetches: Failures,
 }
 
 impl<F> Remembering<F> {
-    fn new(inner: F, failed: &Failures) -> Self {
+    fn new(inner: F, fetches: &Failures) -> Self {
         Self {
             inner,
-            failed: Rc::clone(failed),
+            fetches: Rc::clone(fetches),
         }
     }
 
@@ -910,7 +982,7 @@ impl<F> Remembering<F> {
         fetch: impl FnOnce(&mut F) -> Result<T, LoaderError>,
     ) -> Result<T, LoaderError> {
         {
-            let mut fetches = self.failed.borrow_mut();
+            let mut fetches = self.fetches.borrow_mut();
             if let Some(error) = fetches.failed.get(uri) {
                 return Err(replay(error));
             }
@@ -925,7 +997,7 @@ impl<F> Remembering<F> {
             }
         }
         fetch(&mut self.inner).inspect_err(|error| {
-            self.failed
+            self.fetches
                 .borrow_mut()
                 .failed
                 .insert(uri.clone(), replay(error));
@@ -933,13 +1005,20 @@ impl<F> Remembering<F> {
     }
 }
 
-impl<F: ResourceFetcher> ResourceFetcher for Remembering<F> {
+impl<F: TextFetcher> ResourceFetcher for Remembering<F> {
     fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
-        self.remember(uri, |inner| inner.fetch(uri))
+        self.fetch_document(uri).map(|document| document.document)
     }
 
     fn fetch_document(&mut self, uri: &Url) -> Result<LoadedDocument, LoaderError> {
-        self.remember(uri, |inner| inner.fetch_document(uri))
+        let (document, text) = self.remember(uri, |inner| inner.fetch_document_text(uri))?;
+        if let Some(text) = text {
+            self.fetches
+                .borrow_mut()
+                .texts
+                .insert(document.retrieval_uri.clone(), text);
+        }
+        Ok(document)
     }
 }
 
@@ -1648,6 +1727,71 @@ workflows:
         assert!(asked[0].starts_with("GET /things?id=7 "), "{asked:?}");
     }
 
+    /// An entry calling `child` of a YAML document whose condition is
+    /// malformed behind escapes and a multi-byte character.
+    fn malformed_external_workflow() -> (TempFile, TempFile, TempFile) {
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::text(
+            "malformed-child.yaml",
+            &format!(
+                r#"arazzo: 1.1.0
+info: {{ title: C, version: "1" }}
+sourceDescriptions:
+  - {{ name: api, url: {api_name}, type: openapi }}
+workflows:
+  - workflowId: child
+    steps:
+      - stepId: get
+        operationId: $sourceDescriptions.api.getThing
+        parameters:
+          - {{ name: id, in: query, value: $inputs.id }}
+        successCriteria:
+          - condition: "$response.body#/n\u00e9 == \"café\" && ("
+"#
+            ),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write(
+            "malformed-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [{ "name": "shared", "url": child_name, "type": "arazzo" }],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.shared.child",
+                    "parameters": [{ "name": "id", "value": "$inputs.petId" }] }] }]
+            }),
+        );
+        (entry, child, api)
+    }
+
+    #[test]
+    fn run_reports_where_a_malformed_condition_is_in_a_linked_document() {
+        let (entry, child, api) = malformed_external_workflow();
+        let identity = Url::from_file_path(child.0.canonicalize().unwrap()).unwrap();
+        // Supplied on the command line, and fetched by the loader.
+        for supplied in [true, false] {
+            let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+            args.source = if supplied {
+                vec![format!("shared={}", child.0.display())]
+            } else {
+                Vec::new()
+            };
+            args.base_url = Vec::new();
+            args.load = vec![LoaderKind::File];
+            args.quiet = true;
+            let error = run_arazzo_run(args).unwrap_err();
+            let shown = format!("{error:#}");
+            assert!(
+                shown.contains(&format!(
+                    "{identity} #.workflows[0].steps[0].successCriteria[0].condition \
+                     at line 13, column 65: "
+                )),
+                "supplied: {supplied}: {shown}"
+            );
+        }
+    }
+
     #[test]
     fn selective_loading_follows_calls_back_into_the_entry_document() {
         let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
@@ -1772,6 +1916,7 @@ workflows:
                 }
             }
         }
+        impl TextFetcher for Counting {}
         let calls = Rc::new(RefCell::new(Vec::new()));
         let fetches = Rc::new(RefCell::new(Fetches {
             budget: 2,
@@ -1831,7 +1976,10 @@ workflows:
     #[test]
     fn a_loading_diagnostic_says_why_as_well_as_what() {
         let fetches = Rc::new(RefCell::new(Fetches::default()));
-        let mut fetcher = Remembering::new(roas_file_fetcher::FileFetcher::new(), &fetches);
+        let mut fetcher = Remembering::new(
+            Fetcher::File(roas_file_fetcher::FileFetcher::new()),
+            &fetches,
+        );
         let spent = fetcher
             .fetch(&Url::parse("file:///budget/spent.json").unwrap())
             .unwrap_err();

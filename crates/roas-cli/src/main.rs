@@ -305,6 +305,20 @@ impl ResourceFetcher for Fetcher {
     }
 }
 
+impl Fetcher {
+    /// [`ResourceFetcher::fetch_document`], with the text the document was
+    /// parsed from.
+    pub(crate) fn fetch_document_text(
+        &mut self,
+        uri: &url::Url,
+    ) -> Result<(LoadedDocument, String), LoaderError> {
+        match self {
+            Fetcher::File(fetcher) => fetcher.fetch_document_text(uri),
+            Fetcher::Http(fetcher) => fetcher.fetch_document_text(uri),
+        }
+    }
+}
+
 /// [`build_loader`], with each fetcher passed through `wrap` before it is
 /// registered.
 pub(crate) fn build_loader_with<W: ResourceFetcher + 'static>(
