@@ -1502,19 +1502,20 @@ fn misspelled(out_dir: &Path, key: &str) -> Option<String> {
 /// are looked at, built from planned paths that already passed every
 /// check, and only regular files named the way [`write_atomic`] names the
 /// temporaries of this run's own files.
-fn remove_leftover_temps(
+fn remove_leftover_temps<'a>(
     out_dir: &Path,
-    planned: &BTreeMap<String, &str>,
+    keys: impl IntoIterator<Item = &'a String>,
     manifest_file: &str,
 ) -> Result<(), WriteError> {
-    // Only temporaries of the files this run writes: a run rooted in a
+    // Only temporaries of this label's files, planned or recorded (one no
+    // longer generated may have been cut off mid-write): a run rooted in a
     // subdirectory holds its own lock, and its temporaries are its own.
     let mut prefixes: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     prefixes
         .entry(out_dir.to_path_buf())
         .or_default()
         .insert(tmp_prefix(manifest_file));
-    for key in planned.keys() {
+    for key in keys {
         let (dir, name) = match key.rsplit_once('/') {
             Some((parent, name)) => (out_dir.join(parent), name),
             None => (out_dir.to_path_buf(), key.as_str()),
@@ -1718,7 +1719,11 @@ pub fn write(
     )?;
     // Only now: every planned path is known to stay inside the output
     // directory and to reach it through no link.
-    remove_leftover_temps(out_dir, &planned, &manifest_file)?;
+    remove_leftover_temps(
+        out_dir,
+        planned.keys().chain(previous.files.keys()),
+        &manifest_file,
+    )?;
 
     let hashes: BTreeMap<String, String> = planned
         .iter()
@@ -4111,5 +4116,25 @@ mod tests {
             write(&outer, &dir.0, &WriteOptions::new("outer")),
             Err(WriteError::OwnedByOther { .. })
         ));
+    }
+
+    #[test]
+    fn temporaries_of_files_no_longer_generated_are_removed() {
+        let dir = TempDir::new("stale-temps");
+        write(
+            &generation(&[("pets.rs", "p")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        let leftover = dir.0.join(format!("{}1-2-3", tmp_prefix("pets.rs")));
+        fs::write(&leftover, "partial").unwrap();
+        write(
+            &generation(&[("types.rs", "t")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        assert!(!leftover.exists());
     }
 }

@@ -18,6 +18,9 @@ name = "roas"
 path = "src/main.rs"
 
 [features]
+# Named, though empty, so CI tests the binary as it ships, not only with
+# `exact-numbers` on.
+default = []
 # Keep JSON numbers exactly as written in `openapi generate`. Off by
 # default: it turns on `serde_json/arbitrary_precision` for the whole
 # binary, which changes how the other commands compare numbers — for
