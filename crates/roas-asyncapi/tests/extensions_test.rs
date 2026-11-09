@@ -10,6 +10,9 @@
 
 #![cfg(feature = "v3_0")]
 
+#[path = "../src/test_yaml.rs"]
+mod yaml;
+
 use roas_asyncapi::v3_0::Document;
 
 #[test]
@@ -51,7 +54,7 @@ unknownAfter: [1]
 x-kept: 7
 ";
 
-    let doc: Document = serde_yaml_ng::from_str(yaml).expect("parses");
+    let doc: Document = yaml::from_str(yaml).expect("parses");
     assert_eq!(doc.info.title, "T");
     assert_eq!(doc.info.version, "1");
     assert_eq!(

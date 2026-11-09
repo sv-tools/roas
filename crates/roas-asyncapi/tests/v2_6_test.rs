@@ -3,6 +3,9 @@
 
 #![cfg(feature = "v2_6")]
 
+#[path = "../src/test_yaml.rs"]
+mod yaml;
+
 use enumset::EnumSet;
 use roas_asyncapi::v2_6::{Document, OperationKind, OperationMessage};
 use roas_asyncapi::validation::{Validate, ValidationOptions};
@@ -24,7 +27,7 @@ fn load_json(name: &str) -> Document {
 }
 
 fn load_yaml(name: &str) -> Document {
-    serde_yaml_ng::from_str(&read(name)).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+    yaml::from_str(&read(name)).unwrap_or_else(|e| panic!("parse {name}: {e}"))
 }
 
 #[test]

@@ -52,7 +52,7 @@ doc.validate(EnumSet::empty()).expect("description is well-formed");
 assert_eq!(doc.workflows[0].workflow_id, "getPet");
 ```
 
-YAML descriptions work the same way — parse with `serde_yaml_ng` (or any other YAML crate) into `Description`.
+YAML descriptions work the same way — parse with `serde-saphyr` (or any other YAML crate) into `Description`.
 
 ## Validation
 

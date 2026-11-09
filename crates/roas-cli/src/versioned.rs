@@ -203,10 +203,10 @@ fn to_value<T: serde::Serialize>(version_tag: &str, spec: &T) -> Result<Value> {
 }
 
 /// Parse `raw` into a `serde_json::Value`. Format selection is by `is_yaml`:
-/// YAML is parsed with `serde_yaml_ng`, otherwise `serde_json`.
+/// YAML is parsed with [`crate::yaml::from_str`], otherwise `serde_json`.
 pub fn parse_value(raw: &str, is_yaml: bool) -> Result<Value> {
     if is_yaml {
-        serde_yaml_ng::from_str(raw).context("parsing YAML")
+        crate::yaml::from_str(raw).context("parsing YAML")
     } else {
         serde_json::from_str(raw).context("parsing JSON")
     }

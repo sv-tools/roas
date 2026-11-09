@@ -1,5 +1,8 @@
 #![cfg(feature = "source-graph")]
 
+#[path = "support/yaml.rs"]
+mod yaml;
+
 use roas::{
     AsyncResourceFetcher, DocumentFetchFuture, FetchFuture, LoadedDocument, Loader, LoaderError,
     ResourceFetcher,
@@ -112,11 +115,9 @@ async fn external_fragments_keep_mounts_and_server_origins_across_redirects() {
     for asynchronous in [false, true] {
         for level in ["operation", "path", "root"] {
             let api: Value =
-                serde_yaml_ng::from_str(include_str!("data/operation-resolution/openapi.yaml"))
-                    .unwrap();
+                yaml::from_str(include_str!("data/operation-resolution/openapi.yaml")).unwrap();
             let mut parts: Value =
-                serde_yaml_ng::from_str(include_str!("data/operation-resolution/parts.yaml"))
-                    .unwrap();
+                yaml::from_str(include_str!("data/operation-resolution/parts.yaml")).unwrap();
             let mut next: Value =
                 serde_json::from_str(include_str!("data/operation-resolution/next.json")).unwrap();
             if level != "operation" {

@@ -18,14 +18,14 @@ default = []
 # Parse YAML response bodies in addition to JSON. The fetcher sniffs the
 # response Content-Type and falls back to either the requested or final URL
 # path extension to decide which parser to use.
-yaml = ["dep:serde_yaml_ng"]
+yaml = ["dep:serde-saphyr"]
 
 [dependencies]
 roas = { workspace = true, features = ["v3_2"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng = { workspace = true, optional = true }
+serde-saphyr = { workspace = true, optional = true }
 thiserror.workspace = true
 url.workspace = true
 
