@@ -127,6 +127,10 @@ fn a_stray_member_is_listed_exactly_when_the_model_drops_it() {
                     let paths: Vec<_> = found.members.iter().map(|m| m.path.as_str()).collect();
                     assert_eq!(paths, [member.as_str()], "{name}");
                     assert_eq!(found.members[0].name, stray);
+                    if stray.starts_with("x-") {
+                        // Kept wherever extensions are allowed.
+                        assert!(!found.members[0].extensions_allowed, "{name}: {member}");
+                    }
                     listed += 1;
                 }
             }

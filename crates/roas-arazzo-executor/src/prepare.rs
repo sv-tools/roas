@@ -42,13 +42,15 @@ pub enum PreparationIssue {
     /// A member that is neither a field of its object nor an `x-`
     /// extension it allows: dropped on parse, so whatever it means is not
     /// honoured.
-    #[error("{}", roas_arazzo::unknown::message(name, version))]
+    #[error("{}", roas_arazzo::unknown::message(name, version, *extensions_allowed))]
     #[non_exhaustive]
     UnknownMember {
         /// The member's name as written.
         name: String,
         /// The `arazzo` version the document declares, as written.
         version: String,
+        /// Whether its object allows `x-` extensions.
+        extensions_allowed: bool,
     },
 }
 
@@ -543,6 +545,7 @@ impl<'d> Compiler<'d> {
                     PreparationIssue::UnknownMember {
                         name: member.name.clone(),
                         version: unknown.version.clone(),
+                        extensions_allowed: member.extensions_allowed,
                     },
                 );
             }

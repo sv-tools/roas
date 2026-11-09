@@ -26,6 +26,9 @@ pub struct UnknownMember {
     pub path: String,
     /// The member's name as written.
     pub name: String,
+    /// Whether its object allows `x-` extensions: all but a Reusable
+    /// Object do.
+    pub extensions_allowed: bool,
 }
 
 /// What a description's model did not keep of the value it was read from.
@@ -48,10 +51,11 @@ impl UnknownMembers {
     }
 }
 
-/// What to say about `name`, a member Arazzo `version` does not know.
+/// What to say about `name`, a member Arazzo `version` does not know, of
+/// an object that allows extensions or not.
 #[must_use]
-pub fn message(name: &str, version: &str) -> String {
-    if name.starts_with("x-") {
+pub fn message(name: &str, version: &str, extensions_allowed: bool) -> String {
+    if !extensions_allowed {
         format!("`{name}` is not a field of Arazzo {version}, and this object allows no extensions")
     } else {
         format!("`{name}` is not a field of Arazzo {version}; an extension's name starts with `x-`")
@@ -68,6 +72,8 @@ pub(crate) fn diff(raw: &Value, known: &Value) -> UnknownMembers {
         match (raw, known) {
             (Value::Object(raw), Value::Object(known)) => {
                 let mut children = Vec::new();
+                // Only a Reusable Object has a `reference` field.
+                let extensions_allowed = !known.contains_key("reference");
                 for (name, value) in raw {
                     let member = format!("{path}.{name}");
                     match known.get(name) {
@@ -77,6 +83,7 @@ pub(crate) fn diff(raw: &Value, known: &Value) -> UnknownMembers {
                         None => members.push(UnknownMember {
                             path: member,
                             name: name.clone(),
+                            extensions_allowed,
                         }),
                     }
                 }
@@ -150,17 +157,36 @@ mod tests {
     }
 
     #[test]
-    fn an_extension_the_model_dropped_is_listed() {
-        let raw = json!({ "reference": "$components.parameters.p", "x-note": 1 });
-        let known = json!({ "reference": "$components.parameters.p" });
+    fn a_member_of_a_reusable_object_is_not_told_to_be_an_extension() {
+        let raw = json!({
+            "info": { "summery": 1 },
+            "p": { "reference": "$components.parameters.p", "nme": 2, "x-note": 1 }
+        });
+        let known = json!({ "info": {}, "p": { "reference": "$components.parameters.p" } });
         let found = diff(&raw, &known);
-        assert_eq!(names(&found), [("#.x-note", "x-note")]);
+        let allowed: Vec<_> = found
+            .members
+            .iter()
+            .map(|member| (member.path.as_str(), member.extensions_allowed))
+            .collect();
         assert_eq!(
-            message("x-note", "1.1.0"),
+            allowed,
+            [
+                ("#.info.summery", true),
+                ("#.p.nme", false),
+                ("#.p.x-note", false)
+            ]
+        );
+        assert_eq!(
+            message("x-note", "1.1.0", false),
             "`x-note` is not a field of Arazzo 1.1.0, and this object allows no extensions"
         );
         assert_eq!(
-            message("summery", "1.0.1"),
+            message("nme", "1.1.0", false),
+            "`nme` is not a field of Arazzo 1.1.0, and this object allows no extensions"
+        );
+        assert_eq!(
+            message("summery", "1.0.1", true),
             "`summery` is not a field of Arazzo 1.0.1; an extension's name starts with `x-`"
         );
     }

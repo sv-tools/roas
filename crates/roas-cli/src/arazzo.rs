@@ -259,7 +259,11 @@ fn unknown_warnings(map: Option<&SourceMap>, unknown: &UnknownMembers) -> Vec<St
             format!(
                 "warning: {}{at}: {}",
                 member.path,
-                roas_arazzo::unknown::message(&member.name, &unknown.version)
+                roas_arazzo::unknown::message(
+                    &member.name,
+                    &unknown.version,
+                    member.extensions_allowed
+                )
             )
         })
         .collect()
