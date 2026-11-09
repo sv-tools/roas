@@ -35,7 +35,7 @@ impl SourceMap {
                     message: error.to_string(),
                 }
             })?;
-        let (root, _) = node(&text, root, false, &mut HashMap::new());
+        let (root, _) = node(&text, root, false, &mut Memo::default());
         Ok(Self::new(text, root))
     }
 }
@@ -98,18 +98,22 @@ fn span(text: &str, spanned: &Spanned<Raw>) -> (usize, usize) {
     (start.min(text.len()), end.min(text.len()))
 }
 
+/// What the definition pass measured, for replays to reuse.
+#[derive(Default)]
+struct Memo {
+    /// The end of each collection defined so far, by its start.
+    ends: HashMap<usize, usize>,
+    /// Where an empty value was placed, by where it was reported.
+    placed: HashMap<usize, usize>,
+}
+
 /// The node, and where its occurrence ends: for an alias, the end of the
 /// `*name` that uses it rather than of the anchored value, so the
 /// collection holding the alias is measured where the alias is written.
 /// Inside a replayed alias (`replayed`) every node is measured at its
-/// definition: the `*name` belongs to the alias alone. `ends` holds the
+/// definition: the `*name` belongs to the alias alone. `memo` holds the
 /// end measured for each collection defined so far, by its start.
-fn node(
-    text: &str,
-    spanned: Spanned<Raw>,
-    replayed: bool,
-    ends: &mut HashMap<usize, usize>,
-) -> (Node, usize) {
+fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (Node, usize) {
     let alias = spanned.referenced != spanned.defined;
     let used = spanned.referenced.span();
     let used = used.byte_offset().map_or(0, |offset| offset as usize)
@@ -137,9 +141,15 @@ fn node(
                 .into_iter()
                 .map(|(key, value)| {
                     let (key_start, key_end) = span(text, &key);
+                    // A member merged in by `<<: *a` is referenced at the
+                    // `*a`, key and value alike: like a replay, it is
+                    // where its definition is.
+                    let merged =
+                        key.referenced != key.defined && key.referenced == value.referenced;
+                    let again = inner || merged;
                     // An alias key (`*k :`) is named at its anchor but
                     // written here: what follows it is measured from here.
-                    let key_used = if !inner && key.referenced != key.defined {
+                    let key_used = if !again && key.referenced != key.defined {
                         let used = key.referenced.span();
                         used.byte_offset().map_or(0, |offset| offset as usize)
                             + used.byte_len().map_or(0, |len| len as usize)
@@ -152,18 +162,30 @@ fn node(
                         // `1: x` reads as the member `"1"`.
                         _ => text[key_start..key_end].to_owned(),
                     };
-                    let (mut value, mut value_end) = node(text, value, inner, ends);
+                    let (mut value, mut value_end) = node(text, value, inner, memo);
                     // `? key` with no value: its empty value is given the
                     // next token's place, on a later line. It belongs
-                    // right after the key (or its `:`).
-                    if value.start == value.end
-                        && matches!(value.kind, Kind::Scalar(None))
+                    // right after the key (or its `:`) — where the
+                    // definition put it, for a replayed or merged member.
+                    let reported = value.start;
+                    let empty =
+                        value.start == value.end && matches!(value.kind, Kind::Scalar(None));
+                    let place = if !empty {
+                        None
+                    } else if again {
+                        memo.placed.get(&reported).copied()
+                    } else if text
+                        .get(key_used..value.start)
                         // An alias to an empty value sits back at its anchor.
-                        && text
-                            .get(key_used..value.start)
-                            .is_some_and(|gap| gap.contains(['\n', '\r']))
+                        .is_some_and(|gap| gap.contains(['\n', '\r']))
                     {
                         let at = colon(text, key_used);
+                        memo.placed.insert(reported, at);
+                        Some(at)
+                    } else {
+                        None
+                    };
+                    if let Some(at) = place {
                         (value.start, value.end, value.text_end, value_end) = (at, at, at, at);
                     }
                     end = end.max(key_used).max(value_end);
@@ -182,7 +204,7 @@ fn node(
             items
                 .into_iter()
                 .map(|item| {
-                    let (item, item_end) = node(text, item, inner, ends);
+                    let (item, item_end) = node(text, item, inner, memo);
                     first.get_or_insert(item.start);
                     end = end.max(item_end);
                     item
@@ -220,7 +242,7 @@ fn node(
         // there, which saw where its own nested aliases are written — and
         // do not measure it again per alias.
         let known = (replayed || alias)
-            .then(|| ends.get(&start).copied())
+            .then(|| memo.ends.get(&start).copied())
             .flatten();
         end = match (known, text.as_bytes().get(start)) {
             (Some(known), _) => known,
@@ -233,7 +255,7 @@ fn node(
             _ => colon(text, end),
         };
         if !(replayed || alias) {
-            ends.insert(start, end);
+            memo.ends.insert(start, end);
         }
         text_end = end;
     }
@@ -1050,6 +1072,33 @@ workflows:
         let text = "x: &k title\ninfo:\n  ? *k\n  version: 1\n";
         let map = SourceMap::parse(text).unwrap();
         assert_eq!(map.locate("#.info.title").unwrap().start.line, 3);
+        // Replayed and merged members are where their definition is.
+        for (text, defined, again) in [
+            ("b: &a1\n  ? k\nc:\n  z: 1\n  <<: *a1\n", "#.b.k", "#.c.k"),
+            ("b: &a1 {? k\n  , ups: 9}\nc: {<<: *a1}\n", "#.b.k", "#.c.k"),
+            (
+                "x: &k title\nm: &m\n  *k :\n  v: 1\nn: *m\n",
+                "#.m.title",
+                "#.n.title",
+            ),
+            (
+                "x: &k title\nm: &m\n  ? *k\n  v: 1\nn: [*m]\n",
+                "#.m.title",
+                "#.n[0].title",
+            ),
+            (
+                "x: &k title\nm: &m {*k : , v: 1}\nn: *m\n",
+                "#.m.title",
+                "#.n.title",
+            ),
+        ] {
+            let map = SourceMap::parse(text).unwrap();
+            assert_eq!(map.locate(defined), map.locate(again), "{text:?}");
+        }
+        let map = SourceMap::parse("b: &a1\n  ? k\nc:\n  z: 1\n  <<: *a1\n").unwrap();
+        assert_eq!(map.locate("#.b.k").unwrap().start.offset, 12);
+        let map = SourceMap::parse("x: &k title\nm: &m\n  *k :\n  v: 1\nn: *m\n").unwrap();
+        assert_eq!(map.locate("#.m.title").unwrap().start.line, 3);
         // `?x` is a plain scalar, so its `'` opens no quote.
         let text = "k: {a: ?'x, <<: {m: 1}}\n";
         let map = SourceMap::parse(text).unwrap();
