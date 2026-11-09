@@ -305,6 +305,7 @@ struct Key {
     /// `*name` that brings it there, while `start` is at the anchor.
     #[cfg_attr(not(feature = "editor"), allow(dead_code))]
     written: usize,
+    /// Where `written` ends: the key's end, or the `*name`'s.
     #[cfg_attr(not(feature = "editor"), allow(dead_code))]
     written_end: usize,
 }
