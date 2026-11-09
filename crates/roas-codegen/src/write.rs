@@ -605,6 +605,27 @@ fn resolved(out_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The directories above `root` a run looks in for other output roots,
+/// up to the first shared, sticky one (such as `/tmp`) and not beyond:
+/// what other users put there is not this run's business, and must not be
+/// able to block it.
+fn enclosing_dirs(root: &Path) -> impl Iterator<Item = &Path> {
+    root.ancestors().skip(1).take_while(|dir| !is_sticky(dir))
+}
+
+fn is_sticky(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o1000 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
 /// The other output roots a run in `out_dir` can reach, each with whether
 /// its lock file may be created: enclosing directories holding a manifest
 /// (yes) or a lock file (no), and directories on the way to `keys` holding
@@ -628,7 +649,7 @@ fn other_roots<'a>(
     };
     let mut roots = Vec::new();
     if let Some(root) = resolved(out_dir) {
-        for dir in root.ancestors().skip(1) {
+        for dir in enclosing_dirs(&root) {
             if has(dir, true) {
                 roots.push((dir.to_path_buf(), true));
             } else if has(dir, false) {
@@ -863,7 +884,7 @@ fn other_owners<'a>(
     // Above: only entries that fall inside this output directory. These
     // directories are the caller's, so what cannot be read is skipped.
     if let Some(root) = resolved(out_dir) {
-        for ancestor in root.ancestors().skip(1) {
+        for ancestor in enclosing_dirs(&root) {
             let Ok(below_path) = root.strip_prefix(ancestor) else {
                 continue;
             };
@@ -1136,6 +1157,25 @@ fn aliases(
                 .filter(|new| new.eq_ignore_ascii_case(old))
                 .map(|new| (old.clone(), (*new).clone()))
         })
+        .collect()
+}
+
+/// Previous paths spelled like a planned one ignoring ASCII case that no
+/// longer exist: the file now has the planned spelling, or none. A partial
+/// run keeps every other previous path, but these would be dropped by the
+/// next run anyway (as aliases, once the planned file exists), so they are
+/// dropped now and both runs agree.
+fn gone_spellings(
+    out_dir: &Path,
+    previous: &BTreeMap<String, String>,
+    planned: &BTreeMap<String, &str>,
+) -> Vec<String> {
+    previous
+        .keys()
+        .filter(|old| !planned.contains_key(*old))
+        .filter(|old| planned.keys().any(|new| new.eq_ignore_ascii_case(old)))
+        .filter(|old| fs::symlink_metadata(out_dir.join(old)).is_err())
+        .cloned()
         .collect()
 }
 
@@ -1708,7 +1748,8 @@ pub fn write(
         check_links(out_dir, path)?;
     }
     let aliased = aliases(out_dir, &previous.files, &planned);
-    let old_spellings: BTreeSet<String> = aliased.keys().cloned().collect();
+    let mut old_spellings: BTreeSet<String> = aliased.keys().cloned().collect();
+    old_spellings.extend(gone_spellings(out_dir, &previous.files, &planned));
     let (owned, removable) = outcome(&previous.files, &planned, &old_spellings, errors > 0);
     let going = going(out_dir, &manifest_file, &previous, &removable)?;
     // Every check before the first write.
@@ -1910,9 +1951,10 @@ pub fn check(
     for path in previous.files.keys() {
         check_links(out_dir, path)?;
     }
-    let aliased: BTreeSet<String> = aliases(out_dir, &previous.files, &planned)
+    let mut aliased: BTreeSet<String> = aliases(out_dir, &previous.files, &planned)
         .into_keys()
         .collect();
+    aliased.extend(gone_spellings(out_dir, &previous.files, &planned));
     let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
     let going = going(out_dir, &manifest_file, &previous, &removable)?;
     check_ownership(
@@ -4172,5 +4214,49 @@ mod tests {
             write(&generation(&[("a.rs", "b")]), &dir.0, &b),
             Err(WriteError::SourceMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn a_partial_write_after_a_case_change_settles_in_one_run() {
+        use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
+        let dir = TempDir::new("partial-case");
+        write(
+            &generation(&[("a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        fs::remove_file(dir.0.join("a.rs")).unwrap();
+        let mut g = generation(&[("A.rs", "a")]);
+        g.diagnostics.push(Diagnostic::new(
+            Severity::Error,
+            DiagnosticKind::ReferenceCycle,
+            SchemaId::new(url::Url::parse("file:///x.json").unwrap(), ""),
+            "",
+            "test",
+        ));
+        let mut partial = WriteOptions::new("api");
+        partial.allow_partial = true;
+        write(&g, &dir.0, &partial).unwrap();
+        assert!(check(&g, &dir.0, &partial).unwrap().is_clean());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_enclosing_scan_stops_at_a_sticky_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("sticky");
+        let shared = dir.0.join("shared");
+        fs::create_dir_all(shared.join("mine")).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+        // Another user's junk in the shared directory blocks nothing.
+        fs::write(shared.join(".roas-codegen-x-rust.json"), "not json").unwrap();
+        write(
+            &generation(&[("a.rs", "a")]),
+            &shared.join("mine"),
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }

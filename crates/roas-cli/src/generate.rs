@@ -162,9 +162,12 @@ fn is_regular_file(path: &Path) -> bool {
 
 /// Whether `path` reads through a file descriptor or another non-file.
 fn is_pipe(path: &Path) -> bool {
-    path.starts_with("/dev")
-        || path.starts_with("/proc")
-        || std::fs::metadata(path).is_ok_and(|m| !m.is_file())
+    // A file descriptor by name, even when it is redirected from a file.
+    let parts: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    let through_fd = path == Path::new("/dev/stdin")
+        || path.starts_with("/dev/fd")
+        || (path.starts_with("/proc") && parts.get(3).is_some_and(|p| *p == "fd"));
+    through_fd || std::fs::metadata(path).is_ok_and(|m| !m.is_file())
 }
 
 /// `path` without a description's format extension (`.json`, `.yaml`,
