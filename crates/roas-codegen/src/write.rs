@@ -148,6 +148,10 @@ pub enum WriteError {
         "the output directory is, or is inside, a file another generation target owns (manifest {manifest}); use a different output directory"
     )]
     OutputDirOwned { manifest: PathBuf },
+    #[error(
+        "directory {stored} is spelled {planned} by this generation: the manifest would record a path a case-sensitive checkout does not have; rename the directory, or keep its spelling"
+    )]
+    DirectorySpelling { planned: PathBuf, stored: PathBuf },
     #[error("{0} is a symbolic link; generated files are never written through one")]
     Symlink(PathBuf),
     #[error(
@@ -1288,6 +1292,8 @@ fn check_ownership(
         }
         check_recorded(out_dir, path, going)?;
     }
+    // Last, so whose files these are is the first thing said.
+    check_directory_spelling(out_dir, planned)?;
     check_path(out_dir, manifest_file)
 }
 
@@ -1591,6 +1597,52 @@ fn is_planned_file(out_dir: &Path, planned: &BTreeMap<String, &str>, path: &str)
         && planned
             .keys()
             .any(|p| p.eq_ignore_ascii_case(path) && file_id(&out_dir.join(p)) == id)
+}
+
+/// Refuse a planned directory the disk stores under another spelling of
+/// the same directory (`Dir` for `dir`): files are respelled, directories
+/// are not, since others' files may live in them, and a manifest naming
+/// `dir/a.rs` over `Dir/a.rs` breaks a case-sensitive checkout.
+fn check_directory_spelling(
+    out_dir: &Path,
+    planned: &BTreeMap<String, &str>,
+) -> Result<(), WriteError> {
+    let prefixes: BTreeSet<&str> = planned
+        .keys()
+        .flat_map(|key| key.match_indices('/').map(move |(i, _)| &key[..i]))
+        .collect();
+    let mut listings = Listings::default();
+    for prefix in prefixes {
+        let path = out_dir.join(prefix);
+        let Some(wanted) = file_id(&path) else {
+            continue;
+        };
+        let (parent, name) = match prefix.rsplit_once('/') {
+            Some((dir, name)) => (out_dir.join(dir), name),
+            None => (out_dir.to_path_buf(), prefix),
+        };
+        if listings.has(&parent, name) {
+            continue;
+        }
+        let stored = fs::read_dir(&parent).ok().and_then(|entries| {
+            entries.flatten().find_map(|e| {
+                (e.file_type().is_ok_and(|t| t.is_dir())
+                    && file_id(&e.path()).is_some_and(|id| id == wanted))
+                .then(|| e.file_name())
+            })
+        });
+        if let Some(stored) = stored {
+            let stored = match prefix.rsplit_once('/') {
+                Some((dir, _)) => Path::new(dir).join(stored),
+                None => PathBuf::from(stored),
+            };
+            return Err(WriteError::DirectorySpelling {
+                planned: PathBuf::from(prefix),
+                stored,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Directory listings, read once per run.
@@ -3332,31 +3384,6 @@ mod tests {
     }
 
     #[test]
-    fn respelling_keeps_the_directory_and_fixes_the_name() {
-        let dir = TempDir::new("respell-dir");
-        write(
-            &generation(&[("Dir/A.rs", "a")]),
-            &dir.0,
-            &WriteOptions::new("api"),
-        )
-        .unwrap();
-        if !same_file(&dir.0.join("Dir/A.rs"), &dir.0.join("dir/a.rs")) {
-            return;
-        }
-        write(
-            &generation(&[("dir/a.rs", "a")]),
-            &dir.0,
-            &WriteOptions::new("api"),
-        )
-        .unwrap();
-        let names: Vec<String> = fs::read_dir(dir.0.join("Dir"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["a.rs".to_owned()]);
-    }
-
-    #[test]
     fn a_lock_file_left_by_a_killed_run_does_not_block() {
         let dir = TempDir::new("stale-lock");
         fs::write(dir.0.join(LOCK_FILE), "").unwrap();
@@ -3526,27 +3553,6 @@ mod tests {
         .unwrap();
         assert!(!top.exists() && !nested.exists());
         assert!(dir.0.join("sub/keep.txt").exists());
-    }
-
-    #[test]
-    fn a_directory_only_case_change_reports_no_rename() {
-        let dir = TempDir::new("dir-case");
-        write(
-            &generation(&[("Dir/a.rs", "a")]),
-            &dir.0,
-            &WriteOptions::new("api"),
-        )
-        .unwrap();
-        if !same_file(&dir.0.join("Dir/a.rs"), &dir.0.join("dir/a.rs")) {
-            return;
-        }
-        let report = write(
-            &generation(&[("dir/a.rs", "a")]),
-            &dir.0,
-            &WriteOptions::new("api"),
-        )
-        .unwrap();
-        assert!(report.renamed.is_empty(), "{report:?}");
     }
 
     #[test]
@@ -4542,5 +4548,28 @@ mod tests {
         // Any lock file in the output directory itself.
         fs::write(out.join(LOCK_FILE), "").unwrap();
         assert_eq!(appeared(&out, &unlocked), Some(out.join(LOCK_FILE)));
+    }
+
+    #[test]
+    fn a_directory_stored_in_another_case_is_refused() {
+        let dir = TempDir::new("dir-spelling");
+        write(
+            &generation(&[("Dir/a.rs", "a")]),
+            &dir.0,
+            &WriteOptions::new("api"),
+        )
+        .unwrap();
+        if !same_file(&dir.0.join("Dir"), &dir.0.join("dir")) {
+            return; // two directories here
+        }
+        let g = generation(&[("dir/a.rs", "a")]);
+        assert!(matches!(
+            check(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::DirectorySpelling { .. })
+        ));
+        assert!(matches!(
+            write(&g, &dir.0, &WriteOptions::new("api")),
+            Err(WriteError::DirectorySpelling { .. })
+        ));
     }
 }

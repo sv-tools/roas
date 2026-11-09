@@ -410,6 +410,7 @@ fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
         E::Unowned(_) => anyhow!("{}: {error} (pass --force)", out.display()),
         // Their paths are relative to the output directory.
         E::OwnedByOther { .. }
+        | E::DirectorySpelling { .. }
         | E::ReservedPath(_)
         | E::IsADirectory(_)
         | E::OutputDirOwned { .. } => {
