@@ -878,6 +878,16 @@ fn scoped_base_urls(
     base_urls: &[String],
     retrieval_aliases: bool,
 ) -> Result<()> {
+    // Two flags reaching one document's source by different paths would
+    // otherwise race, the later one silently winning.
+    let mut claimed: BTreeMap<(roas_arazzo_executor::DocumentId, String), (&str, &str)> =
+        BTreeMap::new();
+    for base_url in base_urls {
+        let (path, url) = split_pair(base_url, "--base-url")?;
+        if !path.contains('.') {
+            claimed.insert((root, path.to_owned()), (path, url));
+        }
+    }
     'flags: for base_url in base_urls {
         let (path, url) = split_pair(base_url, "--base-url")?;
         let Some((documents, name)) = path.rsplit_once('.') else {
@@ -930,6 +940,14 @@ fn scoped_base_urls(
         if registry.source(owner, name).is_none() {
             bail!(
                 "`--base-url {path}=…`: `{name}` names no source description of {}",
+                registry.document(owner)?.identity()
+            );
+        }
+        if let Some((other, earlier)) = claimed.insert((owner, name.to_owned()), (path, url))
+            && earlier != url
+        {
+            bail!(
+                "`--base-url {path}=…` and `--base-url {other}=…` name the same source of {} with different URLs",
                 registry.document(owner)?.identity()
             );
         }
@@ -1972,6 +1990,85 @@ mod tests {
         let asked = join.join().unwrap();
         assert_eq!(asked.len(), 1);
         assert!(asked[0].starts_with("GET /things?id=1 "), "{asked:?}");
+    }
+
+    /// An entry whose aliases `a` and `b` both name a child linking `root`
+    /// back to the entry, run with `base_urls`; the error, if any.
+    fn conflicting(name: &str, base_urls: &[&str]) -> Option<String> {
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write(&format!("{name}-entry.json"), &json!({}));
+        let entry_name = entry.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::write(
+            &format!("{name}-child.json"),
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry_name, "type": "arazzo" },
+                    { "name": "api", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                    "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        std::fs::write(
+            &entry.0,
+            serde_json::to_string(&json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "a", "url": child_name, "type": "arazzo" },
+                    { "name": "b", "url": child_name, "type": "arazzo" },
+                    { "name": "api", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.a.child" }] }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.base_url = base_urls.iter().map(|flag| (*flag).to_owned()).collect();
+        args.quiet = true;
+        run_arazzo_run(args).err().map(|error| error.to_string())
+    }
+
+    #[test]
+    fn scoped_base_urls_that_reach_one_source_must_agree() {
+        let error = conflicting(
+            "conflict",
+            &["a.api=http://127.0.0.1:8", "b.api=http://127.0.0.1:9"],
+        )
+        .expect("a conflict");
+        assert!(
+            error.starts_with(
+                "`--base-url b.api=…` and `--base-url a.api=…` name the same source of "
+            ),
+            "{error}"
+        );
+        let error = conflicting(
+            "loop",
+            &["api=http://127.0.0.1:8", "a.root.api=http://127.0.0.1:9"],
+        )
+        .expect("a conflict through the loop back to the entry");
+        assert!(
+            error.starts_with("`--base-url a.root.api=…` and `--base-url api=…`"),
+            "{error}"
+        );
+        // Agreeing flags are not a conflict.
+        let agreed = conflicting(
+            "agreed",
+            &["a.api=http://127.0.0.1:8", "b.api=http://127.0.0.1:8"],
+        );
+        assert!(
+            agreed
+                .as_deref()
+                .is_none_or(|error| !error.contains("name the same source")),
+            "{agreed:?}"
+        );
     }
 
     #[test]

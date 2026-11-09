@@ -378,6 +378,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_fetcher_dispatches_to_the_kind_it_wraps() {
+        let path =
+            std::env::temp_dir().join(format!("roas-cli-fetcher-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"ok":true}"#).unwrap();
+        let uri = url::Url::from_file_path(&path).unwrap();
+        let mut fetcher = Fetcher::File(FileFetcher::new());
+        assert_eq!(
+            fetcher.fetch(&uri).unwrap(),
+            serde_json::json!({ "ok": true })
+        );
+        assert_eq!(
+            fetcher.fetch_document(&uri).unwrap().document,
+            serde_json::json!({ "ok": true })
+        );
+        let mut http = Fetcher::Http(HttpFetcher::new());
+        let refused = url::Url::parse("http://127.0.0.1:1/none.json").unwrap();
+        assert!(http.fetch(&refused).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn build_loader_returns_none_for_empty_kinds() {
         assert!(build_loader(&[]).is_none());
     }
