@@ -2054,7 +2054,11 @@ pub fn write(
     );
     final_manifest.replacing = replacing;
     let on_disk = read_manifest(&manifest_path)?;
-    if !on_disk.is_some_and(|m| m.same_as(&final_manifest)) {
+    // Rewritten also when stored under another spelling held by a hard
+    // link: that gives it a file of its own to respell below.
+    let linked = misspelled_entry(out_dir, &manifest_file, &mut Listings::default())
+        .is_some_and(|(_, single)| !single);
+    if linked || !on_disk.is_some_and(|m| m.same_as(&final_manifest)) {
         write_atomic(&manifest_path, manifest_text(&final_manifest).as_bytes())?;
     }
     // The manifest's own name as stored, too: under another spelling it is
@@ -2121,91 +2125,98 @@ pub fn check(
         }
     }
     let manifest_path = out_dir.join(&manifest_file);
-    let previous = read_manifest(&manifest_path)?.unwrap_or_default();
-    // As read now, to see whether a write rooted here ran meanwhile; after
-    // `read_manifest`, which refuses links and non-files, and never through
-    // either itself.
-    let manifest_at_start = read_recorded(&manifest_path).ok().flatten();
-    check_source(&previous, options)?;
-    for path in previous.files.keys() {
-        check_links(out_dir, path)?;
-    }
-    let mut aliased: BTreeSet<String> = aliases(out_dir, &previous.files, &planned)
-        .into_keys()
-        .collect();
-    aliased.extend(gone_spellings(out_dir, &previous.files, &planned));
-    let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
-    let going = going(out_dir, &manifest_file, &previous, &removable)?;
-    check_ownership(
-        out_dir,
-        &manifest_file,
-        &previous,
-        &planned,
-        &aliases(out_dir, &previous.files, &planned),
-        &going,
-        options,
-    )?;
-    let shared = shared(out_dir, &manifest_file, &removable)?;
-    let mut report = CheckReport::default();
-    let mut listings = Listings::default();
-    for (path, content) in &planned {
-        // Reached through a stale spelling a write removes first: written
-        // afresh.
-        if is_going(out_dir, &going, path) {
-            report.missing.push(PathBuf::from(path));
-            continue;
+    let mut manifest_at_start = None;
+    // Everything compared under the locks. Whatever it concludes, success
+    // or an error, a write that ran meanwhile where there was no lock to
+    // hold makes it moot: that is reported instead.
+    let result = (|| -> Result<CheckReport, WriteError> {
+        let previous = read_manifest(&manifest_path)?.unwrap_or_default();
+        // As read now, to see whether a write rooted here ran meanwhile; after
+        // `read_manifest`, which refuses links and non-files, and never through
+        // either itself.
+        manifest_at_start = read_recorded(&manifest_path).ok().flatten();
+        check_source(&previous, options)?;
+        for path in previous.files.keys() {
+            check_links(out_dir, path)?;
         }
-        // Stored under another spelling: a write renames it.
-        if misspelled_entry(out_dir, path, &mut listings).is_some() {
-            report.changed.push(PathBuf::from(path));
-            continue;
-        }
-        match read_recorded(&out_dir.join(path))? {
-            Some(current) if current == content.as_bytes() => {}
-            Some(_) => report.changed.push(PathBuf::from(path)),
-            // Absent, or a stale file of ours where its directory will be.
-            None => report.missing.push(PathBuf::from(path)),
-        }
-    }
-    // One file reached through two recorded spellings is reported once,
-    // as a write removes it once.
-    let mut seen: Vec<(String, _)> = Vec::new();
-    for (path, _) in removable {
-        let on_disk = out_dir.join(&path);
-        if let Some(id) = file_id(&on_disk) {
-            if seen
-                .iter()
-                .any(|(p, other)| *other == id && p.eq_ignore_ascii_case(&path))
-            {
+        let mut aliased: BTreeSet<String> = aliases(out_dir, &previous.files, &planned)
+            .into_keys()
+            .collect();
+        aliased.extend(gone_spellings(out_dir, &previous.files, &planned));
+        let (owned, removable) = outcome(&previous.files, &planned, &aliased, errors > 0);
+        let going = going(out_dir, &manifest_file, &previous, &removable)?;
+        check_ownership(
+            out_dir,
+            &manifest_file,
+            &previous,
+            &planned,
+            &aliases(out_dir, &previous.files, &planned),
+            &going,
+            options,
+        )?;
+        let shared = shared(out_dir, &manifest_file, &removable)?;
+        let mut report = CheckReport::default();
+        let mut listings = Listings::default();
+        for (path, content) in &planned {
+            // Reached through a stale spelling a write removes first: written
+            // afresh.
+            if is_going(out_dir, &going, path) {
+                report.missing.push(PathBuf::from(path));
                 continue;
             }
-            seen.push((path.clone(), id));
+            // Stored under another spelling: a write renames it.
+            if misspelled_entry(out_dir, path, &mut listings).is_some() {
+                report.changed.push(PathBuf::from(path));
+                continue;
+            }
+            match read_recorded(&out_dir.join(path))? {
+                Some(current) if current == content.as_bytes() => {}
+                Some(_) => report.changed.push(PathBuf::from(path)),
+                // Absent, or a stale file of ours where its directory will be.
+                None => report.missing.push(PathBuf::from(path)),
+            }
         }
-        if going.contains(&path) {
-            report.stale.push(PathBuf::from(path));
-        } else if !shared.contains(&path)
-            && !is_planned_file(out_dir, &planned, &path)
-            && read_recorded(&on_disk)?.is_some()
-        {
-            report.stale_edited.push(PathBuf::from(path));
+        // One file reached through two recorded spellings is reported once,
+        // as a write removes it once.
+        let mut seen: Vec<(String, _)> = Vec::new();
+        for (path, _) in removable {
+            let on_disk = out_dir.join(&path);
+            if let Some(id) = file_id(&on_disk) {
+                if seen
+                    .iter()
+                    .any(|(p, other)| *other == id && p.eq_ignore_ascii_case(&path))
+                {
+                    continue;
+                }
+                seen.push((path.clone(), id));
+            }
+            if going.contains(&path) {
+                report.stale.push(PathBuf::from(path));
+            } else if !shared.contains(&path)
+                && !is_planned_file(out_dir, &planned, &path)
+                && read_recorded(&on_disk)?.is_some()
+            {
+                report.stale_edited.push(PathBuf::from(path));
+            }
         }
-    }
-    let replacing = still_replacing(&previous, &owned, &planned);
-    let mut expected = manifest_for(
-        &options.label,
-        target,
-        &source_of(&previous, options),
-        owned,
-    );
-    expected.replacing = replacing;
-    report.manifest_outdated = !read_manifest(&manifest_path)?
-        .is_some_and(|m| m.same_as(&expected))
-        || misspelled_entry(out_dir, &manifest_file, &mut Listings::default()).is_some();
+        let replacing = still_replacing(&previous, &owned, &planned);
+        let mut expected = manifest_for(
+            &options.label,
+            target,
+            &source_of(&previous, options),
+            owned,
+        );
+        expected.replacing = replacing;
+        report.manifest_outdated = !read_manifest(&manifest_path)?
+            .is_some_and(|m| m.same_as(&expected))
+            || misspelled_entry(out_dir, &manifest_file, &mut Listings::default()).is_some();
+        Ok(report)
+    })();
     let manifest_changed = read_recorded(&manifest_path).ok().flatten() != manifest_at_start;
     if let Some(lock) = appeared(out_dir, &unlocked, manifest_changed) {
         return Err(WriteError::Locked(lock));
     }
-    Ok(report)
+    result
 }
 
 /// A write that ran during a `check` which had no lock file to hold there:
@@ -4670,5 +4681,26 @@ mod tests {
             .filter(|n| n.ends_with(".json") || n.ends_with(".JSON"))
             .collect();
         assert_eq!(names, vec![".roas-codegen-api-rust.json".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_manifest_in_another_case_settles_too() {
+        let dir = TempDir::new("manifest-linked");
+        let g = generation(&[("a.rs", "a")]);
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        let ours = dir.0.join(".roas-codegen-api-rust.json");
+        let shouty = dir.0.join(".ROAS-CODEGEN-API-RUST.JSON");
+        fs::rename(&ours, &shouty).unwrap();
+        if !same_file(&shouty, &ours) {
+            return;
+        }
+        fs::hard_link(&shouty, dir.0.join("backup.json")).unwrap();
+        write(&g, &dir.0, &WriteOptions::new("api")).unwrap();
+        assert!(
+            check(&g, &dir.0, &WriteOptions::new("api"))
+                .unwrap()
+                .is_clean()
+        );
     }
 }
