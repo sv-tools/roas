@@ -36,25 +36,29 @@ pub(crate) fn format(text: &str, edition: &str) -> Result<String, String> {
         .arg(config.file())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("rustfmt could not be started: {e}"))?;
-    // rustfmt may exit before reading everything; the child is reaped
-    // either way, so a long-running caller collects no zombies.
+    // rustfmt may exit before reading everything; it is always waited on,
+    // so a long-running caller collects no zombies.
     let written = child
         .stdin
         .take()
         .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-    if !written {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("rustfmt stopped reading its input".into());
-    }
+    // Its input is closed either way, so it finishes; what it said is the
+    // reason, whether it stopped reading early or failed at the end.
     let output = child
         .wait_with_output()
         .map_err(|e| format!("rustfmt could not be waited on: {e}"))?;
     if !output.status.success() {
-        return Err(format!("rustfmt failed ({})", output.status));
+        let said = String::from_utf8_lossy(&output.stderr);
+        return Err(match said.lines().map(str::trim).find(|l| !l.is_empty()) {
+            Some(line) => format!("rustfmt failed ({}): {line}", output.status),
+            None => format!("rustfmt failed ({})", output.status),
+        });
+    }
+    if !written {
+        return Err("rustfmt stopped reading its input".into());
     }
     String::from_utf8(output.stdout).map_err(|_| "rustfmt's output is not UTF-8".into())
 }

@@ -638,15 +638,12 @@ fn other_roots<'a>(
         }
     }
     for key in keys {
-        let mut current = out_dir.to_path_buf();
-        let parts: Vec<&str> = key.split('/').collect();
-        for part in &parts[..parts.len() - 1] {
-            current.push(part);
-            if !fs::symlink_metadata(&current).is_ok_and(|m| m.is_dir()) {
-                break;
-            }
-            if has(&current, false) {
-                roots.push((current.clone(), false));
+        for (i, _) in key.match_indices('/') {
+            for rel in case_variants(out_dir, &key[..i]) {
+                let dir = out_dir.join(rel);
+                if has(&dir, false) {
+                    roots.push((dir, false));
+                }
             }
         }
     }
@@ -724,6 +721,39 @@ impl Drop for Created {
     }
 }
 
+/// The directories below `out_dir` whose path is `rel` ignoring ASCII
+/// case, as stored: on a case-sensitive disk `Sub` and `sub` are two, and
+/// a nested root in either owns what ownership, compared ignoring case,
+/// says it owns. Links are not followed.
+fn case_variants(out_dir: &Path, rel: &str) -> Vec<String> {
+    let mut found = vec![String::new()];
+    for part in rel.split('/') {
+        let mut next = Vec::new();
+        for base in &found {
+            let dir = if base.is_empty() {
+                out_dir.to_path_buf()
+            } else {
+                out_dir.join(base)
+            };
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.eq_ignore_ascii_case(part) && entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    next.push(if base.is_empty() {
+                        name
+                    } else {
+                        format!("{base}/{name}")
+                    });
+                }
+            }
+        }
+        found = next;
+    }
+    found
+}
+
 fn is_manifest_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.starts_with(MANIFEST_PREFIX) && lower.ends_with(MANIFEST_SUFFIX)
@@ -747,7 +777,7 @@ fn other_owners<'a>(
     let mut dirs = BTreeSet::from([String::new()]);
     for key in keys {
         for (i, _) in key.match_indices('/') {
-            dirs.insert(key[..i].to_owned());
+            dirs.extend(case_variants(out_dir, &key[..i]));
         }
     }
     for rel in dirs {
@@ -3689,6 +3719,8 @@ mod tests {
             write(&g, &inner, &WriteOptions::new("inner")),
             Err(WriteError::OwnedByOther { .. })
         ));
+        // Elsewhere the lock file it made stays, and the directory with it.
+        #[cfg(unix)]
         assert!(!inner.exists());
     }
 
@@ -4018,6 +4050,26 @@ mod tests {
                 &dir.0,
                 &WriteOptions::new("pets")
             ),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+    }
+
+    #[test]
+    fn a_nested_root_spelled_in_another_case_still_owns_its_files() {
+        let dir = TempDir::new("nested-case");
+        write(
+            &generation(&[("types.rs", "t")]),
+            &dir.0.join("Sub"),
+            &WriteOptions::new("inner"),
+        )
+        .unwrap();
+        let outer = generation(&[("sub/types.rs", "t")]);
+        assert!(matches!(
+            write(&outer, &dir.0, &WriteOptions::new("outer")),
+            Err(WriteError::OwnedByOther { .. })
+        ));
+        assert!(matches!(
+            check(&outer, &dir.0, &WriteOptions::new("outer")),
             Err(WriteError::OwnedByOther { .. })
         ));
     }

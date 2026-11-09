@@ -230,11 +230,23 @@ impl ConfigFile {
     }
 }
 
+/// A module named like a crate the user's code or the generated code
+/// names (`std`, `core`, `serde`, ...) hides that crate for every path in
+/// the file that declares it.
+fn shadows_a_crate(module: &str) -> bool {
+    matches!(
+        module,
+        "std" | "core" | "alloc" | "proc_macro" | "test" | "serde" | "serde_json"
+    )
+}
+
 /// A lowercase Rust module name: a letter, then letters, digits or `_`,
-/// and not a keyword. The file name the Rust backend writes.
+/// and not a keyword, a crate's name or a Windows-reserved name. The file
+/// name the Rust backend writes.
 pub(crate) fn is_module_name(module: &str) -> bool {
     // The module names the file: one Windows resolves elsewhere is refused.
     crate::write::windows_safe(module)
+        && !shadows_a_crate(module)
         && !crate::rust::naming::is_keyword(module)
         && module.starts_with(|c: char| c.is_ascii_lowercase())
         && module
@@ -265,7 +277,10 @@ pub fn rust_module_name(text: &str) -> String {
         Some(c) if c.is_ascii_digit() => format!("m_{module}"),
         Some(_) => module,
     };
-    if crate::rust::naming::is_keyword(&module) || !crate::write::windows_safe(&module) {
+    if crate::rust::naming::is_keyword(&module)
+        || !crate::write::windows_safe(&module)
+        || shadows_a_crate(&module)
+    {
         format!("{module}_types")
     } else {
         module
@@ -333,7 +348,7 @@ pub enum ConfigError {
     #[error("no target language: set `target`")]
     MissingTarget,
     #[error(
-        "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`, and not a keyword"
+        "`rust.module = {0:?}` must be a lowercase Rust module name: a letter, then letters, digits or `_`; not a keyword, a crate name such as `std` or `serde`, or a name Windows reserves"
     )]
     InvalidModule(String),
 }
@@ -461,5 +476,12 @@ mod tests {
         assert_eq!(rust_module_name("COM1"), "com1_types");
         assert!(is_module_name(&rust_module_name("nul")));
         assert!(!is_module_name("con"));
+    }
+
+    #[test]
+    fn module_names_never_shadow_a_crate() {
+        assert_eq!(rust_module_name("std"), "std_types");
+        assert_eq!(rust_module_name("serde"), "serde_types");
+        assert!(!is_module_name("core"));
     }
 }
