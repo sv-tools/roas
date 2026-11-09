@@ -522,3 +522,84 @@ async fn async_http_fetcher_still_parses_json_when_content_type_is_json_despite_
         .expect("fetch ok");
     assert_eq!(value, serde_json::json!({ "explicit": "json" }));
 }
+
+fn text_response(request: &str) -> TestResponse {
+    if request.starts_with("GET /start ") {
+        redirect_response(request)
+    } else if request.starts_with("GET /missing ") {
+        TestResponse {
+            status: 404,
+            reason: "Not Found",
+            content_type: None,
+            location: None,
+            body: Vec::new(),
+        }
+    } else if request.starts_with("GET /broken ") {
+        TestResponse::ok_body(b"{".to_vec())
+    } else {
+        assert!(request.starts_with("GET /nested/document.json "));
+        TestResponse::ok_body("{ \"title\": \"caf\u{e9}\" }\n".as_bytes().to_vec())
+    }
+}
+
+fn refused() -> Url {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    drop(listener);
+    Url::parse(&format!("http://{addr}/missing.json")).expect("url")
+}
+
+#[test]
+fn http_fetcher_returns_the_body_a_document_was_parsed_from() {
+    let server = TestServer::start(text_response);
+    let mut fetcher = HttpFetcher::new();
+    let (loaded, text) = fetcher.fetch_document_text(&server.url("start")).unwrap();
+    assert_eq!(loaded.retrieval_uri, server.url("nested/document.json"));
+    assert_eq!(loaded.document, serde_json::json!({ "title": "caf\u{e9}" }));
+    assert_eq!(text, "{ \"title\": \"caf\u{e9}\" }\n");
+
+    for (url, expected) in [
+        (server.url("missing"), "fetch"),
+        (server.url("broken"), "parse"),
+        (refused(), "fetch"),
+        (Url::parse("ftp://example.test/x.json").unwrap(), "scheme"),
+    ] {
+        let error = fetcher.fetch_document_text(&url).unwrap_err();
+        let kind = match error {
+            LoaderError::Fetch { .. } => "fetch",
+            LoaderError::Parse { .. } => "parse",
+            LoaderError::UnsupportedFetcherUri(_) => "scheme",
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(kind, expected, "{url}");
+    }
+}
+
+#[tokio::test]
+async fn async_http_fetcher_returns_the_body_a_document_was_parsed_from() {
+    let server = TestServer::start(text_response);
+    let mut fetcher = AsyncHttpFetcher::new();
+    let (loaded, text) = fetcher
+        .fetch_document_text(&server.url("start"))
+        .await
+        .unwrap();
+    assert_eq!(loaded.retrieval_uri, server.url("nested/document.json"));
+    assert_eq!(loaded.document, serde_json::json!({ "title": "caf\u{e9}" }));
+    assert_eq!(text, "{ \"title\": \"caf\u{e9}\" }\n");
+
+    for (url, expected) in [
+        (server.url("missing"), "fetch"),
+        (server.url("broken"), "parse"),
+        (refused(), "fetch"),
+        (Url::parse("ftp://example.test/x.json").unwrap(), "scheme"),
+    ] {
+        let error = fetcher.fetch_document_text(&url).await.unwrap_err();
+        let kind = match error {
+            LoaderError::Fetch { .. } => "fetch",
+            LoaderError::Parse { .. } => "parse",
+            LoaderError::UnsupportedFetcherUri(_) => "scheme",
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(kind, expected, "{url}");
+    }
+}

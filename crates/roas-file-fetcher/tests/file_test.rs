@@ -181,3 +181,57 @@ async fn async_file_fetcher_yaml_parse_error_surfaces_as_loader_error_parse() {
         .expect_err("malformed YAML must error");
     assert!(matches!(err, LoaderError::Parse { .. }));
 }
+
+#[test]
+fn file_fetcher_returns_the_text_a_document_was_parsed_from() {
+    let body = "{ \"title\": \"caf\u{e9}\" }\n";
+    let file = TempFile::write("text.json", body.as_bytes());
+    let (loaded, text) = FileFetcher::new()
+        .fetch_document_text(&file.url())
+        .expect("fetch ok");
+    assert_eq!(loaded.document, serde_json::json!({ "title": "caf\u{e9}" }));
+    assert_eq!(loaded.retrieval_uri, file.url());
+    assert_eq!(text, body);
+
+    let missing = temp_file("missing.json");
+    let err = FileFetcher::new()
+        .fetch_document_text(&Url::from_file_path(&missing).unwrap())
+        .expect_err("a missing file is an error");
+    assert!(matches!(err, LoaderError::ReadFile { .. }), "{err}");
+    let err = FileFetcher::new()
+        .fetch_document_text(&Url::parse("https://example.test/x.json").unwrap())
+        .expect_err("https must be rejected");
+    assert!(matches!(err, LoaderError::UnsupportedFetcherUri(_)));
+    let file = TempFile::write("broken.json", b"{");
+    let err = FileFetcher::new()
+        .fetch_document_text(&file.url())
+        .expect_err("a broken body is an error");
+    assert!(matches!(err, LoaderError::Parse { .. }), "{err}");
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn async_file_fetcher_returns_the_text_a_document_was_parsed_from() {
+    let body = "{ \"title\": \"caf\u{e9}\" }\n";
+    let file = TempFile::write("async-text.json", body.as_bytes());
+    let (loaded, text) = AsyncFileFetcher::new()
+        .fetch_document_text(&file.url())
+        .await
+        .expect("fetch ok");
+    assert_eq!(loaded.document, serde_json::json!({ "title": "caf\u{e9}" }));
+    assert_eq!(loaded.retrieval_uri, file.url());
+    assert_eq!(text, body);
+
+    let missing = temp_file("async-missing.json");
+    let err = AsyncFileFetcher::new()
+        .fetch_document_text(&Url::from_file_path(&missing).unwrap())
+        .await
+        .expect_err("a missing file is an error");
+    assert!(matches!(err, LoaderError::ReadFile { .. }), "{err}");
+    let file = TempFile::write("async-broken.json", b"{");
+    let err = AsyncFileFetcher::new()
+        .fetch_document_text(&file.url())
+        .await
+        .expect_err("a broken body is an error");
+    assert!(matches!(err, LoaderError::Parse { .. }), "{err}");
+}

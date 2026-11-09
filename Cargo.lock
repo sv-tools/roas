@@ -2782,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "roas-file-fetcher"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "roas",
  "serde",
@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "roas-http-fetcher"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "reqwest",
  "roas",

@@ -798,6 +798,102 @@ fn preparation_locates_findings_inside_the_external_document() {
     );
 }
 
+/// `shared.arazzo.json` as YAML, with a malformed condition behind
+/// escapes and a multi-byte character.
+const SHARED_YAML: &str = r#"arazzo: 1.1.0
+$self: https://example.test/shared/shared.arazzo.json
+info: { title: Shared, version: "1" }
+sourceDescriptions:
+  - { name: api, url: api.openapi.json, type: openapi }
+components:
+  parameters:
+    tenant: { name: X-Tenant, in: header, value: shared }
+  successActions:
+    done:
+      name: done
+      type: end
+      criteria: [{ condition: $statusCode == 200 }]
+workflows:
+  - workflowId: child
+    steps:
+      - stepId: get
+        operationId: $sourceDescriptions.api.getThing
+        parameters:
+          - reference: $components.parameters.tenant
+          - { name: id, in: query, value: $inputs.id }
+        successCriteria:
+          - condition: "$response.body#/n\u00e9 == \"café\" && ("
+        onSuccess: [{ reference: $components.successActions.done }]
+        outputs: { value: $response.body#/value, origin: $self }
+    outputs:
+      value: $steps.get.outputs.value
+      origin: $steps.get.outputs.origin
+      api: $sourceDescriptions.api.url
+"#;
+
+#[test]
+fn preparation_places_findings_in_the_text_of_the_external_document() {
+    use roas_arazzo::source_map::SourceMap;
+
+    let mut documents = standard();
+    documents[2].1 = serde_saphyr::from_str(SHARED_YAML).unwrap();
+    let graph = Graph::new(&documents);
+    let path = "#.workflows[0].steps[0].successCriteria[0].condition";
+
+    let options = graph
+        .options("main")
+        .document_source_map(SHARED, SourceMap::parse(SHARED_YAML).unwrap());
+    let error = prepare(&graph.description, &options).unwrap_err();
+    let found = error
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.path == path)
+        .unwrap_or_else(|| panic!("no finding at {path}: {error}"));
+    assert_eq!(found.document.as_deref(), Some(SHARED));
+    let span = found.span.expect("the field is located");
+    assert_eq!((span.start.line, span.start.column), (23, 24));
+    let offset = found.offset.expect("a syntax error has an offset");
+    let position = found.position.expect("the offset is placed in the text");
+    // The decoded condition and where its bytes are written differ by
+    // the escapes before the offending one.
+    let condition = "$response.body#/n\u{e9} == \"caf\u{e9}\" && (";
+    let raw_line = SHARED_YAML.lines().nth(22).unwrap();
+    assert_eq!(
+        &condition[offset..],
+        &raw_line[raw_line.len() - (condition.len() - offset) - 1..raw_line.len() - 1]
+    );
+    assert_eq!(position.line, 23);
+    assert_eq!(
+        position.column,
+        raw_line.chars().count() - condition[offset..].chars().count()
+    );
+    assert!(
+        found
+            .to_string()
+            .starts_with(&format!("{SHARED} {path} at line 23, column ")),
+        "{found}"
+    );
+
+    // A map of another identity, or one of the entry, does not apply.
+    for options in [
+        graph.options("main").document_source_map(
+            "https://example.test/elsewhere.arazzo.yaml",
+            SourceMap::parse(SHARED_YAML).unwrap(),
+        ),
+        graph
+            .options("main")
+            .source_map(SourceMap::parse(SHARED_YAML).unwrap()),
+    ] {
+        let error = prepare(&graph.description, &options).unwrap_err();
+        let found = error
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.path == path)
+            .unwrap();
+        assert_eq!((found.span, found.position), (None, None), "{found}");
+    }
+}
+
 #[test]
 fn an_unsupplied_or_mistyped_workflow_source_is_named_before_any_request() {
     let mut documents = standard();

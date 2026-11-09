@@ -44,6 +44,9 @@ let mut loader = Loader::new();
 loader.register_async_fetcher("file://", AsyncFileFetcher::new());
 ```
 
+`fetch_document_text` (on both fetchers) returns the parsed document together with
+the text it was parsed from, for callers that report positions in it.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](../../LICENSE-APACHE) or [MIT license](../../LICENSE-MIT) at your option.

@@ -68,6 +68,9 @@ takes precedence over both URLs; disabling `yaml` still means JSON only. `with_c
 continues to honor the supplied client's redirect, timeout, proxy and TLS policies;
 metadata collection does not install a different client or enable more URI schemes.
 
+`fetch_document_text` (on both fetchers) returns that document together with the
+response body it was parsed from, for callers that report positions in it.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](../../LICENSE-APACHE) or [MIT license](../../LICENSE-MIT) at your option.
