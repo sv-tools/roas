@@ -656,6 +656,74 @@ fn parse_document(
     Err(SourceError::Version(uri.to_string()))
 }
 
+/// External Arazzo documents reachable from a registry owner through linked
+/// Arazzo sources. Index `i` of `documents` is run-table handle `i + 1`;
+/// handle 0 is the owner (the entry description), so back edges are data.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorkflowDocuments {
+    /// The owner's Arazzo aliases.
+    pub entry: BTreeMap<String, usize>,
+    pub documents: Vec<WorkflowDocument>,
+}
+
+/// One external Arazzo document and the scope that resolves its own sources.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkflowDocument {
+    pub document: Arc<SourceDocument>,
+    /// Only sources, base URLs and the registry owner are set.
+    pub options: crate::Options,
+    pub links: BTreeMap<String, usize>,
+}
+
+/// `explicit` holds the owner's aliases that the caller already set in
+/// `Options::source`: they win over registry links, so workflow calls run the
+/// same document that operation lookup and `source_document` report.
+fn workflow_documents(
+    registry: &Arc<SourceRegistry>,
+    owner: DocumentId,
+    explicit: &BTreeMap<String, Option<DocumentId>>,
+) -> Result<WorkflowDocuments, SourceError> {
+    let mut handles = BTreeMap::from([(owner, 0)]);
+    let mut order = vec![owner];
+    let mut links = vec![BTreeMap::new()];
+    let mut next = 0;
+    while let Some(id) = order.get(next).copied() {
+        for link in registry.sources(id)? {
+            let target = match explicit.get(&link.name) {
+                Some(target) if id == owner => *target,
+                _ => link.target,
+            };
+            let Some(target) = target else {
+                continue;
+            };
+            if registry.document(target)?.arazzo().is_none() {
+                continue;
+            }
+            let index = *handles.entry(target).or_insert_with(|| {
+                order.push(target);
+                links.push(BTreeMap::new());
+                order.len() - 1
+            });
+            links[next].insert(link.name.clone(), index);
+        }
+        next += 1;
+    }
+    let mut links = links.into_iter();
+    let entry = links.next().expect("the owner's links");
+    let documents = order[1..]
+        .iter()
+        .zip(links)
+        .map(|(id, links)| {
+            Ok(WorkflowDocument {
+                document: registry.shared(*id)?,
+                options: crate::Options::default().scoped_registry(registry, *id)?,
+                links,
+            })
+        })
+        .collect::<Result<_, SourceError>>()?;
+    Ok(WorkflowDocuments { entry, documents })
+}
+
 impl crate::Options {
     /// Adapt readable sources from one registry owner into executor options.
     /// Existing `source`/`base_url` entries are explicit overrides and win.
@@ -664,16 +732,56 @@ impl crate::Options {
     /// Retains an immutable registry snapshot sharing its raw document values.
     /// Construct fresh options after changing registry links or overrides;
     /// existing adapted entries also win when this method is called again.
+    ///
+    /// Linked Arazzo sources, and the Arazzo sources they link in turn, become
+    /// callable as `$sourceDescriptions.<name>.<workflowId>`. Each external
+    /// document resolves its own aliases and registry base-URL overrides
+    /// ([`SourceRegistry::override_base_url`]); `Options::source` and
+    /// `Options::base_url` apply to the owner only.
     /// # Errors
     /// An invalid registry handle. Loading diagnostics remain in SourceLoadReport.
     pub fn source_registry(
-        mut self,
+        self,
         registry: &SourceRegistry,
         owner: DocumentId,
     ) -> Result<Self, SourceError> {
         registry.document(owner)?;
+        // Explicit entries keep their document: a registry-backed one by its
+        // handle in this registry, an owned value never as a workflow source.
+        let explicit = registry
+            .sources(owner)?
+            .into_iter()
+            .filter_map(|link| {
+                let source = self.sources.get(&link.name)?;
+                let target = match &source.data {
+                    crate::operation::SourceData::Registry(document) => registry
+                        .documents
+                        .iter()
+                        .position(|candidate| {
+                            Arc::ptr_eq(candidate, document)
+                                || (candidate.identity == document.identity
+                                    && candidate.value() == document.value())
+                        })
+                        .map(DocumentId),
+                    crate::operation::SourceData::Owned(_) => None,
+                };
+                Some((link.name.clone(), target))
+            })
+            .collect();
+        let registry = Arc::new(registry.clone());
+        let mut options = self.scoped_registry(&registry, owner)?;
+        options.workflow_documents =
+            Some(Arc::new(workflow_documents(&registry, owner, &explicit)?));
+        Ok(options)
+    }
+
+    fn scoped_registry(
+        mut self,
+        registry: &Arc<SourceRegistry>,
+        owner: DocumentId,
+    ) -> Result<Self, SourceError> {
         self.registry = Some(OperationContext {
-            registry: Arc::new(registry.clone()),
+            registry: Arc::clone(registry),
             owner,
         });
         for link in registry.sources(owner)? {

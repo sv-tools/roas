@@ -312,7 +312,7 @@ fn a_goto_that_names_nothing_stops_the_run() {
 }
 
 #[test]
-fn a_step_calling_a_workflow_of_another_document_says_it_cannot() {
+fn a_step_calling_an_unsupplied_workflow_document_says_why() {
     let description = description(
         json!([{
             "workflowId": "w",
@@ -325,9 +325,9 @@ fn a_step_calling_a_workflow_of_another_document_says_it_cannot() {
     );
     let error = execute(&description, &options(), &mut Fake::new()).unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("only workflows of the description"),
+        matches!(&error, ExecutionError::ExternalWorkflow { reference, reason }
+            if reference == "$sourceDescriptions.other.someWorkflow"
+                && reason.contains("declares no source `other`")),
         "got: {error}"
     );
 

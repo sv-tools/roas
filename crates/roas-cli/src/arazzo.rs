@@ -9,17 +9,22 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Subcommand, ValueEnum};
 use enumset::EnumSet;
+use roas::LoadedDocument;
+use roas::loader::{Loader, LoaderError, ResourceFetcher};
 use roas_arazzo::validation::{Error as ArazzoError, Validate, ValidationOptions};
 use roas_arazzo::{v1_0, v1_1};
 use roas_arazzo_executor::{
     Client, Options, SourceLoadOptions, SourceRegistry, prepare, required_sources,
 };
 use serde_json::Value;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use url::Url;
 
 use crate::{
-    InputFormat, InputSource, LoaderKind, build_loader, read_input, resolve_input_source,
+    InputFormat, InputSource, LoaderKind, build_loader_with, read_input, resolve_input_source,
     serialize_spec,
 };
 
@@ -260,7 +265,10 @@ pub(crate) struct ArazzoRunArgs {
 
     /// Send a source description's requests somewhere else, e.g.
     /// `--base-url petStore=http://127.0.0.1:8080` (repeatable) —
-    /// whatever its document says.
+    /// whatever its document says. A dotted name reaches a source of an
+    /// external Arazzo document by its alias path, e.g.
+    /// `--base-url shared.petStore=…` for the `petStore` source of the
+    /// document the entry calls `shared`; it applies to that document only.
     #[arg(long, value_name = "NAME=URL")]
     base_url: Vec<String>,
 
@@ -506,6 +514,11 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     }
     for base_url in &args.base_url {
         let (name, url) = split_pair(base_url, "--base-url")?;
+        // Source names cannot contain dots: a dotted name is an alias path
+        // into an external Arazzo document, applied once it is loaded.
+        if name.contains('.') {
+            continue;
+        }
         // Silently ignoring a typo would send the request to whatever
         // the document says — production, most likely.
         if !description
@@ -593,8 +606,127 @@ fn sources(
     from: &InputSource,
     args: &ArazzoRunArgs,
 ) -> Result<(Options, bool, Vec<String>)> {
+    let explicit: BTreeSet<String> = args
+        .source
+        .iter()
+        .filter_map(|source| source.split_once('=').map(|(name, _)| name.to_owned()))
+        .collect();
+    let mut loader = None;
+    let mut load_options = SourceLoadOptions::default();
+    load_options.max_documents = args.source_max_documents;
+    load_options.max_depth = args.source_max_depth;
+    load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
+    // Loading an external Arazzo document can reveal calls back into this
+    // one, whose workflows may need entry sources nobody asked for yet. Each
+    // pass is one complete load of the whole selection into a fresh registry,
+    // so links, budgets and diagnostics are those of a single load; the
+    // loader keeps what was fetched, and remembers what failed, across passes.
+    let mut selection: Option<BTreeSet<String>> = None;
+    let (mut registry, root, report) = loop {
+        let (mut registry, root) = seeded_registry(&value, from, args)?;
+        // The budget covers supplied documents plus distinct fetches of the
+        // whole loading operation, not of each pass.
+        let loader = loader.get_or_insert_with(|| {
+            remembering_loader(
+                &args.load,
+                args.source_max_documents.saturating_sub(registry.len()),
+            )
+        });
+        let selected = match selection.take() {
+            Some(selected) => selected,
+            None => {
+                let mut selected = explicit.clone();
+                selected.extend(required_sources(
+                    description,
+                    &options.clone().source_registry(&registry, root)?,
+                )?);
+                selected
+            }
+        };
+        load_options.root_sources = (!args.load_all_sources).then(|| selected.clone());
+        let report = registry.load_sources(root, loader, &load_options)?;
+        if args.load_all_sources {
+            break (registry, root, report);
+        }
+        // A static error in a newly linked document is preparation's to
+        // report, with the loading diagnostics beside it.
+        let Ok(grown) = required_sources(
+            description,
+            &options.clone().source_registry(&registry, root)?,
+        ) else {
+            break (registry, root, report);
+        };
+        // Each further pass strictly grows the selection of declared aliases,
+        // so this terminates.
+        if grown.is_subset(&selected) {
+            break (registry, root, report);
+        }
+        selection = Some(selected.union(&grown).cloned().collect());
+    };
+    let diagnostics = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{}: {} (`{}`): {}",
+                registry
+                    .document(diagnostic.owner)
+                    .expect("diagnostic owner")
+                    .identity(),
+                diagnostic.path,
+                diagnostic.source_name,
+                with_causes(&diagnostic.error),
+            )
+        })
+        .chain(report.reference_diagnostics.iter().map(ToString::to_string))
+        .collect::<Vec<_>>();
+    // A missing external document is usually why an alias path names nothing.
+    scoped_base_urls(
+        &mut registry,
+        root,
+        &args.base_url,
+        args.allow_source_retrieval_aliases,
+    )
+    .map_err(|error| {
+        if diagnostics.is_empty() {
+            error
+        } else {
+            anyhow!("{error}\n{}", diagnostics.join("\n"))
+        }
+    })?;
+    let any = registry
+        .sources(root)?
+        .iter()
+        .any(|source| source.target.is_some());
+    Ok((options.source_registry(&registry, root)?, any, diagnostics))
+}
+
+/// An error and what caused it, as one line: a loading diagnostic's own
+/// message often says only which URL failed, and its source says why.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut line = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        // Some messages already end with their source's.
+        let text = error.to_string();
+        if !line.ends_with(&text) {
+            line.push_str(": ");
+            line.push_str(&text);
+        }
+        cause = error.source();
+    }
+    line
+}
+
+/// A registry holding the entry and every document named on the command
+/// line, with `--source` overrides applied and nothing linked yet.
+fn seeded_registry(
+    value: &Value,
+    from: &InputSource,
+    args: &ArazzoRunArgs,
+) -> Result<(SourceRegistry, roas_arazzo_executor::DocumentId)> {
     let mut registry = SourceRegistry::new();
-    let root = registry.insert(base_uri(from, None)?.as_str(), value)?;
+    let root = registry.insert(base_uri(from, None)?.as_str(), value.clone())?;
     // Index every explicitly supplied document before linking any source.
     let mut supplied = Vec::new();
     for source in &args.source {
@@ -617,45 +749,211 @@ fn sources(
     for (name, id) in supplied {
         registry.override_source(root, &name, id)?;
     }
-    let needed = required_sources(
-        description,
-        &options.clone().source_registry(&registry, root)?,
-    )?;
-    let mut selection = needed;
-    selection.extend(
-        args.source
-            .iter()
-            .filter_map(|source| source.split_once('=').map(|(name, _)| name.to_owned())),
-    );
-    let mut load_options = SourceLoadOptions::default();
-    load_options.root_sources = (!args.load_all_sources).then_some(selection);
-    load_options.max_documents = args.source_max_documents;
-    load_options.max_depth = args.source_max_depth;
-    load_options.retrieval_aliases = args.allow_source_retrieval_aliases;
-    let mut loader = build_loader(&args.load).unwrap_or_default();
-    let report = registry.load_sources(root, &mut loader, &load_options)?;
-    let diagnostics = report
-        .diagnostics
-        .iter()
-        .map(|diagnostic| {
-            format!(
-                "{}: {} (`{}`): {}",
-                registry
-                    .document(diagnostic.owner)
-                    .expect("diagnostic owner")
-                    .identity(),
-                diagnostic.path,
-                diagnostic.source_name,
-                diagnostic.error,
-            )
+    Ok((registry, root))
+}
+
+/// The `--load` loader, with each fetcher wrapped to remember its failures
+/// and to stop after `budget` distinct URLs.
+fn remembering_loader(kinds: &[LoaderKind], budget: usize) -> Loader {
+    let failed = Rc::new(RefCell::new(Fetches {
+        budget,
+        ..Fetches::default()
+    }));
+    build_loader_with(kinds, |fetcher| Remembering::new(fetcher, &failed)).unwrap_or_default()
+}
+
+/// What the fetchers of one loading operation have asked for, across its
+/// passes. The loader caches only successes, so a fetcher sees each URL
+/// once unless it failed.
+#[derive(Default)]
+struct Fetches {
+    /// Distinct URLs the fetchers may still be asked for.
+    budget: usize,
+    asked: BTreeSet<Url>,
+    failed: BTreeMap<Url, LoaderError>,
+}
+
+type Failures = Rc<RefCell<Fetches>>;
+
+/// A fetcher that answers a URL it already failed on with the same error,
+/// without asking again, and refuses new URLs past the operation's budget.
+/// Without it a later loading pass would repeat every failed request and
+/// start its document budget afresh.
+struct Remembering<F> {
+    inner: F,
+    failed: Failures,
+}
+
+impl<F> Remembering<F> {
+    fn new(inner: F, failed: &Failures) -> Self {
+        Self {
+            inner,
+            failed: Rc::clone(failed),
+        }
+    }
+
+    fn remember<T>(
+        &mut self,
+        uri: &Url,
+        fetch: impl FnOnce(&mut F) -> Result<T, LoaderError>,
+    ) -> Result<T, LoaderError> {
+        {
+            let mut fetches = self.failed.borrow_mut();
+            if let Some(error) = fetches.failed.get(uri) {
+                return Err(replay(error));
+            }
+            if !fetches.asked.contains(uri) {
+                if fetches.asked.len() >= fetches.budget {
+                    return Err(LoaderError::Fetch {
+                        uri: uri.to_string(),
+                        source: "the --source-max-documents budget is spent".into(),
+                    });
+                }
+                fetches.asked.insert(uri.clone());
+            }
+        }
+        fetch(&mut self.inner).inspect_err(|error| {
+            self.failed
+                .borrow_mut()
+                .failed
+                .insert(uri.clone(), replay(error));
         })
-        .chain(report.reference_diagnostics.iter().map(ToString::to_string))
-        .collect::<Vec<_>>();
-    let any = registry
-        .sources(root)?
-        .iter()
-        .any(|source| source.target.is_some());
-    Ok((options.source_registry(&registry, root)?, any, diagnostics))
+    }
+}
+
+impl<F: ResourceFetcher> ResourceFetcher for Remembering<F> {
+    fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
+        self.remember(uri, |inner| inner.fetch(uri))
+    }
+
+    fn fetch_document(&mut self, uri: &Url) -> Result<LoadedDocument, LoaderError> {
+        self.remember(uri, |inner| inner.fetch_document(uri))
+    }
+}
+
+/// A copy of a loading error that reads the same: its message is the
+/// original's, and its source the original's whole cause chain as text.
+fn replay(error: &LoaderError) -> LoaderError {
+    match error {
+        LoaderError::NoFetcherRegistered { uri } => {
+            LoaderError::NoFetcherRegistered { uri: uri.clone() }
+        }
+        LoaderError::UnsupportedFetcherUri(uri) => LoaderError::UnsupportedFetcherUri(uri.clone()),
+        LoaderError::InvalidFileUri(uri) => LoaderError::InvalidFileUri(uri.clone()),
+        LoaderError::MissingBaseUri(uri) => LoaderError::MissingBaseUri(uri.clone()),
+        LoaderError::InvalidFragment(uri) => LoaderError::InvalidFragment(uri.clone()),
+        LoaderError::InvalidUri { uri, source } => LoaderError::InvalidUri {
+            uri: uri.clone(),
+            source: *source,
+        },
+        LoaderError::ReadFile { path, source } => LoaderError::ReadFile {
+            path: path.clone(),
+            source: std::io::Error::new(source.kind(), with_causes(source)),
+        },
+        LoaderError::Parse { uri, source } => LoaderError::Parse {
+            uri: uri.clone(),
+            source: serde::de::Error::custom(source),
+        },
+        LoaderError::PointerNotFound { uri, reference } => LoaderError::PointerNotFound {
+            uri: uri.clone(),
+            reference: reference.clone(),
+        },
+        LoaderError::Fetch { uri, source } => LoaderError::Fetch {
+            uri: uri.clone(),
+            source: with_causes(source.as_ref()).into(),
+        },
+        // A variant added later: its message is kept, if not its shape.
+        other => LoaderError::Fetch {
+            uri: String::new(),
+            source: other.to_string().into(),
+        },
+    }
+}
+
+/// `--base-url a.b.api=URL`: follow loaded Arazzo aliases `a`, then `b`, and
+/// override `api` for that document only. Plain names are options of the entry.
+fn scoped_base_urls(
+    registry: &mut SourceRegistry,
+    root: roas_arazzo_executor::DocumentId,
+    base_urls: &[String],
+    retrieval_aliases: bool,
+) -> Result<()> {
+    // Two flags reaching one document's source by different paths would
+    // otherwise race, the later one silently winning.
+    let mut claimed: BTreeMap<(roas_arazzo_executor::DocumentId, String), (&str, &str)> =
+        BTreeMap::new();
+    for base_url in base_urls {
+        let (path, url) = split_pair(base_url, "--base-url")?;
+        if !path.contains('.') {
+            claimed.insert((root, path.to_owned()), (path, url));
+        }
+    }
+    'flags: for base_url in base_urls {
+        let (path, url) = split_pair(base_url, "--base-url")?;
+        let Some((documents, name)) = path.rsplit_once('.') else {
+            continue;
+        };
+        let mut owner = root;
+        for alias in documents.split('.') {
+            let document = registry.document(owner)?;
+            let declared = document.arazzo().and_then(|description| {
+                description
+                    .source_descriptions
+                    .iter()
+                    .find(|source| source.name == alias)
+            });
+            let Some(declared) = declared else {
+                bail!(
+                    "`--base-url {path}=…`: `{alias}` names no source description of {}",
+                    document.identity()
+                );
+            };
+            // Selective loading links only the aliases it follows; another
+            // alias may still have loaded the same document. A reference that
+            // cannot be resolved stops the run: dropping the override would
+            // send its requests to the original server.
+            let target = match registry.source(owner, alias) {
+                Some(link) => match link.target {
+                    Some(target) => Some(target),
+                    None => registry
+                        .resolve(owner, &link.declared_uri, retrieval_aliases)
+                        .with_context(|| format!("`--base-url {path}=…`: `{alias}`"))?,
+                },
+                None => None,
+            };
+            let arazzo = match target {
+                Some(target) => registry.document(target)?.arazzo().is_some(),
+                None => declared
+                    .type_
+                    .is_none_or(|type_| type_ == roas_arazzo::v1_1::SourceType::Arazzo),
+            };
+            if !arazzo {
+                bail!("`--base-url {path}=…`: `{alias}` is not an Arazzo source description");
+            }
+            // A document the selected workflow never reaches is not loaded,
+            // and nothing runs there for the override to change.
+            let Some(target) = target else {
+                continue 'flags;
+            };
+            owner = target;
+        }
+        if registry.source(owner, name).is_none() {
+            bail!(
+                "`--base-url {path}=…`: `{name}` names no source description of {}",
+                registry.document(owner)?.identity()
+            );
+        }
+        if let Some((other, earlier)) = claimed.insert((owner, name.to_owned()), (path, url))
+            && earlier != url
+        {
+            bail!(
+                "`--base-url {path}=…` and `--base-url {other}=…` name the same source of {} with different URLs",
+                registry.document(owner)?.identity()
+            );
+        }
+        registry.override_base_url(owner, name, url)?;
+    }
+    Ok(())
 }
 
 /// What a relative source description URL is resolved against.
@@ -1021,6 +1319,783 @@ mod tests {
         )];
         run_arazzo(ArazzoCommand::Run(args.into())).unwrap();
         assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    /// An entry whose only step calls a workflow of another Arazzo document,
+    /// which calls the API through its own `api` source.
+    fn external_workflow() -> (TempFile, TempFile, TempFile) {
+        let api = TempFile::write(
+            "external-api.json",
+            &json!({
+                "openapi": "3.1.0", "info": { "title": "A", "version": "1" },
+                "servers": [{ "url": "https://production.example.invalid" }],
+                "paths": { "/things": { "get": { "operationId": "getThing" } } }
+            }),
+        );
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::write(
+            "external-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [{ "name": "api", "url": api_name, "type": "openapi" }],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                    "parameters": [{ "name": "id", "in": "query", "value": "$inputs.id" }],
+                    "outputs": { "name": "$response.body#/name" } }],
+                    "outputs": { "name": "$steps.get.outputs.name" } }]
+            }),
+        );
+        let entry = TempFile::write(
+            "external-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": "https://example.invalid/shared.arazzo.json", "type": "arazzo" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.shared.child",
+                    "parameters": [{ "name": "id", "value": "$inputs.petId" }] }],
+                    "outputs": { "name": "$steps.call.outputs.name" } }]
+            }),
+        );
+        (entry, child, api)
+    }
+
+    #[test]
+    fn run_executes_a_workflow_of_a_supplied_external_document() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (entry, child, api) = external_workflow();
+        let mut args = run_args(&entry, &api, &base);
+        args.source = vec![format!("shared={}", child.0.display())];
+        // The child's own source is loaded beside it, and only its
+        // requests are redirected.
+        args.load = vec![LoaderKind::File];
+        args.base_url = vec![format!("shared.api={base}")];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        let asked = join.join().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].starts_with("GET /things?id=7 "), "{asked:?}");
+    }
+
+    #[test]
+    fn selective_loading_follows_calls_back_into_the_entry_document() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        // `helper` is reached only through the external document, and is the
+        // only user of the entry's `extra` source.
+        let entry = TempFile::write("back-entry.json", &json!({}));
+        let entry_name = entry.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::write(
+            "back-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [{ "name": "root", "url": entry_name, "type": "arazzo" }],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        std::fs::write(
+            &entry.0,
+            serde_json::to_string(&json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": child_name, "type": "arazzo" },
+                    { "name": "extra", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "buyPet", "steps": [{
+                        "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                    { "workflowId": "helper", "steps": [{
+                        "stepId": "get", "operationId": "$sourceDescriptions.extra.getThing",
+                        "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = run_args(&entry, &api, &base);
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.base_url = vec![format!("extra={base}")];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        let asked = join.join().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].starts_with("GET /things?id=1 "), "{asked:?}");
+    }
+
+    #[test]
+    fn a_later_loading_pass_does_not_fetch_a_failed_source_again() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (gone, gone_join) = server(2, 404, "{}");
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write("refetch-entry.json", &json!({}));
+        let entry_name = entry.0.file_name().unwrap().to_str().unwrap().to_owned();
+        // `gone` fails in the first pass; the call back into the entry then
+        // asks for `extra`, which needs a second pass.
+        let child = TempFile::write(
+            "refetch-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry_name, "type": "arazzo" },
+                    { "name": "gone", "url": format!("{gone}/gone.json"), "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        std::fs::write(
+            &entry.0,
+            serde_json::to_string(&json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": child_name, "type": "arazzo" },
+                    { "name": "extra", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "buyPet", "steps": [{
+                        "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                    { "workflowId": "helper", "steps": [{
+                        "stepId": "get", "operationId": "$sourceDescriptions.extra.getThing",
+                        "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = run_args(&entry, &api, &base);
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File, LoaderKind::Http];
+        args.base_url = vec![format!("extra={base}")];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        assert_eq!(join.join().unwrap().len(), 1);
+        // Release the second accept if the failed source was not asked again.
+        let _ = std::net::TcpStream::connect(gone.trim_start_matches("http://"));
+        let asked = gone_join.join().unwrap();
+        assert_eq!(
+            asked.iter().filter(|line| line.starts_with("GET ")).count(),
+            1,
+            "{asked:?}"
+        );
+    }
+
+    #[test]
+    fn remembered_fetches_replay_failures_and_spend_one_budget() {
+        struct Counting(Rc<RefCell<Vec<String>>>);
+        impl ResourceFetcher for Counting {
+            fn fetch(&mut self, uri: &Url) -> Result<Value, LoaderError> {
+                self.0.borrow_mut().push(uri.to_string());
+                if uri.path().ends_with("bad") {
+                    Err(LoaderError::Fetch {
+                        uri: uri.to_string(),
+                        source: "refused".into(),
+                    })
+                } else {
+                    Ok(json!({}))
+                }
+            }
+        }
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let fetches = Rc::new(RefCell::new(Fetches {
+            budget: 2,
+            ..Fetches::default()
+        }));
+        let mut fetcher = Remembering::new(Counting(Rc::clone(&calls)), &fetches);
+        let good = Url::parse("http://h/good").unwrap();
+        let bad = Url::parse("http://h/bad").unwrap();
+        let late = Url::parse("http://h/late").unwrap();
+        fetcher.fetch(&good).unwrap();
+        let first = fetcher.fetch(&bad).unwrap_err().to_string();
+        // A failure is answered again without asking; the URL already counted.
+        assert_eq!(fetcher.fetch_document(&bad).unwrap_err().to_string(), first);
+        // A URL already asked for stays within the budget.
+        fetcher.fetch(&good).unwrap();
+        // A third distinct URL is past it, and is not asked for.
+        let refused = fetcher.fetch(&late).unwrap_err();
+        assert!(
+            std::error::Error::source(&refused)
+                .is_some_and(|source| source.to_string().contains("--source-max-documents")),
+            "{refused}"
+        );
+        assert_eq!(
+            *calls.borrow(),
+            ["http://h/good", "http://h/bad", "http://h/good"]
+        );
+    }
+
+    /// An error with a fixed message and an `io::Error` source.
+    #[derive(Debug)]
+    struct Wrapping {
+        message: &'static str,
+        source: std::io::Error,
+    }
+
+    impl std::fmt::Display for Wrapping {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for Wrapping {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    #[test]
+    fn a_cause_already_in_the_message_is_not_repeated() {
+        let error = Wrapping {
+            message: "cannot parse `x`: bad type",
+            source: std::io::Error::other("bad type"),
+        };
+        assert_eq!(with_causes(&error), "cannot parse `x`: bad type");
+    }
+
+    #[test]
+    fn a_loading_diagnostic_says_why_as_well_as_what() {
+        let fetches = Rc::new(RefCell::new(Fetches::default()));
+        let mut fetcher = Remembering::new(roas_file_fetcher::FileFetcher::new(), &fetches);
+        let spent = fetcher
+            .fetch(&Url::parse("file:///budget/spent.json").unwrap())
+            .unwrap_err();
+        assert_eq!(
+            with_causes(&spent),
+            "failed to fetch `file:///budget/spent.json`: the --source-max-documents budget is spent"
+        );
+    }
+
+    #[test]
+    fn a_replayed_loading_error_reads_like_the_original() {
+        let errors = [
+            LoaderError::NoFetcherRegistered { uri: "x:a".into() },
+            LoaderError::UnsupportedFetcherUri("x:b".into()),
+            LoaderError::InvalidFileUri("x:c".into()),
+            LoaderError::MissingBaseUri("#/d".into()),
+            LoaderError::InvalidFragment("x:e#%".into()),
+            LoaderError::InvalidUri {
+                uri: "::".into(),
+                source: url::ParseError::RelativeUrlWithoutBase,
+            },
+            LoaderError::ReadFile {
+                path: PathBuf::from("/missing"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "gone"),
+            },
+            LoaderError::Parse {
+                uri: "file:///p".into(),
+                source: serde_json::from_str::<Value>("{").unwrap_err(),
+            },
+            LoaderError::PointerNotFound {
+                uri: "file:///q".into(),
+                reference: "#/r".into(),
+            },
+            LoaderError::Fetch {
+                uri: "http://h/s".into(),
+                source: "refused".into(),
+            },
+        ];
+        let nested = LoaderError::Fetch {
+            uri: "http://h/t".into(),
+            source: Box::new(Wrapping {
+                message: "HTTP request failed",
+                source: std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "connection refused",
+                ),
+            }),
+        };
+        for error in errors.into_iter().chain([nested]) {
+            let replayed = replay(&error);
+            assert_eq!(replayed.to_string(), error.to_string());
+            assert_eq!(with_causes(&replayed), with_causes(&error));
+        }
+    }
+
+    /// Run `sources` for an entry `entry(child_name)` whose linked document is
+    /// `child(entry_name)`, both loaded with `--load file,http`.
+    fn load_back_call(
+        name: &str,
+        child: impl FnOnce(&str) -> Value,
+        entry: impl FnOnce(&str) -> Value,
+        api: &TempFile,
+        tweak: impl FnOnce(&mut ArazzoRunArgs),
+    ) -> (Options, v1_1::Description, Vec<String>) {
+        let entry_file = TempFile::write(&format!("{name}-entry.json"), &json!({}));
+        let entry_name = entry_file
+            .0
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let child = TempFile::write(&format!("{name}-child.json"), &child(&entry_name));
+        let value = entry(child.0.file_name().unwrap().to_str().unwrap());
+        std::fs::write(&entry_file.0, serde_json::to_string(&value).unwrap()).unwrap();
+        let parsed: v1_1::Description = serde_json::from_value(value.clone()).unwrap();
+        let mut args = run_args(&entry_file, api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File, LoaderKind::Http];
+        tweak(&mut args);
+        let (options, _, diagnostics) = sources(
+            Options::new(),
+            &parsed,
+            value,
+            &InputSource::File(entry_file.0.clone()),
+            &args,
+        )
+        .unwrap();
+        (options, parsed, diagnostics)
+    }
+
+    #[test]
+    fn a_failed_source_of_a_diamond_document_is_fetched_and_reported_once() {
+        let (gone, gone_join) = server(2, 404, "{}");
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        // `other` names the same document as `shared`, and is needed only once
+        // the call back into the entry is seen: the second pass revisits it.
+        let child = |entry: &str| {
+            json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry, "type": "arazzo" },
+                    { "name": "gone", "url": format!("{gone}/gone.json"), "type": "openapi" },
+                    { "name": "api", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "child", "steps": [{
+                        "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" }] },
+                    { "workflowId": "leaf", "steps": [{
+                        "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                        "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                ]
+            })
+        };
+        let (options, parsed, diagnostics) = load_back_call(
+            "diamond",
+            child,
+            |child| {
+                json!({
+                    "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                    "sourceDescriptions": [
+                        { "name": "shared", "url": child, "type": "arazzo" },
+                        { "name": "other", "url": child, "type": "arazzo" }
+                    ],
+                    "workflows": [
+                        { "workflowId": "buyPet", "steps": [{
+                            "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                        { "workflowId": "helper", "steps": [{
+                            "stepId": "leaf", "workflowId": "$sourceDescriptions.other.leaf" }] }
+                    ]
+                })
+            },
+            &api,
+            |_| {},
+        );
+        let _ = std::net::TcpStream::connect(gone.trim_start_matches("http://"));
+        let asked = gone_join.join().unwrap();
+        assert_eq!(
+            asked.iter().filter(|line| line.starts_with("GET ")).count(),
+            1,
+            "{asked:?}"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|line| line.contains("`gone`"))
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+        prepare(&parsed, &options).unwrap();
+    }
+
+    #[test]
+    fn a_later_pass_links_a_source_whose_identity_it_supplies() {
+        let (_, _, api) = external_workflow();
+        // The linked document's `api` URL cannot be fetched, but the entry's
+        // `extra` source — selected only once the call back is seen — is that
+        // document, by its `$self`.
+        let unreachable = "http://127.0.0.1:1/reconcile-api.json";
+        let mut identified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&api.0).unwrap()).unwrap();
+        identified["openapi"] = json!("3.2.0");
+        identified["$self"] = json!(unreachable);
+        let extra = TempFile::write("reconcile-api.json", &identified);
+        let extra_name = extra.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = |entry: &str| {
+            json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry, "type": "arazzo" },
+                    { "name": "api", "url": unreachable, "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [
+                    { "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" },
+                    { "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                      "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }]
+            })
+        };
+        let (options, parsed, diagnostics) = load_back_call(
+            "reconcile",
+            child,
+            |child| {
+                json!({
+                    "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                    "sourceDescriptions": [
+                        { "name": "shared", "url": child, "type": "arazzo" },
+                        { "name": "extra", "url": extra_name, "type": "openapi" }
+                    ],
+                    "workflows": [
+                        { "workflowId": "buyPet", "steps": [{
+                            "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                        { "workflowId": "helper", "steps": [{
+                            "stepId": "get", "operationId": "$sourceDescriptions.extra.getThing",
+                            "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                    ]
+                })
+            },
+            &api,
+            |_| {},
+        );
+        prepare(&parsed, &options).unwrap_or_else(|error| panic!("{error}\n{diagnostics:?}"));
+    }
+
+    #[test]
+    fn the_document_budget_bounds_every_loading_pass() {
+        let (_, _, api) = external_workflow();
+        let copy = |name: &str| {
+            let file = TempFile::write(
+                name,
+                &serde_json::from_str::<Value>(&std::fs::read_to_string(&api.0).unwrap()).unwrap(),
+            );
+            let name = file.0.file_name().unwrap().to_str().unwrap().to_owned();
+            (file, name)
+        };
+        let (_a1, a1) = copy("budget-a1.json");
+        let (_a2, a2) = copy("budget-a2.json");
+        let (_a3, a3) = copy("budget-a3.json");
+        let get = |source: &str| {
+            json!({ "stepId": format!("get-{source}"),
+            "operationId": format!("$sourceDescriptions.{source}.getThing"),
+            "parameters": [{ "name": "id", "in": "query", "value": 1 }] })
+        };
+        let child = |entry: &str| {
+            json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry, "type": "arazzo" },
+                    { "name": "a1", "url": a1, "type": "openapi" },
+                    { "name": "a2", "url": a2, "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [
+                    { "stepId": "back", "workflowId": "$sourceDescriptions.root.helper" },
+                    get("a1"), get("a2")] }]
+            })
+        };
+        let entry = |child: &str| {
+            json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": child, "type": "arazzo" },
+                    { "name": "extra", "url": a3, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "buyPet", "steps": [{
+                        "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                    { "workflowId": "helper", "steps": [get("extra")] }
+                ]
+            })
+        };
+        let (options, parsed, diagnostics) = load_back_call("budget", child, entry, &api, |args| {
+            args.source_max_documents = 4
+        });
+        assert!(
+            diagnostics
+                .iter()
+                .any(|line| line.contains("(`a2`): source graph document limit (4) exceeded")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            prepare(&parsed, &options).is_err(),
+            "five documents loaded under a budget of four"
+        );
+    }
+
+    /// An entry linking `shared` to `child_url`, loaded with `--load file`.
+    fn unloadable(child_url: &str, base_url: Option<&str>) -> String {
+        let (_, _, api) = external_workflow();
+        let entry = TempFile::write(
+            "unloadable-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [{ "name": "shared", "url": child_url, "type": "arazzo" }],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] }]
+            }),
+        );
+        let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.base_url = base_url.map(str::to_owned).into_iter().collect();
+        args.quiet = true;
+        run_arazzo_run(args).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn a_scoped_base_url_into_a_document_that_failed_to_load_leaves_the_error_to_preparation() {
+        let error = unloadable(
+            "missing-external-document.json",
+            Some("shared.api=http://127.0.0.1:9"),
+        );
+        assert!(!error.contains("--base-url"), "{error}");
+        assert!(error.contains("missing-external-document.json"), "{error}");
+    }
+
+    #[test]
+    fn a_static_error_in_a_linked_document_is_reported_with_loading_diagnostics() {
+        let child = TempFile::write(
+            "broken-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "gone", "url": "gone-external-api.json", "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.gone.getThing" }],
+                    "outputs": { "x": "$steps.nope.outputs.x" } }]
+            }),
+        );
+        let error = unloadable(child.0.file_name().unwrap().to_str().unwrap(), None);
+        assert!(error.contains("$steps.nope.outputs.x"), "{error}");
+        assert!(error.contains("gone-external-api.json"), "{error}");
+    }
+
+    #[test]
+    fn a_scoped_base_url_for_a_document_the_workflow_never_reaches_is_harmless() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write(
+            "unreached-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "shared", "url": "https://example.invalid/shared.arazzo.json", "type": "arazzo" },
+                    { "name": "api", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [
+                    { "workflowId": "viaShared", "steps": [{
+                        "stepId": "call", "workflowId": "$sourceDescriptions.shared.child" }] },
+                    { "workflowId": "local", "steps": [{
+                        "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                        "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }
+                ]
+            }),
+        );
+        let mut args = run_args(&entry, &api, &base);
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.workflow = Some("local".to_owned());
+        args.base_url = vec![
+            format!("api={base}"),
+            "shared.api=http://127.0.0.1:9".to_owned(),
+        ];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_scoped_base_url_through_an_unresolvable_alias_stops_the_run() {
+        let (_, _, api) = external_workflow();
+        let api_url = Url::from_file_path(&api.0).unwrap();
+        // `a` names the child by its `$self`; `b` by where it was read from,
+        // which identity-based referencing does not accept.
+        let child = TempFile::write(
+            "identity-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "$self": "https://canonical.example.test/child.arazzo.json",
+                "sourceDescriptions": [{ "name": "api", "url": api_url.as_str(), "type": "openapi" }],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                    "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write(
+            "identity-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "a", "url": "https://canonical.example.test/child.arazzo.json", "type": "arazzo" },
+                    { "name": "b", "url": child_name, "type": "arazzo" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.a.child" }] }]
+            }),
+        );
+        let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.source_document = vec![child.0.clone()];
+        args.load = vec![LoaderKind::File];
+        args.base_url = vec!["b.api=http://127.0.0.1:9".to_owned()];
+        args.quiet = true;
+        let error = format!("{:#}", run_arazzo_run(args).unwrap_err());
+        assert!(error.starts_with("`--base-url b.api=…`: `b`"), "{error}");
+    }
+
+    #[test]
+    fn a_scoped_base_url_reaches_a_document_loaded_through_another_alias() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::write(
+            "aliased-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [{ "name": "api", "url": api_name, "type": "openapi" }],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                    "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        // Only `a` is followed; `b` names the same document and stays unlinked.
+        let entry = TempFile::write(
+            "aliased-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "a", "url": child_name, "type": "arazzo" },
+                    { "name": "b", "url": child_name, "type": "arazzo" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.a.child" }] }]
+            }),
+        );
+        let mut args = run_args(&entry, &api, &base);
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.base_url = vec![format!("b.api={base}")];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        let asked = join.join().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].starts_with("GET /things?id=1 "), "{asked:?}");
+    }
+
+    /// An entry whose aliases `a` and `b` both name a child linking `root`
+    /// back to the entry, run with `base_urls`; the error, if any.
+    fn conflicting(name: &str, base_urls: &[&str]) -> Option<String> {
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let entry = TempFile::write(&format!("{name}-entry.json"), &json!({}));
+        let entry_name = entry.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::write(
+            &format!("{name}-child.json"),
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "root", "url": entry_name, "type": "arazzo" },
+                    { "name": "api", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                    "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        std::fs::write(
+            &entry.0,
+            serde_json::to_string(&json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "a", "url": child_name, "type": "arazzo" },
+                    { "name": "b", "url": child_name, "type": "arazzo" },
+                    { "name": "api", "url": api_name, "type": "openapi" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.a.child" }] }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.base_url = base_urls.iter().map(|flag| (*flag).to_owned()).collect();
+        args.quiet = true;
+        run_arazzo_run(args).err().map(|error| error.to_string())
+    }
+
+    #[test]
+    fn scoped_base_urls_that_reach_one_source_must_agree() {
+        let error = conflicting(
+            "conflict",
+            &["a.api=http://127.0.0.1:8", "b.api=http://127.0.0.1:9"],
+        )
+        .expect("a conflict");
+        assert!(
+            error.starts_with(
+                "`--base-url b.api=…` and `--base-url a.api=…` name the same source of "
+            ),
+            "{error}"
+        );
+        let error = conflicting(
+            "loop",
+            &["api=http://127.0.0.1:8", "a.root.api=http://127.0.0.1:9"],
+        )
+        .expect("a conflict through the loop back to the entry");
+        assert!(
+            error.starts_with("`--base-url a.root.api=…` and `--base-url api=…`"),
+            "{error}"
+        );
+        // Agreeing flags are not a conflict.
+        let agreed = conflicting(
+            "agreed",
+            &["a.api=http://127.0.0.1:8", "b.api=http://127.0.0.1:8"],
+        );
+        assert!(
+            agreed
+                .as_deref()
+                .is_none_or(|error| !error.contains("name the same source")),
+            "{agreed:?}"
+        );
+    }
+
+    #[test]
+    fn run_refuses_a_scoped_base_url_that_names_nothing() {
+        let (entry, child, api) = external_workflow();
+        for (base_url, expected) in [
+            (
+                "ghost.api=http://127.0.0.1:9",
+                "`--base-url ghost.api=…`: `ghost` names no source description of file://",
+            ),
+            (
+                "shared.api.x=http://127.0.0.1:9",
+                "`--base-url shared.api.x=…`: `api` is not an Arazzo source description",
+            ),
+            (
+                "shared.nope=http://127.0.0.1:9",
+                "`--base-url shared.nope=…`: `nope` names no source description of file://",
+            ),
+        ] {
+            let mut args = run_args(&entry, &api, "http://127.0.0.1:1");
+            args.source = vec![format!("shared={}", child.0.display())];
+            args.load = vec![LoaderKind::File];
+            args.base_url = vec![base_url.to_owned()];
+            args.quiet = true;
+            let error = run_arazzo_run(args).unwrap_err().to_string();
+            assert!(error.starts_with(expected), "{error}");
+        }
     }
 
     #[test]

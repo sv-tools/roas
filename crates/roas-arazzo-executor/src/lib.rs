@@ -32,6 +32,9 @@
 //! sync/async loading through explicitly configured `roas` fetchers. It retains
 //! canonical Arazzo identities, retrieval metadata, local aliases and loading
 //! diagnostics without adding IO to the execution state machine.
+//! Workflows of linked Arazzo documents are callable as
+//! `$sourceDescriptions.<name>.<workflowId>`; each runs in its own document's
+//! scope (components, sources, `$self`) on the same engine as a local call.
 //!
 //! ## Checked preparation
 //!
@@ -50,6 +53,7 @@
 //! Plans compile schemas; each run validates its actual bound inputs at entry.
 
 mod criterion;
+mod documents;
 mod expression;
 mod http;
 mod input;
