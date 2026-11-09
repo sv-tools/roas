@@ -450,7 +450,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         && roas_codegen::manifest_name(&given.to_ascii_lowercase(), Target::Rust).is_err()
     {
         bail!(
-            "--label {given:?} must be non-empty and use only letters, digits, `-` and `_` (it is lowercased)"
+            "--label {given:?} must be non-empty and use only ASCII letters, digits, `-` and `_` (it is lowercased)"
         );
     }
     let (input, uri) = read_description(&source, args.format)?;
