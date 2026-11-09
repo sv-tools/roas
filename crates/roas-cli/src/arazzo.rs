@@ -676,13 +676,19 @@ fn sources(
                     .identity(),
                 diagnostic.path,
                 diagnostic.source_name,
-                diagnostic.error,
+                with_causes(&diagnostic.error),
             )
         })
         .chain(report.reference_diagnostics.iter().map(ToString::to_string))
         .collect::<Vec<_>>();
     // A missing external document is usually why an alias path names nothing.
-    scoped_base_urls(&mut registry, root, &args.base_url).map_err(|error| {
+    scoped_base_urls(
+        &mut registry,
+        root,
+        &args.base_url,
+        args.allow_source_retrieval_aliases,
+    )
+    .map_err(|error| {
         if diagnostics.is_empty() {
             error
         } else {
@@ -694,6 +700,19 @@ fn sources(
         .iter()
         .any(|source| source.target.is_some());
     Ok((options.source_registry(&registry, root)?, any, diagnostics))
+}
+
+/// An error and what caused it, as one line: a loading diagnostic's own
+/// message often says only which URL failed, and its source says why.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut line = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        line.push_str(": ");
+        line.push_str(&error.to_string());
+        cause = error.source();
+    }
+    line
 }
 
 /// A registry holding the entry and every document named on the command
@@ -868,6 +887,7 @@ fn scoped_base_urls(
     registry: &mut SourceRegistry,
     root: roas_arazzo_executor::DocumentId,
     base_urls: &[String],
+    retrieval_aliases: bool,
 ) -> Result<()> {
     'flags: for base_url in base_urls {
         let (path, url) = split_pair(base_url, "--base-url")?;
@@ -889,7 +909,16 @@ fn scoped_base_urls(
                     document.identity()
                 );
             };
-            let target = registry.source(owner, alias).and_then(|link| link.target);
+            // Selective loading links only the aliases it follows; another
+            // alias may still have loaded the same document.
+            let target = registry.source(owner, alias).and_then(|link| {
+                link.target.or_else(|| {
+                    registry
+                        .resolve(owner, &link.declared_uri, retrieval_aliases)
+                        .ok()
+                        .flatten()
+                })
+            });
             let arazzo = match target {
                 Some(target) => registry.document(target)?.arazzo().is_some(),
                 None => declared
@@ -1492,6 +1521,19 @@ mod tests {
     }
 
     #[test]
+    fn a_loading_diagnostic_says_why_as_well_as_what() {
+        let fetches = Rc::new(RefCell::new(Fetches::default()));
+        let mut fetcher = Remembering::new(FileFetcher::new(), &fetches);
+        let spent = fetcher
+            .fetch(&Url::parse("file:///budget/spent.json").unwrap())
+            .unwrap_err();
+        assert_eq!(
+            with_causes(&spent),
+            "failed to fetch `file:///budget/spent.json`: the --source-max-documents budget is spent"
+        );
+    }
+
+    #[test]
     fn a_replayed_loading_error_reads_like_the_original() {
         let errors = [
             LoaderError::NoFetcherRegistered { uri: "x:a".into() },
@@ -1823,6 +1865,46 @@ mod tests {
         args.quiet = true;
         run_arazzo_run(args).unwrap();
         assert_eq!(join.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_scoped_base_url_reaches_a_document_loaded_through_another_alias() {
+        let (base, join) = server(1, 200, r#"{"name":"Rex"}"#);
+        let (_, _, api) = external_workflow();
+        let api_name = api.0.file_name().unwrap().to_str().unwrap().to_owned();
+        let child = TempFile::write(
+            "aliased-child.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "C", "version": "1" },
+                "sourceDescriptions": [{ "name": "api", "url": api_name, "type": "openapi" }],
+                "workflows": [{ "workflowId": "child", "steps": [{
+                    "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+                    "parameters": [{ "name": "id", "in": "query", "value": 1 }] }] }]
+            }),
+        );
+        let child_name = child.0.file_name().unwrap().to_str().unwrap().to_owned();
+        // Only `a` is followed; `b` names the same document and stays unlinked.
+        let entry = TempFile::write(
+            "aliased-entry.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "E", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "a", "url": child_name, "type": "arazzo" },
+                    { "name": "b", "url": child_name, "type": "arazzo" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [{
+                    "stepId": "call", "workflowId": "$sourceDescriptions.a.child" }] }]
+            }),
+        );
+        let mut args = run_args(&entry, &api, &base);
+        args.source = Vec::new();
+        args.load = vec![LoaderKind::File];
+        args.base_url = vec![format!("b.api={base}")];
+        args.quiet = true;
+        run_arazzo_run(args).unwrap();
+        let asked = join.join().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].starts_with("GET /things?id=1 "), "{asked:?}");
     }
 
     #[test]
