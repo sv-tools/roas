@@ -373,6 +373,10 @@ fn planned(generation: &Generation) -> Result<BTreeMap<String, &str>, WriteError
 /// The output directory itself must not be a symbolic link, or every
 /// check below it would vouch for a directory somewhere else.
 fn check_out_dir(out_dir: &Path) -> Result<(), WriteError> {
+    // A trailing separator makes the lookup follow a symlink, so the
+    // final entry is inspected without one.
+    let out_dir: PathBuf = out_dir.components().collect();
+    let out_dir = out_dir.as_path();
     match fs::symlink_metadata(out_dir) {
         Ok(meta) if meta.file_type().is_symlink() => {
             Err(WriteError::Symlink(out_dir.to_path_buf()))
@@ -1390,5 +1394,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, WriteError::OwnedByOther { .. }), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_trailing_separator_does_not_bypass_the_symlink_check() {
+        let root = TempDir::new("trailing");
+        let real = root.0.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = root.0.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let with_slash = PathBuf::from(format!("{}/", link.display()));
+        let g = generation(&[("types.rs", "x")]);
+        assert!(matches!(
+            write(&g, &with_slash, Target::Rust, &WriteOptions::new("api")),
+            Err(WriteError::Symlink(_))
+        ));
+        assert!(fs::read_dir(&real).unwrap().next().is_none());
     }
 }

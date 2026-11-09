@@ -1,8 +1,8 @@
 //! `roas openapi generate` — generate Rust types from an OpenAPI
 //! description, powered by the `roas-codegen` crate.
 //!
-//! The description is read as raw bytes, so JSON input keeps exact
-//! numbers, then version-detected, normalized to 3.2, validated with
+//! The description is read as raw bytes, so that a build with the
+//! `exact-numbers` feature keeps JSON numbers exact, then version-detected, normalized to 3.2, validated with
 //! external references skipped, lowered and rendered. Files are written
 //! under a manifest the target owns: see `roas_codegen::write` for the
 //! ownership rules. `--check` writes nothing and fails when the output
@@ -98,7 +98,7 @@ pub(crate) struct GenerateArgs {
     pub(crate) check: bool,
 }
 
-/// Read the description as bytes, so JSON keeps exact numbers, and give
+/// Read the description as bytes, so JSON can keep exact numbers, and give
 /// it the URI every schema id is built from.
 fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result<(Input, Url)> {
     let (bytes, uri, yaml) = match source {
@@ -171,8 +171,8 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
     let InputSource::File(path) = source else {
         return None;
     };
-    let file = std::path::absolute(path.with_extension("")).ok()?;
-    let out = std::path::absolute(out).ok()?;
+    let file = normalize(&std::path::absolute(path.with_extension("")).ok()?);
+    let out = normalize(&std::path::absolute(out).ok()?);
     let file: Vec<_> = file.components().collect();
     let out: Vec<_> = out.components().collect();
     let common = file.iter().zip(&out).take_while(|(a, b)| a == b).count();
@@ -183,6 +183,24 @@ fn source_id(source: &InputSource, out: &Path) -> Option<String> {
             .map(|c| c.as_os_str().to_string_lossy().into_owned()),
     );
     Some(parts.join("/"))
+}
+
+/// Resolve `.` and `..` lexically: `std::path::absolute` keeps them, and
+/// `pets/../out` must compare equal to `out`.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn show(paths: &[PathBuf]) -> String {
@@ -681,6 +699,17 @@ mod tests {
             Path::new("/repo/src/api"),
         );
         assert_eq!(id.as_deref(), Some("../../specs/pets/openapi"));
+        // `..` is resolved before comparing, so siblings stay distinct.
+        let pets = source_id(
+            &InputSource::File("/repo/pets/../pets/openapi.json".into()),
+            Path::new("/repo/pets/../out"),
+        );
+        let billing = source_id(
+            &InputSource::File("/repo/billing/openapi.json".into()),
+            Path::new("/repo/billing/../out"),
+        );
+        assert_eq!(pets.as_deref(), Some("../pets/openapi"));
+        assert_eq!(billing.as_deref(), Some("../billing/openapi"));
         assert_eq!(source_id(&InputSource::Stdin, Path::new("/x")), None);
     }
 

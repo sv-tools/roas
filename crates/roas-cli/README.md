@@ -140,7 +140,7 @@ roas openapi convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-m
 
 ### `openapi generate`
 
-Generates Rust types from a description of any version, using [`roas-codegen`](https://crates.io/crates/roas-codegen). JSON input keeps numbers exactly as written; the description is validated first, with external references skipped and reported.
+Generates Rust types from a description of any version, using [`roas-codegen`](https://crates.io/crates/roas-codegen). The description is validated first, with external references skipped and reported. Numbers are read as `f64` by default; a build with the `exact-numbers` feature (`cargo install roas-cli --features exact-numbers`) keeps JSON numbers exactly as written. That feature is off by default because it changes how the other commands compare numbers.
 
 ```shell
 roas openapi generate --target rust --out src/api spec.yaml       # write src/api/spec.rs
