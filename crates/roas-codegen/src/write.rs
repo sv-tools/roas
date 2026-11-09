@@ -1388,9 +1388,11 @@ fn error_count(generation: &Generation) -> usize {
 /// The source a manifest records: the caller's, or the one already there
 /// when the caller gave none, so a run without an identity does not erase it.
 fn source_of(previous: &Manifest, options: &WriteOptions) -> String {
+    // An empty id is no id: it keeps the recorded one, as `None` does.
     options
         .source_id
         .clone()
+        .filter(|id| !id.is_empty())
         .unwrap_or_else(|| previous.source.clone())
 }
 
@@ -4153,5 +4155,22 @@ mod tests {
         let through = resolved(&dir.0.join("link/missing/../../gen")).unwrap();
         let direct = resolved(&dir.0.join("real/gen")).unwrap();
         assert_eq!(through, direct);
+    }
+
+    #[test]
+    fn an_empty_source_id_keeps_the_recorded_one() {
+        let dir = TempDir::new("empty-source");
+        let mut a = WriteOptions::new("api");
+        a.source_id = Some("spec/a".into());
+        write(&generation(&[("a.rs", "a")]), &dir.0, &a).unwrap();
+        let mut empty = WriteOptions::new("api");
+        empty.source_id = Some(String::new());
+        write(&generation(&[("a.rs", "a")]), &dir.0, &empty).unwrap();
+        let mut b = WriteOptions::new("api");
+        b.source_id = Some("spec/b".into());
+        assert!(matches!(
+            write(&generation(&[("a.rs", "b")]), &dir.0, &b),
+            Err(WriteError::SourceMismatch { .. })
+        ));
     }
 }

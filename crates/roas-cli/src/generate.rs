@@ -116,16 +116,17 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
             // As stored on disk, so the generated header names the file the
             // same way however its path was typed (case on macOS/Windows),
             // just as the recorded source does.
-            // A pipe (`<(...)`, `/dev/stdin`) has no stored name to resolve.
-            let absolute = if is_regular_file(path) {
-                std::fs::canonicalize(path)
+            // A pipe (`<(...)`, `/dev/stdin`) has no stored name: it is
+            // named like stdin.
+            let uri = if is_regular_file(path) {
+                let absolute = std::fs::canonicalize(path)
+                    .with_context(|| format!("resolving {}", path.display()))?;
+                Url::from_file_path(&absolute).map_err(|()| {
+                    anyhow!("{} cannot be expressed as a file URL", absolute.display())
+                })?
             } else {
-                std::path::absolute(path)
-            }
-            .with_context(|| format!("resolving {}", path.display()))?;
-            let uri = Url::from_file_path(&absolute).map_err(|()| {
-                anyhow!("{} cannot be expressed as a file URL", absolute.display())
-            })?;
+                Url::parse("stdin:///").expect("a valid URL")
+            };
             let yaml = match format {
                 Some(f) => f == InputFormat::Yaml,
                 None => path_looks_like_yaml(path),
@@ -152,9 +153,18 @@ fn read_description(source: &InputSource, format: Option<InputFormat>) -> Result
     Ok((input, uri))
 }
 
-/// Whether `path` names a regular file, as opposed to a pipe or device.
+/// Whether `path` names a lasting file, as opposed to a pipe, a device or
+/// a file descriptor (`<(...)`, `/dev/stdin`, `/proc/self/fd/0`), which is
+/// read like stdin: label `api`, no recorded source.
 fn is_regular_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|m| m.is_file())
+    !is_pipe(path) && std::fs::metadata(path).is_ok_and(|m| m.is_file())
+}
+
+/// Whether `path` reads through a file descriptor or another non-file.
+fn is_pipe(path: &Path) -> bool {
+    path.starts_with("/dev")
+        || path.starts_with("/proc")
+        || std::fs::metadata(path).is_ok_and(|m| !m.is_file())
 }
 
 /// `path` without a description's format extension (`.json`, `.yaml`,
@@ -176,10 +186,11 @@ fn without_format_extension(path: &Path) -> PathBuf {
 /// The default label: the input file's stem, made safe for a manifest name.
 fn default_label(source: &InputSource) -> String {
     let stem = match source {
-        InputSource::File(path) => without_format_extension(path)
+        InputSource::File(path) if !is_pipe(path) => without_format_extension(path)
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        InputSource::File(_) => String::new(),
         InputSource::Stdin => String::new(),
     };
     let safe: String = stem
@@ -984,6 +995,14 @@ mod tests {
         );
         assert_eq!(default_label(&InputSource::File("...json".into())), "api");
         assert_eq!(default_label(&InputSource::Stdin), "api");
+        assert_eq!(
+            default_label(&InputSource::File("/dev/fd/63".into())),
+            "api"
+        );
+        assert_eq!(
+            default_label(&InputSource::File("/dev/stdin".into())),
+            "api"
+        );
     }
 
     #[test]
