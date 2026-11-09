@@ -2347,14 +2347,18 @@ mod tests {
             &WriteOptions::new("pets"),
         )
         .unwrap();
-        // A manifest left by an older tool under a case variant of our name
-        // is ours on a case-insensitive filesystem, never another target's.
+        // A manifest under a case variant of our name is ours where the
+        // disk folds case, and another target's where it does not.
         let ours = dir.0.join(".roas-codegen-pets-rust.json");
         let text = fs::read_to_string(&ours).unwrap();
         fs::remove_file(&ours).unwrap();
         fs::write(dir.0.join(".roas-codegen-Pets-rust.json"), text).unwrap();
         let owners = other_owners(&dir.0, ".roas-codegen-pets-rust.json", []).unwrap();
-        assert!(owners.is_empty(), "{owners:?}");
+        if ours.exists() {
+            assert!(owners.is_empty(), "{owners:?}");
+        } else {
+            assert!(owners.contains_key("pets_a.rs"), "{owners:?}");
+        }
     }
 
     #[test]
