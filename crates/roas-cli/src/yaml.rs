@@ -86,6 +86,8 @@ mod tests {
             ("3.1.0", json!("3.1.0")),
             ("!!binary SGVsbG8=", json!("SGVsbG8=")),
             ("!!binary /wAB", json!("/wAB")),
+            ("1e400", json!(null)),
+            ("!include other.yaml", json!("other.yaml")),
         ] {
             assert_eq!(
                 parse(&format!("v: {scalar}\n")).unwrap(),
