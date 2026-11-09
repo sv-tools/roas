@@ -34,7 +34,7 @@ enumset.workspace = true
 jsonschema = { workspace = true, optional = true }
 roas = { workspace = true, optional = true, features = ["v2", "v3_0", "v3_1", "v3_2"] }
 roas-asyncapi = { workspace = true, optional = true, features = ["v2_6", "v3_0", "v3_1"] }
-roas-arazzo = { version = "0.3", path = "../roas-arazzo", features = ["v1_1"] }
+roas-arazzo = { version = "0.3.1", path = "../roas-arazzo", features = ["v1_1"] }
 regex.workspace = true
 reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["time"] }
@@ -44,6 +44,7 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+roas-arazzo = { version = "0.3.1", path = "../roas-arazzo", features = ["source-map"] }
 serde.workspace = true
 serde-saphyr.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

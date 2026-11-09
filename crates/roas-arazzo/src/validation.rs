@@ -15,6 +15,9 @@ use enumset::{EnumSet, EnumSetType};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Write};
 
+/// The message of a map key outside the component key pattern.
+const KEY_PATTERN: &str = r"key must match `^[a-zA-Z0-9\.\-_]+$`";
+
 /// A single validation finding.
 ///
 /// `path` is a human-readable locator (e.g. `#.workflows[0].steps[1].stepId`),
@@ -29,6 +32,13 @@ pub struct ValidationError {
 impl ValidationError {
     pub(crate) fn new(path: String, message: String) -> Self {
         Self { path, message }
+    }
+
+    /// Whether the finding is about a member's name rather than its value
+    /// (a map key outside the component key pattern), so a source location
+    /// belongs at the name.
+    pub fn is_about_key(&self) -> bool {
+        self.message == KEY_PATTERN
     }
 
     /// Substring search across path and message (and the rendered
@@ -208,7 +218,7 @@ impl Context {
         self.in_field(field, |ctx| {
             for key in map.keys() {
                 if !is_valid_key(key) {
-                    ctx.error_field(key, r"key must match `^[a-zA-Z0-9\.\-_]+$`");
+                    ctx.error_field(key, KEY_PATTERN);
                 }
             }
         });
@@ -259,6 +269,12 @@ pub(crate) fn is_valid_key(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_key_pattern_finding_is_about_a_key() {
+        assert!(ValidationError::new("#.a".into(), KEY_PATTERN.into()).is_about_key());
+        assert!(!ValidationError::new("#.a".into(), "must not be empty".into()).is_about_key());
+    }
 
     #[test]
     fn error_display_renders_with_count_and_bullets() {

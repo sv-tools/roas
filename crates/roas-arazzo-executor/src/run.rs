@@ -63,6 +63,7 @@ pub struct Options {
         Option<std::sync::Arc<crate::source_registry::WorkflowDocuments>>,
     pub(crate) validation: enumset::EnumSet<roas_arazzo::validation::ValidationOptions>,
     pub(crate) portability_lints: bool,
+    pub(crate) source_map: Option<std::sync::Arc<roas_arazzo::source_map::SourceMap>>,
     headers: Vec<(String, String)>,
     limits: Limits,
 }
@@ -84,6 +85,23 @@ impl Options {
     #[must_use]
     pub fn portability_lints(mut self, enabled: bool) -> Self {
         self.portability_lints = enabled;
+        self
+    }
+
+    /// Where the description's fields sit in the text it was read from.
+    /// [`crate::prepare`] then gives each finding the line and column of
+    /// its field ([`PreparationDiagnostic::span`]) and of the offending
+    /// character inside a string ([`PreparationDiagnostic::position`]).
+    /// Without a map, findings carry the model path and string offset only.
+    ///
+    /// The map must be of the text the description was parsed from: it is
+    /// looked up by path and is never checked against the model.
+    ///
+    /// [`PreparationDiagnostic::span`]: crate::PreparationDiagnostic::span
+    /// [`PreparationDiagnostic::position`]: crate::PreparationDiagnostic::position
+    #[must_use]
+    pub fn source_map(mut self, map: roas_arazzo::source_map::SourceMap) -> Self {
+        self.source_map = Some(std::sync::Arc::new(map));
         self
     }
     /// Options with nothing set: the first workflow, no inputs, no
