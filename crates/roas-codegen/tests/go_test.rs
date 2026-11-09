@@ -203,10 +203,13 @@ fn substitutions_use_their_go_spelling_and_imports() {
     let components = serde_json::json!({
         "Pet": {"type": "object", "properties": {
             "id": {"type": "string", "format": "uuid"},
-            "born": {"type": "string", "format": "date-time"}
+            "born": {"type": "string", "format": "date-time"},
+            "price": {"type": "string", "format": "decimal"}
         }}
     });
-    let toml = "[substitutions.uuid.go]\nname = \"uuid.UUID\"\nimport = \"github.com/google/uuid\"\n[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n";
+    // `uuid` and `time` are the standard library's (Go 1.27); a module
+    // outside it is listed as a dependency.
+    let toml = "[substitutions.uuid.go]\nname = \"uuid.UUID\"\nimport = \"uuid\"\n[substitutions.date-time.go]\nname = \"time.Time\"\nimport = \"time\"\n[substitutions.decimal.go]\nname = \"decimal.Decimal\"\nimport = \"example.com/money/decimal\"\n";
     let Some(generation) = go(components.clone(), toml) else {
         return;
     };
@@ -217,7 +220,8 @@ fn substitutions_use_their_go_spelling_and_imports() {
         "{code}"
     );
     assert!(code.contains("Born Nullable[time.Time]"), "{code}");
-    assert!(code.contains("\"github.com/google/uuid\""), "{code}");
+    assert!(code.contains("\"uuid\""), "{code}");
+    assert!(code.contains("\"example.com/money/decimal\""), "{code}");
     assert!(code.contains("\"time\""), "{code}");
     assert!(code.contains("v *time.Time) error {"), "{code}");
     // The standard library is no dependency.
@@ -227,7 +231,7 @@ fn substitutions_use_their_go_spelling_and_imports() {
         .iter()
         .map(|d| d.import.as_str())
         .collect();
-    assert_eq!(deps, ["github.com/google/uuid"]);
+    assert_eq!(deps, ["example.com/money/decimal"]);
 
     let error = go(
         components.clone(),

@@ -128,6 +128,12 @@ derives = ["Eq"]
 name = "chrono::DateTime<chrono::Utc>"
 import = "chrono"
 
+# Off by default: `format: uuid` is a `string`. Go 1.27 has `uuid` in the
+# standard library, so this adds no dependency.
+[substitutions.uuid.go]
+name = "uuid.UUID"
+import = "uuid"
+
 [types.Pet]
 rename = "Animal"
 attrs = ['#[derive(Hash)]']

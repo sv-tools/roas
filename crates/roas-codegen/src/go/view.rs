@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn import_package_names() {
-        assert_eq!(package_of("github.com/google/uuid"), "uuid");
+        assert_eq!(package_of("example.com/x/uuid"), "uuid");
         assert_eq!(package_of("encoding/json/v2"), "json");
         assert_eq!(package_of("time"), "time");
         assert_eq!(package_of("example.com/v"), "v");
