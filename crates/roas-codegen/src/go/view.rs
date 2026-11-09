@@ -193,12 +193,16 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     let mut dependencies = Vec::new();
     if !types.is_empty() {
         imports.extend(BUILTIN_IMPORTS.iter().map(|(path, _)| quote(path)));
+        let mut used: BTreeMap<&str, &str> = BUILTIN_IMPORTS
+            .iter()
+            .map(|(path, name)| (*name, *path))
+            .collect();
         for import in &builder.externs {
             if BUILTIN_IMPORTS.iter().any(|(path, _)| path == import) {
                 continue;
             }
             let name = package_of(import);
-            if let Some((path, _)) = BUILTIN_IMPORTS.iter().find(|(_, used)| *used == name) {
+            if let Some(path) = used.insert(name, import) {
                 return Err(GenerateError::Config(format!(
                     "substitution import {import:?} is used as `{name}`, which the generated code already imports as {path:?}"
                 )));
@@ -520,7 +524,12 @@ impl Builder<'_> {
                         None => exported(std::slice::from_ref(&field.raw_name)),
                     };
                     let name = fields.allocate(base);
-                    let (ty, omitzero) = match (field.required, field.nullable) {
+                    // A type that holds `null` as a value — `{}`, `type: null`,
+                    // an open holder, or a reference to one — reads it as
+                    // that value, as in Rust; an optional one keeps it apart
+                    // from absence, so its member is nullable in Go's terms.
+                    let holds_null = self.holds_null(&field.ty);
+                    let (ty, omitzero) = match (field.required, field.nullable || holds_null) {
                         (true, false) => (self.spell(&field.ty)?, false),
                         (true, true) => {
                             self.support.nullable = true;
@@ -548,9 +557,7 @@ impl Builder<'_> {
                     if field.required {
                         required.push(quote(&field.raw_name));
                     }
-                    // `Any` and `null` hold a null as a value, as they do in
-                    // Rust.
-                    if !field.nullable && !matches!(field.ty, TypeRef::Any | TypeRef::Null) {
+                    if !field.nullable && !holds_null {
                         non_null.push(quote(&field.raw_name));
                     }
                     let tag = struct_tag(&field.raw_name, omitzero, &go_tags, &at)?;
@@ -587,7 +594,10 @@ impl Builder<'_> {
             }
             TypeKind::StringEnum(values) => {
                 view.kind = "enum";
-                for value in values {
+                let mut seen = BTreeSet::new();
+                // A repeated value is one member: a second constant would make
+                // a duplicate `case`, which Go refuses.
+                for value in values.iter().filter(|v| seen.insert(v.as_str())) {
                     let base = if value.trim().is_empty() {
                         "Empty".to_owned()
                     } else {
@@ -654,6 +664,27 @@ impl Builder<'_> {
         Ok(true)
     }
 
+    /// Whether the type's own decoder takes `null` as one of its values:
+    /// any JSON, `null` itself, or a holder of raw JSON.
+    fn holds_null(&self, ty: &TypeRef) -> bool {
+        let mut ty = ty;
+        // A chain of aliases is at most every type long; one closing a cycle
+        // generates nothing to hold anything.
+        for _ in 0..=self.ir.types.len() {
+            ty = match ty {
+                TypeRef::Any | TypeRef::Null => return true,
+                TypeRef::Boxed(inner) => inner,
+                TypeRef::Named(id) => match &self.ir.types[id].kind {
+                    TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_) => return true,
+                    TypeKind::Newtype(inner) | TypeKind::Alias(inner) => inner,
+                    _ => return false,
+                },
+                _ => return false,
+            };
+        }
+        false
+    }
+
     fn branches(
         &mut self,
         owner: &str,
@@ -713,8 +744,10 @@ fn struct_tag(
     if omitzero {
         json.push_str(",omitzero");
     } else if raw_name == "-" {
-        // `json:"-"` alone skips the field; `-,` names it `-`.
-        json.push(',');
+        // `json:"-"` alone skips the field, and a trailing comma is
+        // malformed, so `-` takes an option that changes nothing: strict
+        // matching is the default.
+        json.push_str(",case:strict");
     }
     let mut parts = vec![format!("json:{}", quote(&json))];
     for (key, value) in extra {
@@ -749,7 +782,10 @@ mod tests {
             struct_tag("name", false, &none, "x").unwrap(),
             "`json:\"name\"`"
         );
-        assert_eq!(struct_tag("-", false, &none, "x").unwrap(), "`json:\"-,\"`");
+        assert_eq!(
+            struct_tag("-", false, &none, "x").unwrap(),
+            "`json:\"-,case:strict\"`"
+        );
         assert_eq!(
             struct_tag("a b", true, &none, "x").unwrap(),
             "`json:\"a b,omitzero\"`"

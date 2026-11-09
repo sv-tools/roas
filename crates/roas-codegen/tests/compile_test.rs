@@ -110,6 +110,13 @@ fn main() {
     let ids: Ids = serde_json::from_str(r#"["a","b"]"#).unwrap();
     assert_eq!(ids.0.len(), 2);
     let _: Alias = serde_json::from_str(r#"{"petType":"Cat"}"#).unwrap();
+    assert_eq!(round_trip::<Holder>(r#"{"needed":null}"#), r#"{"needed":null}"#);
+    assert_eq!(
+        round_trip::<Holder>(r#"{"any":null,"loose":null,"needed":1,"nothing":null,"ref":null}"#),
+        r#"{"any":null,"loose":null,"needed":1,"nothing":null,"ref":null}"#
+    );
+    must_fail::<Holder>(r#"{}"#, "needed is required");
+    assert_eq!(round_trip::<Dash>(r#"{"-":"x"}"#), r#"{"-":"x"}"#);
     println!("generated code behaves");
 }
 "##;
@@ -151,6 +158,21 @@ fn description() -> serde_json::Value {
         serde_json::json!({"$ref": "#/components/schemas/Node"});
     raw["components"]["schemas"]["Node"]["properties"]["done"] =
         serde_json::json!({"type": ["boolean", "null"]});
+    // Types whose values include `null`, directly and through a reference.
+    raw["components"]["schemas"]["Anything"] = serde_json::json!({});
+    raw["components"]["schemas"]["Holder"] = serde_json::json!({
+        "type": "object", "required": ["needed"],
+        "properties": {
+            "any": {}, "nothing": {"type": "null"},
+            "ref": {"$ref": "#/components/schemas/Anything"},
+            "needed": {"$ref": "#/components/schemas/Anything"},
+            "loose": {"$ref": "#/components/schemas/Loose"}
+        }
+    });
+    // A member named `-`, which a bare `json:"-"` tag would skip.
+    raw["components"]["schemas"]["Dash"] = serde_json::json!({
+        "type": "object", "required": ["-"], "properties": {"-": {"type": "string"}}
+    });
     raw
 }
 
@@ -357,6 +379,14 @@ func main() {
 	check(len(decode[api.Ids](`["a","b"]`)), 2)
 	check(roundTrip[api.Ids](`["a","b"]`), `["a","b"]`)
 	var _ api.Cat = decode[api.Alias](`{"petType":"Cat"}`)
+	// null is a value of `{}`, `type: null` and an open holder: kept, not lost.
+	check(roundTrip[api.Holder](`{"needed":null}`), `{"needed":null}`)
+	check(roundTrip[api.Holder](`{"any":null,"loose":null,"needed":1,"nothing":null,"ref":null}`),
+		`{"any":null,"loose":null,"needed":1,"nothing":null,"ref":null}`)
+	check(roundTrip[api.Holder](`{"needed":{"a":[1]}}`), `{"needed":{"a":[1]}}`)
+	mustFail[api.Holder](`{}`, "needed is required")
+	check(roundTrip[api.Dash](`{"-":"x"}`), `{"-":"x"}`)
+	mustFail[api.Dash](`{}`, "- is required")
 	fmt.Println("generated code behaves")
 }
 "##;

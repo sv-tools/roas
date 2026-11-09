@@ -255,6 +255,8 @@ fn the_file_and_package_are_configurable_and_checked() {
     for (toml, bad) in [
         ("[go]\npackage = \"type\"\n", "package"),
         ("[go]\npackage = \"Pets\"\n", "package"),
+        ("[go]\npackage = \"init\"\n", "package"),
+        ("[go]\npackage = \"main\"\n", "package"),
         ("[go]\nfile = \"pets_windows\"\n", "file"),
         ("[go]\nfile = \"pets_test\"\n", "file"),
         ("[go]\nfile = \"nul\"\n", "file"),
@@ -274,6 +276,29 @@ fn the_file_and_package_are_configurable_and_checked() {
             ),
         }
     }
+}
+
+#[test]
+fn repeated_enum_values_and_clashing_imports() {
+    let components = serde_json::json!({
+        "E": {"type": "string", "enum": ["x", "x", "", ""]},
+        "P": {"type": "object", "properties": {
+            "at": {"type": "string", "format": "date-time"},
+            "id": {"type": "string", "format": "uuid"}
+        }}
+    });
+    let Some(generation) = go(components.clone(), "") else {
+        return;
+    };
+    let code = squeezed(&generation.unwrap().files[0].contents);
+    assert!(code.contains("case EX, EEmpty:"), "{code}");
+    assert!(!code.contains("EX2"), "{code}");
+    let toml = "[substitutions.date-time.go]\nname = \"rand.Zipf\"\nimport = \"math/rand\"\n[substitutions.uuid.go]\nname = \"rand.PCG\"\nimport = \"math/rand/v2\"\n";
+    let error = go(components, toml).unwrap().unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("used as `rand`")),
+        "{error}"
+    );
 }
 
 #[test]
@@ -302,7 +327,8 @@ fn every_kind_renders_and_survives_gofmt() {
         "// Any number of the branches may match;",
         "func ComposedFromRaw(raw jsontext.Value) Composed {",
         "Next *Node `json:\"next,omitzero\"`",
-        "Nothing *Null `json:\"nothing,omitzero\"`",
+        "Nothing Nullable[Null] `json:\"nothing,omitzero\"`",
+        "Any Nullable[jsontext.Value] `json:\"any,omitzero\"`",
         "type Ids []*string",
         "type Alias = Cat",
         "type Int32 int32",

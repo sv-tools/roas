@@ -69,13 +69,16 @@ pub(crate) fn is_exported_ident(ident: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// A package name: lowercase ASCII, a letter first, not a keyword.
+/// A package name: lowercase ASCII, a letter first, not a keyword, and
+/// one another package can import (`main` and `init` cannot be).
 pub(crate) fn is_package_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_lowercase())
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         && !is_keyword(name)
+        && name != "main"
+        && name != "init"
 }
 
 /// Operating systems and architectures `go build` knows, from

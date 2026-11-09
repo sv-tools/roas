@@ -68,7 +68,7 @@ pub(crate) enum OpenApiCommand {
     Validate(ValidateArgs),
     /// Convert an OpenAPI description to a different version.
     Convert(ConvertArgs),
-    /// Generate Rust types from an OpenAPI description.
+    /// Generate Rust or Go types from an OpenAPI description.
     Generate(GenerateArgs),
     /// Preview the description in a browser, rendered with Redoc or
     /// Swagger UI.
