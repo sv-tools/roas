@@ -30,7 +30,7 @@ pub struct WriteOptions {
     /// set, a later run under the same label from a different source is
     /// refused, so two descriptions cannot overwrite each other's output.
     /// The `roas` command line uses the description's path relative to
-    /// the output directory, without its extension, so moving between
+    /// the output directory, without a `.json`/`.yaml`/`.yml` extension, so moving between
     /// JSON and YAML keeps the label.
     pub source_id: Option<String>,
     /// Accept a different [`source_id`](Self::source_id) than the one the
@@ -141,6 +141,10 @@ pub enum WriteError {
     OutputDirSymlink(PathBuf),
     #[error("output directory {0} is not a directory")]
     OutputDirNotADirectory(PathBuf),
+    #[error(
+        "the output directory is, or is inside, a file another generation target owns (manifest {manifest}); use a different output directory"
+    )]
+    OutputDirOwned { manifest: PathBuf },
     #[error("{0} is a symbolic link; generated files are never written through one")]
     Symlink(PathBuf),
     #[error(
@@ -437,6 +441,11 @@ fn key(path: &Path) -> Result<String, WriteError> {
                 // anything else could let two spellings share one file.
                 if !part.is_ascii() {
                     return Err(WriteError::NonAsciiPath(path.to_path_buf()));
+                }
+                // Windows drops trailing dots and spaces, so `a.rs.` would
+                // be `a.rs` there: refused everywhere, as one rule.
+                if part.ends_with('.') || part.ends_with(' ') {
+                    return Err(WriteError::UnsafePath(path.to_path_buf()));
                 }
                 parts.push(part.to_owned());
             }
@@ -774,8 +783,12 @@ fn other_owners<'a>(
                 if !is_manifest_name(&name) || !entry.file_type().is_ok_and(|t| t.is_file()) {
                     continue;
                 }
-                let Ok(Some(manifest)) = read_manifest(&entry.path()) else {
-                    continue;
+                // Unreadable is the caller's business up there, but a
+                // manifest that does not parse may still own files here.
+                let manifest = match read_manifest(&entry.path()) {
+                    Ok(Some(manifest)) => manifest,
+                    Ok(None) | Err(WriteError::Io { .. }) => continue,
+                    Err(error) => return Err(error),
                 };
                 let own = prefix.trim_end_matches('/');
                 for file in manifest.files.keys() {
@@ -1041,8 +1054,7 @@ fn check_ownership(
         planned.keys().chain(previous.files.keys()),
     )?;
     if let Some(manifest) = others.get("") {
-        return Err(WriteError::OwnedByOther {
-            path: PathBuf::from("."),
+        return Err(WriteError::OutputDirOwned {
             manifest: manifest.clone(),
         });
     }
@@ -1530,16 +1542,31 @@ pub fn write(
         keep: false,
         lock: None,
     };
+    // One run at a time over every file this one can touch, and a lock
+    // held elsewhere fails at once: runs never wait. Enclosing roots come
+    // first, before anything is created, so a run refused there cannot
+    // have made (and then remove) directories an active enclosing run is
+    // writing into. Then this run's own directory, exclusively; only after
+    // that are nested roots' lock files looked for, so of two overlapping
+    // runs at least one sees the other's.
+    let mut _shared = Vec::new();
+    let enclosing: Vec<PathBuf> = other_roots(out_dir, std::iter::empty())
+        .into_iter()
+        .map(|(dir, create)| DirLock::share(&dir, create).map(|lock| (dir, lock)))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(dir, lock)| {
+            _shared.extend(lock);
+            dir
+        })
+        .collect();
     created.dir_all(out_dir)?;
     check_out_dir(out_dir)?;
-    // One run at a time over every file this one can touch. Its own
-    // directory is locked exclusively first; only then are other roots'
-    // lock files looked for, so of two overlapping runs at least one sees
-    // the other's. A lock held elsewhere fails at once: runs never wait.
     created.lock = Some(DirLock::acquire(out_dir)?);
-    let mut _shared = Vec::new();
     for (dir, create) in other_roots(out_dir, planned.keys()) {
-        _shared.extend(DirLock::share(&dir, create)?);
+        if !enclosing.contains(&dir) {
+            _shared.extend(DirLock::share(&dir, create)?);
+        }
     }
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
@@ -1709,6 +1736,21 @@ pub fn check(
     let manifest_file = manifest_name(&options.label, target)?;
     check_out_dir(out_dir)?;
     check_lock(out_dir)?;
+    // A write opens it, read-write or read-only; one it cannot open fails.
+    match fs::File::open(out_dir.join(LOCK_FILE)) {
+        Ok(_) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) => {}
+        Err(source) => {
+            return Err(WriteError::Io {
+                path: out_dir.join(LOCK_FILE),
+                source,
+            });
+        }
+    }
     let manifest_path = out_dir.join(&manifest_file);
     let previous = read_manifest(&manifest_path)?.unwrap_or_default();
     check_source(&previous, options)?;
@@ -3745,11 +3787,11 @@ mod tests {
         let inner = dir.0.join("nested");
         assert!(matches!(
             check(&g, &inner, &WriteOptions::new("inner")),
-            Err(WriteError::OwnedByOther { .. })
+            Err(WriteError::OutputDirOwned { .. })
         ));
         assert!(matches!(
             write(&g, &inner, &WriteOptions::new("inner")),
-            Err(WriteError::OwnedByOther { .. })
+            Err(WriteError::OutputDirOwned { .. })
         ));
     }
 
@@ -3777,5 +3819,60 @@ mod tests {
         );
         fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(result, Err(WriteError::Io { .. })), "{result:?}");
+    }
+
+    #[test]
+    fn names_windows_would_shorten_are_refused() {
+        let dir = TempDir::new("trailing-dot");
+        for path in ["a.rs.", "a.rs ", "sub./a.rs"] {
+            assert!(
+                matches!(
+                    write(
+                        &generation(&[(path, "x")]),
+                        &dir.0,
+                        &WriteOptions::new("api")
+                    ),
+                    Err(WriteError::UnsafePath(_))
+                ),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_refused_by_an_enclosing_lock_creates_nothing() {
+        let dir = TempDir::new("enclosing-first");
+        write(
+            &generation(&[("top.rs", "t")]),
+            &dir.0,
+            &WriteOptions::new("outer"),
+        )
+        .unwrap();
+        let held = DirLock::acquire(&dir.0).unwrap();
+        let nested = dir.0.join("sub/out");
+        assert!(matches!(
+            write(
+                &generation(&[("a.rs", "a")]),
+                &nested,
+                &WriteOptions::new("n")
+            ),
+            Err(WriteError::Locked(_))
+        ));
+        assert!(!dir.0.join("sub").exists());
+        drop(held);
+    }
+
+    #[test]
+    fn a_corrupt_enclosing_manifest_is_an_error() {
+        let dir = TempDir::new("corrupt-enclosing");
+        fs::write(dir.0.join(".roas-codegen-outer-rust.json"), "<<<<<<< HEAD").unwrap();
+        assert!(matches!(
+            write(
+                &generation(&[("a.rs", "a")]),
+                &dir.0.join("inner"),
+                &WriteOptions::new("inner")
+            ),
+            Err(WriteError::Manifest { .. })
+        ));
     }
 }

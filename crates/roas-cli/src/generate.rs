@@ -188,7 +188,8 @@ fn default_label(source: &InputSource) -> String {
 }
 
 /// What a label was generated from: the description's path relative to the
-/// output directory, `/`-separated and without its extension. Two files
+/// output directory, `/`-separated and without a `.json`/`.yaml`/`.yml`
+/// extension. Two files
 /// called `openapi.yaml` in different folders differ; converting
 /// `petstore.json` to `petstore.yaml` does not. Stdin has no identity.
 fn source_id(source: &InputSource, out: &Path) -> Option<String> {
@@ -288,7 +289,10 @@ fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
     match &error {
         E::Unowned(_) => anyhow!("{}: {error} (pass --force)", out.display()),
         // Their paths are relative to the output directory.
-        E::OwnedByOther { .. } | E::ReservedPath(_) | E::IsADirectory(_) => {
+        E::OwnedByOther { .. }
+        | E::ReservedPath(_)
+        | E::IsADirectory(_)
+        | E::OutputDirOwned { .. } => {
             anyhow!("{}: {error}", out.display())
         }
         // Always relative to the output directory; the directory itself
@@ -389,7 +393,9 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         .iter()
         .any(|d| matches!(d.kind, roas_codegen::DiagnosticKind::Unformatted));
     if failing > 0 && !args.allow_partial {
-        let (what, hint) = if args.strict && unformatted {
+        // rustfmt is the reason only when nothing else failed.
+        let only_unformatted = unformatted && failing == 1 && errors == 0;
+        let (what, hint) = if args.strict && only_unformatted {
             (
                 if args.check {
                     "cannot check"
