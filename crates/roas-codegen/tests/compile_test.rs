@@ -690,6 +690,14 @@ fn validated_description() -> serde_json::Value {
             "Twice": {"anyOf": [{"$ref": "#/components/schemas/TwiceP"}, {"$ref": "#/components/schemas/TwiceQ"}]},
             "TwiceP": {"type": "object", "properties": {"h": {"$ref": "#/components/schemas/Twice"}}},
             "TwiceQ": {"type": "object", "properties": {"h": {"$ref": "#/components/schemas/Twice"}}},
+            "EnumItems": {"oneOf": [
+                {"type": "array", "items": {"type": "string", "enum": ["a"]}},
+                {"type": "array", "items": {"type": "object"}}
+            ]},
+            "PatOrStr": {"anyOf": [
+                {"type": "object", "patternProperties": {"^x": {"type": "integer"}}, "additionalProperties": false},
+                {"type": "string"}
+            ]},
             "EnumOrObj": {"oneOf": [{"type": "string", "enum": ["a"]}, {"type": "object"}]},
             "EmptyEnum": {"type": "string", "enum": [], "minLength": 1},
             "IntOrStr": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
@@ -1027,6 +1035,10 @@ fn main() {
     // A string enum branch reads a JSON string only.
     assert_eq!(report::<EnumOrObj>(r#"{"a":null}"#), vec![]);
     assert_eq!(report::<EnumOrObj>(r#""a""#), vec![]);
+    assert_eq!(report::<EnumItems>(r#"[{"a":null}]"#), vec![]);
+    assert_eq!(report::<EnumItems>(r#"["a"]"#), vec![]);
+    // Members a pattern allows are not refused as unknown.
+    assert_eq!(report::<PatOrStr>(r#"{"x":1}"#), vec![u("")]);
     // A branch that misses for its value is still a miss.
     assert_eq!(report::<IntOrStr>("true"), vec![v("")]);
     assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
@@ -1284,6 +1296,8 @@ func main() {
 		panic("a deep recursive holder passed unwalked")
 	}
 	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
+	check(`[{"a":null}]`, report[api.EnumItems](`[{"a":null}]`))
+	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`), u(""))
 	twice := strings.Repeat(`{"h":`, 40) + `{}` + strings.Repeat("}", 40)
 	if got := report[api.Twice](twice); len(got) == 0 {
 		panic("doubling branches passed unchecked")

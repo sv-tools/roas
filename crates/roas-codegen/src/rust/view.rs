@@ -22,6 +22,8 @@ pub(crate) struct SupportView {
     pub raw_holder: bool,
     /// A closed struct reads through `ObjectOnly`.
     pub object_only: bool,
+    /// A string enum reads through `StringOnly`.
+    pub string_only: bool,
     /// Generated validation is on: the report types and `Validate`.
     pub validation: bool,
 }
@@ -57,9 +59,6 @@ pub(crate) struct BranchView {
     pub constructor: String,
     pub ty: String,
     pub doc: Vec<String>,
-    /// A statement refusing a raw value the branch type would wrongly
-    /// decode: serde's derived enum also reads `{"a": null}` as `"a"`.
-    pub guard: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,6 +88,9 @@ pub(crate) struct TypeView {
     /// A struct read from a JSON object only: serde's derive would also
     /// read it from an array, so it decodes through a guard.
     pub object_only: bool,
+    /// A string enum read from a JSON string only: serde's derive would
+    /// also read `{"a": null}` as `"a"`.
+    pub string_only: bool,
     /// The type's conditional-compilation gates (`#[cfg(...)]` among its
     /// configured attributes), repeated on every impl generated beside it.
     pub cfg: Vec<String>,
@@ -314,6 +316,16 @@ impl Builder<'_> {
             "integer_token",
         ] {
             allocator.reserve(reserved);
+        }
+        // Declared only for a string enum.
+        if self
+            .ir
+            .types
+            .values()
+            .any(|d| matches!(d.kind, TypeKind::StringEnum(_)))
+        {
+            allocator.reserve("StringOnly");
+            allocator.reserve("StringOnlyVariant");
         }
         // Declared only for a closed struct.
         if self.ir.types.values().any(|d| {
@@ -567,6 +579,7 @@ impl Builder<'_> {
             validate: None,
             validate_null: Vec::new(),
             object_only: false,
+            string_only: false,
             cfg,
         };
         let result = self.fill_kind(def, &mut view)?;
@@ -705,6 +718,12 @@ impl Builder<'_> {
             }
             TypeKind::StringEnum(values) => {
                 view.kind = "enum";
+                // serde's derive also reads a single-member object as a
+                // variant: the derived code becomes inherent and a guard
+                // reads a JSON string only.
+                view.attrs.push("#[serde(remote = \"Self\")]".to_owned());
+                view.string_only = true;
+                self.support.string_only = true;
                 view.derives.extend([
                     "Eq".to_owned(),
                     "Hash".to_owned(),
@@ -800,39 +819,7 @@ impl Builder<'_> {
             let base = snake(&branch.suggested_name);
             let name = allocator.allocate(base);
             let ty = self.spell(&branch.ty)?;
-            let (inner, nullable) = match &branch.ty {
-                TypeRef::Nullable(inner) => (inner.as_ref(), true),
-                other => (other, false),
-            };
-            // Through aliases and newtypes, which decode as their target.
-            let string_enum = {
-                let mut current = inner.direct_named();
-                let mut found = false;
-                for _ in 0..=self.ir.types.len() {
-                    let Some(id) = current else { break };
-                    match self.ir.types.get(id).map(|d| &d.kind) {
-                        Some(TypeKind::StringEnum(_)) => {
-                            found = true;
-                            break;
-                        }
-                        Some(TypeKind::Alias(next) | TypeKind::Newtype(next)) => {
-                            current = next.direct_named();
-                        }
-                        _ => break,
-                    }
-                }
-                found
-            };
-            let guard = string_enum.then(|| {
-                let null = if nullable {
-                    " && raw.trim_end() != \"null\""
-                } else {
-                    ""
-                };
-                format!("let raw = self.raw.get().trim_start(); if !raw.starts_with('\"'){null} {{ return None; }}")
-            });
             out.push(BranchView {
-                guard,
                 accessor: format!("as_{name}"),
                 constructor: format!("from_{name}"),
                 doc: vec![format!("The value read as `{ty}`, when it is one.")],

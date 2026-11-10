@@ -774,7 +774,7 @@ pub(crate) fn body(
                 } else {
                     let binding = if reads { "x" } else { "_" };
                     out.push(format!(
-                        "if {binding}, ok := v.{accessor}(); ok {{ branch := r.nested(); {}; r.resume(pointer, branch); if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ {counter}++ }} else {{ uncertain++ }} }} }}{beyond}",
+                        "if {binding}, ok := v.{accessor}(); ok {{ branch := r.nested(pointer); {}; r.resume(pointer, branch); if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ {counter}++ }} else {{ uncertain++ }} }} }}{beyond}",
                         body.join("; ")
                     ));
                 }

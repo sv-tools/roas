@@ -637,7 +637,7 @@ pub(crate) fn body(
                     checked = true;
                     let binding = if reads { "v" } else { "_" };
                     lines.push(format!(
-                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = report.nested(); {} report.resume(pointer, &branch); if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}{beyond}",
+                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = report.nested(pointer); {} report.resume(pointer, &branch); if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}{beyond}",
                         body.join(" ")
                     ));
                 }

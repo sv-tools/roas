@@ -62,6 +62,7 @@ pub struct Pet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub enum PetStatus {
     #[serde(rename = "available")]
     Available,
@@ -73,7 +74,7 @@ pub enum PetStatus {
 The decisions behind that, each one the generated code enforces rather than merely represents:
 
 - **Nullability is two axes.** `required` and nullable are independent, so there are four cases, and plain `Option<T>` enforces none of them: serde accepts `null` into any `Option` and treats a missing member as `None`. Each case gets the helper that rejects the state the schema forbids — `reject_null`, `require_present`, `double_option` — so `{}` and `{"tag": null}` stay distinct on the way in and the way out.
-- **Closed objects read objects only.** serde's derive also reads a struct from a JSON array, field by field; a closed struct has no catch-all to stop that. Its derived code is made inherent (`remote = "Self"`), and the `Serialize` / `Deserialize` impls beside it delegate to that code, handing it the same deserializer asked for a map — so anything but an object is refused, and the decoder's depth limit still holds.
+- **Closed objects read objects only.** serde's derive also reads a struct from a JSON array, field by field; a closed struct has no catch-all to stop that. Its derived code is made inherent (`remote = "Self"`), and the `Serialize` / `Deserialize` impls beside it delegate to that code, handing it the same deserializer asked for a map — so anything but an object is refused, and the decoder's depth limit still holds. A string enum is read the same way, asked for a string: serde's derive would otherwise also read `{"available": null}` as `available`.
 - **Integers read the token.** JSON Schema's `integer` accepts `1.0` and `1e0` and rejects `1.5`; both languages' stock decoders disagree. Generated `Int64` / `Int32` newtypes decode from the raw token exactly, which is why the output depends on `serde_json` with `raw_value` and why the generated types are JSON-only: deserialize them from text or a reader, not through `serde_json::from_value`.
 - **Unions are never first-match-wins.** A `oneOf` becomes a tagged enum only when the discriminator provably selects the branch validation would: every branch is a component object that requires the discriminator property and pins it with `const` or a single-value `enum`. Otherwise, and for every `anyOf`, the value is kept raw with a typed accessor per branch. An `allOf` flattens into one struct only when every branch is an object with disjoint, self-declared properties; otherwise it too is a raw holder with a projection per part.
 - **Cycles are boxed, lists are not.** A field holding its own type directly gets a `Box`; through a `Vec` or a map it does not need one.
@@ -196,6 +197,7 @@ The defaults include one another by plain name, so an override of an included te
 | `go/field.go.jinja` | `doc`, `decl` |
 | `rust/validate.rs.jinja`, `go/validate.go.jinja` (with validation on) | `validate` |
 | `rust/object_only.rs.jinja` (a closed struct) | `object_only` |
+| `rust/string_only.rs.jinja` (a string enum) | `string_only` |
 
 The generated-code marker is written first in every file by the renderer, whatever the templates do, and a `header` override with `{{ super() }}` keeps the configuration's `header` rather than replacing it.
 

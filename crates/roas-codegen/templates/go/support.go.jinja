@@ -227,10 +227,10 @@ func (*Null) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 // wideNumber says whether raw has a number a generated type may fail to
 // decode for its range rather than its value: a whole number from intLimit
 // on, one past the 32-bit float range when narrow holds, or one past
-// float64. A union branch that fails to decode such a value proves no
-// mismatch.
+// float64 — or nests deeper than the decoder reads. A union branch that
+// fails to decode such a value proves no mismatch.
 func wideNumber(raw []byte, intLimit float64, narrow bool) bool {
-	inString := false
+	inString, depth := false, 0
 	for i := 0; i < len(raw); i++ {
 		b := raw[i]
 		if inString {
@@ -244,6 +244,19 @@ func wideNumber(raw []byte, intLimit float64, narrow bool) bool {
 		}
 		if b == '"' {
 			inString = true
+			continue
+		}
+		// Nested past the decoder's limit, a branch fails to decode for
+		// the decoder, not the schema.
+		if b == '[' || b == '{' {
+			depth++
+			if depth > 9000 {
+				return true
+			}
+			continue
+		}
+		if b == ']' || b == '}' {
+			depth--
 			continue
 		}
 		if b == '-' || (b >= '0' && b <= '9') {
@@ -297,9 +310,14 @@ type ValidationReport struct {
 	stopped bool
 }
 
-// nested is a report for one branch, as deep and as spent as r.
-func (r *ValidationReport) nested() *ValidationReport {
-	return &ValidationReport{depth: r.depth, spent: r.spent, stopped: r.stopped}
+// nested is a report for one branch, as deep and as spent as r. Once the
+// budget is spent, the branch goes unchecked and says so.
+func (r *ValidationReport) nested(pointer string) *ValidationReport {
+	branch := &ValidationReport{depth: r.depth, spent: r.spent, stopped: r.stopped}
+	if r.stopped {
+		branch.unevaluated(pointer, "too many branches to validate")
+	}
+	return branch
 }
 
 // resume takes back what a branch spent; a branch that ran out stops r

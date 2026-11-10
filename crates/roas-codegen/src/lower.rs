@@ -961,6 +961,11 @@ impl<'a> Lowerer<'a> {
             );
         }
         let additional = match additional {
+            // Members the patterns allow are not unknown: refusing them
+            // would refuse valid values. They land in the catch-all.
+            FrontAdditional::Denied if !schema.constraints.pattern_properties.is_empty() => {
+                Additional::CatchAll(TypeRef::Any)
+            }
             FrontAdditional::Denied => Additional::Denied,
             FrontAdditional::Any => Additional::CatchAll(TypeRef::Any),
             FrontAdditional::Schema(slot) => {
