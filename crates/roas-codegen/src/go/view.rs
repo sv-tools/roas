@@ -606,10 +606,16 @@ impl Builder<'_> {
             // Through aliases, as `holds_null` sees them.
             let raw_holder = |ty: &TypeRef| {
                 let mut id = ty.direct_named()?;
+                // A JSON-value wrapper holds `null` itself.
+                if let TypeKind::Newtype(TypeRef::Any) = &ir.types.get(id)?.kind {
+                    let name = names.get(id)?;
+                    return Some(format!("{name}(jsontext.Value(\"null\"))"));
+                }
                 for _ in 0..=ir.types.len() {
                     match &ir.types.get(id)?.kind {
                         TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_) => {
-                            return names.get(id).cloned();
+                            let name = names.get(id)?;
+                            return Some(format!("{name}{{raw: jsontext.Value(\"null\")}}"));
                         }
                         TypeKind::Alias(inner) | TypeKind::Newtype(inner) => {
                             id = inner.direct_named()?

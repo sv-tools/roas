@@ -51,6 +51,9 @@ pub(crate) struct BranchView {
     pub constructor: String,
     pub ty: String,
     pub doc: Vec<String>,
+    /// A statement refusing a raw value the branch type would wrongly
+    /// decode: serde's derived struct visitor also reads an array.
+    pub guard: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -745,11 +748,30 @@ impl Builder<'_> {
             let base = snake(&branch.suggested_name);
             let name = allocator.allocate(base);
             let ty = self.spell(&branch.ty)?;
+            let (inner, nullable) = match &branch.ty {
+                TypeRef::Nullable(inner) => (inner.as_ref(), true),
+                other => (other, false),
+            };
+            let is_struct = inner.direct_named().is_some_and(|id| {
+                matches!(
+                    self.ir.types.get(id).map(|d| &d.kind),
+                    Some(crate::ir::TypeKind::Struct(_))
+                )
+            });
+            let guard = is_struct.then(|| {
+                let null = if nullable {
+                    " && raw.trim_end() != \"null\""
+                } else {
+                    ""
+                };
+                format!("let raw = self.raw.get().trim_start(); if !raw.starts_with('{{'){null} {{ return None; }}")
+            });
             out.push(BranchView {
                 accessor: format!("as_{name}"),
                 constructor: format!("from_{name}"),
                 doc: vec![format!("The value read as `{ty}`, when it is one.")],
                 ty,
+                guard,
             });
         }
         Ok(out)

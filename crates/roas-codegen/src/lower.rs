@@ -316,6 +316,7 @@ impl<'a> Lowerer<'a> {
             // The sibling branch reports what goes unchecked, once.
             constraints: crate::front::Constraints {
                 unenforced: Vec::new(),
+                unsupported: Vec::new(),
                 ..siblings.constraints.clone()
             },
             extensions: siblings.extensions.clone(),
@@ -644,7 +645,12 @@ impl<'a> Lowerer<'a> {
             description: None,
             deprecated: false,
             nullable: false,
-            constraints: schema.constraints.clone(),
+            // The holder reports what goes unchecked, for every value.
+            constraints: crate::front::Constraints {
+                unenforced: Vec::new(),
+                unsupported: Vec::new(),
+                ..schema.constraints.clone()
+            },
             extensions: BTreeMap::new(),
             kind: TypeKind::Extern,
             has_error: false,
@@ -1178,6 +1184,26 @@ impl<'a> Lowerer<'a> {
                 );
             }
         }
+        if let Kind::Number {
+            width: Some(FloatWidth::Float),
+            ..
+        } = &schema.kind
+        {
+            let within = |n: &Option<serde_json::Number>| {
+                n.as_ref()
+                    .and_then(serde_json::Number::as_f64)
+                    .is_some_and(|v| v.abs() <= f64::from(f32::MAX))
+            };
+            let below = within(&c.minimum) || within(&c.exclusive_minimum);
+            let above = within(&c.maximum) || within(&c.exclusive_maximum);
+            if !(below && above) {
+                self.warn(
+                    DiagnosticKind::LossyNumber,
+                    &schema.id,
+                    "`format: float` maps to a 32-bit float; a value past its range is read as an infinity in Rust and rejected at decode in Go".into(),
+                );
+            }
+        }
         if !integer && c.multiple_of.is_some() {
             self.warn(
                 DiagnosticKind::LossyNumber,
@@ -1320,37 +1346,7 @@ fn schema_unchecked(schema: &FrontSchema) -> bool {
             ..
         }
     );
-    numeric_enum
-        || schema.const_value.is_some()
-        || !schema.unsupported.is_empty()
-        || inline_inner_unchecked(schema)
-}
-
-/// Whether an inline array's items or map's values say what no check
-/// carries: they have no generated type of their own to check it.
-fn inline_inner_unchecked(schema: &FrontSchema) -> bool {
-    let inner = match &schema.kind {
-        Kind::Array { items: Some(slot) } => slot,
-        Kind::Object {
-            properties,
-            required,
-            additional: FrontAdditional::Schema(slot),
-            typeless: false,
-        } if properties.is_empty() && required.is_empty() => slot,
-        _ => return false,
-    };
-    let Slot::Inline(inner) = inner else {
-        return false;
-    };
-    // Generated as a type of its own, it checks itself.
-    let named = match &inner.kind {
-        Kind::Object { properties, .. } => !properties.is_empty(),
-        Kind::String { enum_values, .. } => enum_values.is_some(),
-        _ => false,
-    };
-    !named
-        && (!crate::checks::present_keywords(&inner.constraints).is_empty()
-            || schema_unchecked(inner))
+    numeric_enum || schema.const_value.is_some() || !schema.unsupported.is_empty()
 }
 
 /// What an inline branch constrains that no named type carries for it.

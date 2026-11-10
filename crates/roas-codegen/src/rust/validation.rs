@@ -180,6 +180,10 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 "{r}.unevaluated({p}, {:?});",
                 format!("{keyword}: {reason}")
             )),
+            Check::Unsupported(keywords) => out.push(format!(
+                "{r}.unevaluated({p}, {:?});",
+                format!("{}: not handled by the generator", keywords.join(", "))
+            )),
         }
         reads |= out.len() > before
             && !matches!(

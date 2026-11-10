@@ -86,6 +86,9 @@ pub(crate) enum Check {
         keyword: &'static str,
         reason: String,
     },
+    /// Keywords the generator does not handle at all: whatever the value,
+    /// it is reported as unevaluated.
+    Unsupported(Vec<String>),
 }
 
 /// The kind of value `ty` holds once nullability and boxing are seen
@@ -257,6 +260,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     _ => Unique::Unknown,
                 }));
             }
+            out.extend(inner_unchecked(c));
         }
         ValueKind::Map => {
             out.extend(
@@ -276,6 +280,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                 });
             }
             out.extend(pattern_properties(c));
+            out.extend(inner_unchecked(c));
         }
         ValueKind::Other => {}
     }
@@ -304,7 +309,15 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
         });
     }
     out.extend(pattern_properties(constraints));
+    out.extend(inner_unchecked(constraints));
     out
+}
+
+fn inner_unchecked(c: &Constraints) -> Option<Check> {
+    c.inner_unchecked.map(|keyword| Check::Unevaluated {
+        keyword,
+        reason: format!("constraints on inline `{keyword}` are not checked yet"),
+    })
 }
 
 fn pattern_properties(c: &Constraints) -> Option<Check> {
@@ -331,6 +344,8 @@ pub(crate) fn part_unsure(branch: &crate::ir::Branch) -> bool {
 /// What the constraints declare that nothing checks yet: a decoded value
 /// is never taken to satisfy it.
 pub(crate) fn unenforced(c: &Constraints) -> Vec<Check> {
+    let unsupported =
+        (!c.unsupported.is_empty()).then(|| Check::Unsupported(c.unsupported.clone()));
     c.unenforced
         .iter()
         .map(|&keyword| Check::Unevaluated {
@@ -340,6 +355,7 @@ pub(crate) fn unenforced(c: &Constraints) -> Vec<Check> {
                 _ => format!("`{keyword}` is not checked yet"),
             },
         })
+        .chain(unsupported)
         .collect()
 }
 
@@ -517,15 +533,26 @@ fn parse_decimal(n: &Number) -> Option<Decimal> {
         None => (false, text),
     };
     let (mantissa, exponent) = match text.split_once(['e', 'E']) {
-        // An exponent past `i64` saturates: the bound is past every value
-        // either way, never zero.
-        Some((m, e)) => (
-            m.to_owned(),
-            e.trim_start_matches('+')
-                .parse::<i128>()
-                .ok()?
-                .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
-        ),
+        // An exponent past `i64`, however many digits it has, saturates
+        // by its sign: the bound is past every value either way, never
+        // zero.
+        Some((m, e)) => {
+            let e = e.strip_prefix('+').unwrap_or(e);
+            let (negative, magnitude) = match e.strip_prefix('-') {
+                Some(rest) => (true, rest),
+                None => (false, e),
+            };
+            if magnitude.is_empty() || !magnitude.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let exponent = match magnitude.parse::<i64>() {
+                Ok(n) if negative => -n,
+                Ok(n) => n,
+                Err(_) if negative => i64::MIN,
+                Err(_) => i64::MAX,
+            };
+            (m.to_owned(), exponent)
+        }
         None => (text, 0),
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((&mantissa, ""));
@@ -681,6 +708,14 @@ mod tests {
         assert_eq!(int_lower(&n("1e9223372036854775807"), false), SATURATE);
         assert_eq!(int_lower(&n("1e9223372036854775808"), false), SATURATE);
         assert_eq!(int_upper(&n("-1e9223372036854775807"), false), -SATURATE);
+        // Past i128 too: saturated by sign, never zero.
+        let huge = "1e170141183460469231731687303715884105728";
+        assert_eq!(int_lower(&n(huge), false), SATURATE);
+        assert_eq!(int_upper(&n(&format!("-{huge}")), false), -SATURATE);
+        assert_eq!(
+            int_lower(&n("1e-170141183460469231731687303715884105728"), false),
+            1
+        );
         assert_eq!(int_upper(&n("9007199254740993.5"), false), 9007199254740993);
         let divisor = match &checks(
             &TypeRef::Integer(IntWidth::Int64),

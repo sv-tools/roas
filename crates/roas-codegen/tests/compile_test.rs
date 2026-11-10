@@ -617,7 +617,22 @@ fn validated_description() -> serde_json::Value {
             "PatMap": {"oneOf": [
                 {"type": "object", "patternProperties": {"^a": {"type": "integer"}}},
                 {"type": "object", "patternProperties": {"^a": {"type": "string"}}}
-            ]}
+            ]},
+            "Scalar": {"const": 3},
+            "HoldsScalar": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/Scalar"}}},
+            "KLow": {"type": "object", "required": ["k"], "properties": {"k": {"type": "array", "items": {"type": "integer", "maximum": 3}}}},
+            "KHigh": {"type": "object", "required": ["k"], "properties": {"k": {"type": "array", "items": {"type": "integer", "minimum": 10}}}},
+            "PickK": {"oneOf": [{"$ref": "#/components/schemas/KLow"}, {"$ref": "#/components/schemas/KHigh"}]},
+            "KHas": {"type": "object", "required": ["k"], "properties": {"k": {"type": "array", "contains": {"type": "integer"}}}},
+            "KStr": {"type": "object", "required": ["k"], "properties": {"k": {"type": "array", "items": {"type": "string"}}}},
+            "PickC": {"oneOf": [{"$ref": "#/components/schemas/KHas"}, {"$ref": "#/components/schemas/KStr"}]},
+            "FmtList": {"type": ["string", "integer"], "format": "date-time"},
+            "EnumF": {"type": ["integer", "string"], "enum": [1.5, "a"]},
+            "ObjOrArr": {"oneOf": [
+                {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
+                {"type": "array", "items": {"type": "string"}}
+            ]},
+            "ClosedOrInt": {"anyOf": [{"$ref": "#/components/schemas/Closed"}, {"type": "integer"}]}
         }}
     })
 }
@@ -794,6 +809,17 @@ fn main() {
     assert_eq!(report::<PatMap>(r#"{"a":"x"}"#), vec![u("")]);
     // A type list left with only its null.
     assert_eq!(report::<NullOnly>("null"), vec![]);
+    // A present null reaches a JSON-value wrapper.
+    assert_eq!(report::<HoldsScalar>(r#"{"n":null}"#), vec![u("/n")]);
+    // What a branch's members leave unchecked proves no match.
+    assert_eq!(report::<PickK>(r#"{"k":[1]}"#), vec![u("")]);
+    assert_eq!(report::<PickC>(r#"{"k":["x"]}"#), vec![u("")]);
+    // A type-list member is never dropped.
+    assert_eq!(report::<FmtList>("5"), vec![]);
+    assert_eq!(report::<EnumF>(r#""a""#), vec![]);
+    // A struct is decoded from an object only.
+    assert_eq!(report::<ObjOrArr>(r#"["x"]"#), vec![]);
+    assert_eq!(report::<ClosedOrInt>("[]"), vec![v("")]);
     println!("validation behaves");
 }
 "##;
@@ -987,6 +1013,13 @@ func main() {
 	check(`["a"]`, report[api.StrItems](`["a"]`), u(""))
 	check(`{"a":"x"}`, report[api.PatMap](`{"a":"x"}`), u(""))
 	check(`null`, report[api.NullOnly](`null`))
+	check(`{"n":null}`, report[api.HoldsScalar](`{"n":null}`), u("/n"))
+	check(`{"k":[1]}`, report[api.PickK](`{"k":[1]}`), u(""))
+	check(`{"k":["x"]}`, report[api.PickC](`{"k":["x"]}`), u(""))
+	check(`5`, report[api.FmtList](`5`))
+	check(`"a"`, report[api.EnumF](`"a"`))
+	check(`["x"]`, report[api.ObjOrArr](`["x"]`))
+	check(`[]`, report[api.ClosedOrInt](`[]`), v(""))
 	fmt.Println("validation behaves")
 }
 "##;

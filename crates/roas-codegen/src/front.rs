@@ -100,6 +100,11 @@ pub(crate) struct Constraints {
     /// Keywords neither the type nor a generated check enforces: a numeric
     /// `enum` and a `const` the type does not pin.
     pub unenforced: Vec<&'static str>,
+    /// The inline `items` or `additionalProperties` schema says what no
+    /// generated type carries for it: it is named here.
+    pub inner_unchecked: Option<&'static str>,
+    /// The schema's keywords the generator does not handle at all.
+    pub unsupported: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -387,6 +392,8 @@ impl Translator<'_> {
                 front.constraints.unenforced.push(keyword);
             }
         }
+        front.constraints.inner_unchecked = inner_unchecked(&front);
+        front.constraints.unsupported = front.unsupported.clone();
         front
     }
 
@@ -495,10 +502,13 @@ impl Translator<'_> {
             .collect();
         let raw = serde_json::to_value(multi).unwrap_or(Value::Null);
         let object = raw.as_object().cloned().unwrap_or_default();
-        let read = |schema_type: &SchemaType, restrict: bool| -> Member {
+        let read_as = |schema_type: &SchemaType,
+                       restrict: bool,
+                       object: &serde_json::Map<String, Value>|
+         -> Member {
             let mut map = serde_json::Map::new();
             let applicable = keywords_for(schema_type);
-            for (key, value) in &object {
+            for (key, value) in object {
                 if key == "type" {
                     continue;
                 }
@@ -548,6 +558,18 @@ impl Translator<'_> {
             }
             Member::Read(Box::new(member))
         };
+        let read = |schema_type: &SchemaType, restrict: bool| -> Member {
+            match read_as(schema_type, restrict, &object) {
+                // A `format` another member type gives is an annotation
+                // for this one.
+                Member::Unread if object.contains_key("format") => {
+                    let mut without = object.clone();
+                    without.remove("format");
+                    read_as(schema_type, restrict, &without)
+                }
+                other => other,
+            }
+        };
         let mut front = match members.as_slice() {
             [] => self.leaf(pointer.clone(), Kind::Null),
             [one] => match read(one, false) {
@@ -564,15 +586,19 @@ impl Translator<'_> {
                 }
             },
             many => {
-                let mut unread = false;
                 let branches = many
                     .iter()
                     .filter_map(|t| match read(t, true) {
                         Member::Read(member) => Some(member),
                         Member::Nothing => None,
+                        // Kept as a branch that proves nothing, so a value
+                        // of its type is never taken to match no member.
                         Member::Unread => {
-                            unread = true;
-                            None
+                            let mut member =
+                                self.leaf(synthetic(&pointer, &t.to_string()), Kind::Any);
+                            member.unsupported.push("type".to_owned());
+                            member.constraints.unsupported = member.unsupported.clone();
+                            Some(Box::new(member))
                         }
                     })
                     .map(Slot::Inline)
@@ -591,9 +617,6 @@ impl Translator<'_> {
                     })
                     .cloned()
                     .collect();
-                if unread {
-                    front.unsupported.push("type".to_owned());
-                }
                 front.title = multi.title.clone();
                 front.description = multi.description.clone();
                 front.deprecated = multi.deprecated.unwrap_or(false);
@@ -839,6 +862,38 @@ impl Translator<'_> {
 
 /// Split the model's catch-all into `x-` extensions, kept, and every
 /// other keyword, returned for reporting.
+/// The keyword whose inline schema says what no check carries: an inline
+/// item or member value has no generated type of its own to check it.
+fn inner_unchecked(schema: &FrontSchema) -> Option<&'static str> {
+    let (keyword, inner) = match &schema.kind {
+        Kind::Array {
+            items: Some(Slot::Inline(inner)),
+        } => ("items", inner),
+        Kind::Object {
+            additional: Additional::Schema(Slot::Inline(inner)),
+            ..
+        } => ("additionalProperties", inner),
+        _ => return None,
+    };
+    // Generated as a type of its own, it checks itself.
+    let named = match &inner.kind {
+        Kind::Object {
+            properties,
+            additional,
+            ..
+        } => !properties.is_empty() || matches!(additional, Additional::Denied),
+        Kind::String { enum_values, .. } => enum_values.is_some(),
+        Kind::AllOf { .. } | Kind::AnyOf { .. } | Kind::OneOf { .. } | Kind::TypeUnion { .. } => {
+            true
+        }
+        _ => false,
+    };
+    let says = !crate::checks::present_keywords(&inner.constraints).is_empty()
+        || !inner.unsupported.is_empty()
+        || inner.constraints.inner_unchecked.is_some();
+    (!named && says).then_some(keyword)
+}
+
 /// A member of a type list, read as a schema of its own.
 enum Member {
     Read(Box<FrontSchema>),

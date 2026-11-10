@@ -23,8 +23,8 @@ pub(crate) struct Context<'a> {
     pub validates: &'a dyn Fn(&TypeRef) -> bool,
     /// A named type spelled as a pointer alias, which may be nil.
     pub nil_able: &'a dyn Fn(&TypeRef) -> bool,
-    /// The Go name of the raw holder (open union or composition) `ty`
-    /// names, if it names one.
+    /// A `null` of the raw holder (open union, composition or JSON-value
+    /// wrapper) `ty` names, as a Go expression, if it names one.
     pub raw_holder: &'a dyn Fn(&TypeRef) -> Option<String>,
     /// A branch that comes back to the holder being validated with the
     /// same raw value: decoded, never validated, or it would not finish.
@@ -267,6 +267,10 @@ fn render(
             Check::Unevaluated { keyword, reason } => out.push(format!(
                 "{r}.unevaluated({p}, {})",
                 lit(&format!("{keyword}: {reason}"))
+            )),
+            Check::Unsupported(keywords) => out.push(format!(
+                "{r}.unevaluated({p}, {})",
+                lit(&format!("{}: not handled by the generator", keywords.join(", ")))
             )),
         }
         reads |= out.len() > before
@@ -539,7 +543,7 @@ pub(crate) fn body(
                     // null outright: a present null is validated too.
                     cx.needs.jsontext = true;
                     block.push(format!(
-                        "if v.{name}.Set {{ x := {holder}{{raw: jsontext.Value(\"null\")}}; if v.{name}.Value != nil {{ x = *v.{name}.Value }}; {statements} }}"
+                        "if v.{name}.Set {{ x := {holder}; if v.{name}.Value != nil {{ x = *v.{name}.Value }}; {statements} }}"
                     ));
                 } else if in_nullable {
                     block.push(format!(
