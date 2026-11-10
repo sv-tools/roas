@@ -253,12 +253,15 @@ fn finish(
     let address = if is_v2(document) {
         key.to_owned()
     } else {
-        // A null or absent address is one only known at runtime; the
-        // channel's key is the closest thing the document gives.
+        // "If the field is null or absent, it MUST be interpreted as
+        // unknown": there is nowhere to send to or listen on.
         channel
             .get("address")
             .and_then(Value::as_str)
-            .unwrap_or(key)
+            .ok_or_else(|| OperationError::BadPath {
+                path: key.to_owned(),
+                reason: "the channel's address is unknown (null or absent)".into(),
+            })?
             .to_owned()
     };
     let all = document
@@ -307,13 +310,24 @@ fn finish(
         .iter()
         .flat_map(|message| alternatives(document, message))
     {
+        // A field the message does not set may come from one of its
+        // traits; the message's own wins.
+        let field = |name: &str| {
+            message.get(name).or_else(|| {
+                message
+                    .get("traits")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .filter_map(|item| follow(document, Some(item), "traits").ok())
+                    .find_map(|item| item.get(name))
+            })
+        };
         if content_type.is_none() {
-            content_type = message
-                .get("contentType")
+            content_type = field("contentType")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
         }
-        if let Some(id) = message.get("correlationId")
+        if let Some(id) = field("correlationId")
             && let Ok(id) = follow(document, Some(id), "correlationId")
             && let Some(location) = id.get("location").and_then(Value::as_str)
             && !correlation.iter().any(|known| known == location)

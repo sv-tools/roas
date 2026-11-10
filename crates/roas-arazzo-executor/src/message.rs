@@ -148,7 +148,9 @@ pub trait MessageClient {
         timeout: Option<Duration>,
     ) -> Result<Option<IncomingMessage>, ClientError>;
 
-    /// Stop listening: the step is done with the subscription.
+    /// Stop listening: the step is done with the subscription. When a run
+    /// stops early this may name a subscription whose `subscribe` failed
+    /// or was never asked for; ignore those.
     fn unsubscribe(&mut self, subscription: SubscriptionId);
 }
 

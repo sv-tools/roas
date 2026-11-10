@@ -29,7 +29,18 @@ fn asyncapi_3() -> Value {
                 "address": "confirmations",
                 "messages": { "confirmation": { "$ref": "#/components/messages/confirmation" } }
             },
-            "plain": { "address": null, "messages": { "text": { "contentType": "text/plain" } } }
+            "plain": { "address": "plain", "messages": { "text": { "contentType": "text/plain" } } },
+            "unknown": { "address": null, "messages": { "text": { "payload": {} } } },
+            "traited": {
+                "address": "traited",
+                "messages": { "traited": {
+                    "payload": {},
+                    "traits": [
+                        { "$ref": "#/components/messageTraits/plain" },
+                        { "$ref": "#/components/messageTraits/correlated" }
+                    ]
+                } }
+            }
         },
         "operations": {
             "placeOrder": { "action": "receive", "channel": { "$ref": "#/channels/orders" } },
@@ -45,6 +56,13 @@ fn asyncapi_3() -> Value {
                 "confirmation": {
                     "correlationId": { "$ref": "#/components/correlationIds/byHeader" },
                     "payload": {}
+                }
+            },
+            "messageTraits": {
+                "plain": { "contentType": "text/plain" },
+                "correlated": {
+                    "contentType": "application/xml",
+                    "correlationId": { "$ref": "#/components/correlationIds/byHeader" }
                 }
             },
             "correlationIds": {
@@ -446,7 +464,7 @@ fn channel_parameters_servers_and_bindings_come_from_the_document() {
         channel.bindings,
         Some(json!({ "kafka": { "partitions": 3 } }))
     );
-    // A null address: the channel's key stands in for it.
+    // A channel with no operation: the message says what it is.
     let description = self::description(
         json!([{ "stepId": "say", "channelPath": "$sourceDescriptions.orders#/channels/plain", "action": "send", "requestBody": { "payload": "hi" } }]),
         json!({}),
@@ -510,6 +528,10 @@ fn what_cannot_be_sent_or_listened_for_is_an_error() {
         (
             json!({ "stepId": "s", "channelPath": "$sourceDescriptions.gone#/channels/x", "action": "send" }),
             "source description `gone` was not supplied",
+        ),
+        (
+            json!({ "stepId": "s", "channelPath": "$sourceDescriptions.orders#/channels/unknown", "action": "send" }),
+            "the channel's address is unknown",
         ),
     ];
     for (step, expected) in cases {
@@ -628,7 +650,7 @@ fn preparation_resolves_channels_and_checks_sources() {
         ),
         (
             json!({ "stepId": "s", "operationId": "ping", "successCriteria": [{ "condition": "$message.payload == 1" }] }),
-            "only an AsyncAPI step has",
+            "can read",
         ),
     ] {
         let description = self::description(json!([step]), json!({}));
@@ -990,6 +1012,10 @@ fn preparation_refuses_what_a_run_would() {
             json!({ "stepId": "s", "operationId": "placeOrder", "action": "send" }),
             "no `channel` parameter gives `{region}`",
         ),
+        (
+            json!({ "stepId": "s", "channelPath": "$sourceDescriptions.orders#/channels/unknown", "action": "receive" }),
+            "the channel's address is unknown",
+        ),
     ] {
         let description = description(json!([step]), json!({}));
         let error = prepare(&description, &options()).unwrap_err();
@@ -1108,4 +1134,159 @@ fn a_retry_wait_comes_after_the_old_subscription_is_closed() {
     ));
     assert!(matches!(run.advance(), Ok(Progress::Wait(_))));
     assert!(matches!(run.advance(), Ok(Progress::Subscribe(_))));
+}
+
+#[test]
+fn a_message_trait_gives_what_the_message_leaves_out() {
+    let description = description(
+        json!([{
+            "stepId": "listen",
+            "channelPath": "$sourceDescriptions.orders#/channels/traited",
+            "action": "receive",
+            "correlationId": "$inputs.id",
+            "timeout": 0,
+            "outputs": { "got": "$message.payload" }
+        }, {
+            "stepId": "say",
+            "channelPath": "$sourceDescriptions.orders#/channels/traited",
+            "action": "send",
+            "requestBody": { "payload": "hi" }
+        }]),
+        json!({ "got": "$steps.listen.outputs.got" }),
+    );
+    let mut messages = Fake::new()
+        .message(
+            "traited",
+            IncomingMessage::json(&json!("other")).header("correlationId", "nope"),
+        )
+        .message(
+            "traited",
+            IncomingMessage::json(&json!("mine")).header("correlationId", "c-7"),
+        );
+    let report =
+        execute_with_messages(&description, &options(), &mut Fake::new(), &mut messages).unwrap();
+    assert!(report.is_success(), "{report}");
+    // The correlation id comes from the second trait.
+    assert_eq!(report.outputs["got"], json!("mine"));
+    // The first trait that sets a field wins.
+    assert_eq!(
+        messages.published()[0].content_type.as_deref(),
+        Some("text/plain")
+    );
+}
+
+#[test]
+fn a_goto_out_of_a_retry_detour_still_comes_back_to_the_receive() {
+    let mut confirm = receive();
+    confirm["timeout"] = json!(0);
+    confirm["onFailure"] =
+        json!([{ "name": "again", "type": "retry", "stepId": "d", "retryLimit": 1 }]);
+    let description = description(
+        json!([
+            confirm,
+            { "stepId": "c", "operationId": "ping", "dependsOn": ["confirm"] },
+            { "stepId": "d", "operationId": "ping",
+              "onSuccess": [{ "name": "jump", "type": "goto", "stepId": "x" }] },
+            { "stepId": "x", "operationId": "ping" }
+        ]),
+        json!({}),
+    );
+    let mut http = Fake::new()
+        .reply(200, &json!({}))
+        .reply(200, &json!({}))
+        .reply(200, &json!({}))
+        .reply(200, &json!({}))
+        .reply(200, &json!({}));
+    let mut messages = Fake::new();
+    let report = execute_with_messages(&description, &options(), &mut http, &mut messages).unwrap();
+    let ran: Vec<_> = report
+        .steps
+        .iter()
+        .map(|step| step.step_id.as_str())
+        .collect();
+    // The detour jumps on to `x`, and the retry still comes after it; the
+    // second attempt gets nothing either, so the workflow fails before `c`.
+    assert_eq!(ran, ["confirm", "d", "x", "confirm"], "{report}");
+    assert_eq!(report.outcome, Outcome::Failed);
+    assert_eq!(messages.subscribed().len(), 2);
+}
+
+#[test]
+fn a_receive_joined_after_an_end_that_fails_fails_the_workflow() {
+    let mut confirm = receive();
+    confirm["timeout"] = json!(0);
+    let description = description(
+        json!([
+            confirm,
+            { "stepId": "x", "operationId": "ping", "onSuccess": [{ "name": "stop", "type": "end" }] }
+        ]),
+        json!({}),
+    );
+    let mut http = Fake::new().reply(200, &json!({}));
+    let report =
+        execute_with_messages(&description, &options(), &mut http, &mut Fake::new()).unwrap();
+    assert_eq!(report.outcome, Outcome::Failed, "{report}");
+}
+
+#[test]
+fn a_message_is_read_only_where_there_is_one() {
+    for (steps, outputs) in [
+        (
+            json!([{
+                "stepId": "s",
+                "operationId": "confirmOrder",
+                "action": "send",
+                "parameters": [{ "name": "h", "in": "header", "value": "$message.header.x" }]
+            }]),
+            json!({}),
+        ),
+        (
+            json!([{ "stepId": "s", "operationId": "confirmOrder", "action": "send" }]),
+            json!({ "o": "$message.payload" }),
+        ),
+    ] {
+        let description = description(steps, outputs);
+        let error = prepare(&description, &options()).unwrap_err();
+        assert!(error.to_string().contains("can read"), "{error}");
+    }
+    // A workflow action may read it.
+    let mut confirm = receive();
+    confirm["timeout"] = json!(0);
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "orders", "url": "https://example.com/asyncapi.json", "type": "asyncapi" }
+        ],
+        "workflows": [{
+            "workflowId": "w",
+            "steps": [confirm],
+            "failureActions": [{
+                "name": "stop", "type": "end",
+                "criteria": [{ "condition": "$message.payload != 1" }]
+            }]
+        }],
+    }))
+    .unwrap();
+    prepare(&description, &options()).expect("a plan");
+}
+
+#[test]
+fn an_untyped_source_may_hold_asyncapi_operations() {
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [{ "name": "orders", "url": "https://example.com/asyncapi.json" }],
+        "workflows": [{ "workflowId": "w", "steps": [send()] }],
+    }))
+    .unwrap();
+    let options = options();
+    let plan = prepare(&description, &options).expect("a plan");
+    assert!(plan.uses_messages());
+    let mut messages = Fake::new();
+    let report = plan
+        .execute_with_messages(&mut Fake::new(), &mut messages)
+        .unwrap();
+    assert!(report.is_success(), "{report}");
+    assert_eq!(messages.published().len(), 1);
 }

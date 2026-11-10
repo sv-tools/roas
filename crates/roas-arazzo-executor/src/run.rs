@@ -400,7 +400,9 @@ struct Frame<'d> {
     /// step that needed it, or the end of the workflow — and the detour
     /// that was pending there.
     /// A stack: a step a joined receive goes back to may itself join one.
-    resume: Vec<(usize, Option<usize>)>,
+    /// Each entry: the receive step joined, where to go back to, and the
+    /// detour pending there. Only that receive's completion pops it.
+    resume: Vec<(usize, usize, Option<usize>)>,
     /// An `end`, or a `goto` to another workflow, finished it.
     ended: bool,
     outcome: Outcome,
@@ -787,7 +789,8 @@ impl<'d> Run<'d> {
     /// Every subscription still open — listening, or done with but not yet
     /// handed out as [`Progress::Unsubscribe`]. A caller driving the run
     /// itself closes these when it stops early, as the `execute` functions
-    /// do.
+    /// do. One may never have been subscribed — its `Subscribe` failed, or
+    /// the run stopped before handing it out.
     #[must_use]
     pub fn open_subscriptions(&self) -> Vec<SubscriptionId> {
         let mut open = self.closing.clone();
@@ -1047,7 +1050,9 @@ impl<'d> Run<'d> {
         // The receive completes where it was needed, then the run comes
         // back there.
         let settled = frame.ended;
-        frame.resume.push((frame.at, frame.detour.take()));
+        frame
+            .resume
+            .push((listening.step, frame.at, frame.detour.take()));
         frame.at = frame
             .order
             .iter()
@@ -1363,11 +1368,15 @@ impl<'d> Run<'d> {
             .map_err(|error| locate(&self.documents, here, error))?;
         if done.settled {
             // Nothing is left to go to: say what it would have done, and
-            // go back to where it was needed.
+            // go back to where it was needed. A receive that fails with
+            // nothing to recover it fails the workflow, ended or not.
             self.records[record].action = describe(&action)
                 .map(|action| format!("{action}, not taken: the workflow had ended"));
             let frame = self.frames.last_mut().expect("the frame is still there");
-            if let Some((back, detour)) = frame.resume.pop() {
+            if matches!(action, Action::End(Outcome::Failed)) {
+                frame.outcome = Outcome::Failed;
+            }
+            if let Some((_, back, detour)) = pop_resume(frame, index) {
                 frame.at = back;
                 frame.detour = detour;
             }
@@ -1983,7 +1992,7 @@ impl<'d> Run<'d> {
                 // back there.
                 if let Some(back) = frame.detour.take() {
                     frame.at = back;
-                } else if let Some((back, detour)) = frame.resume.pop() {
+                } else if let Some((_, back, detour)) = pop_resume(frame, frame.order[frame.at]) {
                     frame.at = back;
                     frame.detour = detour;
                 } else {
@@ -2050,9 +2059,13 @@ impl<'d> Run<'d> {
                 step: Some(step_id),
                 ..
             } => {
+                let current = frame.order.get(frame.at).copied();
                 frame.at = position_of(frame, &step_id)
                     .map_err(|error| locate(&self.documents, here, error))?;
-                if let Some((_, detour)) = frame.resume.pop() {
+                // A joined receive that goes elsewhere does not come back.
+                if let Some(current) = current
+                    && let Some((_, _, detour)) = pop_resume(frame, current)
+                {
                     frame.detour = detour;
                 }
                 Ok(())
@@ -2111,6 +2124,19 @@ fn correlation(location: &str, message: &expression::Message) -> Option<Value> {
         }
         "$message.payload" => message.payload.as_ref()?.pointer(pointer).cloned(),
         _ => None,
+    }
+}
+
+/// The innermost resume entry, if it belongs to the receive `step`.
+fn pop_resume(frame: &mut Frame<'_>, step: usize) -> Option<(usize, usize, Option<usize>)> {
+    if frame
+        .resume
+        .last()
+        .is_some_and(|(receive, _, _)| *receive == step)
+    {
+        frame.resume.pop()
+    } else {
+        None
     }
 }
 

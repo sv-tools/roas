@@ -487,6 +487,27 @@ struct Site<'d> {
     step: Option<&'d Step>,
     path: String,
 }
+/// Whether `$message` names anything where `site` is evaluated: in an
+/// AsyncAPI step's criteria, outputs and actions, which run once it has
+/// sent or received, and in the workflow's actions, which may run after
+/// one. Not in a step's parameters, payload or `correlationId`, which are
+/// evaluated before it has a message, nor in workflow outputs.
+fn message_in_scope(site: &Site<'_>) -> bool {
+    match site.step {
+        Some(step) if step.action.is_some() || step.channel_path.is_some() => {
+            let path = &site.path;
+            let tail = path
+                .rsplit_once(".steps[")
+                .map_or(path.as_str(), |(_, tail)| tail);
+            [".successCriteria", ".outputs", ".onSuccess", ".onFailure"]
+                .iter()
+                .any(|part| tail.contains(part))
+        }
+        Some(_) => false,
+        None => site.path.contains("successActions") || site.path.contains("failureActions"),
+    }
+}
+
 impl<'d> Site<'d> {
     fn root(path: &str) -> Self {
         Self {
@@ -924,9 +945,14 @@ impl<'d> Compiler<'d> {
             .iter()
             .find(|source| source.name == name)
         {
+            // An untyped source is judged by its document when it is resolved.
             Some(source)
                 if source.type_ == Some(SourceType::Arazzo)
-                    || (source.type_ == Some(SourceType::Asyncapi)) != asynchronous =>
+                    || (asynchronous
+                        && source
+                            .type_
+                            .is_some_and(|type_| type_ != SourceType::Asyncapi))
+                    || (!asynchronous && source.type_ == Some(SourceType::Asyncapi)) =>
             {
                 self.error(
                     site,
@@ -1438,21 +1464,15 @@ impl<'d> Compiler<'d> {
     fn reference(&mut self, parsed: &Expression<'_>, site: &Site<'d>, offset: usize) {
         let error =
             match parsed.root {
-                // Only an AsyncAPI step has a message; a workflow-level
-                // action may run after one, so it is not refused there.
-                Root::Message
-                    if site.step.is_some_and(|step| {
-                        step.action.is_none() && step.channel_path.is_none()
-                    }) =>
-                {
-                    Some(
-                        ExpressionError::Missing {
-                            expression: parsed.text.into(),
-                            what: "a message, which only an AsyncAPI step has".into(),
-                        }
-                        .into(),
-                    )
-                }
+                Root::Message if !message_in_scope(site) => Some(
+                    ExpressionError::Missing {
+                        expression: parsed.text.into(),
+                        what: "a message, which only an AsyncAPI step's criteria, \
+                                   outputs and actions, and the workflow's actions, can read"
+                            .into(),
+                    }
+                    .into(),
+                ),
                 Root::Steps => {
                     let id = parsed.parts[0];
                     if !site.workflow.is_some_and(|workflow| {
