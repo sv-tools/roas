@@ -546,12 +546,12 @@ impl Translator<'_> {
             if let Kind::Object { typeless, .. } = &mut member.kind {
                 *typeless = false;
             }
-            Member::Read(member)
+            Member::Read(Box::new(member))
         };
         let mut front = match members.as_slice() {
             [] => self.leaf(pointer.clone(), Kind::Null),
             [one] => match read(one, false) {
-                Member::Read(member) => member,
+                Member::Read(member) => *member,
                 Member::Nothing => self.leaf(pointer.clone(), Kind::Never),
                 // Not lost without a word: the schema is reported as
                 // one the generator does not handle.
@@ -573,7 +573,7 @@ impl Translator<'_> {
                             None
                         }
                     })
-                    .map(|schema| Slot::Inline(Box::new(schema)))
+                    .map(Slot::Inline)
                     .collect();
                 let mut front = self.leaf(pointer.clone(), Kind::TypeUnion { branches });
                 // A keyword that applies to none of the member types is read
@@ -832,7 +832,7 @@ impl Translator<'_> {
 /// other keyword, returned for reporting.
 /// A member of a type list, read as a schema of its own.
 enum Member {
-    Read(FrontSchema),
+    Read(Box<FrontSchema>),
     /// Its `enum` or `const` admits no value of its type.
     Nothing,
     /// Its keywords do not make a schema of its type.
