@@ -1368,12 +1368,13 @@ impl<'d> Run<'d> {
             .map_err(|error| locate(&self.documents, here, error))?;
         if done.settled {
             // Nothing is left to go to: say what it would have done, and
-            // go back to where it was needed. A receive that fails with
-            // nothing to recover it fails the workflow, ended or not.
+            // go back to where it was needed. A receive that fails fails
+            // the workflow, ended or not: a retry or goto that is not
+            // taken recovers nothing.
             self.records[record].action = describe(&action)
                 .map(|action| format!("{action}, not taken: the workflow had ended"));
             let frame = self.frames.last_mut().expect("the frame is still there");
-            if matches!(action, Action::End(Outcome::Failed)) {
+            if !passed {
                 frame.outcome = Outcome::Failed;
             }
             if let Some((_, back, detour)) = pop_resume(frame, index) {

@@ -486,6 +486,9 @@ struct Site<'d> {
     workflow: Option<&'d Workflow>,
     step: Option<&'d Step>,
     path: String,
+    /// Evaluated once its step (or, with no step, a step of its workflow)
+    /// is done: criteria, outputs and actions.
+    after: bool,
 }
 /// Whether `$message` names anything where `site` is evaluated: in an
 /// AsyncAPI step's criteria, outputs and actions, which run once it has
@@ -493,19 +496,10 @@ struct Site<'d> {
 /// one. Not in a step's parameters, payload or `correlationId`, which are
 /// evaluated before it has a message, nor in workflow outputs.
 fn message_in_scope(site: &Site<'_>) -> bool {
-    match site.step {
-        Some(step) if step.action.is_some() || step.channel_path.is_some() => {
-            let path = &site.path;
-            let tail = path
-                .rsplit_once(".steps[")
-                .map_or(path.as_str(), |(_, tail)| tail);
-            [".successCriteria", ".outputs", ".onSuccess", ".onFailure"]
-                .iter()
-                .any(|part| tail.contains(part))
-        }
-        Some(_) => false,
-        None => site.path.contains("successActions") || site.path.contains("failureActions"),
-    }
+    site.after
+        && site
+            .step
+            .is_none_or(|step| step.action.is_some() || step.channel_path.is_some())
 }
 
 impl<'d> Site<'d> {
@@ -514,6 +508,7 @@ impl<'d> Site<'d> {
             workflow: None,
             step: None,
             path: path.into(),
+            after: false,
         }
     }
     fn workflow(index: usize, workflow: &'d Workflow) -> Self {
@@ -521,6 +516,14 @@ impl<'d> Site<'d> {
             workflow: Some(workflow),
             step: None,
             path: format!("#.workflows[{index}]"),
+            after: false,
+        }
+    }
+    /// The same site, evaluated after a step is done.
+    fn after(&self) -> Self {
+        Self {
+            after: true,
+            ..self.clone()
         }
     }
     fn field(&self, field: &str) -> Self {
@@ -756,8 +759,8 @@ impl<'d> Compiler<'d> {
         if let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow) {
             self.dependency_error(&site.field("dependsOn"), error);
         }
-        self.success_actions(&workflow.success_actions, &site, "successActions");
-        self.failure_actions(&workflow.failure_actions, &site, "failureActions");
+        self.success_actions(&workflow.success_actions, &site.after(), "successActions");
+        self.failure_actions(&workflow.failure_actions, &site.after(), "failureActions");
         for (name, value) in &workflow.outputs {
             self.value(value, &site.field(&format!("outputs.{name}")));
         }
@@ -831,11 +834,12 @@ impl<'d> Compiler<'d> {
                     },
                 );
             }
-            self.criteria(&step.success_criteria, &step_site, "successCriteria");
-            self.success_actions(&step.on_success, &step_site, "onSuccess");
-            self.failure_actions(&step.on_failure, &step_site, "onFailure");
+            let done = step_site.after();
+            self.criteria(&step.success_criteria, &done, "successCriteria");
+            self.success_actions(&step.on_success, &done, "onSuccess");
+            self.failure_actions(&step.on_failure, &done, "onFailure");
             for (name, value) in &step.outputs {
-                self.value(value, &step_site.field(&format!("outputs.{name}")));
+                self.value(value, &done.field(&format!("outputs.{name}")));
             }
             if let Some(body) = &step.request_body {
                 let body_site = step_site.field("requestBody");

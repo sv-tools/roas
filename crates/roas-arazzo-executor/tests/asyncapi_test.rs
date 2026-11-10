@@ -1226,6 +1226,33 @@ fn a_receive_joined_after_an_end_that_fails_fails_the_workflow() {
     let report =
         execute_with_messages(&description, &options(), &mut http, &mut Fake::new()).unwrap();
     assert_eq!(report.outcome, Outcome::Failed, "{report}");
+    // A retry or goto that is not taken recovers nothing either.
+    for recovery in [
+        json!({ "name": "again", "type": "retry", "retryLimit": 3 }),
+        json!({ "name": "jump", "type": "goto", "stepId": "x" }),
+    ] {
+        let mut confirm = receive();
+        confirm["timeout"] = json!(0);
+        confirm["onFailure"] = json!([recovery]);
+        let description = self::description(
+            json!([
+                confirm,
+                { "stepId": "x", "operationId": "ping", "onSuccess": [{ "name": "stop", "type": "end" }] }
+            ]),
+            json!({}),
+        );
+        let mut http = Fake::new().reply(200, &json!({}));
+        let report =
+            execute_with_messages(&description, &options(), &mut http, &mut Fake::new()).unwrap();
+        assert_eq!(report.outcome, Outcome::Failed, "{report}");
+        assert!(
+            report.steps[1]
+                .action
+                .as_deref()
+                .is_some_and(|action| action.ends_with("not taken: the workflow had ended")),
+            "{report}"
+        );
+    }
 }
 
 #[test]
@@ -1243,6 +1270,10 @@ fn a_message_is_read_only_where_there_is_one() {
         (
             json!([{ "stepId": "s", "operationId": "confirmOrder", "action": "send" }]),
             json!({ "o": "$message.payload" }),
+        ),
+        (
+            json!([{ "stepId": "s", "operationId": "confirmOrder", "action": "send" }]),
+            json!({ "successActions": "$message.payload" }),
         ),
     ] {
         let description = description(steps, outputs);
@@ -1269,6 +1300,31 @@ fn a_message_is_read_only_where_there_is_one() {
     }))
     .unwrap();
     prepare(&description, &options()).expect("a plan");
+    // So may a reusable action of an AsyncAPI step.
+    let mut confirm = receive();
+    confirm["onSuccess"] = json!([{ "reference": "$components.successActions.check" }]);
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "orders", "url": "https://example.com/asyncapi.json", "type": "asyncapi" },
+            { "name": "api", "url": "https://api.example.com/openapi.json", "type": "openapi" }
+        ],
+        "workflows": [{ "workflowId": "w", "steps": [
+            confirm,
+            { "stepId": "p", "operationId": "ping",
+              "onSuccess": [{ "reference": "$components.successActions.check" }] }
+        ] }],
+        "components": { "successActions": { "check": {
+            "name": "check", "type": "end",
+            "criteria": [{ "condition": "$message.payload#/status == 'ok'" }]
+        } } }
+    }))
+    .unwrap();
+    let error = prepare(&description, &options()).unwrap_err().to_string();
+    // Only the HTTP step's use is refused.
+    assert!(error.contains("can read"), "{error}");
+    assert_eq!(error.matches("can read").count(), 1, "{error}");
 }
 
 #[test]
