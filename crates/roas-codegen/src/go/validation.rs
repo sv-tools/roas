@@ -385,6 +385,17 @@ fn recurse(ty: &TypeRef, at: At<'_>, depth: usize, out: &mut Vec<String>, cx: &m
     }
 }
 
+/// Whether a holder's raw value has a number its branches' types may fail
+/// to decode for their range: such a failure proves no mismatch.
+fn go_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> String {
+    let tys: Vec<&TypeRef> = tys.collect();
+    let (limit, float32) = checks::number_range(ir, &tys);
+    format!(
+        "wideNumber(v.raw, {}, {float32})",
+        limit.unwrap_or("math.Inf(1)")
+    )
+}
+
 /// A `null` of the type `name` checked at `p` into `r`.
 fn null_call(name: &str, p: &str, r: &str) -> String {
     format!("var zero {name}; zero.validateNull({p}, {r})")
@@ -742,6 +753,7 @@ pub(crate) fn body(
                 out.push(format!("if v.raw.Kind() == 'n' {{ {} }}", null.join("; ")));
             }
             out.push("certain, uncertain := 0, 0".to_owned());
+            let wide = go_wide(cx.ir, u.branches.iter().map(|b| &b.ty));
             for (b, branch_view) in u.branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let (body, reads) = branch(b, "branch", cx);
@@ -752,14 +764,9 @@ pub(crate) fn body(
                 } else {
                     "certain"
                 };
-                // A whole number past the integer's width fails to decode
+                // A number past what the branch's type holds fails to decode
                 // for the representation: no proof it matches no branch.
-                let beyond = checks::integer_limit(cx.ir, &b.ty)
-                    .map(|limit| {
-                        cx.needs.math = true;
-                        format!(" else if func() bool {{ var f float64; return json.Unmarshal(v.raw, &f) == nil && f == math.Trunc(f) && math.Abs(f) >= {limit} }}() {{ uncertain++ }}")
-                    })
-                    .unwrap_or_default();
+                let beyond = format!(" else if {wide} {{ uncertain++ }}");
                 if body.is_empty() {
                     out.push(format!(
                         "if _, ok := v.{accessor}(); ok {{ {counter}++ }}{beyond}"
@@ -781,6 +788,7 @@ pub(crate) fn body(
         TypeKind::ComposedOpen(branches) => {
             // An intersection is nullable when any side is, so null is left
             // to every part to accept.
+            let wide = go_wide(cx.ir, branches.iter().map(|b| &b.ty));
             for (b, branch_view) in branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let message = lit(&format!(
@@ -795,20 +803,14 @@ pub(crate) fn body(
                         ))
                     ));
                 }
-                // A whole number past the integer's width fails to decode
-                // for the representation: undecided, not a miss.
-                let miss = match checks::integer_limit(cx.ir, &b.ty) {
-                    Some(limit) => {
-                        cx.needs.math = true;
-                        format!(
-                            "if func() bool {{ var f float64; return json.Unmarshal(v.raw, &f) == nil && f == math.Trunc(f) && math.Abs(f) >= {limit} }}() {{ r.unevaluated(pointer, {}) }} else {{ r.violation(pointer, {message}) }}",
-                            lit(&format!(
-                                "allOf part read by {accessor}: the number is past the integer's width"
-                            ))
-                        )
-                    }
-                    None => format!("r.violation(pointer, {message})"),
-                };
+                // A number past what the part's type holds fails to decode for
+                // the representation: undecided, not a miss.
+                let miss = format!(
+                    "if {wide} {{ r.unevaluated(pointer, {}) }} else {{ r.violation(pointer, {message}) }}",
+                    lit(&format!(
+                        "allOf part read by {accessor}: a number in the value is past what its type holds"
+                    ))
+                );
                 let part = if body.is_empty() {
                     format!("if _, ok := v.{accessor}(); !ok {{ {miss} }}")
                 } else {

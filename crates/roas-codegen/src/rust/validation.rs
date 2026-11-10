@@ -301,6 +301,17 @@ fn branch(
 /// valid.
 const NULL_IS_VALID: &str = "if self.raw.get().trim() == \"null\" { return; }";
 
+/// Whether a holder's raw value has a number its branches' types may fail
+/// to decode for their range: such a failure proves no mismatch.
+fn rust_wide<'a>(ir: &crate::ir::Ir, tys: impl Iterator<Item = &'a TypeRef>) -> String {
+    let tys: Vec<&TypeRef> = tys.collect();
+    let (limit, float32) = checks::number_range(ir, &tys);
+    format!(
+        "wide_number(self.raw.get(), {}, {float32})",
+        limit.unwrap_or("f64::INFINITY")
+    )
+}
+
 /// The body of `validate_null` for one type: empty when a `null` of it
 /// has nothing to check.
 pub(crate) fn null_body(def: &TypeDef) -> Vec<String> {
@@ -603,6 +614,7 @@ pub(crate) fn body(
             let mut lines = Vec::new();
             let mut checked = false;
             let mut counts_certain = false;
+            let wide = rust_wide(ir, u.branches.iter().map(|b| &b.ty));
             for (b, branch_view) in u.branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let (body, reads) = branch(ir, b, &progressing, ("branch", "&mut branch"));
@@ -611,12 +623,10 @@ pub(crate) fn body(
                 let sure = !checks::unsure(b) && (!generated(&b.ty) || progressing(&b.ty));
                 let counter = if sure { "certain" } else { "uncertain" };
                 counts_certain |= sure;
-                // A whole number past the integer's width fails to decode
+                // A number past what the branch's type holds fails to decode
                 // for the representation: no proof it matches no branch.
-                let beyond = checks::integer_limit(ir, &b.ty).map(|limit| {
-                    checked = true;
-                    format!(" else if serde_json::from_str::<f64>(self.raw.get()).is_ok_and(|f| f.fract() == 0.0 && f.abs() >= {limit}) {{ uncertain += 1; }}")
-                }).unwrap_or_default();
+                checked = true;
+                let beyond = format!(" else if {wide} {{ uncertain += 1; }}");
                 if body.is_empty() {
                     checked |= !sure;
                     lines.push(format!(
@@ -651,6 +661,7 @@ pub(crate) fn body(
         TypeKind::ComposedOpen(branches) => {
             // An intersection is nullable when any side is, so null is left
             // to every part to accept.
+            let wide = rust_wide(ir, branches.iter().map(|b| &b.ty));
             for (b, branch_view) in branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let message = format!(
@@ -667,18 +678,15 @@ pub(crate) fn body(
                         )
                     ));
                 }
-                // A whole number past the integer's width fails to decode
-                // for the representation: undecided, not a miss.
-                let miss = match checks::integer_limit(ir, &b.ty) {
-                    Some(limit) => format!(
-                        "if serde_json::from_str::<f64>(self.raw.get()).is_ok_and(|f| f.fract() == 0.0 && f.abs() >= {limit}) {{ report.unevaluated(pointer, {:?}); }} else {{ report.violation(pointer, {message:?}); }}",
-                        format!(
-                            "allOf part read by {}: the number is past the integer's width",
-                            accessor.trim_start_matches("as_")
-                        )
-                    ),
-                    None => format!("report.violation(pointer, {message:?});"),
-                };
+                // A number past what the part's type holds fails to decode for
+                // the representation: undecided, not a miss.
+                let miss = format!(
+                    "if {wide} {{ report.unevaluated(pointer, {:?}); }} else {{ report.violation(pointer, {message:?}); }}",
+                    format!(
+                        "allOf part read by {}: a number in the value is past what its type holds",
+                        accessor.trim_start_matches("as_")
+                    )
+                );
                 let part = if body.is_empty() {
                     format!("if self.{accessor}().is_none() {{ {miss} }}")
                 } else {

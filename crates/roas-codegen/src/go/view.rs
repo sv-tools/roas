@@ -39,6 +39,7 @@ const VALIDATION_NAMES: &[&str] = &[
     "branch",
     "repeated",
     "childPointer",
+    "wideNumber",
     "members",
     "seen",
     "item",
@@ -596,6 +597,8 @@ impl Builder<'_> {
         }
         if self.config.validation {
             self.support.validation = true;
+            // The validation support's number scan uses `math`.
+            self.needs.math = true;
             let opted_out = self.type_config(def).and_then(|t| t.validation) == Some(false);
             let validates = |ty: &TypeRef| self.validates(ty);
             let nil_able = |ty: &TypeRef| match ty {

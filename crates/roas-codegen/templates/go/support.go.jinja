@@ -224,6 +224,46 @@ func (*Null) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 }
 {% endif %}
 {% if support.validation %}
+// wideNumber says whether raw has a number a generated type may fail to
+// decode for its range rather than its value: a whole number from intLimit
+// on, one past the 32-bit float range when narrow holds, or one past
+// float64. A union branch that fails to decode such a value proves no
+// mismatch.
+func wideNumber(raw []byte, intLimit float64, narrow bool) bool {
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		b := raw[i]
+		if inString {
+			switch b {
+			case '\\':
+				i++
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		if b == '"' {
+			inString = true
+			continue
+		}
+		if b == '-' || (b >= '0' && b <= '9') {
+			start := i
+			for i < len(raw) && (raw[i] >= '0' && raw[i] <= '9' || raw[i] == '.' || raw[i] == 'e' || raw[i] == 'E' || raw[i] == '+' || raw[i] == '-') {
+				i++
+			}
+			var f float64
+			if json.Unmarshal(raw[start:i], &f) != nil || math.IsInf(f, 0) {
+				return true
+			}
+			if (f == math.Trunc(f) && math.Abs(f) >= intLimit) || (narrow && math.Abs(f) > math.MaxFloat32) {
+				return true
+			}
+			i--
+		}
+	}
+	return false
+}
+
 // FindingKind says what a finding is.
 type FindingKind int
 

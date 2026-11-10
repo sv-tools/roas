@@ -680,6 +680,10 @@ fn validated_description() -> serde_json::Value {
             }},
             "AllGated": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1}}},
             "IntOrNum": {"oneOf": [{"type": "integer"}, {"type": "number"}]},
+            "IntOrStr": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+            "AllInt": {"allOf": [{"type": "integer"}, {"minimum": 0}]},
+            "ArrOrStr": {"oneOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "string"}]},
+            "ObjOrStr": {"oneOf": [{"type": "object", "properties": {"n": {"type": "integer"}}}, {"type": "string"}]},
             "NullOnlyN": {"type": "null", "if": {}, "then": false},
             "HoldsNullOnly": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/NullOnlyN"}}},
             "Gated": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string", "maxLength": 1}}},
@@ -984,6 +988,13 @@ fn main() {
     assert_eq!(report::<HoldsNullOnly>("{}"), vec![]);
     // A whole number past int64 may match the integer branch too.
     assert_eq!(report::<IntOrNum>("9223372036854775808"), vec![u("")]);
+    // So is one past f64, or one nested anywhere in the branch.
+    assert_eq!(report::<IntOrStr>("1e400"), vec![u("")]);
+    assert!(report::<AllInt>("1e400").iter().all(|f| f.1 == FindingKind::Unevaluated));
+    assert_eq!(report::<ArrOrStr>("[1e19]"), vec![u("")]);
+    assert_eq!(report::<ObjOrStr>(r#"{"n":1e19}"#), vec![u("")]);
+    // A branch that misses for its value is still a miss.
+    assert_eq!(report::<IntOrStr>("true"), vec![v("")]);
     assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
     // An opted-out type nested in a branch proves no match.
     assert_eq!(report::<PickWrap>(r#"{"s":"ab"}"#), vec![u("")]);
@@ -1230,6 +1241,10 @@ func main() {
 	check(`{"n":null}`, report[api.HoldsNullOnly](`{"n":null}`), u("/n"))
 	check(`{}`, report[api.HoldsNullOnly](`{}`))
 	check(`9223372036854775808`, report[api.IntOrNum](`9223372036854775808`), u(""))
+	check(`1e400`, report[api.IntOrStr](`1e400`), u(""))
+	check(`[1e19]`, report[api.ArrOrStr](`[1e19]`), u(""))
+	check(`{"n":1e19}`, report[api.ObjOrStr](`{"n":1e19}`), u(""))
+	check(`true`, report[api.IntOrStr](`true`), v(""))
 	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
 	check(`{"s3":{"p":1}}`, report[api.HoldsSub3](`{"s3":{"p":1}}`), u("/s3"))
 	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))

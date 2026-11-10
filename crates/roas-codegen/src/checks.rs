@@ -527,23 +527,79 @@ mod neighbours {
     }
 }
 
-/// The magnitude from which a whole number no longer fits the integer
-/// `ty` holds (through references), as a float literal: decoding such a
-/// number fails for the representation, not because it is no integer.
-pub(crate) fn integer_limit(ir: &crate::ir::Ir, ty: &TypeRef) -> Option<&'static str> {
-    let mut ty = strip(ty);
-    for _ in 0..=ir.types.len() {
+/// The ranges the types of a holder's branches can hold, found through
+/// fields, items, values and references: the whole-number magnitude from
+/// which the narrowest integer among them overflows (`None` with no
+/// integer), and whether a 32-bit float is among them. A number past
+/// either fails a branch's decoding for the representation, not because
+/// the value is not one the branch's schema allows. A substituted type is
+/// assumed to be as narrow as any.
+pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'static str>, bool) {
+    fn walk(
+        ir: &crate::ir::Ir,
+        ty: &TypeRef,
+        seen: &mut std::collections::BTreeSet<crate::diagnostic::SchemaId>,
+        int32: &mut bool,
+        int64: &mut bool,
+        float32: &mut bool,
+    ) {
         match ty {
-            TypeRef::Integer(IntWidth::Int32) => return Some("2147483648.0"),
-            TypeRef::Integer(_) => return Some("9223372036854775808.0"),
-            TypeRef::Named(id) => match ir.types.get(id).map(|d| &d.kind) {
-                Some(TypeKind::Newtype(inner) | TypeKind::Alias(inner)) => ty = strip(inner),
-                _ => return None,
-            },
-            _ => return None,
+            TypeRef::Integer(IntWidth::Int32) => *int32 = true,
+            TypeRef::Integer(_) => *int64 = true,
+            TypeRef::Number(FloatWidth::Float) => *float32 = true,
+            TypeRef::Extern(_) => {
+                *int32 = true;
+                *float32 = true;
+            }
+            TypeRef::Boxed(inner)
+            | TypeRef::Nullable(inner)
+            | TypeRef::Array(inner)
+            | TypeRef::Map(inner) => walk(ir, inner, seen, int32, int64, float32),
+            TypeRef::Named(id) => {
+                if !seen.insert(id.clone()) {
+                    return;
+                }
+                let Some(def) = ir.types.get(id) else { return };
+                let mut inner: Vec<&TypeRef> = Vec::new();
+                match &def.kind {
+                    TypeKind::Struct(s) => {
+                        inner.extend(s.fields.iter().map(|f| &f.ty));
+                        if let crate::ir::Additional::CatchAll(ty) = &s.additional {
+                            inner.push(ty);
+                        }
+                    }
+                    TypeKind::Newtype(ty) | TypeKind::Alias(ty) => inner.push(ty),
+                    TypeKind::UnionTagged(u) => inner.extend(u.variants.iter().map(|v| &v.ty)),
+                    TypeKind::UnionOpen(crate::ir::OpenUnion { branches, .. })
+                    | TypeKind::ComposedOpen(branches) => {
+                        inner.extend(branches.iter().map(|b| &b.ty))
+                    }
+                    TypeKind::Extern => {
+                        *int32 = true;
+                        *float32 = true;
+                    }
+                    TypeKind::StringEnum(_) => {}
+                }
+                for ty in inner {
+                    walk(ir, ty, seen, int32, int64, float32);
+                }
+            }
+            _ => {}
         }
     }
-    None
+    let (mut int32, mut int64, mut float32) = (false, false, false);
+    let mut seen = std::collections::BTreeSet::new();
+    for ty in tys {
+        walk(ir, ty, &mut seen, &mut int32, &mut int64, &mut float32);
+    }
+    let limit = if int32 {
+        Some("2147483648.0")
+    } else if int64 {
+        Some("9223372036854775808.0")
+    } else {
+        None
+    };
+    (limit, float32)
 }
 
 /// Whether decoding a branch proves nothing: it declares what neither its

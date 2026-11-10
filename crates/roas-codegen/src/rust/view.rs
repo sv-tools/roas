@@ -325,6 +325,7 @@ impl Builder<'_> {
                 "Finding",
                 "FindingKind",
                 "child_pointer",
+                "wide_number",
             ] {
                 allocator.reserve(reserved);
             }
