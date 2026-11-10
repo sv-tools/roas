@@ -289,7 +289,7 @@ pub(crate) enum ArazzoCommand {
     /// List the workflows a description offers, and what each one takes.
     List(ArazzoListArgs),
     /// Check a description the way an editor does: read even damaged
-    /// text, and report every finding with its line and column.
+    /// text, and report its findings, located where possible.
     Check(ArazzoCheckArgs),
 }
 
