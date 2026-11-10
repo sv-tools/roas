@@ -1341,6 +1341,30 @@ fn a_lazy_run_refuses_a_jsonpath_version_it_does_not_evaluate() {
     let mut client = Fake::new().reply(500, &json!({}));
     let error = execute(&description, &options(), &mut client).unwrap_err();
     assert!(error.to_string().contains("RFC9535"), "{error}");
+    // So is XPath there, which a stopped workflow used to skip.
+    let mut description = one(json!([
+        { "stepId": "a", "operationId": "listPets", "successCriteria": [{ "condition": "$statusCode == 200" }] },
+        { "stepId": "b", "operationId": "placeOrder" }
+    ]));
+    description.workflows[0].outputs.insert(
+        "late".to_owned(),
+        serde_json::from_value(
+            json!({ "type": "xpath", "context": "$steps.b.outputs.y", "selector": "/x" }),
+        )
+        .expect("a selector"),
+    );
+    let mut client = Fake::new().reply(500, &json!({}));
+    let error = execute(&description, &options(), &mut client).unwrap_err();
+    assert!(error.to_string().contains("XPath"), "{error}");
+    // A replacement's target language before its value: the value names
+    // an input that was never given.
+    refused(json!([{
+        "stepId": "a",
+        "operationId": "placeOrder",
+        "requestBody": { "payload": { "x": 0 }, "replacements": [
+            { "target": "$.x", "targetSelectorType": goessner, "value": "$inputs.missing" }
+        ] }
+    }]));
     // RFC 9535 itself still runs.
     let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
     let steps = json!([{
