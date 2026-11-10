@@ -55,7 +55,11 @@ static ABANDONED: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn compile(expression: &str, version: XPathVersion) -> Result<(), SelectError> {
     screened(expression)?;
     let owned = expression.to_owned();
-    on_engine(expression, move || compiled(&owned, version).map(drop))
+    // Compiling sees no context, so an evaluation still running does not
+    // hold it up.
+    on_engine(expression, false, move || {
+        compiled(&owned, version).map(drop)
+    })
 }
 
 /// Whether `condition` holds over `context`: its effective boolean
@@ -89,9 +93,15 @@ pub(crate) fn select(
         let value = query
             .evaluate_value_in(&query.context_with(tree.root()))
             .map_err(|error| failed(selector, &error.to_string()))?;
+        // A node's string value walks its subtree, after the engine has
+        // returned, so the deadline is checked between items here too.
         let mut items = value
             .iter()
-            .map(|item| json(selector, item))
+            .map(|item| {
+                EvaluationLimits::check_deadline()
+                    .map_err(|error| failed(selector, &error.to_string()))?;
+                json(selector, item)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(match items.len() {
             0 => None,
@@ -118,7 +128,7 @@ fn evaluate<T: Send + 'static>(
         return Err(failed(expression, &reason));
     }
     let (owned, xml) = (expression.to_owned(), xml.clone());
-    on_engine(expression, move || {
+    on_engine(expression, true, move || {
         let query = compiled(&owned, version)?;
         let tree = Tree::parse_str(&xml)
             .map_err(|error| failed(&owned, &format!("the context is not XML: {error}")))?;
@@ -138,12 +148,13 @@ fn compiled(expression: &str, version: XPathVersion) -> Result<CompiledXPath, Se
 /// do is a limit of this executor, not a condition that is false.
 /// Everything the engine built is dropped on that thread, so nothing it
 /// left half-done is seen again. While an evaluation a run gave up on is
-/// still running, the next one fails at once instead.
+/// still running, the next `gated` one fails at once instead.
 fn on_engine<T: Send + 'static>(
     expression: &str,
+    gated: bool,
     work: impl FnOnce() -> Result<T, SelectError> + Send + 'static,
 ) -> Result<T, SelectError> {
-    if ABANDONED.load(Ordering::Acquire) > 0 {
+    if gated && ABANDONED.load(Ordering::Acquire) > 0 {
         return Err(failed(
             expression,
             "the XPath engine is still busy with an evaluation that ran past its time",
@@ -174,7 +185,12 @@ fn on_engine<T: Send + 'static>(
                 let _ = sender.send(result);
             }
         })
-        .map_err(|_| SelectError::Unsupported(NO_THREAD))?;
+        .map_err(|error| {
+            failed(
+                expression,
+                &format!("no thread could be started for the XPath engine: {error}"),
+            )
+        })?;
     match receiver.recv_timeout(WAIT) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -199,9 +215,6 @@ fn on_engine<T: Send + 'static>(
 
 /// The capability an engine panic is reported as.
 const UNIMPLEMENTED: &str = "partly unimplemented XPath";
-
-/// The capability reported when no thread can be started for the engine.
-const NO_THREAD: &str = "XPath without a thread to evaluate it on";
 
 fn malformed(expression: &str, error: &XPathError) -> SelectError {
     SelectError::Malformed {
@@ -418,6 +431,11 @@ const MAX_NAMESPACE_NODES: usize = 100_000;
 /// document: each of them has a string value that repeats it, and an
 /// expression as plain as `//a` builds every one.
 const MAX_STRING_VALUE_BYTES: usize = 64 * 1024 * 1024;
+/// Nodes, counted once for every element they are inside and once for
+/// the document: building an element's string value walks its subtree,
+/// so selecting every element visits each node that many times, whatever
+/// text there is.
+const MAX_SUBTREE_VISITS: usize = 10_000_000;
 
 /// Why `xml` is past one of the limits above, or holds a document type
 /// declaration, if it does, by one pass over its markup. The engine
@@ -442,6 +460,7 @@ fn too_complex(xml: &str) -> Option<String> {
     let mut nodes = 0usize;
     let mut all_attributes = 0usize;
     let mut string_values = 0usize;
+    let mut subtree_visits = 0usize;
     let skip = |from: usize, end: &str| {
         xml[from..]
             .find(end)
@@ -478,6 +497,12 @@ fn too_complex(xml: &str) -> Option<String> {
             if nodes > MAX_NODES {
                 return Some(format!(
                     "the context has more than {MAX_NODES} elements, comments and processing instructions"
+                ));
+            }
+            subtree_visits += open.len() + 1;
+            if subtree_visits > MAX_SUBTREE_VISITS {
+                return Some(format!(
+                    "the context's nodes, counted once for every element around them, are more than {MAX_SUBTREE_VISITS}"
                 ));
             }
         }
@@ -796,14 +821,14 @@ mod tests {
 
     #[test]
     fn a_panic_inside_the_engine_is_unsupported() {
-        let result: Result<(), _> = on_engine("x", || panic!("an engine bug"));
+        let result: Result<(), _> = on_engine("x", true, || panic!("an engine bug"));
         assert_eq!(result, Err(SelectError::Unsupported(UNIMPLEMENTED)));
     }
 
     #[test]
     fn a_run_waits_for_the_engine_only_so_long() {
         let started = Instant::now();
-        let result: Result<(), _> = on_engine("x", || {
+        let result: Result<(), _> = on_engine("x", true, || {
             std::thread::sleep(WAIT + Duration::from_millis(500));
             Ok(())
         });
@@ -817,6 +842,8 @@ mod tests {
             evaluation_error(select("/order", V31, &order())).contains("still busy"),
             "a second evaluation started"
         );
+        // Compiling sees no context, so it is not held up.
+        assert_eq!(compile("/order", V31), Ok(()));
         while ABANDONED.load(Ordering::Acquire) > 0 {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -841,18 +868,15 @@ mod tests {
 
     #[test]
     fn a_long_evaluation_stops_at_the_deadline() {
-        // Chains of elements as deep as a context may nest: `//a//a`
-        // over them takes several times the deadline.
-        let chain = format!(
-            "{}{}",
-            "<a>".repeat(MAX_DEPTH - 1),
-            "</a>".repeat(MAX_DEPTH - 1)
-        );
-        let deep = format!("<r>{}</r>", chain.repeat(300_000 / chain.len() + 1));
+        let leaves = json!(format!("<r>{}</r>", "<l/>".repeat(50_000)));
         let started = Instant::now();
-        let message = evaluation_error(select("count(//a//a)", V31, &json!(deep)));
+        let message = evaluation_error(select(
+            "sum(for $i in 1 to 2000 return count(//l))",
+            V31,
+            &leaves,
+        ));
         assert!(message.contains("XPDY0130"), "{message}");
-        assert!(started.elapsed() < DEADLINE * 3);
+        assert!(started.elapsed() < WAIT);
     }
 
     #[test]
@@ -1018,6 +1042,20 @@ mod tests {
                     .contains("string value of every element"),
             );
         }
+        // And so is every node: an element's string value walks them all.
+        let deep_leaves = |leaves: usize| {
+            format!(
+                "{}{}{}",
+                "<a>".repeat(1000),
+                "<l/>".repeat(leaves),
+                "</a>".repeat(1000)
+            )
+        };
+        assert!(!refused(&deep_leaves(9_000)));
+        assert!(
+            evaluation_error(select("//*", V31, &json!(deep_leaves(10_000))))
+                .contains("counted once for every element around them")
+        );
         // CDATA sections and end tags are not nodes of their own.
         assert!(!refused(&format!(
             "<r>{}</r>",
