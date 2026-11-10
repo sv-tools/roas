@@ -517,3 +517,161 @@ fn generated_go_compiles_and_behaves() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A description with a constraint of every checked kind, for the
+/// validation tests of both languages.
+fn validated_description() -> serde_json::Value {
+    serde_json::json!({
+        "openapi": "3.2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "Pet": {
+                "type": "object", "required": ["name"], "minProperties": 2, "maxProperties": 4,
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 5},
+                    "age": {"type": "integer", "minimum": 0, "exclusiveMaximum": 30, "multipleOf": 2},
+                    "weight": {"type": "number", "minimum": 0.5, "exclusiveMaximum": 100},
+                    "ratio": {"type": "number", "multipleOf": 1},
+                    "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3, "uniqueItems": true},
+                    "code": {"type": "string", "pattern": "^a"},
+                    "owner": {"$ref": "#/components/schemas/Owner"},
+                    "friends": {"type": "array", "items": {"$ref": "#/components/schemas/Owner"}},
+                    "extra": {"type": "object", "additionalProperties": {"type": "integer"}, "maxProperties": 1}
+                }
+            },
+            "Owner": {"type": "object", "properties": {"nick": {"type": ["string", "null"], "maxLength": 3}}},
+            "Short": {"type": "string", "maxLength": 2},
+            "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
+            "Choice": {"oneOf": [{"$ref": "#/components/schemas/Short"}, {"$ref": "#/components/schemas/Owner"}]}
+        }}
+    })
+}
+
+fn validated_generation(target: Target) -> roas_codegen::Generation {
+    let bytes = serde_json::to_vec(&validated_description()).unwrap();
+    let doc =
+        SourceDocument::parse(Input::Json(bytes), Url::parse("file:///v.json").unwrap()).unwrap();
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
+    let mut config = ConfigFile::default();
+    config.target = Some(target);
+    config.validation = Some(true);
+    let generation = generate(&doc, &config.build().unwrap()).expect("generates");
+    assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
+    generation
+}
+
+const VALIDATE_MAIN: &str = r##"
+#[allow(dead_code)]
+mod types;
+use types::*;
+
+fn report<T: serde::de::DeserializeOwned + Validate>(json: &str) -> Vec<(String, FindingKind)> {
+    let value: T = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+    let mut found: Vec<_> = value.validate().findings.into_iter().map(|f| (f.pointer, f.kind)).collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
+fn v(pointer: &str) -> (String, FindingKind) {
+    (pointer.to_owned(), FindingKind::Violation)
+}
+
+fn u(pointer: &str) -> (String, FindingKind) {
+    (pointer.to_owned(), FindingKind::Unevaluated)
+}
+
+fn main() {
+    // Within every bound: nothing to report.
+    assert_eq!(report::<Pet>(r#"{"name":"rex","age":4,"tags":["a","b"]}"#), vec![]);
+    let pet: Pet = serde_json::from_str(r#"{"name":"rex","age":4}"#).unwrap();
+    assert!(pet.validate().is_valid());
+    // Lengths count characters, not bytes.
+    assert_eq!(report::<Pet>(r#"{"name":"ééééé","age":2}"#), vec![]);
+    assert_eq!(report::<Pet>(r#"{"name":"","age":2}"#), vec![v("/name")]);
+    assert_eq!(report::<Pet>(r#"{"name":"toolong","age":2}"#), vec![v("/name")]);
+    // Integers: bounds, exclusive bounds and multiples, exactly.
+    assert_eq!(report::<Pet>(r#"{"name":"a","age":-2}"#), vec![v("/age")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","age":30}"#), vec![v("/age")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","age":3}"#), vec![v("/age")]);
+    // Floats.
+    assert_eq!(report::<Pet>(r#"{"name":"a","weight":0.25}"#), vec![v("/weight")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","weight":100}"#), vec![v("/weight")]);
+    // A fraction is no multiple of a whole number; a whole float may have
+    // been rounded, so it is not decided.
+    assert_eq!(report::<Pet>(r#"{"name":"a","ratio":1.5}"#), vec![v("/ratio")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","ratio":2}"#), vec![u("/ratio")]);
+    // Arrays.
+    assert_eq!(report::<Pet>(r#"{"name":"a","tags":[]}"#), vec![v("/tags")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","tags":["a","b","c","d"]}"#), vec![v("/tags")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","tags":["a","b","a"]}"#), vec![v("/tags/2")]);
+    // Patterns are not checked yet, and say so.
+    assert_eq!(report::<Pet>(r#"{"name":"a","code":"b"}"#), vec![u("/code")]);
+    // Members: counted on the object, and on a map.
+    assert_eq!(report::<Pet>(r#"{"name":"a"}"#), vec![v("")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","age":2,"weight":1,"ratio":1.5,"tags":["x"]}"#), vec![v(""), v("/ratio")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","extra":{"x":1,"y":2}}"#), vec![v("/extra")]);
+    // Nested types report at their own pointer, nulls skipped.
+    assert_eq!(report::<Pet>(r#"{"name":"a","owner":{"nick":"long"}}"#), vec![v("/owner/nick")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","owner":{"nick":null}}"#), vec![]);
+    assert_eq!(
+        report::<Pet>(r#"{"name":"a","friends":[{"nick":"ok"},{"nick":"long"}]}"#),
+        vec![v("/friends/1/nick")]
+    );
+    // A component newtype checks itself, wherever it is used.
+    assert_eq!(report::<Shorts>(r#"["ab","abc"]"#), vec![v("/1")]);
+    // oneOf counts the branches that decode and validate.
+    assert_eq!(report::<Choice>(r#""ab""#), vec![]);
+    assert_eq!(report::<Choice>(r#""abc""#), vec![v("")]);
+    assert_eq!(report::<Choice>(r#"{"nick":"ok"}"#), vec![]);
+    println!("validation behaves");
+}
+"##;
+
+#[test]
+fn generated_rust_validation_compiles_and_behaves() {
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() {
+        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
+        return;
+    }
+    let generation = validated_generation(Target::Rust);
+    let dir = std::env::temp_dir().join(format!("roas-codegen-validate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let deps: String = generation
+        .dependencies
+        .rust
+        .iter()
+        .map(|d| {
+            format!(
+                "{} = {{ version = \"1\", features = {:?} }}\n",
+                d.name, d.features
+            )
+        })
+        .collect();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{deps}"),
+    )
+    .unwrap();
+    for file in &generation.files {
+        std::fs::write(dir.join("src").join(&file.path), &file.contents).unwrap();
+    }
+    std::fs::write(dir.join("src/main.rs"), VALIDATE_MAIN).unwrap();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["run", "--quiet"])
+        .current_dir(&dir)
+        .env("CARGO_TARGET_DIR", dir.join("target"))
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("validation behaves"),
+        "generated crate failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- types.rs\n{}",
+        generation.files[0].contents
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

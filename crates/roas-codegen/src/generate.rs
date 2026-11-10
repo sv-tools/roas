@@ -241,6 +241,11 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
 }
 
 fn check_go(config: &Config) -> Result<(), GenerateError> {
+    if config.validation {
+        return Err(GenerateError::Unsupported(
+            "`validation = true` for Go (generated validation)".into(),
+        ));
+    }
     if !go::naming::is_package_name(&config.go.package) {
         return Err(GenerateError::Config(format!(
             "`go.package = {:?}` must be a lowercase Go package name",
@@ -296,11 +301,6 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
     }
     // Settings the configuration accepts but this release cannot honour
     // are refused, never silently ignored.
-    if config.validation {
-        return Err(GenerateError::Unsupported(
-            "`validation = true` (generated validation)".into(),
-        ));
-    }
     match config.target {
         Target::Rust => check_rust(config)?,
         Target::Go => check_go(config)?,
@@ -378,6 +378,9 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
         ir.suppressed = suppressed;
     }
     diagnostics.append(&mut ir.diagnostics);
+    if config.validation {
+        diagnostics.extend(crate::checks::diagnostics(&ir));
+    }
 
     Ok(Prepared {
         ir: Some(ir),

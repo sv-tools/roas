@@ -1,0 +1,470 @@
+//! What generated validation checks, decided once for both backends.
+//!
+//! A schema's constraints become a list of [`Check`]s on the value they
+//! constrain; each backend only spells them. Only what the type cannot
+//! express is checked: presence, nullability, enum membership and unknown
+//! members are the decoders' already. A check that cannot be decided
+//! exactly on the mapped type is never turned into a guessed verdict: it
+//! becomes [`Check::Unevaluated`], reported as such at run time.
+
+use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, push_token, source_of};
+use crate::front::{Constraints, FloatWidth, IntWidth};
+use crate::ir::{Ir, TypeKind, TypeRef};
+use serde_json::Number;
+
+/// The value kind a check applies to, after nullability and indirection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueKind {
+    String,
+    Integer(IntWidth),
+    Number(FloatWidth),
+    Array,
+    Map,
+    /// Anything else: a generated type, a substitution, raw JSON.
+    Other,
+}
+
+/// How `uniqueItems` can be decided for an array's items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unique {
+    /// Strings, booleans, integers: equal exactly when their values are.
+    Exact,
+    /// Floats: unequal values came from different numbers, but equal ones
+    /// may not have — a decoded float has lost its literal.
+    Float,
+    /// Anything else needs a JSON equality the generated code lacks.
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Check {
+    MinLength(u64),
+    MaxLength(u64),
+    /// The smallest integer allowed, from `minimum` or `exclusiveMinimum`.
+    IntAtLeast {
+        bound: i128,
+        keyword: &'static str,
+        literal: String,
+    },
+    /// The largest integer allowed.
+    IntAtMost {
+        bound: i128,
+        keyword: &'static str,
+        literal: String,
+    },
+    /// A multiple of `factor / 10^scale`: `value * 10^scale % factor == 0`.
+    IntMultipleOf {
+        factor: i128,
+        scale: u32,
+        literal: String,
+    },
+    /// `value >= bound` (or `>` when exclusive), compared as floats.
+    NumAtLeast {
+        bound: f64,
+        exclusive: bool,
+        literal: String,
+    },
+    NumAtMost {
+        bound: f64,
+        exclusive: bool,
+        literal: String,
+    },
+    /// `multipleOf` on a float: decidable only when it fails for certain.
+    NumMultipleOf {
+        integral: bool,
+        literal: String,
+    },
+    MinItems(u64),
+    MaxItems(u64),
+    UniqueItems(Unique),
+    MinProperties(u64),
+    MaxProperties(u64),
+    /// A keyword this generator does not check; every value it applies to
+    /// is reported as unevaluated rather than passed.
+    Unevaluated {
+        keyword: &'static str,
+        reason: String,
+    },
+}
+
+/// The kind of value `ty` holds once nullability and boxing are seen
+/// through.
+pub(crate) fn kind_of(ty: &TypeRef) -> ValueKind {
+    match ty {
+        TypeRef::Boxed(inner) | TypeRef::Nullable(inner) => kind_of(inner),
+        TypeRef::String => ValueKind::String,
+        TypeRef::Integer(width) => ValueKind::Integer(*width),
+        TypeRef::Number(width) => ValueKind::Number(*width),
+        TypeRef::Array(_) => ValueKind::Array,
+        TypeRef::Map(_) => ValueKind::Map,
+        _ => ValueKind::Other,
+    }
+}
+
+/// Whether `ty` holds a generated type that validates itself: a named
+/// type that was emitted, seen through aliases, and not a substitution.
+pub(crate) fn validates(
+    ir: &Ir,
+    emitted: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+    ty: &TypeRef,
+) -> bool {
+    fn named(
+        ir: &Ir,
+        emitted: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+        id: &crate::diagnostic::SchemaId,
+        depth: usize,
+    ) -> bool {
+        if depth > ir.types.len() || !emitted(id) {
+            return false;
+        }
+        match &ir.types[id].kind {
+            TypeKind::Extern => false,
+            // An alias has its target's implementation, or none.
+            TypeKind::Alias(inner) => inner
+                .direct_named()
+                .is_some_and(|target| named(ir, emitted, target, depth + 1)),
+            _ => true,
+        }
+    }
+    let mut ids = Vec::new();
+    ty.named(&mut ids);
+    ids.iter().any(|id| named(ir, emitted, id, 0))
+}
+
+/// The checks `constraints` put on a value of type `ty`.
+pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
+    let c = constraints;
+    let kind = kind_of(ty);
+    let mut out = Vec::new();
+    match kind {
+        ValueKind::String => {
+            out.extend(c.min_length.map(Check::MinLength));
+            out.extend(c.max_length.map(Check::MaxLength));
+            if c.pattern.is_some() {
+                out.push(Check::Unevaluated {
+                    keyword: "pattern",
+                    reason: "patterns are not checked yet".into(),
+                });
+            }
+        }
+        ValueKind::Integer(_) => {
+            if let Some(n) = &c.minimum {
+                out.push(Check::IntAtLeast {
+                    bound: int_lower(n, false),
+                    keyword: "minimum",
+                    literal: n.to_string(),
+                });
+            }
+            if let Some(n) = &c.exclusive_minimum {
+                out.push(Check::IntAtLeast {
+                    bound: int_lower(n, true),
+                    keyword: "exclusiveMinimum",
+                    literal: n.to_string(),
+                });
+            }
+            if let Some(n) = &c.maximum {
+                out.push(Check::IntAtMost {
+                    bound: int_upper(n, false),
+                    keyword: "maximum",
+                    literal: n.to_string(),
+                });
+            }
+            if let Some(n) = &c.exclusive_maximum {
+                out.push(Check::IntAtMost {
+                    bound: int_upper(n, true),
+                    keyword: "exclusiveMaximum",
+                    literal: n.to_string(),
+                });
+            }
+            if let Some(n) = &c.multiple_of {
+                out.push(match decimal(n) {
+                    Some((factor, scale)) if factor != 0 => Check::IntMultipleOf {
+                        factor,
+                        scale,
+                        literal: n.to_string(),
+                    },
+                    _ => Check::Unevaluated {
+                        keyword: "multipleOf",
+                        reason: format!("{n} has more digits than an exact check can hold"),
+                    },
+                });
+            }
+        }
+        ValueKind::Number(_) => {
+            for (n, exclusive, at_least) in [
+                (&c.minimum, false, true),
+                (&c.exclusive_minimum, true, true),
+                (&c.maximum, false, false),
+                (&c.exclusive_maximum, true, false),
+            ] {
+                let Some(n) = n else { continue };
+                let Some(bound) = n.as_f64() else { continue };
+                let literal = n.to_string();
+                out.push(if at_least {
+                    Check::NumAtLeast {
+                        bound,
+                        exclusive,
+                        literal,
+                    }
+                } else {
+                    Check::NumAtMost {
+                        bound,
+                        exclusive,
+                        literal,
+                    }
+                });
+            }
+            if let Some(n) = &c.multiple_of {
+                out.push(Check::NumMultipleOf {
+                    integral: n.is_i64() || n.is_u64(),
+                    literal: n.to_string(),
+                });
+            }
+        }
+        ValueKind::Array => {
+            out.extend(c.min_items.map(Check::MinItems));
+            out.extend(c.max_items.map(Check::MaxItems));
+            if c.unique_items {
+                let item = match strip(ty) {
+                    TypeRef::Array(item) => item.as_ref(),
+                    _ => unreachable!("an array kind is an array"),
+                };
+                out.push(Check::UniqueItems(match item {
+                    TypeRef::String | TypeRef::Boolean | TypeRef::Integer(_) => Unique::Exact,
+                    TypeRef::Number(_) => Unique::Float,
+                    _ => Unique::Unknown,
+                }));
+            }
+        }
+        ValueKind::Map => {
+            out.extend(c.min_properties.map(Check::MinProperties));
+            out.extend(c.max_properties.map(Check::MaxProperties));
+        }
+        ValueKind::Other => {}
+    }
+    out
+}
+
+/// The constraints on an object's own members, for a generated struct.
+pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
+    let mut out = Vec::new();
+    out.extend(constraints.min_properties.map(Check::MinProperties));
+    out.extend(constraints.max_properties.map(Check::MaxProperties));
+    if constraints.property_names {
+        out.push(Check::Unevaluated {
+            keyword: "propertyNames",
+            reason: "member-name schemas are not checked yet".into(),
+        });
+    }
+    out
+}
+
+/// Whether the constraints say anything a check above does not cover for
+/// a value of this kind: they are then reported at generation time.
+pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static str> {
+    let kind = kind_of(ty);
+    let mut out = Vec::new();
+    let string = matches!(kind, ValueKind::String);
+    let number = matches!(kind, ValueKind::Integer(_) | ValueKind::Number(_));
+    let array = matches!(kind, ValueKind::Array);
+    let map = matches!(kind, ValueKind::Map);
+    for (present, keyword, applies) in [
+        (c.min_length.is_some(), "minLength", string),
+        (c.max_length.is_some(), "maxLength", string),
+        (c.pattern.is_some(), "pattern", string),
+        (c.minimum.is_some(), "minimum", number),
+        (c.maximum.is_some(), "maximum", number),
+        (c.exclusive_minimum.is_some(), "exclusiveMinimum", number),
+        (c.exclusive_maximum.is_some(), "exclusiveMaximum", number),
+        (c.multiple_of.is_some(), "multipleOf", number),
+        (c.min_items.is_some(), "minItems", array),
+        (c.max_items.is_some(), "maxItems", array),
+        (c.unique_items, "uniqueItems", array),
+        (c.min_properties.is_some(), "minProperties", map),
+        (c.max_properties.is_some(), "maxProperties", map),
+    ] {
+        if present && !applies {
+            out.push(keyword);
+        }
+    }
+    out
+}
+
+/// With validation on, a warning for every constraint no check covers, so
+/// nothing a schema says is dropped without a word.
+pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut warn = |id: &crate::diagnostic::SchemaId, pointer: String, keyword: &str| {
+        out.push(Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Unvalidated {
+                keyword: keyword.to_owned(),
+            },
+            schema_id: id.clone(),
+            pointer: source_of(&pointer),
+            message: format!(
+                "`{keyword}` does not apply to a value of this type, so validation does not check it"
+            ),
+        });
+    };
+    for id in &ir.order {
+        if ir.suppressed.contains(id) {
+            continue;
+        }
+        let def = &ir.types[id];
+        match &def.kind {
+            TypeKind::Struct(s) => {
+                for field in &s.fields {
+                    let mut pointer = def.id.pointer.clone();
+                    push_token(&mut pointer, "properties");
+                    push_token(&mut pointer, &field.raw_name);
+                    for keyword in unchecked_keywords(&field.ty, &field.constraints) {
+                        warn(&def.id, format!("{pointer}/{keyword}"), keyword);
+                    }
+                }
+            }
+            TypeKind::Newtype(inner) => {
+                for keyword in unchecked_keywords(inner, &def.constraints) {
+                    warn(&def.id, format!("{}/{keyword}", def.id.pointer), keyword);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Every constraint keyword `c` declares.
+pub(crate) fn present_keywords(c: &Constraints) -> Vec<&'static str> {
+    [
+        (c.min_length.is_some(), "minLength"),
+        (c.max_length.is_some(), "maxLength"),
+        (c.pattern.is_some(), "pattern"),
+        (c.minimum.is_some(), "minimum"),
+        (c.maximum.is_some(), "maximum"),
+        (c.exclusive_minimum.is_some(), "exclusiveMinimum"),
+        (c.exclusive_maximum.is_some(), "exclusiveMaximum"),
+        (c.multiple_of.is_some(), "multipleOf"),
+        (c.min_items.is_some(), "minItems"),
+        (c.max_items.is_some(), "maxItems"),
+        (c.unique_items, "uniqueItems"),
+        (c.min_properties.is_some(), "minProperties"),
+        (c.max_properties.is_some(), "maxProperties"),
+        (c.property_names, "propertyNames"),
+    ]
+    .into_iter()
+    .filter_map(|(present, keyword)| present.then_some(keyword))
+    .collect()
+}
+
+fn strip(ty: &TypeRef) -> &TypeRef {
+    match ty {
+        TypeRef::Boxed(inner) | TypeRef::Nullable(inner) => strip(inner),
+        other => other,
+    }
+}
+
+/// Far enough past any `i64` that a bound beyond it decides every value.
+const SATURATE: i128 = 1 << 70;
+
+fn clamp(value: f64) -> i128 {
+    if value >= SATURATE as f64 {
+        SATURATE
+    } else if value <= -(SATURATE as f64) {
+        -SATURATE
+    } else {
+        value as i128
+    }
+}
+
+/// The smallest integer satisfying `>= n` (or `> n`).
+fn int_lower(n: &Number, exclusive: bool) -> i128 {
+    match exact_int(n) {
+        Some(i) if exclusive => i + 1,
+        Some(i) => i,
+        None => {
+            let f = n.as_f64().unwrap_or(0.0);
+            if exclusive {
+                clamp(f.floor()) + 1
+            } else {
+                clamp(f.ceil())
+            }
+        }
+    }
+}
+
+/// The largest integer satisfying `<= n` (or `< n`).
+fn int_upper(n: &Number, exclusive: bool) -> i128 {
+    match exact_int(n) {
+        Some(i) if exclusive => i - 1,
+        Some(i) => i,
+        None => {
+            let f = n.as_f64().unwrap_or(0.0);
+            if exclusive {
+                clamp(f.ceil()) - 1
+            } else {
+                clamp(f.floor())
+            }
+        }
+    }
+}
+
+fn exact_int(n: &Number) -> Option<i128> {
+    n.as_i64()
+        .map(i128::from)
+        .or_else(|| n.as_u64().map(i128::from))
+}
+
+/// A number as `digits / 10^scale`, exactly as written when it is an
+/// integer and as its shortest decimal otherwise. `None` when it does not
+/// fit an `i128`.
+pub(crate) fn decimal(n: &Number) -> Option<(i128, u32)> {
+    if let Some(i) = exact_int(n) {
+        return Some((i.abs(), 0));
+    }
+    // `Display` for `f64` never uses an exponent, and is the shortest
+    // decimal that reads back as the same float.
+    let text = format!("{}", n.as_f64()?.abs());
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    let fraction = fraction.trim_end_matches('0');
+    let digits = format!("{whole}{fraction}");
+    let factor: i128 = digits.trim_start_matches('0').parse().ok().or_else(|| {
+        // All zeros.
+        digits.chars().all(|c| c == '0').then_some(0)
+    })?;
+    let scale = u32::try_from(fraction.len()).ok()?;
+    (scale <= 38).then_some((factor, scale))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn n(text: &str) -> Number {
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn integer_bounds_round_inwards() {
+        assert_eq!(int_lower(&n("5"), false), 5);
+        assert_eq!(int_lower(&n("5"), true), 6);
+        assert_eq!(int_lower(&n("1.5"), false), 2);
+        assert_eq!(int_lower(&n("1.5"), true), 2);
+        assert_eq!(int_lower(&n("2.0"), true), 3);
+        assert_eq!(int_upper(&n("1.5"), false), 1);
+        assert_eq!(int_upper(&n("1.5"), true), 1);
+        assert_eq!(int_upper(&n("-3"), true), -4);
+        assert_eq!(int_lower(&n("1e300"), false), SATURATE);
+        assert_eq!(int_upper(&n("-1e300"), false), -SATURATE);
+    }
+
+    #[test]
+    fn multiples_are_exact_decimals() {
+        assert_eq!(decimal(&n("3")), Some((3, 0)));
+        assert_eq!(decimal(&n("0.5")), Some((5, 1)));
+        assert_eq!(decimal(&n("0.01")), Some((1, 2)));
+        assert_eq!(decimal(&n("2.50")), Some((25, 1)));
+        assert_eq!(decimal(&n("1e-7")), Some((1, 7)));
+        assert_eq!(decimal(&n("1e300")), None);
+    }
+}

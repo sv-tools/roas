@@ -142,4 +142,99 @@ mod require_present {
     }
 }
 
+{% endif %}{% if support.validation %}/// What [`Validate`] found: every constraint a value breaks, and every one
+/// it could not check. Findings collect rather than stop at the first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidationReport {
+    pub findings: Vec<Finding>,
+}
+
+/// One finding, at an RFC 6901 JSON Pointer into the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub pointer: String,
+    pub kind: FindingKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingKind {
+    /// The value breaks a constraint.
+    Violation,
+    /// A constraint could not be checked; the message says which and why.
+    Unevaluated,
+}
+
+impl ValidationReport {
+    /// True only when nothing was found, so a constraint that could not be
+    /// checked is never mistaken for one that passed.
+    pub fn is_valid(&self) -> bool {
+        self.findings.is_empty()
+    }
+
+    pub fn violations(&self) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(|f| f.kind == FindingKind::Violation)
+    }
+
+    pub fn unchecked(&self) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(|f| f.kind == FindingKind::Unevaluated)
+    }
+
+    fn violation(&mut self, pointer: &str, message: impl Into<String>) {
+        self.findings.push(Finding { pointer: pointer.to_owned(), kind: FindingKind::Violation, message: message.into() });
+    }
+
+    fn unevaluated(&mut self, pointer: &str, message: impl Into<String>) {
+        self.findings.push(Finding { pointer: pointer.to_owned(), kind: FindingKind::Unevaluated, message: message.into() });
+    }
+}
+
+/// Checks a value against the constraints its schema declares that its
+/// type cannot express.
+pub trait Validate {
+    fn validate(&self) -> ValidationReport {
+        let mut report = ValidationReport::default();
+        self.validate_into("", &mut report);
+        report
+    }
+
+    /// Adds the findings for this value, found at `pointer`, to `report`.
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport);
+}
+
+impl<T: Validate> Validate for Vec<T> {
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
+        for (i, item) in self.iter().enumerate() {
+            item.validate_into(&child_pointer(pointer, &i.to_string()), report);
+        }
+    }
+}
+
+impl<T: Validate> Validate for Option<T> {
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
+        if let Some(value) = self {
+            value.validate_into(pointer, report);
+        }
+    }
+}
+
+impl<T: Validate> Validate for Box<T> {
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
+        (**self).validate_into(pointer, report);
+    }
+}
+
+impl<T: Validate> Validate for std::collections::BTreeMap<String, T> {
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
+        for (key, value) in self {
+            value.validate_into(&child_pointer(pointer, key), report);
+        }
+    }
+}
+
+/// `pointer` extended by one RFC 6901 reference token.
+fn child_pointer(pointer: &str, token: &str) -> String {
+    format!("{pointer}/{}", token.replace('~', "~0").replace('/', "~1"))
+}
+
 {% endif %}

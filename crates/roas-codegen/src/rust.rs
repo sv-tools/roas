@@ -5,6 +5,7 @@ mod attrs;
 mod format;
 pub(crate) mod naming;
 pub(crate) mod render;
+mod validation;
 pub(crate) mod view;
 
 pub use view::RustDependency;

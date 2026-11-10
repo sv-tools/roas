@@ -20,6 +20,8 @@ pub(crate) struct SupportView {
     pub int64: bool,
     pub int32: bool,
     pub raw_holder: bool,
+    /// Generated validation is on: the report types and `Validate`.
+    pub validation: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +72,9 @@ pub(crate) struct TypeView {
     pub tag: String,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
+    /// The statements of `Validate::validate_into`, with validation on;
+    /// `None` for no implementation (an alias shares its target's).
+    pub validate: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,6 +291,17 @@ impl Builder<'_> {
             "integer_token",
         ] {
             allocator.reserve(reserved);
+        }
+        if self.config.validation {
+            for reserved in [
+                "Validate",
+                "ValidationReport",
+                "Finding",
+                "FindingKind",
+                "child_pointer",
+            ] {
+                allocator.reserve(reserved);
+            }
         }
         for id in &self.ir.order {
             let def = &self.ir.types[id];
@@ -517,10 +533,18 @@ impl Builder<'_> {
             inner: String::new(),
             tag: String::new(),
             exclusive: false,
+            validate: None,
         };
         let result = self.fill_kind(def, &mut view)?;
         if !result {
             return Ok(None);
+        }
+        if self.config.validation {
+            self.support.validation = true;
+            let opted_out = self.type_config(def).and_then(|t| t.validation) == Some(false);
+            let emitted = |id: &SchemaId| self.names.contains_key(id);
+            let generated = |ty: &TypeRef| crate::checks::validates(self.ir, &emitted, ty);
+            view.validate = super::validation::body(def, &view, &generated, opted_out);
         }
         let mut seen = std::collections::BTreeSet::new();
         view.derives.retain(|d| seen.insert(d.clone()));

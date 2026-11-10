@@ -323,12 +323,6 @@ fn generated_rust_is_a_module_not_a_crate() {
 }
 
 #[test]
-fn settings_this_release_cannot_honour_are_refused() {
-    let error = generate(&document(pet()), &rust_config("validation = true\n")).unwrap_err();
-    assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
-}
-
-#[test]
 fn the_edition_must_be_a_rust_edition_and_is_recorded_with_the_target() {
     let error = generate(
         &document(pet()),

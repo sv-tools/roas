@@ -106,6 +106,10 @@ pub enum DiagnosticKind {
     /// could not be set up; the message says why — so it is unformatted and
     /// will not match a formatted run byte for byte.
     Unformatted,
+    /// With generated validation on, a constraint no generated check
+    /// covers: on a value of a type it does not apply to, or on array items
+    /// or map values written inline. `keyword` names it.
+    Unvalidated { keyword: String },
 }
 
 /// One thing the generator has to say about the description.
