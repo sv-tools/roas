@@ -21,6 +21,8 @@ use oxc_regular_expression::{LiteralParser, Options};
 /// The largest repetition count Go compiles.
 const MAX_COUNT: u64 = 1000;
 const MAX_CHAR: u32 = 0x10FFFF;
+/// Rust's `regex` nesting limit: anything deeper never compiles there.
+const MAX_NESTING: usize = 250;
 const SURROGATES: (u32, u32) = (0xD800, 0xDFFF);
 const LEGACY: &str =
     "it is valid only without the Unicode flag, where part of it can match half of a character";
@@ -31,6 +33,13 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
     // ECMAScript refuses the pattern.
     if pattern.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1 {
         return Err("not an ECMAScript regular expression: \\ at end of pattern".into());
+    }
+    // The parser and the printer recurse per group: a pattern nested past
+    // what Rust compiles anyway is refused before it can exhaust the stack.
+    if nesting(pattern) > MAX_NESTING {
+        return Err(format!(
+            "nesting deeper than {MAX_NESTING} is not supported"
+        ));
     }
     let allocator = Allocator::default();
     // Unicode mode, as JSON Schema recommends: an astral character is one
@@ -58,6 +67,7 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
     let mut printer = Printer {
         legacy,
         source: pattern,
+        names: Vec::new(),
         budget: MAX_COUNT,
         out: String::new(),
     };
@@ -76,6 +86,8 @@ struct Printer<'a> {
     legacy: bool,
     /// The pattern as written: a character's span reads into it.
     source: &'a str,
+    /// Group names seen so far.
+    names: Vec<String>,
     /// How many times what is printed next may be repeated, through every
     /// count around it: Go refuses a nesting whose counts multiply past
     /// 1000.
@@ -171,7 +183,17 @@ impl Printer<'_> {
                 let set = self.class(class)?;
                 self.set(set)?;
             }
-            Term::CapturingGroup(g) => self.group(&g.body)?,
+            Term::CapturingGroup(g) => {
+                // oxc accepts a name repeated inside its own group, which
+                // ECMAScript refuses; any repeat is refused here.
+                if let Some(name) = &g.name {
+                    if self.names.iter().any(|n| n == name.as_str()) {
+                        return Err(format!("the group name `{name}` is repeated"));
+                    }
+                    self.names.push(name.as_str().to_owned());
+                }
+                self.group(&g.body)?;
+            }
             Term::IgnoreGroup(g) => {
                 if g.modifiers.is_some() {
                     return Err("inline flags are not supported".into());
@@ -281,6 +303,28 @@ impl Printer<'_> {
         }
         Ok(())
     }
+}
+
+/// How deep groups nest in `pattern`, read outside classes and escapes.
+fn nesting(pattern: &str) -> usize {
+    let (mut depth, mut deepest, mut in_class) = (0usize, 0usize, false);
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            ')' if !in_class => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// What a shorthand class means in ECMAScript, which is ASCII for `\d`
@@ -444,6 +488,15 @@ mod tests {
     }
 
     #[test]
+    fn deep_nesting_is_refused_before_parsing() {
+        let deep = format!("{}a{}", "(".repeat(100_000), ")".repeat(100_000));
+        assert!(translate(&deep).unwrap_err().contains("nesting"));
+        // Brackets in a class or escaped do not nest.
+        assert!(translate(&format!("[{}]", "(".repeat(1000))).is_ok());
+        assert!(translate(&"\\(".repeat(1000)).is_ok());
+    }
+
+    #[test]
     fn what_differs_is_refused() {
         for pattern in [
             r"\bword\b",
@@ -462,6 +515,8 @@ mod tests {
             r"[\c_]",
             r"[\c]",
             r"[\c-x]",
+            "(?<n>a|(?<n>b))",
+            r"\-(?<n>a|(?<n>b))",
             "a\\",
             r"^\d+$\",
             r"^\S{1,1000}-\S{1,1000}-\S{1,1000}-\S{1,1000}-\S{1,1000}$",

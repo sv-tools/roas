@@ -840,7 +840,8 @@ pub(crate) fn diagnostics(
             TypeKind::Newtype(inner) => {
                 positions.push((def.id.pointer.clone(), inner, &def.constraints));
             }
-            TypeKind::StringEnum(_) => {
+            // An enum of no members has no value to check.
+            TypeKind::StringEnum(values) if !values.is_empty() => {
                 positions.push((def.id.pointer.clone(), &TypeRef::String, &def.constraints));
             }
             TypeKind::UnionOpen(crate::ir::OpenUnion { branches, .. })
