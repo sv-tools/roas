@@ -611,16 +611,22 @@ pub(crate) fn body(
                 let sure = !checks::unsure(b) && (!generated(&b.ty) || progressing(&b.ty));
                 let counter = if sure { "certain" } else { "uncertain" };
                 counts_certain |= sure;
+                // A whole number past the integer's width fails to decode
+                // for the representation: no proof it matches no branch.
+                let beyond = checks::integer_limit(ir, &b.ty).map(|limit| {
+                    checked = true;
+                    format!(" else if serde_json::from_str::<f64>(self.raw.get()).is_ok_and(|f| f.fract() == 0.0 && f.abs() >= {limit}) {{ uncertain += 1; }}")
+                }).unwrap_or_default();
                 if body.is_empty() {
                     checked |= !sure;
                     lines.push(format!(
-                        "if self.{accessor}().is_some() {{ {counter} += 1; }}"
+                        "if self.{accessor}().is_some() {{ {counter} += 1; }}{beyond}"
                     ));
                 } else {
                     checked = true;
                     let binding = if reads { "v" } else { "_" };
                     lines.push(format!(
-                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = ValidationReport::default(); {} if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}",
+                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = ValidationReport::default(); {} if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}{beyond}",
                         body.join(" ")
                     ));
                 }
@@ -661,14 +667,24 @@ pub(crate) fn body(
                         )
                     ));
                 }
+                // A whole number past the integer's width fails to decode
+                // for the representation: undecided, not a miss.
+                let miss = match checks::integer_limit(ir, &b.ty) {
+                    Some(limit) => format!(
+                        "if serde_json::from_str::<f64>(self.raw.get()).is_ok_and(|f| f.fract() == 0.0 && f.abs() >= {limit}) {{ report.unevaluated(pointer, {:?}); }} else {{ report.violation(pointer, {message:?}); }}",
+                        format!(
+                            "allOf part read by {}: the number is past the integer's width",
+                            accessor.trim_start_matches("as_")
+                        )
+                    ),
+                    None => format!("report.violation(pointer, {message:?});"),
+                };
                 let part = if body.is_empty() {
-                    format!(
-                        "if self.{accessor}().is_none() {{ report.violation(pointer, {message:?}); }}"
-                    )
+                    format!("if self.{accessor}().is_none() {{ {miss} }}")
                 } else {
                     let binding = if reads { "v" } else { "_" };
                     format!(
-                        "match self.{accessor}() {{ Some({binding}) => {{ {} }} None => report.violation(pointer, {message:?}), }}",
+                        "match self.{accessor}() {{ Some({binding}) => {{ {} }} None => {{ {miss} }} }}",
                         body.join(" ")
                     )
                 };

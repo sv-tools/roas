@@ -527,6 +527,25 @@ mod neighbours {
     }
 }
 
+/// The magnitude from which a whole number no longer fits the integer
+/// `ty` holds (through references), as a float literal: decoding such a
+/// number fails for the representation, not because it is no integer.
+pub(crate) fn integer_limit(ir: &crate::ir::Ir, ty: &TypeRef) -> Option<&'static str> {
+    let mut ty = strip(ty);
+    for _ in 0..=ir.types.len() {
+        match ty {
+            TypeRef::Integer(IntWidth::Int32) => return Some("2147483648.0"),
+            TypeRef::Integer(_) => return Some("9223372036854775808.0"),
+            TypeRef::Named(id) => match ir.types.get(id).map(|d| &d.kind) {
+                Some(TypeKind::Newtype(inner) | TypeKind::Alias(inner)) => ty = strip(inner),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Whether decoding a branch proves nothing: it declares what neither its
 /// type nor a generated check enforces.
 pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {
@@ -858,7 +877,7 @@ pub(crate) fn decimal(n: &Number) -> Option<(i128, u32)> {
         let factor = 10i128.checked_pow(u32::try_from(d.exponent).ok()?)?;
         Some((digits.checked_mul(factor)?, 0))
     } else {
-        let scale = u32::try_from(-d.exponent).ok()?;
+        let scale = u32::try_from(d.exponent.checked_neg()?).ok()?;
         (scale <= 38).then_some((digits, scale))
     }
 }
@@ -918,6 +937,8 @@ mod tests {
         assert_eq!(int_lower(&n("1e9223372036854775807"), false), SATURATE);
         assert_eq!(int_lower(&n("1e9223372036854775808"), false), SATURATE);
         assert_eq!(int_upper(&n("-1e9223372036854775807"), false), -SATURATE);
+        // A scale past every exponent is not an exact divisor.
+        assert_eq!(decimal(&n("1e-9223372036854775808")), None);
         // Past i128 too: saturated by sign, never zero.
         let huge = "1e170141183460469231731687303715884105728";
         assert_eq!(int_lower(&n(huge), false), SATURATE);

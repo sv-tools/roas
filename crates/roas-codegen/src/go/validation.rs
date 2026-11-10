@@ -752,12 +752,22 @@ pub(crate) fn body(
                 } else {
                     "certain"
                 };
+                // A whole number past the integer's width fails to decode
+                // for the representation: no proof it matches no branch.
+                let beyond = checks::integer_limit(cx.ir, &b.ty)
+                    .map(|limit| {
+                        cx.needs.math = true;
+                        format!(" else if func() bool {{ var f float64; return json.Unmarshal(v.raw, &f) == nil && f == math.Trunc(f) && math.Abs(f) >= {limit} }}() {{ uncertain++ }}")
+                    })
+                    .unwrap_or_default();
                 if body.is_empty() {
-                    out.push(format!("if _, ok := v.{accessor}(); ok {{ {counter}++ }}"));
+                    out.push(format!(
+                        "if _, ok := v.{accessor}(); ok {{ {counter}++ }}{beyond}"
+                    ));
                 } else {
                     let binding = if reads { "x" } else { "_" };
                     out.push(format!(
-                        "if {binding}, ok := v.{accessor}(); ok {{ branch := &ValidationReport{{}}; {}; if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ {counter}++ }} else {{ uncertain++ }} }} }}",
+                        "if {binding}, ok := v.{accessor}(); ok {{ branch := &ValidationReport{{}}; {}; if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ {counter}++ }} else {{ uncertain++ }} }} }}{beyond}",
                         body.join("; ")
                     ));
                 }
@@ -785,12 +795,26 @@ pub(crate) fn body(
                         ))
                     ));
                 }
+                // A whole number past the integer's width fails to decode
+                // for the representation: undecided, not a miss.
+                let miss = match checks::integer_limit(cx.ir, &b.ty) {
+                    Some(limit) => {
+                        cx.needs.math = true;
+                        format!(
+                            "if func() bool {{ var f float64; return json.Unmarshal(v.raw, &f) == nil && f == math.Trunc(f) && math.Abs(f) >= {limit} }}() {{ r.unevaluated(pointer, {}) }} else {{ r.violation(pointer, {message}) }}",
+                            lit(&format!(
+                                "allOf part read by {accessor}: the number is past the integer's width"
+                            ))
+                        )
+                    }
+                    None => format!("r.violation(pointer, {message})"),
+                };
                 let part = if body.is_empty() {
-                    format!("if _, ok := v.{accessor}(); !ok {{ r.violation(pointer, {message}) }}")
+                    format!("if _, ok := v.{accessor}(); !ok {{ {miss} }}")
                 } else {
                     let binding = if reads { "x" } else { "_" };
                     format!(
-                        "if {binding}, ok := v.{accessor}(); ok {{ {} }} else {{ r.violation(pointer, {message}) }}",
+                        "if {binding}, ok := v.{accessor}(); ok {{ {} }} else {{ {miss} }}",
                         body.join("; ")
                     )
                 };

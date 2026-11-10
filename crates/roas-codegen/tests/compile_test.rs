@@ -677,6 +677,7 @@ fn validated_description() -> serde_json::Value {
                 "a": {"type": "string", "minLength": 1}, "b": {"type": "string"}
             }},
             "AllGated": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1}}},
+            "IntOrNum": {"oneOf": [{"type": "integer"}, {"type": "number"}]},
             "NullOnlyN": {"type": "null", "if": {}, "then": false},
             "HoldsNullOnly": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/NullOnlyN"}}},
             "Gated": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string", "maxLength": 1}}},
@@ -977,6 +978,8 @@ fn main() {
     // A null-only reference keeps what it says.
     assert_eq!(report::<HoldsNullOnly>(r#"{"n":null}"#), vec![u("/n")]);
     assert_eq!(report::<HoldsNullOnly>("{}"), vec![]);
+    // A whole number past int64 may match the integer branch too.
+    assert_eq!(report::<IntOrNum>("9223372036854775808"), vec![u("")]);
     assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
     // An opted-out type nested in a branch proves no match.
     assert_eq!(report::<PickWrap>(r#"{"s":"ab"}"#), vec![u("")]);
@@ -1222,6 +1225,7 @@ func main() {
 	check(`{"b":"x"}`, report[api.GatedField](`{"b":"x"}`))
 	check(`{"n":null}`, report[api.HoldsNullOnly](`{"n":null}`), u("/n"))
 	check(`{}`, report[api.HoldsNullOnly](`{}`))
+	check(`9223372036854775808`, report[api.IntOrNum](`9223372036854775808`), u(""))
 	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
 	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
 	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))
