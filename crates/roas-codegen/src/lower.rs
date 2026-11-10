@@ -116,7 +116,7 @@ impl<'a> Lowerer<'a> {
         let Slot::Inline(schema) = slot else {
             return;
         };
-        if !self.config.validation || matches!(lowered.ty.direct_named(), Some(_)) {
+        if !self.config.validation || lowered.ty.direct_named().is_some() {
             return;
         }
         for keyword in crate::checks::present_keywords(&schema.constraints) {

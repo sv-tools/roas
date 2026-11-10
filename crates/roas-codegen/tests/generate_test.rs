@@ -708,3 +708,46 @@ fn a_module_named_like_a_crate_a_substitution_names_is_refused() {
         "{error}"
     );
 }
+
+#[test]
+fn validation_reports_what_it_cannot_check_and_types_can_opt_out() {
+    let components = serde_json::json!({
+        "Pet": {"type": "object", "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "tags": {"type": "array", "items": {"type": "string", "maxLength": 3}}
+        }},
+        "Quiet": {"type": "object", "properties": {"name": {"type": "string", "minLength": 1}}}
+    });
+    let config = ConfigFile::from_toml(
+        "validation = true\n[types.Quiet]\nvalidation = false\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Rust))
+    .build()
+    .unwrap();
+    let generation = generate(&document(components), &config).unwrap();
+    let unvalidated: Vec<_> = generation
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.kind {
+            DiagnosticKind::Unvalidated { keyword } => Some((keyword.as_str(), d.pointer.as_str())),
+            _ => None,
+        })
+        .collect();
+    // An inline item constraint has no type to carry it.
+    assert!(
+        unvalidated.contains(&("maxLength", "/components/schemas/Pet/properties/tags/items")),
+        "{unvalidated:?}"
+    );
+    let code = &generation.files[0].contents;
+    assert!(code.contains("impl Validate for Pet {"), "{code}");
+    // Opted out: an implementation, so holders still compile, with no checks.
+    assert!(
+        code.contains("impl Validate for Quiet {\n    fn validate_into(&self, _pointer: &str, _report: &mut ValidationReport) {}"),
+        "{code}"
+    );
+    // Off by default: none of it.
+    let plain = generate(&document(pet()), &rust_config("")).unwrap();
+    assert!(!plain.files[0].contents.contains("Validate"));
+}

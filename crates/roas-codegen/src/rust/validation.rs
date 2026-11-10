@@ -61,14 +61,14 @@ fn render(list: &[Check], kind: ValueKind, v: &str, p: &str, out: &mut Vec<Strin
                     ));
                 }
             }
-            Check::IntMultipleOf {
-                factor,
-                scale,
-                literal,
-            } => out.push(format!(
-                "match {}.checked_mul(10i128.pow({scale})) {{ Some(n) if n % {factor} != 0 => report.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v}.0)), Some(_) => {{}} None => report.unevaluated({p}, \"multipleOf {literal}: the value is too large to check exactly\"), }}",
-                int(v)
-            )),
+            Check::IntMultipleOf { divisor, literal } => {
+                if *divisor != 1 {
+                    out.push(format!(
+                        "if {} % {divisor} != 0 {{ report.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v}.0)); }}",
+                        int(v)
+                    ));
+                }
+            }
             Check::NumAtLeast {
                 bound,
                 exclusive,

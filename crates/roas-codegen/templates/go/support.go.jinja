@@ -223,3 +223,79 @@ func (*Null) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 	return nil
 }
 {% endif %}
+{% if support.validation %}
+// FindingKind says what a finding is.
+type FindingKind int
+
+const (
+	// Violation: the value breaks a constraint.
+	Violation FindingKind = iota
+	// Unevaluated: a constraint could not be checked; the message says
+	// which and why.
+	Unevaluated
+)
+
+// Finding is one thing validation found, at an RFC 6901 JSON Pointer into
+// the value.
+type Finding struct {
+	Pointer string
+	Kind    FindingKind
+	Message string
+}
+
+// ValidationReport collects every constraint a value breaks and every one
+// it could not check, rather than stopping at the first.
+type ValidationReport struct {
+	Findings []Finding
+}
+
+// IsValid is true only when nothing was found, so a constraint that could
+// not be checked is never mistaken for one that passed.
+func (r *ValidationReport) IsValid() bool { return len(r.Findings) == 0 }
+
+// Violations are the findings of constraints the value breaks.
+func (r *ValidationReport) Violations() []Finding { return r.of(Violation) }
+
+// Unchecked are the findings of constraints that could not be checked.
+func (r *ValidationReport) Unchecked() []Finding { return r.of(Unevaluated) }
+
+func (r *ValidationReport) of(kind FindingKind) []Finding {
+	var out []Finding
+	for _, f := range r.Findings {
+		if f.Kind == kind {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func (r *ValidationReport) violation(pointer, message string) {
+	r.Findings = append(r.Findings, Finding{Pointer: pointer, Kind: Violation, Message: message})
+}
+
+func (r *ValidationReport) unevaluated(pointer, message string) {
+	r.Findings = append(r.Findings, Finding{Pointer: pointer, Kind: Unevaluated, Message: message})
+}
+
+// Validator checks a value against the constraints its schema declares
+// that its type cannot express. Every generated type implements it.
+type Validator interface {
+	Validate() *ValidationReport
+}
+
+// childPointer extends pointer by one RFC 6901 reference token.
+func childPointer(pointer, token string) string {
+	escaped := make([]byte, 0, len(token))
+	for i := 0; i < len(token); i++ {
+		switch token[i] {
+		case '~':
+			escaped = append(escaped, '~', '0')
+		case '/':
+			escaped = append(escaped, '~', '1')
+		default:
+			escaped = append(escaped, token[i])
+		}
+	}
+	return pointer + "/" + string(escaped)
+}
+{% endif %}

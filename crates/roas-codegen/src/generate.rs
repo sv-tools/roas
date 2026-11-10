@@ -241,11 +241,6 @@ fn check_rust(config: &Config) -> Result<(), GenerateError> {
 }
 
 fn check_go(config: &Config) -> Result<(), GenerateError> {
-    if config.validation {
-        return Err(GenerateError::Unsupported(
-            "`validation = true` for Go (generated validation)".into(),
-        ));
-    }
     if !go::naming::is_package_name(&config.go.package) {
         return Err(GenerateError::Config(format!(
             "`go.package = {:?}` must be a lowercase Go package name",

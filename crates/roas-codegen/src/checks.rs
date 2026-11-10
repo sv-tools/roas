@@ -52,10 +52,11 @@ pub(crate) enum Check {
         keyword: &'static str,
         literal: String,
     },
-    /// A multiple of `factor / 10^scale`: `value * 10^scale % factor == 0`.
+    /// `multipleOf` on an integer, exactly: with the multiple written as
+    /// `F / 10^s`, `v * 10^s % F == 0` holds exactly when
+    /// `v % (F / gcd(F, 10^s)) == 0`, so no product can overflow.
     IntMultipleOf {
-        factor: i128,
-        scale: u32,
+        divisor: i128,
         literal: String,
     },
     /// `value >= bound` (or `>` when exclusive), compared as floats.
@@ -179,8 +180,7 @@ pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
             if let Some(n) = &c.multiple_of {
                 out.push(match decimal(n) {
                     Some((factor, scale)) if factor != 0 => Check::IntMultipleOf {
-                        factor,
-                        scale,
+                        divisor: factor / gcd(factor, 10i128.pow(scale)),
                         literal: n.to_string(),
                     },
                     _ => Check::Unevaluated {
@@ -409,6 +409,13 @@ fn int_upper(n: &Number, exclusive: bool) -> i128 {
     }
 }
 
+fn gcd(mut a: i128, mut b: i128) -> i128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
 fn exact_int(n: &Number) -> Option<i128> {
     n.as_i64()
         .map(i128::from)
@@ -466,5 +473,21 @@ mod tests {
         assert_eq!(decimal(&n("2.50")), Some((25, 1)));
         assert_eq!(decimal(&n("1e-7")), Some((1, 7)));
         assert_eq!(decimal(&n("1e300")), None);
+        // v * 10^s % F == 0  <=>  v % (F / gcd(F, 10^s)) == 0
+        let divisor = |text: &str| match &checks(
+            &TypeRef::Integer(IntWidth::Int64),
+            &Constraints {
+                multiple_of: Some(n(text)),
+                ..Default::default()
+            },
+        )[0]
+        {
+            Check::IntMultipleOf { divisor, .. } => *divisor,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(divisor("6"), 6);
+        assert_eq!(divisor("0.5"), 1);
+        assert_eq!(divisor("2.5"), 5);
+        assert_eq!(divisor("0.03"), 3);
     }
 }

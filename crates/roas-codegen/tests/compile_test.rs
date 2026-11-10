@@ -675,3 +675,133 @@ fn generated_rust_validation_compiles_and_behaves() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const GO_VALIDATE_MAIN: &str = r##"package main
+
+import (
+	"encoding/json/v2"
+	"fmt"
+	"reflect"
+	"sort"
+
+	"generated/api"
+)
+
+type found struct {
+	Pointer string
+	Kind    api.FindingKind
+}
+
+func report[T api.Validator](js string) []found {
+	var value T
+	if err := json.Unmarshal([]byte(js), &value); err != nil {
+		panic(fmt.Sprintf("%s: %v", js, err))
+	}
+	out := []found{}
+	for _, f := range value.Validate().Findings {
+		out = append(out, found{f.Pointer, f.Kind})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pointer < out[j].Pointer })
+	return out
+}
+
+func v(p string) found { return found{p, api.Violation} }
+func u(p string) found { return found{p, api.Unevaluated} }
+
+func check(js string, got []found, want ...found) {
+	if want == nil {
+		want = []found{}
+	}
+	if !reflect.DeepEqual(got, want) {
+		panic(fmt.Sprintf("%s: got %v, want %v", js, got, want))
+	}
+}
+
+func main() {
+	type P = api.Pet
+	for _, c := range []struct {
+		js   string
+		want []found
+	}{
+		{`{"name":"rex","age":4,"tags":["a","b"]}`, nil},
+		{`{"name":"ééééé","age":2}`, nil},
+		{`{"name":"","age":2}`, []found{v("/name")}},
+		{`{"name":"toolong","age":2}`, []found{v("/name")}},
+		{`{"name":"a","age":-2}`, []found{v("/age")}},
+		{`{"name":"a","age":30}`, []found{v("/age")}},
+		{`{"name":"a","age":3}`, []found{v("/age")}},
+		{`{"name":"a","weight":0.25}`, []found{v("/weight")}},
+		{`{"name":"a","weight":100}`, []found{v("/weight")}},
+		{`{"name":"a","ratio":1.5}`, []found{v("/ratio")}},
+		{`{"name":"a","ratio":2}`, []found{u("/ratio")}},
+		{`{"name":"a","tags":[]}`, []found{v("/tags")}},
+		{`{"name":"a","tags":["a","b","c","d"]}`, []found{v("/tags")}},
+		{`{"name":"a","tags":["a","b","a"]}`, []found{v("/tags/2")}},
+		{`{"name":"a","code":"b"}`, []found{u("/code")}},
+		{`{"name":"a"}`, []found{v("")}},
+		{`{"name":"a","age":2,"weight":1,"ratio":1.5,"tags":["x"]}`, []found{v(""), v("/ratio")}},
+		{`{"name":"a","extra":{"x":1,"y":2}}`, []found{v("/extra")}},
+		{`{"name":"a","owner":{"nick":"long"}}`, []found{v("/owner/nick")}},
+		{`{"name":"a","owner":{"nick":null}}`, nil},
+		{`{"name":"a","friends":[{"nick":"ok"},{"nick":"long"}]}`, []found{v("/friends/1/nick")}},
+	} {
+		check(c.js, report[P](c.js), c.want...)
+	}
+	check(`["ab","abc"]`, report[api.Shorts](`["ab","abc"]`), v("/1"))
+	check(`"ab"`, report[api.Choice](`"ab"`))
+	check(`"abc"`, report[api.Choice](`"abc"`), v(""))
+	check(`{"nick":"ok"}`, report[api.Choice](`{"nick":"ok"}`))
+	fmt.Println("validation behaves")
+}
+"##;
+
+#[test]
+fn generated_go_validation_compiles_and_behaves() {
+    let required = std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_some();
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() && !required {
+        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
+        return;
+    }
+    if let Err(reason) = go_toolchain() {
+        assert!(!required, "ROAS_CODEGEN_REQUIRE_GO is set: {reason}");
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let generation = validated_generation(Target::Go);
+    let dir = std::env::temp_dir().join(format!("roas-codegen-go-validate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("api")).unwrap();
+    std::fs::write(dir.join("go.mod"), "module generated\n\ngo 1.27\n").unwrap();
+    for file in &generation.files {
+        std::fs::write(dir.join("api").join(&file.path), &file.contents).unwrap();
+    }
+    std::fs::write(dir.join("main.go"), GO_VALIDATE_MAIN).unwrap();
+    let output = Command::new("go")
+        .args(["run", "."])
+        .current_dir(&dir)
+        .env("GOTOOLCHAIN", "local")
+        .env("GOWORK", "off")
+        .output()
+        .expect("go runs");
+    let vet = Command::new("go")
+        .args(["vet", "./..."])
+        .current_dir(&dir)
+        .env("GOTOOLCHAIN", "local")
+        .env("GOWORK", "off")
+        .output()
+        .expect("go vet runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("validation behaves"),
+        "generated Go failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- {}\n{}",
+        generation.files[0].path.display(),
+        generation.files[0].contents
+    );
+    assert!(
+        vet.status.success(),
+        "go vet\n{}",
+        String::from_utf8_lossy(&vet.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

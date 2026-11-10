@@ -33,6 +33,17 @@ const BUILTIN_IMPORTS: &[(&str, &str)] = &[
 /// Lowercase names the templates declare, at package level or locally; an
 /// import used under one of them would not compile.
 const TEMPLATE_NAMES: &[&str] = &[
+    "certain",
+    "uncertain",
+    "branch",
+    "repeated",
+    "childPointer",
+    "members",
+    "seen",
+    "item",
+    "p",
+    "x",
+    "f",
     "decodeOptions",
     "refuseNull",
     "readTag",
@@ -90,6 +101,8 @@ pub(crate) struct SupportView {
     /// Substituted types that hold null themselves: decoded without the
     /// generated rules, null included.
     pub isolated: Vec<String>,
+    /// Generated validation is on: the report types and `Validator`.
+    pub validation: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +178,9 @@ pub(crate) struct TypeView {
     pub marshal: bool,
     /// The raw constructor of a composed holder.
     pub from_raw: String,
+    /// The statements of `validateInto`, with validation on; `None` for
+    /// no methods of its own (an alias).
+    pub validate: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,6 +221,8 @@ pub(crate) struct Built {
 }
 
 struct Builder<'a> {
+    /// Imports the validation checks need.
+    needs: super::validation::Needs,
     ir: &'a Ir,
     config: &'a Config,
     names: BTreeMap<SchemaId, String>,
@@ -234,6 +252,7 @@ fn package_of(import: &str) -> &str {
 
 pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, GenerateError> {
     let mut builder = Builder {
+        needs: Default::default(),
         ir,
         config,
         names: BTreeMap::new(),
@@ -270,8 +289,14 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     let mut dependencies = Vec::new();
     if !types.is_empty() {
         let mut builtin = BUILTIN_IMPORTS.to_vec();
-        if builder.support.sorted_keys {
+        if builder.support.sorted_keys || builder.needs.sorted {
             builtin.extend([("maps", "maps"), ("slices", "slices")]);
+        }
+        if builder.needs.math {
+            builtin.push(("math", "math"));
+        }
+        if builder.needs.utf8 {
+            builtin.push(("unicode/utf8", "utf8"));
         }
         imports.extend(builtin.iter().map(|(path, _)| quote(path)));
         let mut used: BTreeMap<&str, &str> =
@@ -324,6 +349,18 @@ impl Builder<'_> {
         // The helpers every file may declare.
         for reserved in ["Nullable", "Int64", "Int32", "Null"] {
             self.package_names.reserve(reserved);
+        }
+        if self.config.validation {
+            for reserved in [
+                "ValidationReport",
+                "Finding",
+                "FindingKind",
+                "Violation",
+                "Unevaluated",
+                "Validator",
+            ] {
+                self.package_names.reserve(reserved);
+            }
         }
         for id in &self.ir.order {
             let def = &self.ir.types[id];
@@ -539,9 +576,29 @@ impl Builder<'_> {
             extra_name: String::new(),
             marshal: false,
             from_raw: String::new(),
+            validate: None,
         };
         if !self.fill_kind(def, &mut view)? {
             return Ok(None);
+        }
+        if self.config.validation {
+            self.support.validation = true;
+            let opted_out = self.type_config(def).and_then(|t| t.validation) == Some(false);
+            let validates = |ty: &TypeRef| self.validates(ty);
+            let nil_able = |ty: &TypeRef| match ty {
+                TypeRef::Named(id) => matches!(
+                    self.alias_target(id),
+                    Some(TypeRef::Boxed(_) | TypeRef::Nullable(_))
+                ),
+                _ => false,
+            };
+            let mut cx = super::validation::Context {
+                validates: &validates,
+                nil_able: &nil_able,
+                needs: self.needs,
+            };
+            view.validate = super::validation::body(def, &view, opted_out, &mut cx);
+            self.needs = cx.needs;
         }
         Ok(Some(view))
     }
@@ -556,6 +613,7 @@ impl Builder<'_> {
                 let mut fields = Allocator::default();
                 // The methods a generated struct has.
                 fields.reserve("UnmarshalJSONFrom");
+                fields.reserve("Validate");
                 fields.reserve("MarshalJSONTo");
                 let mut required_count = 0;
                 for field in &s.fields {
@@ -695,7 +753,13 @@ impl Builder<'_> {
                 view.tag = u.tag.clone();
                 view.tag_literal = quote(&u.tag);
                 let mut methods = Allocator::default();
-                for reserved in ["Tag", "Value", "MarshalJSONTo", "UnmarshalJSONFrom"] {
+                for reserved in [
+                    "Tag",
+                    "Value",
+                    "MarshalJSONTo",
+                    "UnmarshalJSONFrom",
+                    "Validate",
+                ] {
                     methods.reserve(reserved);
                 }
                 for variant in &u.variants {
@@ -776,6 +840,44 @@ impl Builder<'_> {
 
     /// Whether the type is a substitution, directly or through aliases and
     /// newtypes over one (emitted as aliases).
+    /// The type a named type is a Go alias of, if it is emitted as one:
+    /// it then has no methods of its own.
+    fn alias_target(&self, id: &SchemaId) -> Option<&TypeRef> {
+        match &self.ir.types.get(id)?.kind {
+            TypeKind::Alias(inner) => Some(inner),
+            TypeKind::Newtype(inner)
+                if matches!(inner, TypeRef::Boxed(_) | TypeRef::Nullable(_))
+                    || self.substituted(inner) =>
+            {
+                Some(inner)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `ty` holds a generated type with a `validateInto` of its own,
+    /// seen through the aliases Go emits.
+    fn validates(&self, ty: &TypeRef) -> bool {
+        let mut ids = Vec::new();
+        ty.named(&mut ids);
+        ids.iter().any(|id| self.validates_named(id, 0))
+    }
+
+    fn validates_named(&self, id: &SchemaId, depth: usize) -> bool {
+        if depth > self.ir.types.len()
+            || !self.names.contains_key(id)
+            || matches!(self.ir.types[id].kind, TypeKind::Extern)
+        {
+            return false;
+        }
+        match self.alias_target(id) {
+            Some(inner) => inner
+                .direct_named()
+                .is_some_and(|target| self.validates_named(target, depth + 1)),
+            None => true,
+        }
+    }
+
     fn substituted(&self, ty: &TypeRef) -> bool {
         let mut ty = ty;
         for _ in 0..=self.ir.types.len() {
@@ -809,7 +911,7 @@ impl Builder<'_> {
         branches: &[crate::ir::Branch],
     ) -> Result<Vec<BranchView>, GenerateError> {
         let mut methods = Allocator::default();
-        for reserved in ["Raw", "MarshalJSONTo", "UnmarshalJSONFrom"] {
+        for reserved in ["Raw", "MarshalJSONTo", "UnmarshalJSONFrom", "Validate"] {
             methods.reserve(reserved);
         }
         let mut out = Vec::new();

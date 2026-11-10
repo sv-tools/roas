@@ -75,6 +75,12 @@ pub(crate) struct GenerateArgs {
     #[arg(long, value_enum)]
     pub(crate) ignore: Vec<Options>,
 
+    /// Generate validation: every type gets a `validate` that checks the
+    /// constraints its type cannot express. Overrides `validation` in the
+    /// configuration.
+    #[arg(long)]
+    pub(crate) validate: bool,
+
     /// Apply code-bearing extensions from the description (`x-rust-attrs`).
     /// Off by default: a description is often written by someone else.
     #[arg(long)]
@@ -549,6 +555,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     let mut flags = ConfigFile::default();
     flags.target = args.target.map(Target::from);
     flags.allow_codegen_extensions = args.allow_codegen_extensions.then_some(true);
+    flags.validation = args.validate.then_some(true);
     if let Some(dir) = &args.template_dir {
         flags.template_dir =
             Some(std::path::absolute(dir).with_context(|| format!("resolving {}", dir.display()))?);
@@ -824,6 +831,7 @@ mod tests {
             format: None,
             ignore: vec![Options::IgnoreUnusedSchemas],
             allow_codegen_extensions: false,
+            validate: false,
             strict: false,
             allow_partial: false,
             force: false,

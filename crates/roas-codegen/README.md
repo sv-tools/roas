@@ -147,6 +147,19 @@ Types and fields are addressed by the names in the description, never by the gen
 
 Generated Rust is validated with `syn` before it is returned and formatted with `rustfmt` when one is on the path. `rustfmt` always runs with an empty configuration, so a `rustfmt.toml` nearby never changes the output; when it cannot run, the output is unformatted and a warning says so.
 
+## Generated validation
+
+Off by default. `validation = true` (or `roas openapi generate --validate`) gives every generated type a `validate()` — the `Validate` trait in Rust, the `Validator` interface in Go — that checks the constraints its type cannot express: `minLength` / `maxLength` (in characters), `minimum` / `maximum` and their exclusive forms, `multipleOf`, `minItems` / `maxItems` / `uniqueItems`, and `minProperties` / `maxProperties`. What the type does express — presence, nullability, enum membership, unknown members, integers — is the decoder's job and is not re-checked. Nested types are validated in place, and `oneOf` / `anyOf` / `allOf` holders count the branches that decode and validate, which the raw JSON they keep makes possible.
+
+```rust
+let report = pet.validate();
+for finding in report.violations() {
+    eprintln!("{}: {}", finding.pointer, finding.message); // "/name: is 0 characters long, shorter than minLength 1"
+}
+```
+
+Findings collect rather than stop at the first, each at an RFC 6901 JSON Pointer into the value, and are of two kinds. A **violation** is a constraint the value breaks. An **unevaluated** finding is one the generated code could not decide, and says why; `is_valid()` / `IsValid()` is true only when there are neither, so an unchecked constraint is never mistaken for a passing one. Integers are checked exactly, `multipleOf` included. A decoded float has lost its literal, so `multipleOf` on a `number` decides only a fraction against a whole multiple and is otherwise unevaluated, and equal floats under `uniqueItems` are unevaluated too. `pattern` and `propertyNames` are reported as unevaluated until they are checked. A constraint on an inline array item or map value has no generated type to carry it and is reported at generation time; give that schema a name of its own. `types.<Name>.validation = false` opts one type out: it still implements `validate`, with no checks, so the types holding it compile unchanged. The generated code needs nothing beyond what it already does.
+
 ## Templates
 
 Every file is rendered through [minijinja](https://docs.rs/minijinja) templates, embedded in the crate. `template_dir` in the configuration (or `--template-dir`) points at a directory of your own, which overrides them by name: `rust/struct.rs.jinja`, `go/field.go.jinja` and so on, with the same paths as [`templates/`](templates). The directory holds a `roas-templates.toml` declaring the contract it was written against:
@@ -179,6 +192,7 @@ The defaults include one another by plain name, so an override of an included te
 | `go/union_open.go.jinja`, `go/composed_open.go.jinja` | `doc`, `accessors`, `trailing` |
 | `go/alias.go.jinja` | `doc`, `trailing` |
 | `go/field.go.jinja` | `doc`, `decl` |
+| `rust/validate.rs.jinja`, `go/validate.go.jinja` (with validation on) | `validate` |
 
 The generated-code marker is written first in every file by the renderer, whatever the templates do, and a `header` override with `{{ super() }}` keeps the configuration's `header` rather than replacing it.
 

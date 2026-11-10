@@ -4,7 +4,8 @@
 mod format;
 pub(crate) mod naming;
 mod render;
-mod view;
+mod validation;
+pub(crate) mod view;
 
 pub use view::GoDependency;
 
