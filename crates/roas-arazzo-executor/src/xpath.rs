@@ -8,7 +8,9 @@
 //!
 //! A response body is untrusted, so the engine only ever runs on a thread
 //! of [`ENGINE_STACK`] bytes, which it is told it has, under a deadline of
-//! [`DEADLINE`]: deep recursion and long evaluations become errors. A
+//! [`DEADLINE`]: deep recursion and long evaluations become errors. The
+//! engine checks that deadline only between steps and calls, so a run
+//! waits for it no longer than [`WAIT`] whatever happens on that thread. A
 //! context is screened by [`too_complex`] before it is parsed, and an
 //! expression by [`screened`] before it is compiled, for the costs the
 //! engine does not bound itself. A panic inside the engine becomes an
@@ -21,6 +23,7 @@ use oxixml_xpath::{
     CompiledXPath, EvaluationLimits, StaticContext, XPath, XPathError, XPathVersion, XpathItem,
 };
 use serde_json::Value;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const KIND: &str = "XPath";
@@ -29,15 +32,22 @@ const KIND: &str = "XPath";
 /// it uses against it and stops a recursion with an error at two thirds.
 const ENGINE_STACK: usize = 16 * 1024 * 1024;
 
-/// How long one evaluation may run. The engine checks it between steps
-/// and calls; parsing and a single built-in run to completion, which the
-/// limits on a context keep short.
+/// How long one evaluation may run, parsing included. The engine checks
+/// it between steps and calls.
 const DEADLINE: Duration = Duration::from_secs(2);
+
+/// How long a run waits for the engine before giving up on it. Parsing
+/// and a single built-in run to completion past [`DEADLINE`]; the limits
+/// on a context and the functions refused keep them short, and this
+/// bounds what they miss. The engine's thread is then left to finish on
+/// its own, and what it built is dropped there.
+const WAIT: Duration = Duration::from_secs(4);
 
 /// Check that `expression` is a valid expression of `version`.
 pub(crate) fn compile(expression: &str, version: XPathVersion) -> Result<(), SelectError> {
     screened(expression)?;
-    on_engine(|| compiled(expression, version).map(drop))
+    let owned = expression.to_owned();
+    on_engine(expression, move || compiled(&owned, version).map(drop))
 }
 
 /// Whether `condition` holds over `context`: its effective boolean
@@ -50,7 +60,7 @@ pub(crate) fn passes(
     if context.is_null() {
         return Ok(false);
     }
-    evaluate(condition, version, context, |query, tree| {
+    evaluate(condition, version, context, |query, tree, condition| {
         query
             .evaluate_to_boolean_in(&query.context_with(tree.root()))
             .map_err(|error| failed(condition, &error.to_string()))
@@ -67,7 +77,7 @@ pub(crate) fn select(
     if context.is_null() {
         return Ok(None);
     }
-    evaluate(selector, version, context, |query, tree| {
+    evaluate(selector, version, context, |query, tree, selector| {
         let value = query
             .evaluate_value_in(&query.context_with(tree.root()))
             .map_err(|error| failed(selector, &error.to_string()))?;
@@ -83,11 +93,11 @@ pub(crate) fn select(
     })
 }
 
-fn evaluate<T: Send>(
+fn evaluate<T: Send + 'static>(
     expression: &str,
     version: XPathVersion,
     context: &Value,
-    then: impl FnOnce(&CompiledXPath, &Tree) -> Result<T, SelectError> + Send,
+    then: fn(&CompiledXPath, &Tree, &str) -> Result<T, SelectError>,
 ) -> Result<T, SelectError> {
     let Value::String(xml) = context else {
         return Err(failed(
@@ -99,11 +109,12 @@ fn evaluate<T: Send>(
     if let Some(reason) = too_complex(xml) {
         return Err(failed(expression, &reason));
     }
-    on_engine(|| {
-        let query = compiled(expression, version)?;
-        let tree = Tree::parse_str(xml)
-            .map_err(|error| failed(expression, &format!("the context is not XML: {error}")))?;
-        then(&query, &tree)
+    let (owned, xml) = (expression.to_owned(), xml.clone());
+    on_engine(expression, move || {
+        let query = compiled(&owned, version)?;
+        let tree = Tree::parse_str(&xml)
+            .map_err(|error| failed(&owned, &format!("the context is not XML: {error}")))?;
+        then(&query, &tree, &owned)
     })
 }
 
@@ -114,26 +125,39 @@ fn compiled(expression: &str, version: XPathVersion) -> Result<CompiledXPath, Se
 
 /// Run `work` on a thread of [`ENGINE_STACK`] bytes under [`DEADLINE`],
 /// so that what it may spend is known to the engine and does not depend
-/// on the caller's thread. A panic inside it is an unsupported
-/// capability: what the engine cannot do is a limit of this executor,
-/// not a condition that is false. Everything the engine built is dropped
-/// on that thread, so nothing it left half-done is seen again.
-fn on_engine<T: Send>(
-    work: impl FnOnce() -> Result<T, SelectError> + Send,
+/// on the caller's thread, and wait for it no longer than [`WAIT`]. A
+/// panic inside it is an unsupported capability: what the engine cannot
+/// do is a limit of this executor, not a condition that is false.
+/// Everything the engine built is dropped on that thread, so nothing it
+/// left half-done is seen again.
+fn on_engine<T: Send + 'static>(
+    expression: &str,
+    work: impl FnOnce() -> Result<T, SelectError> + Send + 'static,
 ) -> Result<T, SelectError> {
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("roas-xpath".to_owned())
-            .stack_size(ENGINE_STACK)
-            .spawn_scoped(scope, || {
-                let _stack = EvaluationLimits::declare(ENGINE_STACK);
-                let _deadline = EvaluationLimits::declare_deadline(Instant::now() + DEADLINE);
-                work()
-            })
-            .map_err(|_| SelectError::Unsupported(NO_THREAD))?
-            .join()
-            .unwrap_or(Err(SelectError::Unsupported(UNIMPLEMENTED)))
-    })
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("roas-xpath".to_owned())
+        .stack_size(ENGINE_STACK)
+        .spawn(move || {
+            let _stack = EvaluationLimits::declare(ENGINE_STACK);
+            let _deadline = EvaluationLimits::declare_deadline(Instant::now() + DEADLINE);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .unwrap_or(Err(SelectError::Unsupported(UNIMPLEMENTED)));
+            // The run may have stopped waiting.
+            let _ = sender.send(result);
+        })
+        .map_err(|_| SelectError::Unsupported(NO_THREAD))?;
+    match receiver.recv_timeout(WAIT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(failed(
+            expression,
+            &format!(
+                "the evaluation did not finish within {} seconds",
+                WAIT.as_secs()
+            ),
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(SelectError::Unsupported(UNIMPLEMENTED)),
+    }
 }
 
 /// The capability an engine panic is reported as.
@@ -223,9 +247,13 @@ fn json(selector: &str, item: &XpathItem) -> Result<Value, SelectError> {
 /// - The regular-expression functions run a single pattern to completion,
 ///   past the deadline, over text that may be a whole response; an Arazzo
 ///   `regex` criterion matches instead.
+/// - `fn:distinct-values` compares each value with every one it kept, and
+///   `fn:id`, `fn:idref` and `fn:element-with-id` each element with every
+///   token asked for, in a single built-in that runs past the deadline;
+///   over a response's values that is minutes.
 /// - `fn:function-lookup` could reach any of them by a name built at run
 ///   time.
-const REFUSED_FUNCTIONS: [&str; 11] = [
+const REFUSED_FUNCTIONS: [&str; 15] = [
     "parse-xml",
     "parse-xml-fragment",
     "json-to-xml",
@@ -237,11 +265,15 @@ const REFUSED_FUNCTIONS: [&str; 11] = [
     "fold-left",
     "fold-right",
     "function-lookup",
+    "distinct-values",
+    "id",
+    "idref",
+    "element-with-id",
 ];
 
 /// What an expression calling or naming one of [`REFUSED_FUNCTIONS`] is
 /// refused as.
-const UNSAFE_FUNCTION: &str = "XPath fn:parse-xml, fn:parse-xml-fragment, fn:json-to-xml, fn:parse-json, fn:function-lookup, folds and regular-expression functions";
+const UNSAFE_FUNCTION: &str = "XPath fn:parse-xml, fn:parse-xml-fragment, fn:json-to-xml, fn:parse-json, fn:distinct-values, fn:id, fn:idref, fn:element-with-id, fn:function-lookup, folds and regular-expression functions";
 
 /// Refuse an expression that calls or names a function in
 /// [`REFUSED_FUNCTIONS`], by one pass over it. Names inside string
@@ -323,19 +355,25 @@ fn is_name_byte(byte: u8) -> bool {
 }
 
 /// Limits on a context, checked before the engine parses it. A response
-/// body is untrusted, and the engine's parser checks each attribute
-/// against the ones before it on the same element, and gives every
-/// element a node for every namespace binding in scope on it, so a small
-/// document can take seconds and gigabytes. Evaluating paths over a large
-/// or deep document is bounded by the deadline instead. Real documents
-/// stay far below all of these.
+/// body is untrusted, and parsing it runs to completion: the engine
+/// spends close to a kilobyte on each node, checks each attribute against
+/// the ones before it on the same element, and gives every element a node
+/// for every namespace binding in scope on it, so a few megabytes of
+/// markup could take seconds and gigabytes. These keep a parsed context
+/// to a few hundred megabytes at most. Evaluating paths over a large or
+/// deep document is bounded by the deadline instead. Real documents stay
+/// far below all of these.
 const MAX_CONTEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DEPTH: usize = 1024;
-const MAX_ATTRIBUTES: usize = 1024;
+/// Elements, comments and processing instructions; text nodes lie
+/// between them, so they are bounded too.
+const MAX_NODES: usize = 100_000;
+const MAX_ATTRIBUTES_PER_ELEMENT: usize = 256;
+const MAX_ATTRIBUTES: usize = 100_000;
 /// Namespace bindings held by elements, summed over every element: one
 /// for each prefix (or the default namespace) bound in scope on it,
-/// besides `xml`.
-const MAX_NAMESPACE_NODES: usize = 1_000_000;
+/// besides `xml`, which every element holds and [`MAX_NODES`] counts.
+const MAX_NAMESPACE_NODES: usize = 100_000;
 
 /// Why `xml` is past one of the limits above, or holds a document type
 /// declaration, if it does, by one pass over its markup. The engine
@@ -357,6 +395,8 @@ fn too_complex(xml: &str) -> Option<String> {
     let mut open: Vec<Vec<&str>> = Vec::new();
     let mut bindings = Bindings::default();
     let mut namespace_nodes = 0usize;
+    let mut nodes = 0usize;
+    let mut all_attributes = 0usize;
     let skip = |from: usize, end: &str| {
         xml[from..]
             .find(end)
@@ -376,6 +416,14 @@ fn too_complex(xml: &str) -> Option<String> {
     while let Some(found) = xml[at..].find('<') {
         let start = at + found;
         let rest = &xml[start..];
+        if !rest.starts_with("</") && !rest.starts_with("<![CDATA[") {
+            nodes += 1;
+            if nodes > MAX_NODES {
+                return Some(format!(
+                    "the context has more than {MAX_NODES} elements, comments and processing instructions"
+                ));
+            }
+        }
         if rest.starts_with("<!--") {
             at = skip(start, "-->");
         } else if rest.starts_with("<![CDATA[") {
@@ -411,12 +459,18 @@ fn too_complex(xml: &str) -> Option<String> {
                 }
                 let (name, after) = name_at(index);
                 index = after;
-                if attributes == MAX_ATTRIBUTES {
+                if attributes == MAX_ATTRIBUTES_PER_ELEMENT {
                     return Some(format!(
-                        "the context has an element with more than {MAX_ATTRIBUTES} attributes"
+                        "the context has an element with more than {MAX_ATTRIBUTES_PER_ELEMENT} attributes"
                     ));
                 }
                 attributes += 1;
+                all_attributes += 1;
+                if all_attributes > MAX_ATTRIBUTES {
+                    return Some(format!(
+                        "the context has more than {MAX_ATTRIBUTES} attributes"
+                    ));
+                }
                 // `=` and a quoted value, if they follow.
                 while index < length && bytes[index].is_ascii_whitespace() {
                     index += 1;
@@ -685,8 +739,22 @@ mod tests {
 
     #[test]
     fn a_panic_inside_the_engine_is_unsupported() {
-        let result: Result<(), _> = on_engine(|| panic!("an engine bug"));
+        let result: Result<(), _> = on_engine("x", || panic!("an engine bug"));
         assert_eq!(result, Err(SelectError::Unsupported(UNIMPLEMENTED)));
+    }
+
+    #[test]
+    fn a_run_waits_for_the_engine_only_so_long() {
+        let started = Instant::now();
+        let result: Result<(), _> = on_engine("x", || {
+            std::thread::sleep(WAIT + Duration::from_secs(1));
+            Ok(())
+        });
+        assert!(
+            matches!(&result, Err(SelectError::Evaluation { message, .. }) if message.contains("did not finish")),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < WAIT + Duration::from_secs(1));
     }
 
     #[test]
@@ -831,40 +899,73 @@ mod tests {
                 .map(|index| format!(" a{index}='x=y'"))
                 .collect::<String>()
         };
-        assert!(!refused(&format!("<r{}/>", attributes(MAX_ATTRIBUTES))));
+        assert!(!refused(&format!(
+            "<r{}/>",
+            attributes(MAX_ATTRIBUTES_PER_ELEMENT)
+        )));
         assert!(
             evaluation_error(select(
                 "/r",
                 V31,
-                &json!(format!("<r{}/>", attributes(MAX_ATTRIBUTES + 1)))
+                &json!(format!(
+                    "<r{}/>",
+                    attributes(MAX_ATTRIBUTES_PER_ELEMENT + 1)
+                ))
             ))
-            .contains("more than 1024 attributes")
+            .contains("an element with more than 256 attributes")
         );
         assert!(!refused(&format!(
             "<r>{}</r>",
-            format!("<e{}/>", attributes(8)).repeat(MAX_ATTRIBUTES)
+            format!("<e{}/>", attributes(8)).repeat(1024)
+        )));
+        // So are attributes over the whole document.
+        let spread = |elements: usize| {
+            format!(
+                "<r>{}</r>",
+                format!("<e{}/>", attributes(200)).repeat(elements)
+            )
+        };
+        assert!(!refused(&spread(MAX_ATTRIBUTES / 200)));
+        assert!(
+            too_complex(&spread(MAX_ATTRIBUTES / 200 + 1))
+                .is_some_and(|reason| reason.contains("more than 100000 attributes"))
+        );
+        // And nodes: elements, comments and processing instructions.
+        let leaves = |markup: &str, count: usize| format!("<r>{}</r>", markup.repeat(count));
+        assert!(!refused(&leaves("<l/>", MAX_NODES - 1)));
+        for markup in ["<l/>", "<!---->", "<?p?>"] {
+            assert!(
+                too_complex(&leaves(markup, MAX_NODES))
+                    .is_some_and(|reason| reason.contains("more than 100000 elements")),
+                "{markup}"
+            );
+        }
+        // CDATA sections and end tags are not nodes of their own.
+        assert!(!refused(&format!(
+            "<r>{}</r>",
+            "<l><![CDATA[x]]></l>".repeat(MAX_NODES - 1)
         )));
         // Namespace bindings are counted on every element they are in
-        // scope on: 257 prefixes on a root over 257 x 257 children.
+        // scope on: 200 prefixes on a root over 600 children.
         let wide = format!(
             "<r {}>{}</r>",
-            (0..257)
+            (0..200)
                 .map(|prefix| format!("xmlns:p{prefix}='u{prefix}'"))
                 .collect::<Vec<_>>()
                 .join(" "),
-            (0..257 * 257)
-                .map(|index| format!("<p{}:n/>", index % 257))
+            (0..600)
+                .map(|index| format!("<p{}:n/>", index % 200))
                 .collect::<String>()
         );
         assert!(
             evaluation_error(select("count(/r/*)", V31, &json!(wide)))
-                .contains("binds more than 1000000 namespaces")
+                .contains("binds more than 100000 namespaces")
         );
         // Out of scope, a binding counts for nothing more; rebinding a
         // prefix, or undeclaring the default namespace, is not another.
         let siblings = format!(
             "<r>{}</r>",
-            "<e xmlns:p='u' xmlns:q='v' xmlns='w'/>".repeat(100_000)
+            "<e xmlns:p='u' xmlns:q='v'/><g/>".repeat(MAX_NAMESPACE_NODES / 2 - 1)
         );
         assert!(!refused(&siblings));
         let rebound = format!(
@@ -931,6 +1032,10 @@ mod tests {
             "fn:replace(/a, '(a)', 'b')",
             "tokenize (: comment :) (/a, ',')",
             "Q{http://www.w3.org/2005/xpath-functions}analyze-string('a', 'a')",
+            "count(distinct-values(//l))",
+            "id('a b')",
+            "fn:idref('x')",
+            "element-with-id('x')",
             "for-each(/a, matches#2(?, 'a'))",
             "1 -matches('a', 'a')",
             "count(fold-left(1 to 50000, [], function($a, $x) { [$a] }))",
@@ -946,6 +1051,8 @@ mod tests {
         // Names that only look like them are paths and literals.
         for harmless in [
             "/order/matches",
+            "/order/id",
+            "//distinct-values/@id",
             "/replacement/tokenize-me",
             "/a[@replace = 'matches(']",
             "contains(/a, \"parse-xml(\")",

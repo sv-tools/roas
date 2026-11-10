@@ -24,6 +24,8 @@ http = "1.5"
 http-body-util = "0.1"
 lazy-regex = "3.6.0"
 monostate = "1.0.0"
+oxixml-infoset = "0.1.2"
+oxixml-xpath = "0.1.2"
 regex = "1.11.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "native-tls"] }
 serde = { version = "1.0.219", features = ["derive"] }
@@ -51,5 +53,3 @@ tokio = { version = "1.52", default-features = false }
 tokio-stream = { version = "0.1", default-features = false }
 url = "2.5.8"
 webbrowser = "1"
-oxixml-infoset = "0.1.2"
-oxixml-xpath = "0.1.2"
