@@ -295,6 +295,18 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
             out.extend(pattern_properties(c));
             out.extend(inner_unchecked(c));
         }
+        // A substituted type is the user's: what applies to the value it
+        // stands for is not checked on it.
+        ValueKind::Other if matches!(strip(ty), TypeRef::Extern(_)) => {
+            out.extend(
+                declared_keywords(c)
+                    .into_iter()
+                    .map(|keyword| Check::Unevaluated {
+                        keyword,
+                        reason: "a substituted type is not checked against it".into(),
+                    }),
+            );
+        }
         ValueKind::Other => {}
     }
     out
@@ -348,10 +360,25 @@ pub(crate) fn null_checks(def: &crate::ir::TypeDef) -> Vec<Check> {
         return Vec::new();
     }
     match &def.kind {
-        TypeKind::Alias(_) | TypeKind::Extern => Vec::new(),
+        // A raw holder validates its own null instead: see `null_raw`.
+        TypeKind::Alias(_)
+        | TypeKind::Extern
+        | TypeKind::UnionOpen(_)
+        | TypeKind::ComposedOpen(_) => Vec::new(),
         TypeKind::Newtype(inner) => presence_checks(inner, &def.constraints),
         _ => unenforced(&def.constraints),
     }
+}
+
+/// Whether a `null` held outside the raw holder `def` is validated by
+/// building the holder from that `null`: its branches have their say.
+pub(crate) fn null_raw(def: &crate::ir::TypeDef) -> bool {
+    def.nullable && matches!(def.kind, TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_))
+}
+
+/// Whether `def` has a null hook: a `validate_null` of its own.
+pub(crate) fn has_null_hook(def: &crate::ir::TypeDef) -> bool {
+    null_raw(def) || !null_checks(def).is_empty()
 }
 
 /// The unhandled keywords every branch of a union shares: a type list
@@ -441,7 +468,7 @@ pub(crate) fn unenforced(c: &Constraints) -> Vec<Check> {
 pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static str> {
     // A named type checks the constraints it was hoisted with itself, and
     // raw JSON reports them at run time.
-    if ty.direct_named().is_some() || matches!(strip(ty), TypeRef::Any) {
+    if ty.direct_named().is_some() || matches!(strip(ty), TypeRef::Any | TypeRef::Extern(_)) {
         return Vec::new();
     }
     let kind = kind_of(ty);

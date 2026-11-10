@@ -772,3 +772,20 @@ fn an_opt_out_on_an_alias_is_refused_rather_than_ignored() {
         "{error}"
     );
 }
+
+#[test]
+fn a_type_list_whose_enum_fits_no_member_admits_nothing() {
+    // `enum: [1]` fits neither `string` nor `null`: no value is valid.
+    let components = serde_json::json!({
+        "NoValue": {"type": ["string", "null"], "enum": [1]},
+        "OnlyNull": {"type": ["string", "null"], "enum": [null]}
+    });
+    let generation = generate(&document(components), &rust_config("")).expect("generates");
+    let errors: Vec<&str> = generation
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(errors, ["/components/schemas/NoValue"]);
+}

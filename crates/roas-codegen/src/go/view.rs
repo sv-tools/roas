@@ -638,7 +638,12 @@ impl Builder<'_> {
                     let def = ir.types.get(id)?;
                     match &def.kind {
                         TypeKind::Alias(inner) => id = inner.direct_named()?,
-                        _ if crate::checks::null_checks(def).is_empty() => return None,
+                        // An opted-out type has no `validateNull`.
+                        _ if !crate::checks::has_null_hook(def)
+                            || self.type_config(def).and_then(|t| t.validation) == Some(false) =>
+                        {
+                            return None;
+                        }
                         _ => return names.get(&def.id).cloned(),
                     }
                 }
@@ -654,7 +659,7 @@ impl Builder<'_> {
             };
             view.validate = super::validation::body(def, &view, opted_out, &mut cx);
             if view.validate.is_some() && !opted_out {
-                view.validate_null = super::validation::null_body(def, &mut cx);
+                view.validate_null = super::validation::null_body(def, &view.name, &mut cx);
             }
             if opted_out && view.validate.is_none() {
                 return Err(opt_out_on_alias(def));

@@ -407,7 +407,7 @@ impl<'a> Lowerer<'a> {
 
     /// Whether a schema is generated as a type of its own rather than
     /// spelled in place.
-    fn needs_name(schema: &FrontSchema) -> bool {
+    pub(crate) fn needs_name(schema: &FrontSchema) -> bool {
         match &schema.kind {
             Kind::String {
                 enum_values: Some(_),
@@ -1053,7 +1053,7 @@ impl<'a> Lowerer<'a> {
             self.warn(
                 DiagnosticKind::UnsupportedKeyword { keyword: keyword.clone() },
                 &schema.id,
-                format!("`{keyword}` is not handled by the generator; it is neither represented in the type nor validated"),
+                format!("`{keyword}` is not handled by the generator; it is not represented in the type, and generated validation reports it as unevaluated"),
             );
         }
         if schema.const_value.is_some() && !self.const_is_tag(schema) {

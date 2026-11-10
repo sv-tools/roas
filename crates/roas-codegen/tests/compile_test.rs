@@ -649,7 +649,16 @@ fn validated_description() -> serde_json::Value {
             "Mid2": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "minimum": 1.0000000596046448}}},
             "DMin": {"type": "number", "minimum": 8.143539365241406e270},
             "SibEnum": {"$ref": "#/components/schemas/MaybeText", "enum": ["a", "b"]},
-            "HoldsSibEnum": {"type": "object", "properties": {"e": {"$ref": "#/components/schemas/SibEnum"}}}
+            "HoldsSibEnum": {"type": "object", "properties": {"e": {"$ref": "#/components/schemas/SibEnum"}}},
+            "HoldsListIf": {"type": "object", "properties": {"value": {"$ref": "#/components/schemas/ListIf"}}},
+            "NIfOff": {"type": ["string", "null"], "if": {"type": "null"}, "then": false},
+            "HoldsNIfOff": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/NIfOff"}}},
+            "Dated": {"type": "object", "properties": {"d": {"type": "string", "format": "date", "minLength": 5}}},
+            "SmallMaps": {"type": "array", "items": {"additionalProperties": {"type": "string"}, "maxProperties": 2}},
+            "NestedClosed": {"oneOf": [
+                {"type": "array", "items": {"$ref": "#/components/schemas/Closed"}},
+                {"type": "array", "items": {"type": "array"}}
+            ]}
         }}
     })
 }
@@ -659,7 +668,12 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc =
         SourceDocument::parse(Input::Json(bytes), Url::parse("file:///v.json").unwrap()).unwrap();
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
-    let mut config = ConfigFile::default();
+    // One type opted out, and a format substituted by a plain string.
+    let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
+        "types": {"NIfOff": {"validation": false}},
+        "substitutions": {"date": {"rust": {"name": "String"}, "go": {"name": "string"}}}
+    }))
+    .unwrap();
     config.target = Some(target);
     config.validation = Some(true);
     let generation = generate(&doc, &config.build().unwrap()).expect("generates");
@@ -853,6 +867,17 @@ fn main() {
     assert_eq!(report::<DMin>("81435393652414055e254"), vec![]);
     // A null the siblings' enum leaves out is not passed.
     assert!(!report::<HoldsSibEnum>(r#"{"e":null}"#).is_empty());
+    // A null held outside a type list is checked as the list would be.
+    assert_eq!(report::<HoldsListIf>(r#"{"value":null}"#), vec![u("/value")]);
+    // An opted-out type is not asked about its null.
+    assert_eq!(report::<HoldsNIfOff>(r#"{"v":null}"#), vec![]);
+    // A substituted type is not checked against what applies to it.
+    assert_eq!(report::<Dated>(r#"{"d":"x"}"#), vec![u("/d")]);
+    // A hoisted inline item checks itself.
+    assert_eq!(report::<SmallMaps>(r#"[{"k":"v"}]"#), vec![]);
+    assert_eq!(report::<SmallMaps>(r#"[{"a":"1","b":"2","c":"3"}]"#), vec![v("/0")]);
+    // A closed struct is read from an object only, wherever it is.
+    assert_eq!(report::<NestedClosed>(r#"[["x"]]"#), vec![]);
     println!("validation behaves");
 }
 "##;
@@ -1065,6 +1090,12 @@ func main() {
 	if got := report[api.HoldsSibEnum](`{"e":null}`); len(got) == 0 {
 		panic("null outside the siblings' enum passed")
 	}
+	check(`{"value":null}`, report[api.HoldsListIf](`{"value":null}`), u("/value"))
+	check(`{"v":null}`, report[api.HoldsNIfOff](`{"v":null}`))
+	check(`{"d":"x"}`, report[api.Dated](`{"d":"x"}`), u("/d"))
+	check(`[{"k":"v"}]`, report[api.SmallMaps](`[{"k":"v"}]`))
+	check(`[{"a":"1","b":"2","c":"3"}]`, report[api.SmallMaps](`[{"a":"1","b":"2","c":"3"}]`), v("/0"))
+	check(`[["x"]]`, report[api.NestedClosed](`[["x"]]`))
 	fmt.Println("validation behaves")
 }
 "##;

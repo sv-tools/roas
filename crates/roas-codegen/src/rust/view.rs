@@ -51,9 +51,6 @@ pub(crate) struct BranchView {
     pub constructor: String,
     pub ty: String,
     pub doc: Vec<String>,
-    /// A statement refusing a raw value the branch type would wrongly
-    /// decode: serde's derived struct visitor also reads an array.
-    pub guard: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +77,9 @@ pub(crate) struct TypeView {
     pub validate: Option<Vec<String>>,
     /// The statements of `Validate::validate_null`; empty for none.
     pub validate_null: Vec<String>,
+    /// A struct read from a JSON object only: serde's derive would also
+    /// read it from an array, so it decodes through a guard.
+    pub object_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -546,6 +546,7 @@ impl Builder<'_> {
             exclusive: false,
             validate: None,
             validate_null: Vec::new(),
+            object_only: false,
         };
         let result = self.fill_kind(def, &mut view)?;
         if !result {
@@ -647,8 +648,13 @@ impl Builder<'_> {
                     });
                 }
                 match &s.additional {
+                    // With no catch-all to flatten, serde's derive reads a
+                    // sequence too: the derived code becomes inherent and a
+                    // guard decodes an object only.
                     Additional::Denied => {
-                        view.attrs.push("#[serde(deny_unknown_fields)]".to_owned())
+                        view.attrs.push("#[serde(deny_unknown_fields)]".to_owned());
+                        view.attrs.push("#[serde(remote = \"Self\")]".to_owned());
+                        view.object_only = true;
                     }
                     Additional::CatchAll(ty) => {
                         let inner = self.spell(ty)?;
@@ -760,44 +766,11 @@ impl Builder<'_> {
             let base = snake(&branch.suggested_name);
             let name = allocator.allocate(base);
             let ty = self.spell(&branch.ty)?;
-            let (inner, nullable) = match &branch.ty {
-                TypeRef::Nullable(inner) => (inner.as_ref(), true),
-                other => (other, false),
-            };
-            // Through aliases and transparent newtypes, which decode as
-            // their target does.
-            let is_struct = {
-                let mut current = inner.direct_named();
-                let mut found = false;
-                for _ in 0..=self.ir.types.len() {
-                    let Some(id) = current else { break };
-                    match self.ir.types.get(id).map(|d| &d.kind) {
-                        Some(TypeKind::Struct(_)) => {
-                            found = true;
-                            break;
-                        }
-                        Some(TypeKind::Alias(next) | TypeKind::Newtype(next)) => {
-                            current = next.direct_named();
-                        }
-                        _ => break,
-                    }
-                }
-                found
-            };
-            let guard = is_struct.then(|| {
-                let null = if nullable {
-                    " && raw.trim_end() != \"null\""
-                } else {
-                    ""
-                };
-                format!("let raw = self.raw.get().trim_start(); if !raw.starts_with('{{'){null} {{ return None; }}")
-            });
             out.push(BranchView {
                 accessor: format!("as_{name}"),
                 constructor: format!("from_{name}"),
                 doc: vec![format!("The value read as `{ty}`, when it is one.")],
                 ty,
-                guard,
             });
         }
         Ok(out)

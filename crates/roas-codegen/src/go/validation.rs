@@ -375,7 +375,13 @@ fn null_call(name: &str, p: &str, r: &str) -> String {
 
 /// The body of `validateNull` for one type: empty when a `null` of it
 /// has nothing to check.
-pub(crate) fn null_body(def: &TypeDef, cx: &mut Context<'_>) -> Vec<String> {
+pub(crate) fn null_body(def: &TypeDef, name: &str, cx: &mut Context<'_>) -> Vec<String> {
+    if checks::null_raw(def) {
+        cx.needs.jsontext = true;
+        return vec![format!(
+            "{name}{{raw: jsontext.Value(\"null\")}}.validateInto(pointer, r)"
+        )];
+    }
     let mut out = Vec::new();
     render(
         &checks::null_checks(def),

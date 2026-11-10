@@ -583,7 +583,9 @@ impl Translator<'_> {
             [one] => match read(one, false) {
                 Member::Read(member) => *member,
                 // Only the list's null is left, if it has one.
-                Member::Nothing if nullable => self.leaf(pointer.clone(), Kind::Null),
+                Member::Nothing if nullable && shared_admits_null(&object) => {
+                    self.leaf(pointer.clone(), Kind::Null)
+                }
                 Member::Nothing => self.leaf(pointer.clone(), Kind::Never),
                 // Not lost without a word: the schema is reported as
                 // one the generator does not handle.
@@ -637,14 +639,7 @@ impl Translator<'_> {
         if let Kind::Object { typeless, .. } = &mut front.kind {
             *typeless = false;
         }
-        // A shared `enum` or `const` without null leaves it out, whatever
-        // the list says.
-        let admits_null = |key: &str| match object.get(key) {
-            Some(Value::Array(values)) if key == "enum" => values.iter().any(Value::is_null),
-            Some(value) if key == "const" => value.is_null(),
-            _ => true,
-        };
-        front.nullable = nullable && admits_null("enum") && admits_null("const");
+        front.nullable = nullable && shared_admits_null(&object);
         front
     }
 
@@ -883,23 +878,24 @@ fn inner_unchecked(schema: &FrontSchema) -> Option<&'static str> {
         } => ("additionalProperties", inner),
         _ => return None,
     };
-    // Generated as a type of its own, it checks itself.
-    let named = match &inner.kind {
-        Kind::Object {
-            properties,
-            additional,
-            ..
-        } => !properties.is_empty() || matches!(additional, Additional::Denied),
-        Kind::String { enum_values, .. } => enum_values.is_some(),
-        Kind::AllOf { .. } | Kind::AnyOf { .. } | Kind::OneOf { .. } | Kind::TypeUnion { .. } => {
-            true
-        }
-        _ => false,
-    };
+    // Generated as a type of its own, it checks itself: the lowerer's own
+    // rule.
+    let named = crate::lower::Lowerer::needs_name(inner);
     let says = !crate::checks::present_keywords(&inner.constraints).is_empty()
         || !inner.unsupported.is_empty()
         || inner.constraints.inner_unchecked.is_some();
     (!named && says).then_some(keyword)
+}
+
+/// Whether a type list's shared `enum` and `const` allow null: without
+/// it, they leave it out whatever the list says.
+fn shared_admits_null(object: &serde_json::Map<String, Value>) -> bool {
+    let admits = |key: &str| match object.get(key) {
+        Some(Value::Array(values)) if key == "enum" => values.iter().any(Value::is_null),
+        Some(value) if key == "const" => value.is_null(),
+        _ => true,
+    };
+    admits("enum") && admits("const")
 }
 
 /// A member of a type list, read as a schema of its own.

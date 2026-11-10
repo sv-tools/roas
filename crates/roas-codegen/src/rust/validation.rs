@@ -288,6 +288,11 @@ const NULL_IS_VALID: &str = "if self.raw.get().trim() == \"null\" { return; }";
 /// The body of `validate_null` for one type: empty when a `null` of it
 /// has nothing to check.
 pub(crate) fn null_body(def: &TypeDef) -> Vec<String> {
+    if checks::null_raw(def) {
+        return vec![
+            "Self { raw: serde_json::value::RawValue::from_string(\"null\".to_owned()).expect(\"null is JSON\") }.validate_into(pointer, report);".to_owned(),
+        ];
+    }
     let mut out = Vec::new();
     render(
         &checks::null_checks(def),
