@@ -242,7 +242,7 @@ impl<'a> Lowerer<'a> {
                 Slot::Inline(schema) => (
                     schema.title.clone(),
                     schema.description.clone(),
-                    substituted_constraints(schema),
+                    self.substituted_constraints(schema),
                 ),
                 Slot::Ref { description, .. } => {
                     (None, description.clone(), self.referenced_constraints(slot))
@@ -481,6 +481,90 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// What a substituted schema declares, its string `enum` (or `const`
+    /// pin) included: the kind that carried it is replaced by the user's
+    /// type. So is what its members, items and branches declare, which
+    /// is marked as one unchecked whole.
+    fn substituted_constraints(&self, schema: &FrontSchema) -> crate::front::Constraints {
+        let mut c = schema.constraints.clone();
+        let string_enum = matches!(
+            &schema.kind,
+            Kind::String {
+                enum_values: Some(_),
+                ..
+            }
+        );
+        if string_enum && !c.unenforced.contains(&"enum") {
+            c.unenforced.push("enum");
+        }
+        if self.asserts_inside(schema, &mut BTreeSet::new()) {
+            c.unsupported
+                .push("the substituted schema's members".to_owned());
+        }
+        c
+    }
+
+    /// Whether anything inside `schema` — a member, an item, a value, a
+    /// branch, through references — asserts what decoding does not.
+    fn asserts_inside(&self, schema: &FrontSchema, seen: &mut BTreeSet<String>) -> bool {
+        let slots: Vec<&Slot> = match &schema.kind {
+            Kind::Array { items } => items.iter().collect(),
+            Kind::Object {
+                properties,
+                additional,
+                ..
+            } => {
+                let mut out: Vec<&Slot> = properties.values().collect();
+                if let FrontAdditional::Schema(slot) = additional {
+                    out.push(slot);
+                }
+                out
+            }
+            Kind::AllOf { branches }
+            | Kind::AnyOf { branches }
+            | Kind::OneOf { branches, .. }
+            | Kind::TypeUnion { branches } => branches.iter().collect(),
+            _ => Vec::new(),
+        };
+        slots.into_iter().any(|slot| self.slot_asserts(slot, seen))
+    }
+
+    /// Whether a slot, followed through references, asserts what decoding
+    /// does not, itself or anywhere inside.
+    fn slot_asserts(&self, slot: &Slot, seen: &mut BTreeSet<String>) -> bool {
+        match slot {
+            Slot::Inline(inner) => {
+                !crate::checks::present_keywords(&inner.constraints).is_empty()
+                    || !inner.unsupported.is_empty()
+                    || matches!(
+                        &inner.kind,
+                        Kind::String {
+                            enum_values: Some(_),
+                            ..
+                        }
+                    )
+                    || self.asserts_inside(inner, seen)
+            }
+            Slot::Ref {
+                target: RefTarget::Component(name),
+                siblings,
+                ..
+            } => {
+                if siblings.is_some() {
+                    return true;
+                }
+                if !seen.insert(name.clone()) {
+                    return false;
+                }
+                self.front
+                    .components
+                    .get(name)
+                    .is_some_and(|next| self.slot_asserts(next, seen))
+            }
+            Slot::Ref { .. } => false,
+        }
+    }
+
     /// The constraints a reference stands for, through a chain of
     /// references; siblings that assert are kept as unsupported, since
     /// they are not merged.
@@ -491,7 +575,7 @@ impl<'a> Lowerer<'a> {
         loop {
             match current {
                 Slot::Inline(schema) => {
-                    let mut c = substituted_constraints(schema);
+                    let mut c = self.substituted_constraints(schema);
                     for keyword in extra {
                         if !c.unsupported.contains(&keyword) {
                             c.unsupported.push(keyword);
@@ -1509,23 +1593,6 @@ fn branch_constraints(
     } else {
         constraints.clone()
     }
-}
-
-/// What a substituted schema declares, its string `enum` (or `const`
-/// pin) included: the kind that carried it is replaced by the user's type.
-fn substituted_constraints(schema: &FrontSchema) -> crate::front::Constraints {
-    let mut c = schema.constraints.clone();
-    if matches!(
-        &schema.kind,
-        Kind::String {
-            enum_values: Some(_),
-            ..
-        }
-    ) && !c.unenforced.contains(&"enum")
-    {
-        c.unenforced.push("enum");
-    }
-    c
 }
 
 /// Whether `$ref` siblings are known to allow null: they say so, or say

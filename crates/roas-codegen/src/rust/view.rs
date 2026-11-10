@@ -82,6 +82,9 @@ pub(crate) struct TypeView {
     /// A struct read from a JSON object only: serde's derive would also
     /// read it from an array, so it decodes through a guard.
     pub object_only: bool,
+    /// The type's conditional-compilation gates (`#[cfg(...)]` among its
+    /// configured attributes), repeated on every impl generated beside it.
+    pub cfg: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -534,6 +537,11 @@ impl Builder<'_> {
         check_container_attrs(&user_attrs, &raw_name)?;
         attrs.extend(user_attrs);
         attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
+        let cfg: Vec<String> = attrs
+            .iter()
+            .filter(|a| a.trim_start().starts_with("#[cfg("))
+            .cloned()
+            .collect();
         let mut derives: Vec<String> = ["Debug", "Clone", "PartialEq"]
             .iter()
             .map(|s| (*s).to_owned())
@@ -555,6 +563,7 @@ impl Builder<'_> {
             validate: None,
             validate_null: Vec::new(),
             object_only: false,
+            cfg,
         };
         let result = self.fill_kind(def, &mut view)?;
         if !result {
