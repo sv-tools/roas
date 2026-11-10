@@ -24,6 +24,11 @@ const MAX_CHAR: u32 = 0x10FFFF;
 /// Go's `regexp/syntax` size limit (`maxSize`): 128 MiB of 40-byte
 /// instructions.
 const GO_MAX_SIZE: u64 = (128 << 20) / 40;
+/// Go caches node sizes and can count some twice after rewriting a
+/// regex (measured up to 1.72x the true size), so a margin of half is
+/// kept rather than its exact limit.
+const GO_SIZE_LIMIT: u64 = GO_MAX_SIZE / 2;
+const TOO_LARGE_FOR_GO: &str = "it is larger than Go's regexp safely compiles";
 /// The longest pattern read, in bytes.
 const MAX_LEN: usize = 16 * 1024;
 /// How deep groups may nest. oxc's parser recurses per level and needs
@@ -96,8 +101,8 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
         budget: MAX_COUNT,
         out: String::new(),
     };
-    if printer.disjunction(&ast.body)? > GO_MAX_SIZE {
-        return Err("it is larger than Go's regexp compiles".into());
+    if printer.disjunction(&ast.body)? > GO_SIZE_LIMIT {
+        return Err(TOO_LARGE_FOR_GO.into());
     }
     // The printer's output is meant to compile; this is the proof, with
     // the limits the generated Rust code compiles it under. Go's other
@@ -127,8 +132,9 @@ type Set = Vec<(u32, u32)>;
 
 impl Printer<'_> {
     // Each part returns its size as Go's `calcSize` counts it (at least
-    // one per node): Go refuses a regex past `GO_MAX_SIZE` at compile time.
-    // An overestimate only refuses more.
+    // one per node): Go refuses a regex past `GO_MAX_SIZE` at compile time,
+    // by its own count, which can exceed the true size: see
+    // `GO_SIZE_LIMIT`.
 
     fn disjunction(&mut self, d: &Disjunction<'_>) -> Result<u64, String> {
         let mut size = 0u64;
@@ -194,6 +200,11 @@ impl Printer<'_> {
                 }
                 let sub = self.term(&q.body)?;
                 self.budget = saved;
+                // Go checks each node as it parses it, so a body hidden by
+                // `{0}` still counts.
+                if sub > GO_SIZE_LIMIT {
+                    return Err(TOO_LARGE_FOR_GO.into());
+                }
                 // Laziness changes which match is found, never whether one
                 // is: a check only asks the latter.
                 let size = match (q.min, q.max) {
@@ -602,6 +613,8 @@ mod tests {
             r"\p{Latin}",
             r"\-\P{Foo}",
             &format!("(?:{}){{1000}}", "^".repeat(3356)),
+            &format!("(?:(?:{}){{1000}}){{0}}", "x".repeat(3400)),
+            &format!("(?:{}){{1000}}", "^".repeat(1700)),
             "(?:(?:a{1000}){2}){0}",
             r"[\cA]",
             r"\-(?<n>a|(?<n>b))",
