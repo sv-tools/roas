@@ -147,8 +147,8 @@ not silently certify a partial graph as complete.
 Recognized versions are Arazzo 1.0/1.1, OpenAPI 2.0/3.0/3.1/3.2, and AsyncAPI
 2.6/3.0/3.1. Arazzo 1.0 retains its wire version and is upconverted for execution.
 API documents retain complete raw values and model-checked versions; loading is
-**not** API structural or schema validation. AsyncAPI loading does not enable
-broker execution. External OpenAPI Path Item resolution and API-server computation
+**not** API structural or schema validation. AsyncAPI steps run through a
+message client the caller supplies ([AsyncAPI steps](#asyncapi-steps)). External OpenAPI Path Item resolution and API-server computation
 have separate execution rules below; workflows of linked Arazzo documents are
 callable as described next.
 
@@ -345,7 +345,36 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 
 A step that calls a workflow is a step like any other: what it called becomes its outputs, its own `outputs` are named on top, its `successCriteria` are judged, its `timeout` covers the whole call, and its `onSuccess` / `onFailure` decide where the workflow goes next. It gets a record of its own in the report — `Performed::Workflow` rather than `Performed::Request`.
 
+**AsyncAPI steps** send and receive messages through a client the caller supplies — see [AsyncAPI steps](#asyncapi-steps).
+
 Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0` feature), which upconverts first so there is one interpreter.
+
+### AsyncAPI steps
+
+A step with an `action` publishes to (`send`) or listens on (`receive`) a channel of an AsyncAPI 2.6, 3.0 or 3.1 source. The engine still performs no IO: implement `MessageClient` (or `AsyncMessageClient`) for your broker — Kafka, MQTT, AMQP, WebSocket — and run with `execute_with_messages` (or `execute_with_messages_async`, or a plan's methods of the same names). `testing::Fake` scripts messages per channel address. The plain `execute` functions stop at an AsyncAPI step with an error, and `PreparedWorkflow::uses_messages` says up front whether a plan needs a message client; `roas arazzo run` has none and refuses such a workflow before sending anything.
+
+```rust
+# use roas_arazzo::v1_1::Description;
+# use roas_arazzo_executor::{IncomingMessage, Options, execute_with_messages, testing::Fake};
+# use serde_json::json;
+# fn example(description: &Description, options: &Options) {
+let mut messages = Fake::new().message(
+    "confirmations",
+    IncomingMessage::json(&json!({ "orderId": "o-1" })).header("correlationId", "c-7"),
+);
+let report = execute_with_messages(description, options, &mut Fake::new(), &mut messages);
+# }
+```
+
+- **The channel** comes from `operationId` — bare, searched across the AsyncAPI sources, or `$sourceDescriptions.<name>.<id>` — or from `channelPath`, `$sourceDescriptions.<name>#/channels/<key>` (or `{$sourceDescriptions.<name>.url}#/…`). AsyncAPI 3.x operations point at their channel; 2.6 operations sit inside it, under `publish` or `subscribe`. Only references within the document are followed. A message's `contentType` and `correlationId` may come from its `traits`. A 3.x channel whose `address` is null or absent — unknown, as AsyncAPI defines it — is an error. The client is given the address with its `{parameters}` filled from `in: channel` parameters, the servers it is on (the channel's, else all of the document's) and the channel's bindings. The step's `action` decides the direction: an AsyncAPI operation's own `action` describes the application the document is about, and whether the workflow plays that application or talks to it is not something Arazzo says.
+- **A send** publishes `in: header` parameters as headers and the `requestBody` as the payload, encoded as for a request, in its `contentType`, else the first message's `contentType`, else the document's `defaultContentType`, else JSON. The step is done once the client has sent it: Arazzo does not model broker acknowledgement. Other parameter locations are an error.
+- **A receive does not hold the workflow up.** When it is reached the client is asked to subscribe, and the run goes on. Its message is asked for (`Progress::Receive`) when a later step depends on it — by `dependsOn` or by reading it, as do the workflow's own `successActions` / `failureActions`, which are judged after every step — or when the workflow ends. It completes there: its `successCriteria`, `outputs` and actions run at that point, and a `goto` or `end` it takes acts from there; the run then carries on with the step that needed it. A `retry` subscribes again. A receive joined after an `end` (or a `goto` to another workflow) finished its workflow is judged and recorded, but its action is not taken: there is nothing left to go to.
+- **`correlationId`** is evaluated when the receive starts and compared with each message at the places its channel's messages keep a correlation id (AsyncAPI `correlationId.location`, `$message.header#/…` or `$message.payload#/…`; a string and a number with the same text match). Messages that do not carry it are passed over. A receive with a `correlationId` on a channel whose messages say nowhere where theirs is is an error.
+- **The first matching message decides.** One that fails the step's `successCriteria` fails the step; the next message is not waited for. With no criteria, any matching message passes.
+- **Timeouts**: a receive waits at most its `timeout`, counted from when it subscribed, and fails — its `onFailure` actions run — when nothing came; its criteria are not judged and it names no outputs. Without one it waits as long as the run may: forever, unless `Options::timeout` is set. A receive joined after an `end` that fails fails its workflow: its `retry` or `goto` is recorded as not taken, since the workflow is over.
+- **`$message.header.<name>`** and **`$message.payload`** (with `#/pointer`) read the message a receive got or a send sent, in the step's own criteria, outputs and actions and in the workflow's actions; `$steps.<id>.message.…` reads it later. Elsewhere — a step's parameters, payload or `correlationId`, which are evaluated before there is a message, or workflow outputs — `$message` is a preparation error. The payload is read as a response body is: JSON, else UTF-8 text. The ABNF's `#` form is the one parsed; the spec example's `$message.payload.orderId` is not.
+- **Subscriptions** are closed (`Progress::Unsubscribe`) once their receive completes. When a run stops early, the `execute` functions close what is still open; a caller driving `Run` itself does so with `Run::open_subscriptions`.
+- **Report**: an AsyncAPI step is a `Performed::Message` with its action, the channel address and whether a message went out or came in.
 
 ### XPath
 
@@ -368,7 +397,7 @@ A response body is untrusted, so the engine runs under limits:
 
 ## Support matrix
 
-Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (AsyncAPI steps, XPath without its feature) is an error where it is met, never skipped; `x-` extensions of Arazzo objects are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
+Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (XPath without its feature, AsyncAPI steps without a message client) is an error where it is met, never skipped; `x-` extensions of Arazzo objects are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
 
 | Feature | Parsing | Reference resolution | Validation | Execution |
 | --- | --- | --- | --- | --- |
@@ -376,17 +405,17 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | `x-` extensions of Arazzo objects | Kept on every object but a Reusable Object | — | Not interpreted | Ignored |
 | Other unknown members | Dropped by the model; listed by `Description::unknown_members` | — | Preparation error (entry when given `Options::unknown_members`, external documents always) | A checked run refuses them; the lazy path never sees them |
 | OpenAPI 2.0 / 3.0 / 3.1 / 3.2 sources | Raw values with a checked version | `operationId`, `operationPath`, Path Item `$ref` chains, servers | Duplicate IDs, reference cycles, Path Item overlaps; no structural or schema validation | HTTP requests ([methods and servers](#openapi-operation-resolution)) |
-| AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Loaded as sources | AsyncAPI steps, `channel` parameters and `$message` expressions are preparation errors | Not run |
+| AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Operations and channels by `operationId` / `channelPath`, local `$ref`s | Channels, parameter locations and sources checked; `$message` outside an AsyncAPI step is an error | Messages sent and received through a `MessageClient` ([details](#asyncapi-steps)) |
 | External Arazzo workflows | Typed models from the registry | `$sourceDescriptions.<name>.<workflowId>` | Structure, unknown members and the cross-document workflow graph | In their own document's scope |
 | Components | Typed models | `$components.<kind>.<name>` by name | A missing component is a preparation error | Resolved where used |
-| Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>` | Syntax and references checked, with byte offsets | Evaluated, except `$message` (AsyncAPI) |
+| Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>` | Syntax and references checked, with byte offsets | Evaluated |
 | `simple` conditions | Strings | — | Parsed under the [condition profile](#condition-profile) | Evaluated, short-circuiting |
 | `regex` criteria | Typed criterion types | — | Constant patterns compiled | Evaluated |
 | JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run refuses any other version when it reaches it |
 | JSON Pointer selectors and criteria (v1.1) | Typed | — | Constant pointers' syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | With the `xpath` feature: constant expressions compiled as their version, unknown versions, refused functions and XPath replacement targets refused; without it, a preparation error | With the `xpath` feature, evaluated as XPath 1.0 to 3.1 over XML text ([details](#xpath)); without it, not run |
 | Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
-| `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time; no parallel scheduling; a call, `goto` or `retry` target's dependencies run first, each once in a run, with the run's inputs |
+| `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time, except that an AsyncAPI receive listens in the background until a step depends on it; a call, `goto` or `retry` target's dependencies run first, each once in a run, with the run's inputs |
 
 ## Condition profile
 
@@ -538,7 +567,7 @@ The CLI now opts in by default, so previously skipped document defects can cause
 earlier, nonzero exit instead of a recovered success.
 
 Input-schema compilation is optional; see the input-validation policy below.
-Preparation does not add XPath or AsyncAPI execution; XPath runs only with the `xpath` feature.
+Preparation does not add XPath execution; XPath runs only with the `xpath` feature. AsyncAPI steps run only with a message client.
 Source identity loading is opt-in and occurs before preparation;
 referenced OpenAPI resolution uses the already-supplied document graph.
 JSONPath execution supports `rfc9535`, not the alternate Goessner draft: preparation
@@ -734,6 +763,10 @@ selector or replacement target (preparation reports a criterion's version as
 criteria that name the Goessner draft, the only JSONPath version v1.0 allows; a
 v1.0 `jsonpath` criterion with no version still runs.
 
+### AsyncAPI steps and `Progress`
+
+AsyncAPI steps now run ([AsyncAPI steps](#asyncapi-steps)). `Progress` gains `Publish`, `Subscribe`, `Receive` and `Unsubscribe`, so a loop that drives `Run` itself needs arms for them (or a panicking catch-all if it runs no AsyncAPI steps); `Run::deliver` answers a `Receive`. `Performed` gains `Message`. `$message` is now evaluated, and is a preparation error in an HTTP step instead of an unsupported capability; `ExpressionError::Unsupported` is no longer raised. Preparation no longer refuses AsyncAPI steps, so check `PreparedWorkflow::uses_messages` before running a plan without a message client.
+
 ### XPath and response bodies
 
 A response body that is not JSON used to leave `$response.body` empty, so naming it failed with a missing-body error. It is now the body's text, as a string, when the body is UTF-8. This applies with or without the `xpath` feature: a criterion such as `$response.body == 'pong'` can now pass, and an output of `$response.body` now holds the text instead of failing. An empty body still has no `$response.body`. `SelectError` gains an `Evaluation` variant for an expression that is valid but cannot be evaluated against its data; matches already need a fallback arm. Criteria that read such a body now judge its text rather than failing for want of a body: a JSONPath or JSON Pointer criterion over it matches nothing except `$` or the empty pointer, which match the whole string and pass, and a simple condition such as `$response.body != null` passes. `$response.body#/id` now reports that the value has no `/id`.
@@ -742,13 +775,13 @@ A response body that is not JSON used to leave `$response.body` empty, so naming
 
 Each of these is reported where it is met, never passed over — a run should not look successful because something was skipped.
 
-- **AsyncAPI steps** (`channelPath` / `action` / `correlationId`): they need a broker client, not an HTTP one.
+- **AsyncAPI steps without a message client**: the plain `execute` functions, and `roas arazzo run`, stop at them.
 - **XPath** criteria and selectors without the `xpath` feature; with it, versions Arazzo does not name, XPath payload replacement targets, and the functions listed under [XPath](#xpath).
-- **Parallel execution**: `dependsOn` orders steps and workflows; they still run one at a time.
+- **Parallel execution**: `dependsOn` orders steps and workflows; they still run one at a time. Only an AsyncAPI receive goes on in the background.
 
 ## Safety rails
 
-A description can loop — `goto` is a jump. `Options` caps the number of steps (1000), the depth of workflow calls (8) and the retries of one step (10); each raises `ExecutionError::Limit` rather than running forever.
+A description can loop — `goto` is a jump. `Options` caps the number of steps (1000), the depth of workflow calls (8) and the retries of one step (10); each raises `ExecutionError::Limit` rather than running forever. Time is not limited unless you ask: `Options::timeout` bounds the whole run. Each request's timeout is cut to the time left, a retry wait that would outlast it is not taken, and a response that comes back after the time is spent — or a client that gives up then — stops the run with `ExecutionError::TimedOut` and a partial report (a caller driving `Run` itself maps its client's failures with `Run::client_failure`). Running out of time ends the run; it is not a failed step, so `onFailure` actions do not run.
 
 ## License
 

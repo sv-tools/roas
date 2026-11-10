@@ -186,6 +186,7 @@ pub struct PreparedWorkflow<'d> {
     pub(crate) queue: Vec<(Doc, &'d Workflow)>,
     pub(crate) orders: BTreeMap<(Doc, &'d str), Vec<usize>>,
     pub(crate) endpoints: BTreeMap<(Doc, &'d str, &'d str), Endpoint>,
+    pub(crate) channels: BTreeMap<(Doc, &'d str, &'d str), crate::channel::Resolved>,
     selected: &'d Workflow,
     diagnostics: Vec<PreparationDiagnostic>,
 }
@@ -207,6 +208,13 @@ impl PreparedWorkflow<'_> {
     #[must_use]
     pub fn condition_profile(&self) -> &'static str {
         CONDITION_PROFILE
+    }
+
+    /// Whether a workflow the plan may run has AsyncAPI steps, which need a
+    /// message client: [`Self::execute_with_messages`].
+    #[must_use]
+    pub fn uses_messages(&self) -> bool {
+        !self.channels.is_empty()
     }
 
     /// Non-fatal preparation findings. A plan never contains fatal diagnostics.
@@ -257,6 +265,39 @@ impl PreparedWorkflow<'_> {
         })?;
         crate::drive_async(&mut run, client).await
     }
+
+    /// Execute the plan with a client for its AsyncAPI steps' messages too.
+    /// # Errors
+    /// As [`crate::execute_with_messages`].
+    pub fn execute_with_messages<C: HttpClient + ?Sized, M: crate::MessageClient + ?Sized>(
+        &self,
+        client: &mut C,
+        messages: &mut M,
+    ) -> Result<ExecutionReport, ExecutionFailure> {
+        let mut run = self.start().map_err(|error| ExecutionFailure {
+            error,
+            report: None,
+        })?;
+        crate::drive_with(&mut run, client, Some(&mut crate::Messages(messages)))
+    }
+
+    /// Async counterpart of [`Self::execute_with_messages`].
+    /// # Errors
+    /// As [`crate::execute_with_messages`].
+    pub async fn execute_with_messages_async<
+        C: AsyncHttpClient + ?Sized,
+        M: crate::AsyncMessageClient + ?Sized,
+    >(
+        &self,
+        client: &mut C,
+        messages: &mut M,
+    ) -> Result<ExecutionReport, ExecutionFailure> {
+        let mut run = self.start().map_err(|error| ExecutionFailure {
+            error,
+            report: None,
+        })?;
+        crate::drive_async_with(&mut run, client, Some(&mut crate::AsyncMessages(messages))).await
+    }
 }
 
 /// Prepare a selected workflow without sending requests or fetching sources.
@@ -287,6 +328,7 @@ pub fn prepare<'d>(
         queue,
         orders: compiler.orders,
         endpoints: compiler.endpoints,
+        channels: compiler.channels,
         diagnostics: compiler.diagnostics,
     })
 }
@@ -340,6 +382,7 @@ fn compile<'d>(
         validated: BTreeSet::from([Doc::ENTRY]),
         orders: BTreeMap::new(),
         endpoints: BTreeMap::new(),
+        channels: BTreeMap::new(),
         reads: BTreeMap::new(),
         required_sources: BTreeSet::new(),
         resolve_operations,
@@ -443,13 +486,29 @@ struct Site<'d> {
     workflow: Option<&'d Workflow>,
     step: Option<&'d Step>,
     path: String,
+    /// Evaluated once its step (or, with no step, a step of its workflow)
+    /// is done: criteria, outputs and actions.
+    after: bool,
 }
+/// Whether `$message` names anything where `site` is evaluated: in an
+/// AsyncAPI step's criteria, outputs and actions, which run once it has
+/// sent or received, and in the workflow's actions, which may run after
+/// one. Not in a step's parameters, payload or `correlationId`, which are
+/// evaluated before it has a message, nor in workflow outputs.
+fn message_in_scope(site: &Site<'_>) -> bool {
+    site.after
+        && site
+            .step
+            .is_none_or(|step| step.action.is_some() || step.channel_path.is_some())
+}
+
 impl<'d> Site<'d> {
     fn root(path: &str) -> Self {
         Self {
             workflow: None,
             step: None,
             path: path.into(),
+            after: false,
         }
     }
     fn workflow(index: usize, workflow: &'d Workflow) -> Self {
@@ -457,6 +516,14 @@ impl<'d> Site<'d> {
             workflow: Some(workflow),
             step: None,
             path: format!("#.workflows[{index}]"),
+            after: false,
+        }
+    }
+    /// The same site, evaluated after a step is done.
+    fn after(&self) -> Self {
+        Self {
+            after: true,
+            ..self.clone()
         }
     }
     fn field(&self, field: &str) -> Self {
@@ -495,6 +562,7 @@ struct Compiler<'d> {
     validated: BTreeSet<Doc>,
     orders: BTreeMap<(Doc, &'d str), Vec<usize>>,
     endpoints: BTreeMap<(Doc, &'d str, &'d str), Endpoint>,
+    channels: BTreeMap<(Doc, &'d str, &'d str), crate::channel::Resolved>,
     reads: BTreeMap<(Doc, &'d str, &'d str), BTreeSet<String>>,
     /// Entry-document aliases only.
     required_sources: BTreeSet<String>,
@@ -691,8 +759,8 @@ impl<'d> Compiler<'d> {
         if let Err(error) = run::ordered_workflows(&self.documents, self.current, workflow) {
             self.dependency_error(&site.field("dependsOn"), error);
         }
-        self.success_actions(&workflow.success_actions, &site, "successActions");
-        self.failure_actions(&workflow.failure_actions, &site, "failureActions");
+        self.success_actions(&workflow.success_actions, &site.after(), "successActions");
+        self.failure_actions(&workflow.failure_actions, &site.after(), "failureActions");
         for (name, value) in &workflow.outputs {
             self.value(value, &site.field(&format!("outputs.{name}")));
         }
@@ -703,6 +771,32 @@ impl<'d> Compiler<'d> {
             };
             if let Some(id) = &step.workflow_id {
                 self.target(id, &step_site.field("workflowId"));
+            } else if step.action.is_some() || step.channel_path.is_some() {
+                self.channel_sources(step, &step_site);
+                if self.resolve_operations {
+                    let missing = run::unsupplied(self.documents.get(self.current));
+                    let sources = &self.documents.get(self.current).options.sources;
+                    match crate::channel::resolve(step, sources, &missing) {
+                        Ok(channel) => {
+                            self.channel_checks(workflow, step, &channel, &step_site);
+                            self.channels.insert(
+                                (self.current, &workflow.workflow_id, &step.step_id),
+                                channel,
+                            );
+                        }
+                        Err(error) => self.error(
+                            &step_site.field(if step.channel_path.is_some() {
+                                "channelPath"
+                            } else {
+                                "operationId"
+                            }),
+                            error,
+                        ),
+                    }
+                }
+                if let Some(id) = &step.correlation_id {
+                    self.literal(id, &step_site.field("correlationId"));
+                }
             } else {
                 let missing = run::unsupplied(self.documents.get(self.current));
                 self.operation_sources(step, &step_site);
@@ -740,11 +834,12 @@ impl<'d> Compiler<'d> {
                     },
                 );
             }
-            self.criteria(&step.success_criteria, &step_site, "successCriteria");
-            self.success_actions(&step.on_success, &step_site, "onSuccess");
-            self.failure_actions(&step.on_failure, &step_site, "onFailure");
+            let done = step_site.after();
+            self.criteria(&step.success_criteria, &done, "successCriteria");
+            self.success_actions(&step.on_success, &done, "onSuccess");
+            self.failure_actions(&step.on_failure, &done, "onFailure");
             for (name, value) in &step.outputs {
-                self.value(value, &step_site.field(&format!("outputs.{name}")));
+                self.value(value, &done.field(&format!("outputs.{name}")));
             }
             if let Some(body) = &step.request_body {
                 let body_site = step_site.field("requestBody");
@@ -835,27 +930,41 @@ impl<'d> Compiler<'d> {
                     Value::String("prepared".into()),
                 );
             }
-            self.parameter(&template, &site, step.workflow_id.is_none());
+            let asynchronous = step.action.is_some() || step.channel_path.is_some();
+            self.parameter(&template, &site, step.workflow_id.is_none(), asynchronous);
         }
         path
     }
 
     fn need_source(&mut self, name: &str, site: &Site<'d>) {
+        self.need_source_of(name, site, false);
+    }
+
+    /// `asynchronous`: the step is an AsyncAPI step, which needs an
+    /// AsyncAPI source rather than an HTTP one.
+    fn need_source_of(&mut self, name: &str, site: &Site<'d>, asynchronous: bool) {
         match self
             .description()
             .source_descriptions
             .iter()
             .find(|source| source.name == name)
         {
+            // An untyped source is judged by its document when it is resolved.
             Some(source)
                 if source.type_ == Some(SourceType::Arazzo)
-                    || source.type_ == Some(SourceType::Asyncapi) =>
+                    || (asynchronous
+                        && source
+                            .type_
+                            .is_some_and(|type_| type_ != SourceType::Asyncapi))
+                    || (!asynchronous && source.type_ == Some(SourceType::Asyncapi)) =>
             {
                 self.error(
                     site,
-                    ExecutionError::Unsupported(format!(
-                        "source `{name}` does not describe supported HTTP operations"
-                    )),
+                    ExecutionError::Unsupported(if asynchronous {
+                        format!("source `{name}` is not an AsyncAPI description")
+                    } else {
+                        format!("source `{name}` does not describe supported HTTP operations")
+                    }),
                 )
             }
             Some(_) => {
@@ -875,11 +984,85 @@ impl<'d> Compiler<'d> {
         }
     }
 
-    fn operation_sources(&mut self, step: &Step, site: &Site<'d>) {
-        if step.channel_path.is_some() || step.action.is_some() {
-            self.error(site, operation::OperationError::Async(step.step_id.clone()));
-            return;
+    /// What a run would refuse about a resolved channel, said up front.
+    fn channel_checks(
+        &mut self,
+        workflow: &'d Workflow,
+        step: &'d Step,
+        channel: &crate::channel::Resolved,
+        site: &Site<'d>,
+    ) {
+        if step.action == Some(roas_arazzo::v1_1::StepAction::Receive)
+            && step.correlation_id.is_some()
+            && channel.correlation.is_empty()
+        {
+            self.error(
+                &site.field("correlationId"),
+                ExecutionError::BadRequest {
+                    step: step.step_id.clone(),
+                    reason: format!(
+                        "it waits for a `correlationId`, but no message of channel `{}` \
+                         says where its correlation id is",
+                        channel.channel.address
+                    ),
+                },
+            );
         }
+        let description = self.description();
+        if let Ok(parameters) = run::effective_parameters(workflow, step, description) {
+            let given = parameters
+                .iter()
+                .filter(|template| template.location() == ParameterLocation::Channel)
+                .map(|template| (template.parameter.name.clone(), String::new()))
+                .collect();
+            if let Err(reason) = crate::channel::address(&channel.channel.address, &given) {
+                self.error(
+                    &site.field("parameters"),
+                    ExecutionError::BadRequest {
+                        step: step.step_id.clone(),
+                        reason,
+                    },
+                );
+            }
+        }
+    }
+
+    /// The sources an AsyncAPI step needs.
+    fn channel_sources(&mut self, step: &Step, site: &Site<'d>) {
+        let (named, site) = match (&step.channel_path, &step.operation_id) {
+            (Some(path), _) => {
+                let document = path
+                    .split_once('#')
+                    .map_or(path.as_str(), |(document, _)| document);
+                let name = document
+                    .trim()
+                    .strip_prefix("{$sourceDescriptions.")
+                    .and_then(|rest| rest.strip_suffix(".url}"))
+                    .or_else(|| document.trim().strip_prefix("$sourceDescriptions."));
+                (name, site.field("channelPath"))
+            }
+            (None, Some(id)) => (
+                id.strip_prefix("$sourceDescriptions.")
+                    .and_then(|rest| rest.split_once('.'))
+                    .map(|(name, _)| name),
+                site.field("operationId"),
+            ),
+            (None, None) => (None, site.field("operationId")),
+        };
+        match named {
+            Some(name) => self.need_source_of(name, &site, true),
+            None if self.current == Doc::ENTRY => self.required_sources.extend(
+                self.description()
+                    .source_descriptions
+                    .iter()
+                    .filter(|source| source.type_ != Some(SourceType::Arazzo))
+                    .map(|source| source.name.clone()),
+            ),
+            None => {}
+        }
+    }
+
+    fn operation_sources(&mut self, step: &Step, site: &Site<'d>) {
         if let Some(operation) = &step.operation_id {
             let site = site.field("operationId");
             if let Some(rest) = operation.strip_prefix("$sourceDescriptions.") {
@@ -974,8 +1157,27 @@ impl<'d> Compiler<'d> {
         }
     }
 
-    fn parameter(&mut self, template: &ParameterTemplate<'d>, site: &Site<'d>, operation: bool) {
-        if operation
+    fn parameter(
+        &mut self,
+        template: &ParameterTemplate<'d>,
+        site: &Site<'d>,
+        operation: bool,
+        asynchronous: bool,
+    ) {
+        if asynchronous {
+            if !matches!(
+                template.location(),
+                ParameterLocation::Channel | ParameterLocation::Header
+            ) || template.parameter.in_.is_none()
+            {
+                self.error(
+                    &site.field("in"),
+                    ExecutionError::Unsupported(
+                        "an AsyncAPI step's parameters are in `channel` or `header`".into(),
+                    ),
+                );
+            }
+        } else if operation
             && (template.parameter.in_.is_none()
                 || template.location() == ParameterLocation::Channel)
         {
@@ -1003,7 +1205,7 @@ impl<'d> Compiler<'d> {
                         } else {
                             site.component(entry)
                         };
-                        self.parameter(&parameter, &site, false);
+                        self.parameter(&parameter, &site, false, false);
                     }
                 }
                 Err(error) => self.error(&site, error),
@@ -1266,6 +1468,15 @@ impl<'d> Compiler<'d> {
     fn reference(&mut self, parsed: &Expression<'_>, site: &Site<'d>, offset: usize) {
         let error =
             match parsed.root {
+                Root::Message if !message_in_scope(site) => Some(
+                    ExpressionError::Missing {
+                        expression: parsed.text.into(),
+                        what: "a message, which only an AsyncAPI step's criteria, \
+                                   outputs and actions, and the workflow's actions, can read"
+                            .into(),
+                    }
+                    .into(),
+                ),
                 Root::Steps => {
                     let id = parsed.parts[0];
                     if !site.workflow.is_some_and(|workflow| {
@@ -1293,7 +1504,6 @@ impl<'d> Compiler<'d> {
                 {
                     Some(expression::undeclared_workflow(parsed.text, parsed.parts[0]).into())
                 }
-                Root::Message => Some(ExpressionError::Unsupported(parsed.text.into()).into()),
                 Root::Sources
                     if !self
                         .description()

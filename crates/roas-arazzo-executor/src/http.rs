@@ -29,7 +29,9 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     /// The encoded body, if the step has one.
     pub body: Option<Vec<u8>>,
-    /// How long the step is willing to wait, from `Step.timeout`.
+    /// How long the step is willing to wait, from `Step.timeout`, cut to
+    /// the time the run has left under
+    /// [`Options::timeout`](crate::Options::timeout).
     pub timeout: Option<Duration>,
 }
 
@@ -101,19 +103,22 @@ impl HttpResponse {
     /// lossily: replacing what cannot be read would change the data
     /// criteria and selectors judge.
     pub(crate) fn body_value(&self) -> Option<serde_json::Value> {
-        if self.body.is_empty() {
-            return None;
-        }
-        // A byte-order mark is no part of either.
-        let body = self
-            .body
-            .strip_prefix(b"\xef\xbb\xbf")
-            .unwrap_or(&self.body);
-        serde_json::from_slice(body).ok().or_else(|| {
-            let text = std::str::from_utf8(body).ok()?;
-            Some(serde_json::Value::String(text.to_owned()))
-        })
+        bytes_value(&self.body)
     }
+}
+
+/// A body or payload as a value: JSON when it parses, its UTF-8 text
+/// otherwise, nothing when it is empty or not UTF-8.
+pub(crate) fn bytes_value(bytes: &[u8]) -> Option<serde_json::Value> {
+    if bytes.is_empty() {
+        return None;
+    }
+    // A byte-order mark is no part of either.
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    serde_json::from_slice(bytes).ok().or_else(|| {
+        let text = std::str::from_utf8(bytes).ok()?;
+        Some(serde_json::Value::String(text.to_owned()))
+    })
 }
 
 fn header<'h>(headers: &'h [(String, String)], name: &str) -> Option<&'h str> {

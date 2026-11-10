@@ -217,6 +217,7 @@ fn checked_lazy_async_and_manual_runs_agree() {
             }
             roas_arazzo_executor::Progress::Wait(_) => {}
             roas_arazzo_executor::Progress::Done(report) => break *report,
+            progress => panic!("unexpected progress: {progress:?}"),
         }
     };
     assert_eq!(trace(&checked), trace(&manual));
