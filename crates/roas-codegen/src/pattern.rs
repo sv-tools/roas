@@ -190,10 +190,10 @@ impl Printer<'_> {
             Term::CapturingGroup(g) => {
                 // oxc accepts a name repeated inside its own group, which
                 // ECMAScript refuses; any repeat is refused here.
-                if let Some(name) = &g.name {
-                    if !self.names.insert(name.as_str().to_owned()) {
-                        return Err(format!("the group name `{name}` is repeated"));
-                    }
+                if let Some(name) = &g.name
+                    && !self.names.insert(name.as_str().to_owned())
+                {
+                    return Err(format!("the group name `{name}` is repeated"));
                 }
                 self.group(&g.body)?;
             }
