@@ -838,6 +838,37 @@ fn a_pattern_is_translated_or_reported() {
 }
 
 #[test]
+fn a_property_names_pattern_is_warned_about_where_it_is_written() {
+    let components = serde_json::json!({
+        "Map": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"pattern": "a(?=b)"}},
+        "Obj": {"type": "object", "properties": {"a": {"type": "string"}}, "propertyNames": {"pattern": "a(?=b)"}},
+        "Fine": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"pattern": "^a"}}
+    });
+    let config = ConfigFile::from_toml("validation = true\n", Path::new("/"))
+        .unwrap()
+        .merge(target(Target::Rust))
+        .build()
+        .unwrap();
+    let generation = generate(&document(components), &config).unwrap();
+    let mut pointers: Vec<_> = generation
+        .diagnostics
+        .iter()
+        .filter(
+            |d| matches!(&d.kind, DiagnosticKind::Unvalidated { keyword } if keyword == "pattern"),
+        )
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort();
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/Map/propertyNames/pattern",
+            "/components/schemas/Obj/propertyNames/pattern"
+        ]
+    );
+}
+
+#[test]
 fn an_opt_out_on_an_alias_is_refused_rather_than_ignored() {
     let components = serde_json::json!({
         "Short": {"type": "string", "maxLength": 2},

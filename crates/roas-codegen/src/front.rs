@@ -93,8 +93,12 @@ pub(crate) struct Constraints {
     pub unique_items: bool,
     pub min_properties: Option<u64>,
     pub max_properties: Option<u64>,
-    /// `propertyNames` is declared; the schema itself is not modelled.
+    /// `propertyNames` is declared.
     pub property_names: bool,
+    /// What `propertyNames` says, when it says only what a string check
+    /// covers (`minLength`, `maxLength`, `pattern`); `None` when it says
+    /// more, and is then not checked.
+    pub names: Option<Box<Constraints>>,
     /// `patternProperties` patterns, in declaration order.
     pub pattern_properties: Vec<String>,
     /// Keywords neither the type nor a generated check enforces: a numeric
@@ -490,6 +494,32 @@ impl Translator<'_> {
             .pointer(&source)
             .and_then(Value::as_object)
             .is_some_and(|object| object.contains_key("type"))
+    }
+
+    /// A `propertyNames` schema at `pointer`, read as written, when all it
+    /// asserts is what a string check covers. A member name is a string, so
+    /// `type: string` asserts nothing.
+    fn names(&self, pointer: &str) -> Option<Box<Constraints>> {
+        let source = (self.source_pointer)(&source_of(pointer));
+        let object = match self.raw.pointer(&source)? {
+            Value::Bool(true) => return Some(Box::default()),
+            Value::Object(object) => object,
+            _ => return None,
+        };
+        let mut names = Constraints::default();
+        for (key, value) in object {
+            match key.as_str() {
+                "type" if value == "string" => {}
+                "minLength" => names.min_length = Some(value.as_u64()?),
+                "maxLength" => names.max_length = Some(value.as_u64()?),
+                "pattern" => names.pattern = Some(value.as_str()?.to_owned()),
+                "title" | "description" | "$comment" | "examples" | "example" | "deprecated"
+                | "readOnly" | "writeOnly" => {}
+                key if key.starts_with("x-") => {}
+                _ => return None,
+            }
+        }
+        Some(Box::new(names))
     }
 
     fn schema(&self, schema: &Schema, pointer: String) -> FrontSchema {
@@ -971,6 +1001,7 @@ impl Translator<'_> {
     }
 
     fn object(&self, s: &ObjectSchema, pointer: String) -> FrontSchema {
+        let pointer_text = pointer.clone();
         let mut properties = BTreeMap::new();
         if let Some(props) = &s.properties {
             for (name, slot) in props {
@@ -1011,6 +1042,9 @@ impl Translator<'_> {
         front.constraints.min_properties = s.min_properties;
         front.constraints.max_properties = s.max_properties;
         front.constraints.property_names = s.property_names.is_some();
+        if s.property_names.is_some() {
+            front.constraints.names = self.names(&format!("{pointer_text}/propertyNames"));
+        }
         front.constraints.pattern_properties = s
             .pattern_properties
             .as_ref()

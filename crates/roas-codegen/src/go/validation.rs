@@ -336,6 +336,23 @@ fn render(
                     });
                 }
             }
+            Check::Keys(list) => {
+                let mut body = Vec::new();
+                render(
+                    list,
+                    (ValueKind::String, None),
+                    At { e: "k", p: "p", r },
+                    &mut body,
+                    needs,
+                );
+                if !body.is_empty() {
+                    needs.sorted = true;
+                    out.push(format!(
+                        "for _, k := range slices.Sorted(maps.Keys({e})) {{ p := childPointer({p}, k); {} }}",
+                        body.join("; ")
+                    ));
+                }
+            }
             Check::ItemsUnevaluated { keyword, reason } => out.push(format!(
                 "if len({e}) > 0 {{ {r}.unevaluated({p}, {}) }}",
                 lit(&format!("{keyword} on the items: {reason}"))
@@ -744,6 +761,41 @@ pub(crate) fn body(
                         "if uint64(members) > {n} {{ r.violation(pointer, fmt.Sprintf({}, members)) }}",
                         lit(&format!("has %d members, more than maxProperties {n}"))
                     )),
+                    // Declared names are known now: only whether the member
+                    // is present is left to run time. The other members'
+                    // names are read from the catch-all.
+                    Check::Keys(names) => {
+                        for (field, field_view) in s.fields.iter().zip(&view.fields) {
+                            let pointer = format!("childPointer(pointer, {})", lit(&field.raw_name));
+                            let statement = match checks::name_verdict(&field.raw_name, names) {
+                                checks::Verdict::Pass => continue,
+                                checks::Verdict::Fail(message) => {
+                                    format!("r.violation({pointer}, {})", lit(&message))
+                                }
+                                checks::Verdict::Unknown(message) => {
+                                    format!("r.unevaluated({pointer}, {})", lit(&message))
+                                }
+                            };
+                            let name = &field_view.name;
+                            out.push(if field.required {
+                                statement
+                            } else if field_view.ty.starts_with("Nullable[") {
+                                format!("if v.{name}.Set {{ {statement} }}")
+                            } else {
+                                format!("if v.{name} != nil {{ {statement} }}")
+                            });
+                        }
+                        if matches!(s.additional, Additional::CatchAll(_)) {
+                            let map = format!("v.{}", view.extra_name);
+                            render(
+                                std::slice::from_ref(check),
+                                (ValueKind::Map, None),
+                                At { e: &map, ..own },
+                                &mut out,
+                                &mut cx.needs,
+                            );
+                        }
+                    }
                     other => {
                         render(
                             std::slice::from_ref(other),
