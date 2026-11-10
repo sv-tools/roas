@@ -376,7 +376,14 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
     }
     diagnostics.append(&mut ir.diagnostics);
     if config.validation {
-        diagnostics.extend(crate::checks::diagnostics(&ir));
+        let opted_out = |def: &crate::ir::TypeDef| {
+            def.component
+                .as_ref()
+                .and_then(|name| config.types.get(name))
+                .and_then(|t| t.validation)
+                == Some(false)
+        };
+        diagnostics.extend(crate::checks::diagnostics(&ir, &opted_out));
     }
 
     Ok(Prepared {

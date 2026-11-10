@@ -6,6 +6,17 @@ use crate::front::{FloatWidth, IntWidth};
 use crate::ir::{Additional, Branch, TypeDef, TypeKind, TypeRef};
 use crate::rust::view::TypeView;
 
+thread_local! {
+    /// Whether a `pattern` check was rendered since the last
+    /// [`take_uses_regex`]: the generated code then needs `regex`.
+    static USES_REGEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a `pattern` check was rendered since the last call; resets it.
+pub(crate) fn take_uses_regex() -> bool {
+    USES_REGEX.with(|flag| flag.replace(false))
+}
+
 /// Where a check reads and reports: the value (a `&T`, parenthesised),
 /// the pointer (a `&str`) and the report (a `&mut ValidationReport`).
 #[derive(Clone, Copy)]
@@ -51,6 +62,18 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
             Check::MaxLength(n) => out.push(format!(
                 "{{ let n = {v}.chars().count(); if (n as u64) > {n} {{ {r}.violation({p}, format!(\"is {{n}} characters long, longer than maxLength {n}\")); }} }}"
             )),
+            Check::Pattern { regex, source } => {
+                USES_REGEX.with(|flag| flag.set(true));
+                // An argument needs no parentheses, and rustc says so.
+                let arg = v.strip_prefix('(').and_then(|v| v.strip_suffix(')')).unwrap_or(v);
+                // Compiled once, where it is used. A pattern past what the
+                // engine compiles (its size limit) is not checked, not failed.
+                out.push(format!(
+                    "{{ static RE: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| regex::Regex::new({regex:?}).ok()); match RE.as_ref() {{ Some(re) => {{ if !re.is_match({arg}) {{ {r}.violation({p}, {:?}); }} }} None => {r}.unevaluated({p}, {:?}), }} }}",
+                    format!("does not match pattern {source:?}"),
+                    format!("pattern {source:?}: too large to compile here"),
+                ))
+            }
             Check::IntAtLeast {
                 bound,
                 keyword,
@@ -199,6 +222,52 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 "{r}.unevaluated({p}, {:?});",
                 format!("{}: not handled by the generator", keywords.join(", "))
             )),
+            Check::Each {
+                item,
+                presence,
+                value: list,
+            } => {
+                let at = At {
+                    v: "item",
+                    p: "&p",
+                    r,
+                };
+                let mut body = Vec::new();
+                let mut reads = render(presence, ValueKind::Other, at, &mut body);
+                reads |= value(item, list, at, &mut body);
+                if !body.is_empty() {
+                    let binding = if reads { "item" } else { "_" };
+                    let body = body.join(" ");
+                    out.push(if kind == ValueKind::Map {
+                        format!(
+                            "for (k, {binding}) in {v}.iter() {{ let p = child_pointer({p}, k); {body} }}"
+                        )
+                    } else {
+                        format!(
+                            "for (i, {binding}) in {v}.iter().enumerate() {{ let p = child_pointer({p}, &i.to_string()); {body} }}"
+                        )
+                    });
+                }
+            }
+            Check::Keys(list) => {
+                let mut body = Vec::new();
+                render(
+                    list,
+                    ValueKind::String,
+                    At {
+                        v: "k",
+                        p: "&p",
+                        r,
+                    },
+                    &mut body,
+                );
+                if !body.is_empty() {
+                    out.push(format!(
+                        "for k in {v}.keys() {{ let p = child_pointer({p}, k); {} }}",
+                        body.join(" ")
+                    ));
+                }
+            }
             Check::ItemsUnevaluated { keyword, reason } => out.push(format!(
                 "if !{v}.is_empty() {{ {r}.unevaluated({p}, {:?}); }}",
                 format!("{keyword} on the items: {reason}")
@@ -471,17 +540,27 @@ pub(crate) fn body(
                 let name = &view.fields.last().expect("the catch-all field").name;
                 present.push(format!("self.{name}.len()"));
                 gated.push(String::new());
-                if generated(ty) {
+                let each = checks::each(&TypeRef::Map(Box::new(ty.clone())), &def.constraints);
+                // A property compiled out with `cfg` lands among the other
+                // members, where `additionalProperties` does not apply to
+                // it: with any gated, their values are not checked.
+                let gates = view.fields.iter().any(|f| !f.cfg.is_empty());
+                if gates && (generated(ty) || each.is_some()) {
+                    out.push(format!(
+                        "if !self.{name}.is_empty() {{ report.unevaluated(pointer, \"additionalProperties: a property compiled out with cfg lands among the other members, so their values are not checked\"); }}"
+                    ));
+                } else if generated(ty) {
                     out.push(format!("self.{name}.validate_into(pointer, report);"));
                 }
+                let each = each.filter(|_| !gates);
                 let field = format!("self.{name}");
                 render(
                     &checks::extern_checks(ir, &TypeRef::Map(Box::new(ty.clone())), false)
                         .value
                         .into_iter()
-                        .chain(checks::inner_unchecked(&def.constraints))
+                        .chain(each)
                         .collect::<Vec<_>>(),
-                    ValueKind::Other,
+                    ValueKind::Map,
                     At {
                         v: &field,
                         p: "pointer",
@@ -523,6 +602,47 @@ pub(crate) fn body(
                     Check::MaxProperties(n) => out.push(format!(
                         "if (members as u64) > {n} {{ report.violation(pointer, format!(\"has {{members}} members, more than maxProperties {n}\")); }}"
                     )),
+                    // Declared names are known now: only whether the member
+                    // is present is left to run time. The other members'
+                    // names are read from the catch-all.
+                    Check::Keys(names) => {
+                        for (field, field_view) in s.fields.iter().zip(&view.fields) {
+                            let pointer = format!("&child_pointer(pointer, {:?})", field.raw_name);
+                            let statement = match checks::name_verdict(&field.raw_name, names) {
+                                checks::Verdict::Pass => continue,
+                                checks::Verdict::Fail(message) => {
+                                    format!("report.violation({pointer}, {message:?});")
+                                }
+                                checks::Verdict::Unknown(message) => {
+                                    format!("report.unevaluated({pointer}, {message:?});")
+                                }
+                            };
+                            let statement = if field.required {
+                                statement
+                            } else {
+                                format!("if self.{}.is_some() {{ {statement} }}", field_view.name)
+                            };
+                            let gates = field_view.cfg.join(" ");
+                            out.push(
+                                format!("{gates} {{ {statement} }}").trim_start().to_owned(),
+                            );
+                        }
+                        if matches!(s.additional, Additional::CatchAll(_)) {
+                            let field = format!(
+                                "self.{}",
+                                view.fields.last().expect("the catch-all field").name
+                            );
+                            render(
+                                std::slice::from_ref(check),
+                                ValueKind::Map,
+                                At {
+                                    v: &field,
+                                    ..report
+                                },
+                                &mut out,
+                            );
+                        }
+                    }
                     other => {
                         render(
                             std::slice::from_ref(other),

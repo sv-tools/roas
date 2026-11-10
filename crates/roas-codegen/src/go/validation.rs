@@ -18,6 +18,8 @@ pub(crate) struct Needs {
     pub slices: bool,
     /// A raw holder is built from `null`: `jsontext`.
     pub jsontext: bool,
+    /// A `pattern` is matched: `regexp`, `sync` and `matchPattern`.
+    pub pattern: bool,
 }
 
 pub(crate) struct Context<'a> {
@@ -90,6 +92,15 @@ fn render(
                         *n,
                         format!("is %d characters long, shorter than minLength {n}")
                     )
+                ));
+            }
+            Check::Pattern { regex, source } => {
+                needs.pattern = true;
+                out.push(format!(
+                    "if matched, compiled := matchPattern({}, string({e})); !compiled {{ {r}.unevaluated({p}, {}) }} else if !matched {{ {r}.violation({p}, {}) }}",
+                    lit(regex),
+                    lit(&format!("pattern {source:?}: too large to compile here")),
+                    lit(&format!("does not match pattern {source:?}")),
                 ));
             }
             Check::MaxLength(n) => {
@@ -292,6 +303,56 @@ fn render(
                 "{r}.unevaluated({p}, {})",
                 lit(&format!("{}: not handled by the generator", keywords.join(", ")))
             )),
+            Check::Each {
+                item,
+                presence,
+                value: list,
+            } => {
+                let at = At {
+                    e: "item",
+                    p: "p",
+                    r,
+                };
+                let mut body = Vec::new();
+                let mut reads = render(presence, (ValueKind::Other, None), at, &mut body, needs);
+                reads |= checked(item, list, at, &mut body, needs);
+                if !body.is_empty() {
+                    let body = body.join("; ");
+                    out.push(if kind == ValueKind::Map {
+                        needs.sorted = true;
+                        let item = if reads {
+                            format!("item := {e}[k]; ")
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "for _, k := range slices.Sorted(maps.Keys({e})) {{ {item}p := childPointer({p}, k); {body} }}"
+                        )
+                    } else {
+                        let binding = if reads { "i, item" } else { "i" };
+                        format!(
+                            "for {binding} := range {e} {{ p := childPointer({p}, fmt.Sprint(i)); {body} }}"
+                        )
+                    });
+                }
+            }
+            Check::Keys(list) => {
+                let mut body = Vec::new();
+                render(
+                    list,
+                    (ValueKind::String, None),
+                    At { e: "k", p: "p", r },
+                    &mut body,
+                    needs,
+                );
+                if !body.is_empty() {
+                    needs.sorted = true;
+                    out.push(format!(
+                        "for _, k := range slices.Sorted(maps.Keys({e})) {{ p := childPointer({p}, k); {} }}",
+                        body.join("; ")
+                    ));
+                }
+            }
             Check::ItemsUnevaluated { keyword, reason } => out.push(format!(
                 "if len({e}) > 0 {{ {r}.unevaluated({p}, {}) }}",
                 lit(&format!("{keyword} on the items: {reason}"))
@@ -432,6 +493,35 @@ pub(crate) fn null_body(def: &TypeDef, name: &str, cx: &mut Context<'_>) -> Vec<
     out
 }
 
+/// The checks on a value of type `ty` at `at`, behind its pointer when it
+/// has one. True when they read the value.
+fn checked(
+    ty: &TypeRef,
+    list: &[Check],
+    at: At<'_>,
+    out: &mut Vec<String>,
+    needs: &mut Needs,
+) -> bool {
+    match ty {
+        TypeRef::Nullable(inner) | TypeRef::Boxed(inner) if !list.is_empty() => {
+            let deref = format!("(*{})", at.e);
+            let mut body = Vec::new();
+            render(
+                list,
+                (checks::kind_of(inner), item_of(inner)),
+                At { e: &deref, ..at },
+                &mut body,
+                needs,
+            );
+            if !body.is_empty() {
+                out.push(format!("if {} != nil {{ {} }}", at.e, body.join("; ")));
+            }
+            !body.is_empty()
+        }
+        _ => render(list, (checks::kind_of(ty), item_of(ty)), at, out, needs),
+    }
+}
+
 /// Checks then recursion on a value of type `ty` at `at`. True when the
 /// statements read the value.
 fn value(
@@ -441,32 +531,7 @@ fn value(
     out: &mut Vec<String>,
     cx: &mut Context<'_>,
 ) -> bool {
-    let reads = match ty {
-        // The checks apply to the value behind the pointer, when there is
-        // one.
-        TypeRef::Nullable(inner) | TypeRef::Boxed(inner) if !list.is_empty() => {
-            let deref = format!("(*{})", at.e);
-            let mut body = Vec::new();
-            render(
-                list,
-                (checks::kind_of(inner), item_of(inner)),
-                At { e: &deref, ..at },
-                &mut body,
-                &mut cx.needs,
-            );
-            if !body.is_empty() {
-                out.push(format!("if {} != nil {{ {} }}", at.e, body.join("; ")));
-            }
-            !body.is_empty()
-        }
-        _ => render(
-            list,
-            (checks::kind_of(ty), item_of(ty)),
-            at,
-            out,
-            &mut cx.needs,
-        ),
-    };
+    let reads = checked(ty, list, at, out, &mut cx.needs);
     let before = out.len();
     recurse(ty, at, 0, out, cx);
     reads || out.len() > before
@@ -667,9 +732,12 @@ pub(crate) fn body(
                     &(cx.extern_checks)(&TypeRef::Map(Box::new(ty.clone())))
                         .value
                         .into_iter()
-                        .chain(checks::inner_unchecked(&def.constraints))
+                        .chain(checks::each(
+                            &TypeRef::Map(Box::new(ty.clone())),
+                            &def.constraints,
+                        ))
                         .collect::<Vec<_>>(),
-                    (ValueKind::Other, None),
+                    (ValueKind::Map, None),
                     At { e: &map, ..own },
                     &mut out,
                     &mut cx.needs,
@@ -693,6 +761,41 @@ pub(crate) fn body(
                         "if uint64(members) > {n} {{ r.violation(pointer, fmt.Sprintf({}, members)) }}",
                         lit(&format!("has %d members, more than maxProperties {n}"))
                     )),
+                    // Declared names are known now: only whether the member
+                    // is present is left to run time. The other members'
+                    // names are read from the catch-all.
+                    Check::Keys(names) => {
+                        for (field, field_view) in s.fields.iter().zip(&view.fields) {
+                            let pointer = format!("childPointer(pointer, {})", lit(&field.raw_name));
+                            let statement = match checks::name_verdict(&field.raw_name, names) {
+                                checks::Verdict::Pass => continue,
+                                checks::Verdict::Fail(message) => {
+                                    format!("r.violation({pointer}, {})", lit(&message))
+                                }
+                                checks::Verdict::Unknown(message) => {
+                                    format!("r.unevaluated({pointer}, {})", lit(&message))
+                                }
+                            };
+                            let name = &field_view.name;
+                            out.push(if field.required {
+                                statement
+                            } else if field_view.ty.starts_with("Nullable[") {
+                                format!("if v.{name}.Set {{ {statement} }}")
+                            } else {
+                                format!("if v.{name} != nil {{ {statement} }}")
+                            });
+                        }
+                        if matches!(s.additional, Additional::CatchAll(_)) {
+                            let map = format!("v.{}", view.extra_name);
+                            render(
+                                std::slice::from_ref(check),
+                                (ValueKind::Map, None),
+                                At { e: &map, ..own },
+                                &mut out,
+                                &mut cx.needs,
+                            );
+                        }
+                    }
                     other => {
                         render(
                             std::slice::from_ref(other),

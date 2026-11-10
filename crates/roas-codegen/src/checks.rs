@@ -40,6 +40,11 @@ pub(crate) enum Unique {
 pub(crate) enum Check {
     MinLength(u64),
     MaxLength(u64),
+    /// `pattern`, as a regex both targets read as ECMAScript does.
+    Pattern {
+        regex: String,
+        source: String,
+    },
     /// The smallest integer allowed, from `minimum` or `exclusiveMinimum`.
     IntAtLeast {
         bound: i128,
@@ -89,6 +94,17 @@ pub(crate) enum Check {
     /// Keywords the generator does not handle at all: whatever the value,
     /// it is reported as unevaluated.
     Unsupported(Vec<String>),
+    /// Checks on each item of an array or member value of a map: those
+    /// that apply to any value, `null` included, then the rest.
+    Each {
+        item: TypeRef,
+        presence: Vec<Check>,
+        value: Vec<Check>,
+    },
+    /// `propertyNames`: string checks on each member name of a map, or of
+    /// a struct's other members (its declared names are decided when
+    /// generating: see [`name_verdict`]).
+    Keys(Vec<Check>),
     /// What the items or members of a non-empty array or map declare that
     /// nothing checks on them.
     ItemsUnevaluated {
@@ -179,10 +195,16 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
         ValueKind::String => {
             out.extend(c.min_length.filter(|n| *n > 0).map(Check::MinLength));
             out.extend(c.max_length.filter(|n| *n < u64::MAX).map(Check::MaxLength));
-            if c.pattern.is_some() {
-                out.push(Check::Unevaluated {
-                    keyword: "pattern",
-                    reason: "patterns are not checked yet".into(),
+            if let Some(source) = &c.pattern {
+                out.push(match crate::pattern::translate(source) {
+                    Ok(regex) => Check::Pattern {
+                        regex,
+                        source: source.clone(),
+                    },
+                    Err(reason) => Check::Unevaluated {
+                        keyword: "pattern",
+                        reason: format!("{source:?} is not checked: {reason}"),
+                    },
                 });
             }
         }
@@ -279,7 +301,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     _ => Unique::Unknown,
                 }));
             }
-            out.extend(inner_unchecked(c));
+            out.extend(each(ty, c));
         }
         ValueKind::Map => {
             out.extend(
@@ -292,14 +314,9 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     .filter(|n| *n < u64::MAX)
                     .map(Check::MaxProperties),
             );
-            if c.property_names {
-                out.push(Check::Unevaluated {
-                    keyword: "propertyNames",
-                    reason: "member-name schemas are not checked yet".into(),
-                });
-            }
+            out.extend(names(c));
             out.extend(pattern_properties(c));
-            out.extend(inner_unchecked(c));
+            out.extend(each(ty, c));
         }
         // A substituted type is the user's: what applies to the value it
         // stands for is not checked on it.
@@ -333,23 +350,94 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
             .filter(|n| *n < u64::MAX)
             .map(Check::MaxProperties),
     );
-    if constraints.property_names {
-        out.push(Check::Unevaluated {
-            keyword: "propertyNames",
-            reason: "member-name schemas are not checked yet".into(),
-        });
-    }
+    out.extend(names(constraints));
     out.extend(pattern_properties(constraints));
     out
 }
 
-/// What inline items or member values declare, unchecked: reported only
-/// when there is an item or a member to say it of.
-pub(crate) fn inner_unchecked(c: &Constraints) -> Option<Check> {
-    c.inner_unchecked.map(|keyword| Check::ItemsUnevaluated {
-        keyword,
-        reason: format!("constraints on inline `{keyword}` are not checked yet"),
+/// What an inline item or member-value schema constrains, checked on each
+/// item or member value of the array or map `ty`. A generated item type
+/// checks itself.
+pub(crate) fn each(ty: &TypeRef, c: &Constraints) -> Option<Check> {
+    let items = c.items.as_ref()?;
+    let item = match strip(ty) {
+        TypeRef::Array(item) | TypeRef::Map(item) => item.as_ref(),
+        _ => return None,
+    };
+    let presence = presence_checks(item, &items.constraints);
+    let value = value_checks(item, &items.constraints);
+    (!presence.is_empty() || !value.is_empty()).then(|| Check::Each {
+        item: item.clone(),
+        presence,
+        value,
     })
+}
+
+/// `propertyNames`: checked on each member name when it says only what a
+/// string check covers, otherwise unevaluated.
+fn names(c: &Constraints) -> Option<Check> {
+    if !c.property_names {
+        return None;
+    }
+    match &c.names {
+        Some(names) => {
+            let list = value_checks(&TypeRef::String, names);
+            (!list.is_empty()).then_some(Check::Keys(list))
+        }
+        None => Some(Check::Unevaluated {
+            keyword: "propertyNames",
+            reason: "a member-name schema saying more than minLength, maxLength and pattern is not checked yet".into(),
+        }),
+    }
+}
+
+/// What the name checks say of a member name known when generating.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Verdict {
+    Pass,
+    Fail(String),
+    Unknown(String),
+}
+
+/// The `propertyNames` checks applied to a declared property's `name`.
+pub(crate) fn name_verdict(name: &str, list: &[Check]) -> Verdict {
+    let mut unknown = None;
+    for check in list {
+        let length = name.chars().count() as u64;
+        match check {
+            Check::MinLength(n) if length < *n => {
+                return Verdict::Fail(format!(
+                    "the name is shorter than propertyNames minLength {n}"
+                ));
+            }
+            Check::MaxLength(n) if length > *n => {
+                return Verdict::Fail(format!(
+                    "the name is longer than propertyNames maxLength {n}"
+                ));
+            }
+            Check::MinLength(_) | Check::MaxLength(_) => {}
+            Check::Pattern { regex, source } => match regex::Regex::new(regex) {
+                Ok(re) if re.is_match(name) => {}
+                Ok(_) => {
+                    return Verdict::Fail(format!(
+                        "the name does not match propertyNames pattern {source:?}"
+                    ));
+                }
+                Err(_) => {
+                    unknown.get_or_insert_with(|| {
+                        format!("propertyNames pattern {source:?}: too large to compile here")
+                    });
+                }
+            },
+            Check::Unevaluated { keyword, reason } => {
+                unknown.get_or_insert_with(|| format!("propertyNames {keyword}: {reason}"));
+            }
+            _ => {
+                unknown.get_or_insert_with(|| "propertyNames: not checked on this name".to_owned());
+            }
+        }
+    }
+    unknown.map_or(Verdict::Pass, Verdict::Unknown)
 }
 
 fn pattern_properties(c: &Constraints) -> Option<Check> {
@@ -719,7 +807,25 @@ pub(crate) fn flatten_fragile(ir: &crate::ir::Ir, ty: &TypeRef) -> bool {
 /// Whether decoding a branch proves nothing: it declares what neither its
 /// type nor a generated check enforces.
 pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {
-    branch.unchecked || !unchecked_keywords(&branch.ty, &branch.constraints).is_empty()
+    branch.unchecked || !unchecked_paths(&branch.ty, &branch.constraints).is_empty()
+}
+
+/// What `unchecked_keywords` finds at a position and, through inline items
+/// and member values, inside it: each with the pointer suffix of the
+/// schema that declares it.
+pub(crate) fn unchecked_paths(ty: &TypeRef, c: &Constraints) -> Vec<(String, &'static str)> {
+    let mut out: Vec<(String, &'static str)> = unchecked_keywords(ty, c)
+        .into_iter()
+        .map(|keyword| (String::new(), keyword))
+        .collect();
+    if let (Some(items), TypeRef::Array(item) | TypeRef::Map(item)) = (&c.items, strip(ty)) {
+        out.extend(
+            unchecked_paths(item, &items.constraints)
+                .into_iter()
+                .map(|(path, keyword)| (format!("/{}{path}", items.keyword), keyword)),
+        );
+    }
+    out
 }
 
 /// Whether an allOf part needs a finding of its own for what goes
@@ -791,9 +897,15 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
 
 /// With validation on, a warning for every constraint no check covers, so
 /// nothing a schema says is dropped without a word.
-pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
+///
+/// `opted_out` says which types check nothing: an untranslatable pattern
+/// is reported as unevaluated only by a type that checks.
+pub(crate) fn diagnostics(
+    ir: &Ir,
+    opted_out: &dyn Fn(&crate::ir::TypeDef) -> bool,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    let mut warn = |id: &crate::diagnostic::SchemaId, pointer: String, keyword: &str| {
+    let mut warn = |id: &crate::diagnostic::SchemaId, pointer: String, keyword: &str, message| {
         out.push(Diagnostic {
             severity: Severity::Warning,
             kind: DiagnosticKind::Unvalidated {
@@ -801,9 +913,7 @@ pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
             },
             schema_id: id.clone(),
             pointer: source_of(&pointer),
-            message: format!(
-                "`{keyword}` does not apply to a value of this type, so validation does not check it"
-            ),
+            message,
         });
     };
     for id in &ir.order {
@@ -811,31 +921,99 @@ pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
             continue;
         }
         let def = &ir.types[id];
+        // Each value position: where it is, its type and its constraints.
+        let mut positions: Vec<(String, &TypeRef, &Constraints)> = Vec::new();
         match &def.kind {
             TypeKind::Struct(s) => {
                 for field in &s.fields {
                     let mut pointer = def.id.pointer.clone();
                     push_token(&mut pointer, "properties");
                     push_token(&mut pointer, &field.raw_name);
-                    for keyword in unchecked_keywords(&field.ty, &field.constraints) {
-                        warn(&def.id, format!("{pointer}/{keyword}"), keyword);
-                    }
+                    positions.push((pointer, &field.ty, &field.constraints));
+                }
+                // The catch-all's values are the other members.
+                if let (crate::ir::Additional::CatchAll(ty), Some(items)) =
+                    (&s.additional, &def.constraints.items)
+                {
+                    positions.push((
+                        format!("{}/{}", def.id.pointer, items.keyword),
+                        ty,
+                        &items.constraints,
+                    ));
                 }
             }
             TypeKind::Newtype(inner) => {
-                for keyword in unchecked_keywords(inner, &def.constraints) {
-                    warn(&def.id, format!("{}/{keyword}", def.id.pointer), keyword);
-                }
+                positions.push((def.id.pointer.clone(), inner, &def.constraints));
+            }
+            // An enum of no members has no value to check.
+            TypeKind::StringEnum(values) if !values.is_empty() => {
+                positions.push((def.id.pointer.clone(), &TypeRef::String, &def.constraints));
             }
             TypeKind::UnionOpen(crate::ir::OpenUnion { branches, .. })
             | TypeKind::ComposedOpen(branches) => {
                 for branch in branches {
-                    for keyword in unchecked_keywords(&branch.ty, &branch.constraints) {
-                        warn(&def.id, format!("{}/{keyword}", def.id.pointer), keyword);
-                    }
+                    positions.push((def.id.pointer.clone(), &branch.ty, &branch.constraints));
                 }
             }
             _ => {}
+        }
+        // A struct's checked `propertyNames`: its pattern is a string
+        // position. (Other positions' are found below.)
+        if matches!(def.kind, TypeKind::Struct(_))
+            && def.constraints.property_names
+            && let Some(names) = &def.constraints.names
+        {
+            positions.push((
+                format!("{}/propertyNames", def.id.pointer),
+                &TypeRef::String,
+                names,
+            ));
+        }
+        // Inline items and member values, checked on each, and a map's
+        // checked `propertyNames`.
+        let mut i = 0;
+        while i < positions.len() {
+            let (pointer, ty, c) = positions[i].clone();
+            if c.property_names
+                && kind_of(ty) == ValueKind::Map
+                && let Some(names) = &c.names
+            {
+                positions.push((format!("{pointer}/propertyNames"), &TypeRef::String, names));
+            }
+            if let (Some(items), TypeRef::Array(item) | TypeRef::Map(item)) = (&c.items, strip(ty))
+            {
+                positions.push((
+                    format!("{pointer}/{}", items.keyword),
+                    item,
+                    &items.constraints,
+                ));
+            }
+            i += 1;
+        }
+        for (pointer, ty, c) in positions {
+            for keyword in unchecked_keywords(ty, c) {
+                warn(
+                    &def.id,
+                    format!("{pointer}/{keyword}"),
+                    keyword,
+                    format!(
+                        "`{keyword}` does not apply to a value of this type, so validation does not check it"
+                    ),
+                );
+            }
+            if !opted_out(def)
+                && ty.direct_named().is_none()
+                && kind_of(ty) == ValueKind::String
+                && let Some(source) = &c.pattern
+                && let Err(reason) = crate::pattern::translate(source)
+            {
+                warn(
+                    &def.id,
+                    format!("{pointer}/pattern"),
+                    "pattern",
+                    format!("pattern {source:?} is reported as unevaluated: {reason}"),
+                );
+            }
         }
     }
     out
@@ -903,6 +1081,7 @@ fn declared_keywords(c: &Constraints) -> Vec<&'static str> {
     ]
     .into_iter()
     .filter_map(|(present, keyword)| present.then_some(keyword))
+    .chain(c.items.as_ref().map(|items| items.keyword))
     .collect()
 }
 

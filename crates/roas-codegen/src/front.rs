@@ -93,18 +93,31 @@ pub(crate) struct Constraints {
     pub unique_items: bool,
     pub min_properties: Option<u64>,
     pub max_properties: Option<u64>,
-    /// `propertyNames` is declared; the schema itself is not modelled.
+    /// `propertyNames` is declared.
     pub property_names: bool,
+    /// What `propertyNames` says, when it says only what a string check
+    /// covers (`minLength`, `maxLength`, `pattern`); `None` when it says
+    /// more, and is then not checked.
+    pub names: Option<Box<Constraints>>,
     /// `patternProperties` patterns, in declaration order.
     pub pattern_properties: Vec<String>,
     /// Keywords neither the type nor a generated check enforces: a numeric
     /// `enum` and a `const` the type does not pin.
     pub unenforced: Vec<&'static str>,
-    /// The inline `items` or `additionalProperties` schema says what no
-    /// generated type carries for it: it is named here.
-    pub inner_unchecked: Option<&'static str>,
+    /// The constraints of an inline `items` or `additionalProperties`
+    /// schema, checked on each item or member value its type holds unless
+    /// that type is generated (and checks itself).
+    pub items: Option<Items>,
     /// The schema's keywords the generator does not handle at all.
     pub unsupported: Vec<String>,
+}
+
+/// What an inline item or member-value schema constrains.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Items {
+    /// `items` or `additionalProperties`.
+    pub keyword: &'static str,
+    pub constraints: Box<Constraints>,
 }
 
 #[derive(Debug, Clone)]
@@ -483,6 +496,32 @@ impl Translator<'_> {
             .is_some_and(|object| object.contains_key("type"))
     }
 
+    /// A `propertyNames` schema at `pointer`, read as written, when all it
+    /// asserts is what a string check covers. A member name is a string, so
+    /// `type: string` asserts nothing.
+    fn names(&self, pointer: &str) -> Option<Box<Constraints>> {
+        let source = (self.source_pointer)(&source_of(pointer));
+        let object = match self.raw.pointer(&source)? {
+            Value::Bool(true) => return Some(Box::default()),
+            Value::Object(object) => object,
+            _ => return None,
+        };
+        let mut names = Constraints::default();
+        for (key, value) in object {
+            match key.as_str() {
+                "type" if value == "string" => {}
+                "minLength" => names.min_length = Some(value.as_u64()?),
+                "maxLength" => names.max_length = Some(value.as_u64()?),
+                "pattern" => names.pattern = Some(value.as_str()?.to_owned()),
+                "title" | "description" | "$comment" | "examples" | "example" | "deprecated"
+                | "readOnly" | "writeOnly" => {}
+                key if key.starts_with("x-") => {}
+                _ => return None,
+            }
+        }
+        Some(Box::new(names))
+    }
+
     fn schema(&self, schema: &Schema, pointer: String) -> FrontSchema {
         let lost = self.lost_in_conversion(schema, &pointer);
         let mut front = self.schema_kind(schema, pointer);
@@ -517,7 +556,7 @@ impl Translator<'_> {
                 front.constraints.unenforced.push(keyword);
             }
         }
-        front.constraints.inner_unchecked = inner_unchecked(&front);
+        front.constraints.items = items(&front);
         front.constraints.unsupported = front.unsupported.clone();
         front
     }
@@ -962,6 +1001,7 @@ impl Translator<'_> {
     }
 
     fn object(&self, s: &ObjectSchema, pointer: String) -> FrontSchema {
+        let pointer_text = pointer.clone();
         let mut properties = BTreeMap::new();
         if let Some(props) = &s.properties {
             for (name, slot) in props {
@@ -1002,6 +1042,9 @@ impl Translator<'_> {
         front.constraints.min_properties = s.min_properties;
         front.constraints.max_properties = s.max_properties;
         front.constraints.property_names = s.property_names.is_some();
+        if s.property_names.is_some() {
+            front.constraints.names = self.names(&format!("{pointer_text}/propertyNames"));
+        }
         front.constraints.pattern_properties = s
             .pattern_properties
             .as_ref()
@@ -1019,26 +1062,28 @@ impl Translator<'_> {
 
 /// Split the model's catch-all into `x-` extensions, kept, and every
 /// other keyword, returned for reporting.
-/// The keyword whose inline schema says what no check carries: an inline
-/// item or member value has no generated type of its own to check it.
-fn inner_unchecked(schema: &FrontSchema) -> Option<&'static str> {
+/// The inline item or member-value schema's constraints. Not beside
+/// `prefixItems` or `patternProperties`: `items` and `additionalProperties`
+/// then speak only of the items after the prefix, or the members no
+/// pattern matches, which the generated array or map does not separate.
+fn items(schema: &FrontSchema) -> Option<Items> {
     let (keyword, inner) = match &schema.kind {
+        // Beside `prefixItems`, `items` speaks only of the items after it.
         Kind::Array {
             items: Some(Slot::Inline(inner)),
-        } => ("items", inner),
+        } if !schema.unsupported.iter().any(|k| k == "prefixItems") => ("items", inner),
         Kind::Object {
             additional: Additional::Schema(Slot::Inline(inner)),
             ..
-        } => ("additionalProperties", inner),
+        } if schema.constraints.pattern_properties.is_empty() => ("additionalProperties", inner),
         _ => return None,
     };
-    // Generated as a type of its own, it checks itself: the lowerer's own
-    // rule.
-    let named = crate::lower::Lowerer::needs_name(inner);
-    let says = !crate::checks::present_keywords(&inner.constraints).is_empty()
-        || !inner.unsupported.is_empty()
-        || inner.constraints.inner_unchecked.is_some();
-    (!named && says).then_some(keyword)
+    let mut constraints = inner.constraints.clone();
+    constraints.unsupported = inner.unsupported.clone();
+    (constraints != Constraints::default()).then(|| Items {
+        keyword,
+        constraints: Box::new(constraints),
+    })
 }
 
 /// Whether a type list's shared `enum` and `const` allow null: without

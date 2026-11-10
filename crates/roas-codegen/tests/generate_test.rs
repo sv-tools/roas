@@ -735,13 +735,14 @@ fn validation_reports_what_it_cannot_check_and_types_can_opt_out() {
             _ => None,
         })
         .collect();
-    // An inline item constraint has no type to carry it.
-    assert!(
-        unvalidated.contains(&("maxLength", "/components/schemas/Pet/properties/tags/items")),
-        "{unvalidated:?}"
-    );
+    // An inline item's constraints are checked on each item.
+    assert!(unvalidated.is_empty(), "{unvalidated:?}");
     let code = &generation.files[0].contents;
     assert!(code.contains("impl Validate for Pet {"), "{code}");
+    assert!(
+        code.contains("for (i, item) in v.iter().enumerate()"),
+        "{code}"
+    );
     // Opted out: an implementation, so holders still compile, with no checks.
     assert!(
         code.contains("impl Validate for Quiet {\n    fn validate_into(&self, _pointer: &str, _report: &mut ValidationReport) {}"),
@@ -750,6 +751,121 @@ fn validation_reports_what_it_cannot_check_and_types_can_opt_out() {
     // Off by default: none of it.
     let plain = generate(&document(pet()), &rust_config("")).unwrap();
     assert!(!plain.files[0].contents.contains("Validate"));
+}
+
+#[test]
+fn a_pattern_is_translated_or_reported() {
+    let components = serde_json::json!({
+        "Pet": {"type": "object", "properties": {
+            "code": {"type": "string", "pattern": "^\\d+$"},
+            "look": {"type": "string", "pattern": "a(?=b)"}
+        }},
+        // Opted out: it reports nothing, so it is not warned about.
+        "Quiet": {"type": "string", "pattern": "\\bx"}
+    });
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml(
+            "validation = true\n[types.Quiet]\nvalidation = false\n",
+            Path::new("/"),
+        )
+        .unwrap()
+        .merge(target(language))
+        .build()
+        .unwrap();
+        let generation = generate(&document(components.clone()), &config).unwrap();
+        let unvalidated: Vec<_> = generation
+            .diagnostics
+            .iter()
+            .filter_map(|d| match &d.kind {
+                DiagnosticKind::Unvalidated { keyword } => {
+                    Some((keyword.as_str(), d.pointer.as_str(), d.message.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        // Only the one that cannot mean the same in both engines.
+        assert_eq!(unvalidated.len(), 1, "{unvalidated:?}");
+        assert_eq!(unvalidated[0].0, "pattern");
+        assert_eq!(
+            unvalidated[0].1,
+            "/components/schemas/Pet/properties/look/pattern"
+        );
+        assert!(unvalidated[0].2.contains("lookaround"), "{unvalidated:?}");
+        let code = &generation.files[0].contents;
+        // `\d` is ECMAScript's ASCII digit, spelled out for both engines.
+        assert!(code.contains("^[0-9]+$"), "{code}");
+        if language == Target::Rust {
+            assert!(
+                generation
+                    .dependencies
+                    .rust
+                    .iter()
+                    .any(|d| d.name == "regex"),
+                "{:?}",
+                generation.dependencies
+            );
+        } else {
+            assert!(code.contains("\"regexp\""), "{code}");
+        }
+    }
+    // No pattern checked, no regex engine.
+    let config = ConfigFile::from_toml("validation = true\n", Path::new("/"))
+        .unwrap()
+        .merge(target(Target::Rust))
+        .build()
+        .unwrap();
+    let generation = generate(&document(pet()), &config).unwrap();
+    assert!(
+        !generation
+            .dependencies
+            .rust
+            .iter()
+            .any(|d| d.name == "regex")
+    );
+    // Nor when the text only appears in a value or an unchecked pattern.
+    let components = serde_json::json!({
+        "Word": {"type": "string", "enum": ["regex::Regex::new(", "b"], "minLength": 1},
+        "Look": {"type": "string", "pattern": "regex::Regex(?=b)"}
+    });
+    let generation = generate(&document(components), &config).unwrap();
+    assert!(
+        !generation
+            .dependencies
+            .rust
+            .iter()
+            .any(|d| d.name == "regex")
+    );
+}
+
+#[test]
+fn a_property_names_pattern_is_warned_about_where_it_is_written() {
+    let components = serde_json::json!({
+        "Map": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"pattern": "a(?=b)"}},
+        "Obj": {"type": "object", "properties": {"a": {"type": "string"}}, "propertyNames": {"pattern": "a(?=b)"}},
+        "Fine": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"pattern": "^a"}}
+    });
+    let config = ConfigFile::from_toml("validation = true\n", Path::new("/"))
+        .unwrap()
+        .merge(target(Target::Rust))
+        .build()
+        .unwrap();
+    let generation = generate(&document(components), &config).unwrap();
+    let mut pointers: Vec<_> = generation
+        .diagnostics
+        .iter()
+        .filter(
+            |d| matches!(&d.kind, DiagnosticKind::Unvalidated { keyword } if keyword == "pattern"),
+        )
+        .map(|d| d.pointer.as_str())
+        .collect();
+    pointers.sort();
+    assert_eq!(
+        pointers,
+        [
+            "/components/schemas/Map/propertyNames/pattern",
+            "/components/schemas/Obj/propertyNames/pattern"
+        ]
+    );
 }
 
 #[test]
