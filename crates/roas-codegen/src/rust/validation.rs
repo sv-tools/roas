@@ -222,6 +222,33 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 "{r}.unevaluated({p}, {:?});",
                 format!("{}: not handled by the generator", keywords.join(", "))
             )),
+            Check::Each {
+                item,
+                presence,
+                value: list,
+            } => {
+                let at = At {
+                    v: "item",
+                    p: "&p",
+                    r,
+                };
+                let mut body = Vec::new();
+                let mut reads = render(presence, ValueKind::Other, at, &mut body);
+                reads |= value(item, list, at, &mut body);
+                if !body.is_empty() {
+                    let binding = if reads { "item" } else { "_" };
+                    let body = body.join(" ");
+                    out.push(if kind == ValueKind::Map {
+                        format!(
+                            "for (k, {binding}) in {v}.iter() {{ let p = child_pointer({p}, k); {body} }}"
+                        )
+                    } else {
+                        format!(
+                            "for (i, {binding}) in {v}.iter().enumerate() {{ let p = child_pointer({p}, &i.to_string()); {body} }}"
+                        )
+                    });
+                }
+            }
             Check::ItemsUnevaluated { keyword, reason } => out.push(format!(
                 "if !{v}.is_empty() {{ {r}.unevaluated({p}, {:?}); }}",
                 format!("{keyword} on the items: {reason}")
@@ -502,9 +529,12 @@ pub(crate) fn body(
                     &checks::extern_checks(ir, &TypeRef::Map(Box::new(ty.clone())), false)
                         .value
                         .into_iter()
-                        .chain(checks::inner_unchecked(&def.constraints))
+                        .chain(checks::each(
+                            &TypeRef::Map(Box::new(ty.clone())),
+                            &def.constraints,
+                        ))
                         .collect::<Vec<_>>(),
-                    ValueKind::Other,
+                    ValueKind::Map,
                     At {
                         v: &field,
                         p: "pointer",

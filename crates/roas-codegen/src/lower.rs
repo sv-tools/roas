@@ -199,26 +199,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// With validation on, constraints on an inline array item or map value
-    /// have no named type to carry them, so no check: say so.
-    fn inline_constraints(&mut self, slot: &Slot, lowered: &Lowered, position: &str) {
-        let Slot::Inline(schema) = slot else {
-            return;
-        };
-        if !self.config.validation || lowered.ty.direct_named().is_some() {
-            return;
-        }
-        for keyword in crate::checks::present_keywords(&schema.constraints) {
-            self.warn(
-                DiagnosticKind::Unvalidated {
-                    keyword: keyword.to_owned(),
-                },
-                &schema.id,
-                format!("`{keyword}` on inline {position} is not checked by generated validation yet; give the schema a name of its own to have it checked"),
-            );
-        }
-    }
-
     fn warn(&mut self, kind: DiagnosticKind, at: &SchemaId, message: String) {
         self.diagnose(Severity::Warning, kind, at, None, message);
     }
@@ -732,11 +712,7 @@ impl<'a> Lowerer<'a> {
                 let mut item_hint = hint.to_vec();
                 item_hint.push("item".to_owned());
                 let item = match items {
-                    Some(slot) => {
-                        let item = self.position(slot, &item_hint);
-                        self.inline_constraints(slot, &item, "items");
-                        item
-                    }
+                    Some(slot) => self.position(slot, &item_hint),
                     None => Lowered {
                         ty: TypeRef::Any,
                         nullable: false,
@@ -769,7 +745,6 @@ impl<'a> Lowerer<'a> {
                             let mut value_hint = hint.to_vec();
                             value_hint.push("value".to_owned());
                             let value = self.position(slot, &value_hint);
-                            self.inline_constraints(slot, &value, "additionalProperties");
                             TypeRef::Map(Box::new(wrap_nullable(value)))
                         }
                         FrontAdditional::Denied => return self.hoist_lowered(schema, hint),
@@ -983,7 +958,6 @@ impl<'a> Lowerer<'a> {
                 let mut hint = name.to_vec();
                 hint.push("value".to_owned());
                 let value = self.position(slot, &hint);
-                self.inline_constraints(slot, &value, "additionalProperties");
                 Additional::CatchAll(wrap_nullable(value))
             }
         };

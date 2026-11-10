@@ -303,6 +303,39 @@ fn render(
                 "{r}.unevaluated({p}, {})",
                 lit(&format!("{}: not handled by the generator", keywords.join(", ")))
             )),
+            Check::Each {
+                item,
+                presence,
+                value: list,
+            } => {
+                let at = At {
+                    e: "item",
+                    p: "p",
+                    r,
+                };
+                let mut body = Vec::new();
+                let mut reads = render(presence, (ValueKind::Other, None), at, &mut body, needs);
+                reads |= checked(item, list, at, &mut body, needs);
+                if !body.is_empty() {
+                    let body = body.join("; ");
+                    out.push(if kind == ValueKind::Map {
+                        needs.sorted = true;
+                        let item = if reads {
+                            format!("item := {e}[k]; ")
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "for _, k := range slices.Sorted(maps.Keys({e})) {{ {item}p := childPointer({p}, k); {body} }}"
+                        )
+                    } else {
+                        let binding = if reads { "item" } else { "_" };
+                        format!(
+                            "for i, {binding} := range {e} {{ p := childPointer({p}, fmt.Sprint(i)); {body} }}"
+                        )
+                    });
+                }
+            }
             Check::ItemsUnevaluated { keyword, reason } => out.push(format!(
                 "if len({e}) > 0 {{ {r}.unevaluated({p}, {}) }}",
                 lit(&format!("{keyword} on the items: {reason}"))
@@ -443,6 +476,35 @@ pub(crate) fn null_body(def: &TypeDef, name: &str, cx: &mut Context<'_>) -> Vec<
     out
 }
 
+/// The checks on a value of type `ty` at `at`, behind its pointer when it
+/// has one. True when they read the value.
+fn checked(
+    ty: &TypeRef,
+    list: &[Check],
+    at: At<'_>,
+    out: &mut Vec<String>,
+    needs: &mut Needs,
+) -> bool {
+    match ty {
+        TypeRef::Nullable(inner) | TypeRef::Boxed(inner) if !list.is_empty() => {
+            let deref = format!("(*{})", at.e);
+            let mut body = Vec::new();
+            render(
+                list,
+                (checks::kind_of(inner), item_of(inner)),
+                At { e: &deref, ..at },
+                &mut body,
+                needs,
+            );
+            if !body.is_empty() {
+                out.push(format!("if {} != nil {{ {} }}", at.e, body.join("; ")));
+            }
+            !body.is_empty()
+        }
+        _ => render(list, (checks::kind_of(ty), item_of(ty)), at, out, needs),
+    }
+}
+
 /// Checks then recursion on a value of type `ty` at `at`. True when the
 /// statements read the value.
 fn value(
@@ -452,32 +514,7 @@ fn value(
     out: &mut Vec<String>,
     cx: &mut Context<'_>,
 ) -> bool {
-    let reads = match ty {
-        // The checks apply to the value behind the pointer, when there is
-        // one.
-        TypeRef::Nullable(inner) | TypeRef::Boxed(inner) if !list.is_empty() => {
-            let deref = format!("(*{})", at.e);
-            let mut body = Vec::new();
-            render(
-                list,
-                (checks::kind_of(inner), item_of(inner)),
-                At { e: &deref, ..at },
-                &mut body,
-                &mut cx.needs,
-            );
-            if !body.is_empty() {
-                out.push(format!("if {} != nil {{ {} }}", at.e, body.join("; ")));
-            }
-            !body.is_empty()
-        }
-        _ => render(
-            list,
-            (checks::kind_of(ty), item_of(ty)),
-            at,
-            out,
-            &mut cx.needs,
-        ),
-    };
+    let reads = checked(ty, list, at, out, &mut cx.needs);
     let before = out.len();
     recurse(ty, at, 0, out, cx);
     reads || out.len() > before
@@ -678,9 +715,12 @@ pub(crate) fn body(
                     &(cx.extern_checks)(&TypeRef::Map(Box::new(ty.clone())))
                         .value
                         .into_iter()
-                        .chain(checks::inner_unchecked(&def.constraints))
+                        .chain(checks::each(
+                            &TypeRef::Map(Box::new(ty.clone())),
+                            &def.constraints,
+                        ))
                         .collect::<Vec<_>>(),
-                    (ValueKind::Other, None),
+                    (ValueKind::Map, None),
                     At { e: &map, ..own },
                     &mut out,
                     &mut cx.needs,

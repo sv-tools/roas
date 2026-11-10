@@ -735,13 +735,14 @@ fn validation_reports_what_it_cannot_check_and_types_can_opt_out() {
             _ => None,
         })
         .collect();
-    // An inline item constraint has no type to carry it.
-    assert!(
-        unvalidated.contains(&("maxLength", "/components/schemas/Pet/properties/tags/items")),
-        "{unvalidated:?}"
-    );
+    // An inline item's constraints are checked on each item.
+    assert!(unvalidated.is_empty(), "{unvalidated:?}");
     let code = &generation.files[0].contents;
     assert!(code.contains("impl Validate for Pet {"), "{code}");
+    assert!(
+        code.contains("for (i, item) in v.iter().enumerate()"),
+        "{code}"
+    );
     // Opted out: an implementation, so holders still compile, with no checks.
     assert!(
         code.contains("impl Validate for Quiet {\n    fn validate_into(&self, _pointer: &str, _report: &mut ValidationReport) {}"),

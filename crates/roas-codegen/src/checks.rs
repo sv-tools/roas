@@ -94,6 +94,13 @@ pub(crate) enum Check {
     /// Keywords the generator does not handle at all: whatever the value,
     /// it is reported as unevaluated.
     Unsupported(Vec<String>),
+    /// Checks on each item of an array or member value of a map: those
+    /// that apply to any value, `null` included, then the rest.
+    Each {
+        item: TypeRef,
+        presence: Vec<Check>,
+        value: Vec<Check>,
+    },
     /// What the items or members of a non-empty array or map declare that
     /// nothing checks on them.
     ItemsUnevaluated {
@@ -290,7 +297,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     _ => Unique::Unknown,
                 }));
             }
-            out.extend(inner_unchecked(c));
+            out.extend(each(ty, c));
         }
         ValueKind::Map => {
             out.extend(
@@ -310,7 +317,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                 });
             }
             out.extend(pattern_properties(c));
-            out.extend(inner_unchecked(c));
+            out.extend(each(ty, c));
         }
         // A substituted type is the user's: what applies to the value it
         // stands for is not checked on it.
@@ -354,12 +361,21 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
     out
 }
 
-/// What inline items or member values declare, unchecked: reported only
-/// when there is an item or a member to say it of.
-pub(crate) fn inner_unchecked(c: &Constraints) -> Option<Check> {
-    c.inner_unchecked.map(|keyword| Check::ItemsUnevaluated {
-        keyword,
-        reason: format!("constraints on inline `{keyword}` are not checked yet"),
+/// What an inline item or member-value schema constrains, checked on each
+/// item or member value of the array or map `ty`. A generated item type
+/// checks itself.
+pub(crate) fn each(ty: &TypeRef, c: &Constraints) -> Option<Check> {
+    let items = c.items.as_ref()?;
+    let item = match strip(ty) {
+        TypeRef::Array(item) | TypeRef::Map(item) => item.as_ref(),
+        _ => return None,
+    };
+    let presence = presence_checks(item, &items.constraints);
+    let value = value_checks(item, &items.constraints);
+    (!presence.is_empty() || !value.is_empty()).then(|| Check::Each {
+        item: item.clone(),
+        presence,
+        value,
     })
 }
 
@@ -730,7 +746,25 @@ pub(crate) fn flatten_fragile(ir: &crate::ir::Ir, ty: &TypeRef) -> bool {
 /// Whether decoding a branch proves nothing: it declares what neither its
 /// type nor a generated check enforces.
 pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {
-    branch.unchecked || !unchecked_keywords(&branch.ty, &branch.constraints).is_empty()
+    branch.unchecked || !unchecked_paths(&branch.ty, &branch.constraints).is_empty()
+}
+
+/// What `unchecked_keywords` finds at a position and, through inline items
+/// and member values, inside it: each with the pointer suffix of the
+/// schema that declares it.
+pub(crate) fn unchecked_paths(ty: &TypeRef, c: &Constraints) -> Vec<(String, &'static str)> {
+    let mut out: Vec<(String, &'static str)> = unchecked_keywords(ty, c)
+        .into_iter()
+        .map(|keyword| (String::new(), keyword))
+        .collect();
+    if let (Some(items), TypeRef::Array(item) | TypeRef::Map(item)) = (&c.items, strip(ty)) {
+        out.extend(
+            unchecked_paths(item, &items.constraints)
+                .into_iter()
+                .map(|(path, keyword)| (format!("/{}{path}", items.keyword), keyword)),
+        );
+    }
+    out
 }
 
 /// Whether an allOf part needs a finding of its own for what goes
@@ -836,6 +870,16 @@ pub(crate) fn diagnostics(
                     push_token(&mut pointer, &field.raw_name);
                     positions.push((pointer, &field.ty, &field.constraints));
                 }
+                // The catch-all's values are the other members.
+                if let (crate::ir::Additional::CatchAll(ty), Some(items)) =
+                    (&s.additional, &def.constraints.items)
+                {
+                    positions.push((
+                        format!("{}/{}", def.id.pointer, items.keyword),
+                        ty,
+                        &items.constraints,
+                    ));
+                }
             }
             TypeKind::Newtype(inner) => {
                 positions.push((def.id.pointer.clone(), inner, &def.constraints));
@@ -851,6 +895,20 @@ pub(crate) fn diagnostics(
                 }
             }
             _ => {}
+        }
+        // Inline items and member values, checked on each.
+        let mut i = 0;
+        while i < positions.len() {
+            let (pointer, ty, c) = positions[i].clone();
+            if let (Some(items), TypeRef::Array(item) | TypeRef::Map(item)) = (&c.items, strip(ty))
+            {
+                positions.push((
+                    format!("{pointer}/{}", items.keyword),
+                    item,
+                    &items.constraints,
+                ));
+            }
+            i += 1;
         }
         for (pointer, ty, c) in positions {
             for keyword in unchecked_keywords(ty, c) {
@@ -943,6 +1001,7 @@ fn declared_keywords(c: &Constraints) -> Vec<&'static str> {
     ]
     .into_iter()
     .filter_map(|(present, keyword)| present.then_some(keyword))
+    .chain(c.items.as_ref().map(|items| items.keyword))
     .collect()
 }
 
