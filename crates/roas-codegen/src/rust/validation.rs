@@ -116,7 +116,14 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 let violation = format!(
                     "{r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v}))"
                 );
+                // A `float` equal to the bound is ambiguous: literals on
+                // either side of the bound decode to it. (A `double` is
+                // decided as far as an f64 holds it.)
+                let inexact = matches!(width, FloatWidth::Float);
                 match float_bound(*bound, width) {
+                    Ok(rounded) if inexact => out.push(format!(
+                        "if {value} == {rounded} {{ {r}.unevaluated({p}, \"{keyword} {literal}: the value rounds to the same float as the bound\"); }} else if !({value} {op} {rounded}) {{ {violation}; }}"
+                    )),
                     Ok(bound) => out.push(format!(
                         "if !({value} {op} {bound}) {{ {violation}; }}"
                     )),
@@ -269,18 +276,43 @@ pub(crate) fn body(
         p: "pointer",
         r: "report",
     };
+    // A holder's own `const` constrains the whole value, null included,
+    // whatever its branches say.
+    if matches!(
+        def.kind,
+        TypeKind::UnionTagged(_) | TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_)
+    ) {
+        render(
+            &checks::unenforced(&def.constraints),
+            ValueKind::Other,
+            report,
+            &mut out,
+        );
+    }
     match &def.kind {
         TypeKind::Struct(s) => {
             let mut present = Vec::new();
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
-                let list = checks::checks(&field.ty, &field.constraints);
+                let list = checks::value_checks(&field.ty, &field.constraints);
                 let recurse = generated(&field.ty);
                 present.push(if field.required {
                     "1".to_owned()
                 } else {
                     format!("usize::from(self.{name}.is_some())")
                 });
+                // What applies to a present null as much as to a value.
+                let mut always = Vec::new();
+                render(
+                    &checks::presence_checks(&field.ty, &field.constraints),
+                    ValueKind::Other,
+                    At {
+                        v: "v",
+                        p: "&p",
+                        r: "report",
+                    },
+                    &mut always,
+                );
                 let mut inner = Vec::new();
                 let reads = value(
                     &field.ty,
@@ -293,13 +325,20 @@ pub(crate) fn body(
                     &mut inner,
                 );
                 // Every check may have been decided away.
-                if inner.is_empty() && !recurse {
+                if inner.is_empty() && !recurse && always.is_empty() {
                     continue;
                 }
                 let mut block = vec![format!(
                     "let p = child_pointer(pointer, {:?});",
                     field.raw_name
                 )];
+                if !always.is_empty() {
+                    block.push(if field.required {
+                        always.join(" ")
+                    } else {
+                        format!("if self.{name}.is_some() {{ {} }}", always.join(" "))
+                    });
+                }
                 if !inner.is_empty() {
                     let binding = if reads { "v" } else { "_" };
                     let pattern = match (field.required, field.nullable) {
@@ -495,7 +534,13 @@ pub(crate) fn body(
             }
         }
         TypeKind::Newtype(inner) | TypeKind::Alias(inner) => {
-            let list = checks::checks(inner, &def.constraints);
+            render(
+                &checks::presence_checks(inner, &def.constraints),
+                ValueKind::Other,
+                report,
+                &mut out,
+            );
+            let list = checks::value_checks(inner, &def.constraints);
             let _ = value(
                 inner,
                 &list,

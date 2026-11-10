@@ -187,9 +187,12 @@ fn render(
                     // The bound as float32 rounds it, exactly as Rust does;
                     // left to Go's constant conversion a midpoint could
                     // round the other way.
+                    // A float32 equal to the bound is ambiguous: literals
+                    // on either side of the bound decode to it.
+                    let rounded = *bound as f32;
                     out.push(format!(
-                        "if !({value} {op} {:?}) {{ {violation} }}",
-                        *bound as f32
+                        "if {value} == {rounded:?} {{ {r}.unevaluated({p}, {}) }} else if !({value} {op} {rounded:?}) {{ {violation} }}",
+                        lit(&format!("{keyword} {literal}: the value rounds to the same float as the bound"))
                     ));
                 } else {
                     let wide = format!("float64({e})");
@@ -428,18 +431,49 @@ pub(crate) fn body(
         p: "pointer",
         r: "r",
     };
+    // A holder's own `const` constrains the whole value, null included,
+    // whatever its branches say.
+    if matches!(
+        def.kind,
+        TypeKind::UnionTagged(_) | TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_)
+    ) {
+        render(
+            &checks::unenforced(&def.constraints),
+            (ValueKind::Other, None),
+            own,
+            &mut out,
+            &mut cx.needs,
+        );
+    }
     match &def.kind {
         TypeKind::Struct(s) => {
             let mut members = Vec::new();
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
-                let list = checks::checks(&field.ty, &field.constraints);
+                let list = checks::value_checks(&field.ty, &field.constraints);
                 let in_nullable = field_view.ty.starts_with("Nullable[");
-                members.push(match (field.required, in_nullable) {
-                    (true, _) => "members++".to_owned(),
-                    (false, true) => format!("if v.{name}.Set {{ members++ }}"),
-                    (false, false) => format!("if v.{name} != nil {{ members++ }}"),
+                let presence = match (field.required, in_nullable) {
+                    (true, _) => None,
+                    (false, true) => Some(format!("v.{name}.Set")),
+                    (false, false) => Some(format!("v.{name} != nil")),
+                };
+                members.push(match &presence {
+                    None => "members++".to_owned(),
+                    Some(test) => format!("if {test} {{ members++ }}"),
                 });
+                // What applies to a present null as much as to a value.
+                let mut always = Vec::new();
+                render(
+                    &checks::presence_checks(&field.ty, &field.constraints),
+                    (ValueKind::Other, None),
+                    At {
+                        e: "x",
+                        p: "p",
+                        r: "r",
+                    },
+                    &mut always,
+                    &mut cx.needs,
+                );
                 let inner_ty = match &field.ty {
                     TypeRef::Boxed(inner) => inner.as_ref(),
                     other => other,
@@ -456,13 +490,23 @@ pub(crate) fn body(
                     &mut body,
                     cx,
                 );
-                if body.is_empty() {
+                if body.is_empty() && always.is_empty() {
                     continue;
                 }
                 let mut block = vec![format!(
                     "p := childPointer(pointer, {})",
                     field_view.literal
                 )];
+                if !always.is_empty() {
+                    block.push(match &presence {
+                        None => always.join("; "),
+                        Some(test) => format!("if {test} {{ {} }}", always.join("; ")),
+                    });
+                }
+                if body.is_empty() {
+                    out.push(format!("{{ {} }}", block.join("; ")));
+                    continue;
+                }
                 // Bound only when read; Go refuses an unused variable.
                 let bind = |access: &str| {
                     if reads {
@@ -633,7 +677,14 @@ pub(crate) fn body(
         TypeKind::Newtype(inner) | TypeKind::Alias(inner) => {
             // A defined type does not inherit its underlying type's
             // methods: recursion goes through a conversion.
-            let list = checks::checks(inner, &def.constraints);
+            render(
+                &checks::presence_checks(inner, &def.constraints),
+                (ValueKind::Other, None),
+                own,
+                &mut out,
+                &mut cx.needs,
+            );
+            let list = checks::value_checks(inner, &def.constraints);
             render(
                 &list,
                 (checks::kind_of(inner), item_of(inner)),

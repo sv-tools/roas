@@ -291,6 +291,13 @@ impl<'a> Lowerer<'a> {
         let mut own = siblings.clone();
         own.id.pointer = crate::diagnostic::synthetic(&own.id.pointer, "siblings");
         let projection = self.position(&Slot::Inline(Box::new(own)), &sibling_hint);
+        // Null is one of the intersection's values only when both sides
+        // allow it; a side without a `type` says nothing about null.
+        let nullable = nullable && admits_null(siblings);
+        let target_ty = wrap_nullable(Lowered {
+            ty: TypeRef::Named(target_id),
+            nullable: self.component_nullable(target),
+        });
         self.warn(
             DiagnosticKind::OpenComposition { keyword: "$ref".to_owned() },
             id,
@@ -305,13 +312,17 @@ impl<'a> Lowerer<'a> {
             title: siblings.title.clone(),
             description: siblings.description.clone(),
             deprecated: siblings.deprecated,
-            nullable: nullable || siblings.nullable,
-            constraints: siblings.constraints.clone(),
+            nullable,
+            // The sibling branch reports what goes unchecked, once.
+            constraints: crate::front::Constraints {
+                unenforced: Vec::new(),
+                ..siblings.constraints.clone()
+            },
             extensions: siblings.extensions.clone(),
             kind: TypeKind::ComposedOpen(vec![
                 Branch {
                     suggested_name: target_hint,
-                    ty: TypeRef::Named(target_id),
+                    ty: target_ty,
                     constraints: Default::default(),
                     object_only: false,
                     unchecked: false,
@@ -319,7 +330,7 @@ impl<'a> Lowerer<'a> {
                 Branch {
                     suggested_name: sibling_hint,
                     constraints: branch_constraints(&projection.ty, &siblings.constraints),
-                    ty: projection.ty,
+                    ty: wrap_nullable(projection),
                     object_only: false,
                     unchecked: schema_unchecked(siblings),
                 },
@@ -328,7 +339,7 @@ impl<'a> Lowerer<'a> {
         });
         Lowered {
             ty: TypeRef::Named(id.clone()),
-            nullable: nullable || siblings.nullable,
+            nullable,
         }
     }
 
@@ -382,10 +393,9 @@ impl<'a> Lowerer<'a> {
                 Some(Slot::Ref {
                     target, siblings, ..
                 }) => {
-                    if let Some(siblings) = siblings
-                        && siblings.nullable
-                    {
-                        return true;
+                    // An intersection: null only when both sides allow it.
+                    if siblings.as_ref().is_some_and(|s| !admits_null(s)) {
+                        return false;
                     }
                     current = target;
                 }
@@ -1332,6 +1342,15 @@ fn branch_constraints(
     } else {
         constraints.clone()
     }
+}
+
+/// Whether `$ref` siblings allow null: they say so, or say no `type`.
+fn admits_null(siblings: &FrontSchema) -> bool {
+    siblings.nullable
+        || matches!(
+            &siblings.kind,
+            Kind::Any | Kind::Object { typeless: true, .. }
+        )
 }
 
 fn wrap_nullable(lowered: Lowered) -> TypeRef {

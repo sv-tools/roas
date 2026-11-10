@@ -495,7 +495,7 @@ impl Translator<'_> {
             .collect();
         let raw = serde_json::to_value(multi).unwrap_or(Value::Null);
         let object = raw.as_object().cloned().unwrap_or_default();
-        let read = |schema_type: &SchemaType, restrict: bool| -> Option<FrontSchema> {
+        let read = |schema_type: &SchemaType, restrict: bool| -> Member {
             let mut map = serde_json::Map::new();
             let applicable = keywords_for(schema_type);
             for (key, value) in &object {
@@ -509,10 +509,31 @@ impl Translator<'_> {
                 {
                     continue;
                 }
-                map.insert(key.clone(), value.clone());
+                // The values the list shares among its members: each
+                // member keeps those of its own type. An `enum` or `const`
+                // with none admits no value of this type.
+                let value = match (key.as_str(), value) {
+                    ("enum", Value::Array(values)) => {
+                        let own: Vec<Value> = values
+                            .iter()
+                            .filter(|v| fits(schema_type, v))
+                            .cloned()
+                            .collect();
+                        if own.is_empty() {
+                            return Member::Nothing;
+                        }
+                        Value::Array(own)
+                    }
+                    ("const", v) if !fits(schema_type, v) => return Member::Nothing,
+                    ("default", v) if !fits(schema_type, v) => continue,
+                    _ => value.clone(),
+                };
+                map.insert(key.clone(), value);
             }
             map.insert("type".to_owned(), Value::String(schema_type.to_string()));
-            let schema: Schema = serde_json::from_value(Value::Object(map)).ok()?;
+            let Ok(schema) = serde_json::from_value::<Schema>(Value::Object(map)) else {
+                return Member::Unread;
+            };
             // Several members are several schemas, each with an identity of
             // its own; a lone member is the schema itself.
             let at = if restrict {
@@ -525,15 +546,33 @@ impl Translator<'_> {
             if let Kind::Object { typeless, .. } = &mut member.kind {
                 *typeless = false;
             }
-            Some(member)
+            Member::Read(member)
         };
         let mut front = match members.as_slice() {
             [] => self.leaf(pointer.clone(), Kind::Null),
-            [one] => read(one, false).unwrap_or_else(|| self.leaf(pointer.clone(), Kind::Any)),
+            [one] => match read(one, false) {
+                Member::Read(member) => member,
+                Member::Nothing => self.leaf(pointer.clone(), Kind::Never),
+                // Not lost without a word: the schema is reported as
+                // one the generator does not handle.
+                Member::Unread => {
+                    let mut front = self.leaf(pointer.clone(), Kind::Any);
+                    front.unsupported.push("type".to_owned());
+                    front
+                }
+            },
             many => {
+                let mut unread = false;
                 let branches = many
                     .iter()
-                    .filter_map(|t| read(t, true))
+                    .filter_map(|t| match read(t, true) {
+                        Member::Read(member) => Some(member),
+                        Member::Nothing => None,
+                        Member::Unread => {
+                            unread = true;
+                            None
+                        }
+                    })
                     .map(|schema| Slot::Inline(Box::new(schema)))
                     .collect();
                 let mut front = self.leaf(pointer.clone(), Kind::TypeUnion { branches });
@@ -550,6 +589,9 @@ impl Translator<'_> {
                     })
                     .cloned()
                     .collect();
+                if unread {
+                    front.unsupported.push("type".to_owned());
+                }
                 front.title = multi.title.clone();
                 front.description = multi.description.clone();
                 front.deprecated = multi.deprecated.unwrap_or(false);
@@ -788,6 +830,31 @@ impl Translator<'_> {
 
 /// Split the model's catch-all into `x-` extensions, kept, and every
 /// other keyword, returned for reporting.
+/// A member of a type list, read as a schema of its own.
+enum Member {
+    Read(FrontSchema),
+    /// Its `enum` or `const` admits no value of its type.
+    Nothing,
+    /// Its keywords do not make a schema of its type.
+    Unread,
+}
+
+/// Whether `value` is an instance of `schema_type`.
+fn fits(schema_type: &SchemaType, value: &Value) -> bool {
+    match schema_type {
+        SchemaType::String => value.is_string(),
+        SchemaType::Number => value.is_number(),
+        SchemaType::Integer => {
+            value.is_i64() || value.is_u64() || value.as_f64().is_some_and(|f| f.fract() == 0.0)
+        }
+        SchemaType::Object => value.is_object(),
+        SchemaType::Array => value.is_array(),
+        SchemaType::Boolean => value.is_boolean(),
+        SchemaType::Null => value.is_null(),
+        SchemaType::Custom(_) => true,
+    }
+}
+
 fn catch_all_keywords(
     extensions: &Option<BTreeMap<String, Value>>,
     keep: &mut BTreeMap<String, Value>,

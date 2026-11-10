@@ -584,7 +584,15 @@ fn validated_description() -> serde_json::Value {
             "Pins": {"type": "object", "properties": {
                 "n": {"type": "integer", "enum": [1, 2]},
                 "k": {"type": "boolean", "const": true}
-            }}
+            }},
+            "EnumO": {"type": ["string", "integer"], "enum": ["ab", 5]},
+            "Def": {"type": ["integer", "string"], "default": "x", "minimum": 1},
+            "EnumN": {"type": ["string", "null"], "enum": ["ab", "cde", null], "maxLength": 2},
+            "F32X": {"type": "number", "format": "float", "exclusiveMaximum": 1},
+            "HolderC": {"anyOf": [{"type": "string"}, {"type": "integer"}], "const": "only"},
+            "NullC": {"type": "object", "properties": {"n": {"type": ["integer", "null"], "const": 3}}},
+            "HoldsBoth": {"type": "object", "properties": {"b": {"$ref": "#/components/schemas/Both"}}},
+            "NullSib": {"$ref": "#/components/schemas/MaybeText", "type": ["string", "null"]}
         }}
     })
 }
@@ -678,8 +686,8 @@ fn main() {
     // Enum members still meet the other string constraints.
     assert_eq!(report::<Letters>(r#""a""#), vec![]);
     assert_eq!(report::<Letters>(r#""abcd""#), vec![v("")]);
-    // A float compared at its own width: 0.1 is its own maximum.
-    assert_eq!(report::<Fine>(r#"{"f":0.1}"#), vec![]);
+    // A float equal to its bound may have come from either side of it.
+    assert_eq!(report::<Fine>(r#"{"f":0.1}"#), vec![u("/f")]);
     assert_eq!(report::<Fine>(r#"{"f":0.2}"#), vec![v("/f")]);
     // A null in an open holder is one of its values, and matches no branch.
     assert_eq!(report::<Fine>(r#"{"choice":null}"#), vec![v("/choice")]);
@@ -729,6 +737,21 @@ fn main() {
     assert_eq!(report::<Ni>("3"), vec![u("")]);
     assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![u("/n")]);
     assert_eq!(report::<Pins>(r#"{"k":false}"#), vec![u("/k")]);
+    // A type list's enum and default are split among its members.
+    assert_eq!(report::<EnumO>(r#""ab""#), vec![]);
+    assert_eq!(report::<EnumO>("5"), vec![u("")]);
+    assert_eq!(report::<Def>("5"), vec![]);
+    assert_eq!(report::<Def>("0"), vec![v("")]);
+    assert_eq!(report::<EnumN>(r#""cde""#), vec![v("")]);
+    assert_eq!(report::<F32X>("0.99999999"), vec![u("")]);
+    assert_eq!(report::<F32X>("0.5"), vec![]);
+    // A holder's own const, and a const on a present null.
+    assert_eq!(report::<HolderC>(r#""wrong""#), vec![u("")]);
+    assert_eq!(report::<NullC>(r#"{"n":null}"#), vec![u("/n")]);
+    // An intersection's null is checked behind a field, and allowed when
+    // both sides allow it.
+    assert!(report::<HoldsBoth>(r#"{"b":null}"#).contains(&v("/b")));
+    assert_eq!(report::<NullSib>("null"), vec![]);
     println!("validation behaves");
 }
 "##;
@@ -865,7 +888,7 @@ func main() {
 	check(`5`, report[api.Inline](`5`))
 	check(`"a"`, report[api.Letters](`"a"`))
 	check(`"abcd"`, report[api.Letters](`"abcd"`), v(""))
-	check(`{"f":0.1}`, report[api.Fine](`{"f":0.1}`))
+	check(`{"f":0.1}`, report[api.Fine](`{"f":0.1}`), u("/f"))
 	check(`{"f":0.2}`, report[api.Fine](`{"f":0.2}`), v("/f"))
 	check(`{"choice":null}`, report[api.Fine](`{"choice":null}`), v("/choice"))
 	check(`{"abcd":1}`, report[api.Named](`{"abcd":1}`), u(""))
@@ -898,6 +921,19 @@ func main() {
 	check(`3`, report[api.Ni](`3`), u(""))
 	check(`{"n":3}`, report[api.Pins](`{"n":3}`), u("/n"))
 	check(`{"k":false}`, report[api.Pins](`{"k":false}`), u("/k"))
+	check(`"ab"`, report[api.EnumO](`"ab"`))
+	check(`5`, report[api.EnumO](`5`), u(""))
+	check(`5`, report[api.Def](`5`))
+	check(`0`, report[api.Def](`0`), v(""))
+	check(`"cde"`, report[api.EnumN](`"cde"`), v(""))
+	check(`0.99999999`, report[api.F32X](`0.99999999`), u(""))
+	check(`0.5`, report[api.F32X](`0.5`))
+	check(`"wrong"`, report[api.HolderC](`"wrong"`), u(""))
+	check(`{"n":null}`, report[api.NullC](`{"n":null}`), u("/n"))
+	if got := report[api.HoldsBoth](`{"b":null}`); len(got) == 0 || got[0] != v("/b") {
+		panic(fmt.Sprintf("null intersection field: got %v", got))
+	}
+	check(`null`, report[api.NullSib](`null`))
 	fmt.Println("validation behaves")
 }
 "##;

@@ -134,13 +134,25 @@ pub(crate) fn validates(
 
 /// The checks `constraints` put on a value of type `ty`.
 pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
+    let mut out = presence_checks(ty, constraints);
+    out.extend(value_checks(ty, constraints));
+    out
+}
+
+/// The checks that apply to whatever value is present, `null` included.
+pub(crate) fn presence_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
+    // A named type checks what it was hoisted with itself.
+    if ty.direct_named().is_some() {
+        return Vec::new();
+    }
+    unenforced(constraints)
+}
+
+/// The checks that apply to a non-null value of type `ty`.
+pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
     let c = constraints;
     let kind = kind_of(ty);
     let mut out = Vec::new();
-    // A named type checks what it was hoisted with itself.
-    if ty.direct_named().is_none() {
-        out.extend(unenforced(c));
-    }
     match kind {
         ValueKind::String => {
             out.extend(c.min_length.filter(|n| *n > 0).map(Check::MinLength));
@@ -310,7 +322,7 @@ pub(crate) fn part_unsure(branch: &crate::ir::Branch) -> bool {
 
 /// What the constraints declare that nothing checks yet: a decoded value
 /// is never taken to satisfy it.
-fn unenforced(c: &Constraints) -> Vec<Check> {
+pub(crate) fn unenforced(c: &Constraints) -> Vec<Check> {
     c.unenforced
         .iter()
         .map(|&keyword| Check::Unevaluated {
