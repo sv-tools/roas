@@ -511,9 +511,15 @@ impl<'a> Lowerer<'a> {
             Kind::Array { items } => items.iter().collect(),
             Kind::Object {
                 properties,
+                required,
                 additional,
                 ..
             } => {
+                // Which members must be present, or may not, is the
+                // object's own assertion.
+                if !required.is_empty() || matches!(additional, FrontAdditional::Denied) {
+                    return true;
+                }
                 let mut out: Vec<&Slot> = properties.values().collect();
                 if let FrontAdditional::Schema(slot) = additional {
                     out.push(slot);

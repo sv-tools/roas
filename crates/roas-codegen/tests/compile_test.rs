@@ -663,6 +663,12 @@ fn validated_description() -> serde_json::Value {
             "Currency": {"type": "string", "enum": ["USD", "EUR"]},
             "HoldsCurrency": {"type": "object", "properties": {"c": {"$ref": "#/components/schemas/Currency"}}},
             "Point": {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}}},
+            "Mixed": {"type": ["string", "integer"], "enum": ["a", 1]},
+            "Strict": {"type": "object", "required": ["a"]},
+            "HoldsMixed": {"type": "object", "properties": {
+                "m": {"$ref": "#/components/schemas/Mixed"},
+                "s": {"$ref": "#/components/schemas/Strict"}
+            }},
             "HoldsPoint": {"type": "object", "properties": {"s": {"$ref": "#/components/schemas/Point"}}},
             "Gated": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string", "maxLength": 1}}},
             "NullType": {"type": ["null"], "if": {}, "then": false},
@@ -712,7 +718,9 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "AliasSub": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Currency": {"rust": {"name": "String"}, "go": {"name": "string"}},
-            "Point": {"rust": {"name": "serde_json::Value"}, "go": {"name": "any"}}
+            "Point": {"rust": {"name": "serde_json::Value"}, "go": {"name": "any"}},
+            "Mixed": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
+            "Strict": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}}
         }
     }))
     .unwrap();
@@ -953,6 +961,7 @@ fn main() {
     assert_eq!(report::<NullType>("null"), vec![u("")]);
     // A substituted object is not checked against what its members declare.
     assert_eq!(report::<HoldsPoint>(r#"{"s":{"n":-1}}"#), vec![u("/s")]);
+    assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
     // An opted-out type nested in a branch proves no match.
     assert_eq!(report::<PickWrap>(r#"{"s":"ab"}"#), vec![u("")]);
     // A substituted reference keeps what its target declares.
@@ -1194,6 +1203,7 @@ func main() {
 	check(`{"c":"BAD"}`, report[api.HoldsCurrency](`{"c":"BAD"}`), u("/c"))
 	check(`null`, report[api.NullType](`null`), u(""))
 	check(`{"s":"ab"}`, report[api.PickWrap](`{"s":"ab"}`), u(""))
+	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
 	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))
 	check(`{"v":null}`, report[api.HoldsNIfAlias](`{"v":null}`), u("/v"))
 	fmt.Println("validation behaves")
