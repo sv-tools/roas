@@ -548,6 +548,7 @@ impl<'a> Lowerer<'a> {
                             enum_values: Some(_),
                             ..
                         } | Kind::Never
+                            | Kind::Not
                     )
                     || self.asserts_inside(inner, seen)
             }

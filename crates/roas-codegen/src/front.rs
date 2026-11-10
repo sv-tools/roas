@@ -438,8 +438,15 @@ impl Translator<'_> {
         };
         // A branch says the type only when it also leaves null out as the
         // schema does.
-        let nullable = |v: &Value| v.get("nullable") == Some(&Value::Bool(true));
-        let outer_nullable = raw.get("nullable") == Some(&Value::Bool(true));
+        // `nullable` in 3.0, `x-nullable` in 2.0.
+        let nullable = |v: &Value| {
+            ["nullable", "x-nullable"]
+                .iter()
+                .any(|k| v.get(k) == Some(&Value::Bool(true)))
+        };
+        let outer_nullable = ["nullable", "x-nullable"]
+            .iter()
+            .any(|k| raw.get(*k) == Some(&Value::Bool(true)));
         let typed = |branch: &Value| {
             let mut current = branch;
             for _ in 0..16 {

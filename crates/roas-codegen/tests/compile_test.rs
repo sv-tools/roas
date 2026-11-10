@@ -664,6 +664,8 @@ fn validated_description() -> serde_json::Value {
             "HoldsCurrency": {"type": "object", "properties": {"c": {"$ref": "#/components/schemas/Currency"}}},
             "Point": {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}}},
             "Sub2": {"type": "object", "properties": {"x": false}},
+            "Sub3": {"type": "object", "properties": {"p": {"not": {}}}},
+            "HoldsSub3": {"type": "object", "properties": {"s3": {"$ref": "#/components/schemas/Sub3"}}},
             "HoldsSub2": {"type": "object", "properties": {"s2": {"$ref": "#/components/schemas/Sub2"}}},
             "Mixed": {"type": ["string", "integer"], "enum": ["a", 1]},
             "Strict": {"type": "object", "required": ["a"]},
@@ -730,6 +732,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
             "Currency": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Point": {"rust": {"name": "serde_json::Value"}, "go": {"name": "any"}},
             "Sub2": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
+            "Sub3": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
             "Mixed": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
             "Strict": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}}
         }
@@ -973,6 +976,7 @@ fn main() {
     // A substituted object is not checked against what its members declare.
     assert_eq!(report::<HoldsPoint>(r#"{"s":{"n":-1}}"#), vec![u("/s")]);
     assert_eq!(report::<HoldsSub2>(r#"{"s2":{"x":1}}"#), vec![u("/s2")]);
+    assert_eq!(report::<HoldsSub3>(r#"{"s3":{"p":1}}"#), vec![u("/s3")]);
     // A field compiled out is neither read nor counted.
     assert_eq!(report::<GatedField>(r#"{"b":"x"}"#), vec![]);
     // A null-only reference keeps what it says.
@@ -1227,6 +1231,7 @@ func main() {
 	check(`{}`, report[api.HoldsNullOnly](`{}`))
 	check(`9223372036854775808`, report[api.IntOrNum](`9223372036854775808`), u(""))
 	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
+	check(`{"s3":{"p":1}}`, report[api.HoldsSub3](`{"s3":{"p":1}}`), u("/s3"))
 	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
 	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))
 	check(`{"v":null}`, report[api.HoldsNIfAlias](`{"v":null}`), u("/v"))
