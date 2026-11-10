@@ -574,7 +574,7 @@ pub(crate) fn body(
                 let (body, reads) = branch(b, "branch", cx);
                 // Decoding proves a match only when nothing the branch says
                 // goes unchecked.
-                let counter = if b.unchecked || (cx.loops)(&b.ty) {
+                let counter = if checks::unsure(b) || (cx.loops)(&b.ty) {
                     "uncertain"
                 } else {
                     "certain"
@@ -596,16 +596,15 @@ pub(crate) fn body(
             }
         }
         TypeKind::ComposedOpen(branches) => {
-            if def.nullable {
-                out.push("if v.raw.Kind() == 'n' { return }".to_owned());
-            }
+            // An intersection is nullable when any side is, so null is left
+            // to every part to accept.
             for (b, branch_view) in branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let message = lit(&format!(
                     "does not satisfy the allOf part read by {accessor}"
                 ));
                 let (mut body, reads) = branch(b, "r", cx);
-                if b.unchecked || (cx.loops)(&b.ty) {
+                if checks::part_unsure(b) || (cx.loops)(&b.ty) {
                     body.push(format!(
                         "r.unevaluated(pointer, {})",
                         lit(&format!(

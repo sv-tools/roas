@@ -421,7 +421,7 @@ pub(crate) fn body(
                 let (body, reads) = branch(b, &progressing, ("branch", "&mut branch"));
                 // Decoding proves a match only when nothing the branch says
                 // goes unchecked.
-                let sure = !b.unchecked && (!generated(&b.ty) || progressing(&b.ty));
+                let sure = !checks::unsure(b) && (!generated(&b.ty) || progressing(&b.ty));
                 let counter = if sure { "certain" } else { "uncertain" };
                 counts_certain |= sure;
                 if body.is_empty() {
@@ -456,9 +456,8 @@ pub(crate) fn body(
             }
         }
         TypeKind::ComposedOpen(branches) => {
-            if def.nullable {
-                out.push(NULL_IS_VALID.to_owned());
-            }
+            // An intersection is nullable when any side is, so null is left
+            // to every part to accept.
             for (b, branch_view) in branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let message = format!(
@@ -466,7 +465,7 @@ pub(crate) fn body(
                     accessor.trim_start_matches("as_")
                 );
                 let (mut body, reads) = branch(b, &progressing, ("report", "report"));
-                if b.unchecked || (generated(&b.ty) && !progressing(&b.ty)) {
+                if checks::part_unsure(b) || (generated(&b.ty) && !progressing(&b.ty)) {
                     body.push(format!(
                         "report.unevaluated(pointer, {:?});",
                         format!(

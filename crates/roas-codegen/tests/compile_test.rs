@@ -12,6 +12,8 @@
 //! Set `ROAS_CODEGEN_SKIP_COMPILE=1` to skip both where no toolchain or
 //! registry is available.
 
+#![recursion_limit = "256"]
+
 use roas::validation::{IGNORE_UNUSED, Options};
 use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
 use std::path::Path;
@@ -569,7 +571,20 @@ fn validated_description() -> serde_json::Value {
             "OrNull": {"type": ["string", "integer", "null"], "maxLength": 1},
             "Base": {"type": "object", "properties": {"q": {"type": "string"}}},
             "Extended": {"$ref": "#/components/schemas/Base", "properties": {"z": {"type": "string", "maxLength": 1}}},
-            "Tiny": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "maximum": 3.5e38}}}
+            "Tiny": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "maximum": 3.5e38}}},
+            "One": {"type": "integer", "enum": [1]},
+            "Two": {"type": "integer", "enum": [2]},
+            "PicksRef": {"oneOf": [{"$ref": "#/components/schemas/One"}, {"$ref": "#/components/schemas/Two"}]},
+            "Old": {"type": "object", "properties": {"name": {"type": "string", "deprecated": true, "minLength": 1}}},
+            "MaybeText": {"type": ["string", "null"]},
+            "Both": {"$ref": "#/components/schemas/MaybeText", "type": "string"},
+            "Sib": {"$ref": "#/components/schemas/Short", "minLength": 2},
+            "SibC": {"$ref": "#/components/schemas/Short", "const": "zz"},
+            "Ni": {"type": "integer", "enum": [1, 2]},
+            "Pins": {"type": "object", "properties": {
+                "n": {"type": "integer", "enum": [1, 2]},
+                "k": {"type": "boolean", "const": true}
+            }}
         }}
     })
 }
@@ -700,6 +715,20 @@ fn main() {
     // past every f32 but not every f64, still catches it.
     assert_eq!(report::<Tiny>(r#"{"f":1e39}"#), vec![v("/f")]);
     assert_eq!(report::<Tiny>(r#"{"f":1.5}"#), vec![]);
+    // A referenced numeric enum is unchecked too: no certain double match.
+    assert_eq!(report::<PicksRef>("1"), vec![u("")]);
+    // A deprecated field is still checked, without a warning.
+    assert_eq!(report::<Old>(r#"{"name":""}"#), vec![v("/name")]);
+    // An intersection allows null only when every side does.
+    assert_eq!(report::<Both>(r#""a""#), vec![]);
+    assert!(report::<Both>("null").contains(&v("")));
+    // `$ref` siblings nothing checks prove no match.
+    assert_eq!(report::<Sib>(r#""a""#), vec![u("")]);
+    assert_eq!(report::<SibC>(r#""a""#), vec![u("")]);
+    // A numeric enum or a const is never taken as satisfied.
+    assert_eq!(report::<Ni>("3"), vec![u("")]);
+    assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![u("/n")]);
+    assert_eq!(report::<Pins>(r#"{"k":false}"#), vec![u("/k")]);
     println!("validation behaves");
 }
 "##;
@@ -858,6 +887,17 @@ func main() {
 	check(`"ab"`, report[api.OrNull](`"ab"`), v(""))
 	check(`{"q":"a","z":"b"}`, report[api.Extended](`{"q":"a","z":"b"}`))
 	check(`{"q":"a","z":"bc"}`, report[api.Extended](`{"q":"a","z":"bc"}`), v("/z"))
+	check(`1`, report[api.PicksRef](`1`), u(""))
+	check(`{"name":""}`, report[api.Old](`{"name":""}`), v("/name"))
+	check(`"a"`, report[api.Both](`"a"`))
+	if got := report[api.Both](`null`); len(got) == 0 || got[0] != v("") {
+		panic(fmt.Sprintf("null intersection: got %v", got))
+	}
+	check(`"a"`, report[api.Sib](`"a"`), u(""))
+	check(`"a"`, report[api.SibC](`"a"`), u(""))
+	check(`3`, report[api.Ni](`3`), u(""))
+	check(`{"n":3}`, report[api.Pins](`{"n":3}`), u("/n"))
+	check(`{"k":false}`, report[api.Pins](`{"k":false}`), u("/k"))
 	fmt.Println("validation behaves")
 }
 "##;

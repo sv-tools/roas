@@ -97,6 +97,9 @@ pub(crate) struct Constraints {
     pub property_names: bool,
     /// `patternProperties` patterns, in declaration order.
     pub pattern_properties: Vec<String>,
+    /// Keywords neither the type nor a generated check enforces: a numeric
+    /// `enum` and a `const` the type does not pin.
+    pub unenforced: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +368,29 @@ impl Translator<'_> {
     }
 
     fn schema(&self, schema: &Schema, pointer: String) -> FrontSchema {
+        let mut front = self.schema_kind(schema, pointer);
+        let numeric_enum = matches!(
+            &front.kind,
+            Kind::Integer {
+                enum_values: Some(_),
+                ..
+            } | Kind::Number {
+                enum_values: Some(_),
+                ..
+            }
+        );
+        for (present, keyword) in [
+            (numeric_enum, "enum"),
+            (front.const_value.is_some(), "const"),
+        ] {
+            if present && !front.constraints.unenforced.contains(&keyword) {
+                front.constraints.unenforced.push(keyword);
+            }
+        }
+        front
+    }
+
+    fn schema_kind(&self, schema: &Schema, pointer: String) -> FrontSchema {
         match schema {
             Schema::Bool(true) | Schema::Empty(_) => self.leaf(pointer, Kind::Any),
             Schema::Bool(false) => self.leaf(pointer, Kind::Never),

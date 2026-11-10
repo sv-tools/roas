@@ -321,7 +321,7 @@ impl<'a> Lowerer<'a> {
                     constraints: branch_constraints(&projection.ty, &siblings.constraints),
                     ty: projection.ty,
                     object_only: false,
-                    unchecked: false,
+                    unchecked: schema_unchecked(siblings),
                 },
             ]),
             has_error: false,
@@ -333,6 +333,40 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Whether a component permits `null`, following bare references.
+    /// Whether a branch declares what nothing enforces, so decoding it
+    /// proves no match. A reference is followed: the component's own type
+    /// does not enforce a numeric `enum` or a `const` either.
+    fn slot_unchecked(&self, slot: &Slot) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut current = slot;
+        loop {
+            let schema = match current {
+                Slot::Inline(schema) => schema,
+                Slot::Ref {
+                    target: RefTarget::Component(name),
+                    siblings,
+                    ..
+                } => {
+                    if siblings.as_ref().is_some_and(|s| schema_unchecked(s)) {
+                        return true;
+                    }
+                    if !seen.insert(name.clone()) {
+                        return false;
+                    }
+                    match self.front.components.get(name) {
+                        Some(next) => {
+                            current = next;
+                            continue;
+                        }
+                        None => return false,
+                    }
+                }
+                Slot::Ref { .. } => return false,
+            };
+            return schema_unchecked(schema);
+        }
+    }
+
     fn component_nullable(&self, target: &RefTarget) -> bool {
         let mut seen = BTreeSet::new();
         let mut current = target;
@@ -712,7 +746,7 @@ impl<'a> Lowerer<'a> {
                 Branch {
                     suggested_name,
                     constraints: slot_constraints(slot, &ty),
-                    unchecked: slot_unchecked(slot),
+                    unchecked: self.slot_unchecked(slot),
                     ty,
                     object_only: false,
                 }
@@ -735,7 +769,7 @@ impl<'a> Lowerer<'a> {
                 Branch {
                     suggested_name: hint,
                     constraints: slot_constraints(slot, &ty),
-                    unchecked: slot_unchecked(slot),
+                    unchecked: self.slot_unchecked(slot),
                     ty,
                     object_only: false,
                 }
@@ -1264,12 +1298,8 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-/// Whether an inline branch declares what nothing enforces, so decoding it
-/// proves no match.
-fn slot_unchecked(slot: &Slot) -> bool {
-    let Slot::Inline(schema) = slot else {
-        return false;
-    };
+/// A schema saying what neither its type nor a generated check enforces.
+fn schema_unchecked(schema: &FrontSchema) -> bool {
     let numeric_enum = matches!(
         &schema.kind,
         Kind::Integer {

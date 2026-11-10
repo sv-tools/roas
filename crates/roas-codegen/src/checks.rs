@@ -137,6 +137,10 @@ pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
     let c = constraints;
     let kind = kind_of(ty);
     let mut out = Vec::new();
+    // A named type checks what it was hoisted with itself.
+    if ty.direct_named().is_none() {
+        out.extend(unenforced(c));
+    }
     match kind {
         ValueKind::String => {
             out.extend(c.min_length.filter(|n| *n > 0).map(Check::MinLength));
@@ -267,7 +271,7 @@ pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
 
 /// The constraints on an object's own members, for a generated struct.
 pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
-    let mut out = Vec::new();
+    let mut out = unenforced(constraints);
     out.extend(
         constraints
             .min_properties
@@ -287,6 +291,36 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
         });
     }
     out
+}
+
+/// Whether decoding a branch proves nothing: it declares what neither its
+/// type nor a generated check enforces.
+pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {
+    branch.unchecked || !unchecked_keywords(&branch.ty, &branch.constraints).is_empty()
+}
+
+/// Whether an allOf part needs a finding of its own for what goes
+/// unchecked: its own checks already report one where they can.
+pub(crate) fn part_unsure(branch: &crate::ir::Branch) -> bool {
+    unsure(branch)
+        && !checks(&branch.ty, &branch.constraints)
+            .iter()
+            .any(|c| matches!(c, Check::Unevaluated { .. }))
+}
+
+/// What the constraints declare that nothing checks yet: a decoded value
+/// is never taken to satisfy it.
+fn unenforced(c: &Constraints) -> Vec<Check> {
+    c.unenforced
+        .iter()
+        .map(|&keyword| Check::Unevaluated {
+            keyword,
+            reason: match keyword {
+                "enum" => "numeric enums are not checked yet".into(),
+                _ => format!("`{keyword}` is not checked yet"),
+            },
+        })
+        .collect()
 }
 
 /// Whether the constraints say anything a check above does not cover for
@@ -431,6 +465,7 @@ pub(crate) fn present_keywords(c: &Constraints) -> Vec<&'static str> {
     ]
     .into_iter()
     .filter_map(|(present, keyword)| present.then_some(keyword))
+    .chain(c.unenforced.iter().copied())
     .collect()
 }
 
@@ -460,7 +495,15 @@ fn parse_decimal(n: &Number) -> Option<Decimal> {
         None => (false, text),
     };
     let (mantissa, exponent) = match text.split_once(['e', 'E']) {
-        Some((m, e)) => (m.to_owned(), e.trim_start_matches('+').parse::<i64>().ok()?),
+        // An exponent past `i64` saturates: the bound is past every value
+        // either way, never zero.
+        Some((m, e)) => (
+            m.to_owned(),
+            e.trim_start_matches('+')
+                .parse::<i128>()
+                .ok()?
+                .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+        ),
         None => (text, 0),
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((&mantissa, ""));
@@ -614,6 +657,7 @@ mod tests {
     #[test]
     fn exact_literals_are_read_as_written() {
         assert_eq!(int_lower(&n("1e9223372036854775807"), false), SATURATE);
+        assert_eq!(int_lower(&n("1e9223372036854775808"), false), SATURATE);
         assert_eq!(int_upper(&n("-1e9223372036854775807"), false), -SATURATE);
         assert_eq!(int_upper(&n("9007199254740993.5"), false), 9007199254740993);
         let divisor = match &checks(

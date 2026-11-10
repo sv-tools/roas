@@ -1,5 +1,7 @@
 
-{% block validate %}impl Validate for {{ t.name }} {
+{% block validate %}// A deprecated field is still checked.
+#[allow(deprecated)]
+impl Validate for {{ t.name }} {
     fn validate_into(&self, {% if t.validate %}pointer{% else %}_pointer{% endif %}: &str, {% if t.validate %}report{% else %}_report{% endif %}: &mut ValidationReport) {
 {% for line in t.validate %}        {{ line }}
 {% endfor %}    }
