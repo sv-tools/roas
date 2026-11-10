@@ -177,18 +177,19 @@ jobs:
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
-      - name: Upload coverage reports to Codecov
+      # Not sent to Codecov from here: every upload makes Codecov
+      # recompute its statuses from the reports it has so far, so a
+      # matrix of uploads shows each component red until the last row
+      # lands. The `Coverage` job below sends all of them at once.
+      - name: Store coverage and test reports
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          report_type: test_results
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          name: coverage-test-${{ strategy.job-index }}
+          path: |
+            coverage.lcov
+            target/nextest/default/junit.xml
+          retention-days: 1
   CrossFeatureTestJob:
     name: Test cross-feature code
     # The matrix above is one row per feature, so code that compiles
@@ -211,18 +212,15 @@ jobs:
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
-      - name: Upload coverage reports to Codecov
+      - name: Store coverage and test reports
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          report_type: test_results
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          name: coverage-cross-${{ matrix.package }}
+          path: |
+            coverage.lcov
+            target/nextest/default/junit.xml
+          retention-days: 1
   GoBackendJob:
     name: Test the Go backend
     # The Go tests skip themselves without a toolchain, so a runner that
@@ -246,6 +244,51 @@ jobs:
           cargo nextest run --package roas-codegen --all-features --no-fail-fast \
             -E 'binary(go_test) | test(go) | test(gofmt)'
           cargo nextest run --package roas-cli --all-features --no-fail-fast -E 'test(go)'
+  Coverage:
+    name: Publish coverage to Codecov
+    # One upload for the whole run, once every coverage-producing job
+    # is done, so Codecov computes each status a single time from the
+    # complete report. Runs after a test failure too, as the per-job
+    # uploads used to. Deliberately not part of `AllChecks`: the
+    # Codecov statuses are informational.
+    needs: [TestJob, CrossFeatureTestJob]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      # Codecov resolves the report paths against the repository tree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # One directory per artifact, so same-named reports from
+          # different jobs don't overwrite each other.
+          pattern: coverage-*
+          path: coverage-reports
+      - name: List the reports
+        id: reports
+        run: |
+          set -euo pipefail
+          mkdir -p coverage-reports
+          list() { find coverage-reports -type f -name "$1" | sort | paste -sd, -; }
+          echo "lcov=$(list coverage.lcov)" >> "$GITHUB_OUTPUT"
+          echo "junit=$(list junit.xml)" >> "$GITHUB_OUTPUT"
+          find coverage-reports -type f | sort
+      - name: Upload coverage reports to Codecov
+        if: ${{ steps.reports.outputs.lcov != '' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: ${{ steps.reports.outputs.lcov }}
+          disable_search: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload test results to Codecov
+        if: ${{ steps.reports.outputs.junit != '' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          report_type: test_results
+          files: ${{ steps.reports.outputs.junit }}
+          disable_search: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
   Tests:
     name: Wait for testing jobs to finish
     needs: [TestJob, CrossFeatureTestJob, GoBackendJob]
