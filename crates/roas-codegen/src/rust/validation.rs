@@ -637,7 +637,7 @@ pub(crate) fn body(
                     checked = true;
                     let binding = if reads { "v" } else { "_" };
                     lines.push(format!(
-                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = report.nested(); {} if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}{beyond}",
+                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = report.nested(); {} report.resume(pointer, &branch); if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}{beyond}",
                         body.join(" ")
                     ));
                 }
@@ -735,11 +735,17 @@ pub(crate) fn body(
         }
         TypeKind::Extern => {}
     }
-    // A raw holder decodes each projection afresh: its depth is bounded
-    // here, through the report.
-    if matches!(def.kind, TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_)) && !out.is_empty() {
+    // Every generated type counts its depth, and a raw holder its branches:
+    // a raw holder decodes each projection afresh, so nothing else bounds
+    // a recursive value, and nested unions would multiply the work.
+    if !out.is_empty() {
+        let branches = match &def.kind {
+            TypeKind::UnionOpen(u) => u.branches.len(),
+            TypeKind::ComposedOpen(b) => b.len(),
+            _ => 0,
+        };
         let mut wrapped = vec![
-            "if !report.enter(pointer) { return; }".to_owned(),
+            format!("if !report.enter(pointer, {branches}) {{ return; }}"),
             "let run = |report: &mut ValidationReport| {".to_owned(),
         ];
         wrapped.extend(out);

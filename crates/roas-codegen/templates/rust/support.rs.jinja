@@ -220,9 +220,14 @@ fn wide_number(raw: &str, int_limit: f64, float32: bool) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationReport {
     pub findings: Vec<Finding>,
-    /// How many raw holders deep the walk is: each decodes afresh, so
-    /// nothing else bounds a recursive value.
+    /// How many generated types deep the walk is: a raw holder decodes
+    /// afresh, so nothing else bounds a recursive value.
     depth: usize,
+    /// Branches tried so far, against a budget: nested unions would
+    /// otherwise multiply the work.
+    spent: usize,
+    /// The budget ran out: the rest went unchecked, and was reported so.
+    stopped: bool,
 }
 
 /// One finding, at an RFC 6901 JSON Pointer into the value.
@@ -256,18 +261,39 @@ impl ValidationReport {
         self.findings.iter().filter(|f| f.kind == FindingKind::Unevaluated)
     }
 
-    /// A report for one branch, as deep as this one.
+    /// A report for one branch, as deep and as spent as this one.
     #[allow(dead_code)]
     fn nested(&self) -> Self {
-        Self { findings: Vec::new(), depth: self.depth }
+        Self { findings: Vec::new(), depth: self.depth, spent: self.spent, stopped: self.stopped }
     }
 
-    /// Steps into a raw holder; past the limit, the rest is reported
-    /// unevaluated instead of walked.
+    /// Takes back what a branch spent; a branch that ran out stops this
+    /// report too, and says so here.
     #[allow(dead_code)]
-    fn enter(&mut self, pointer: &str) -> bool {
-        if self.depth >= 128 {
+    fn resume(&mut self, pointer: &str, branch: &Self) {
+        self.spent = branch.spent;
+        if branch.stopped && !self.stopped {
+            self.stopped = true;
+            self.unevaluated(pointer, "too many branches to validate");
+        }
+    }
+
+    /// Steps into a generated type (`branches` it is about to try); past
+    /// the depth limit or the budget, the rest is reported unevaluated
+    /// instead of walked.
+    #[allow(dead_code)]
+    fn enter(&mut self, pointer: &str, branches: usize) -> bool {
+        if self.stopped {
+            return false;
+        }
+        if self.depth >= 256 {
             self.unevaluated(pointer, "nested too deep to validate");
+            return false;
+        }
+        self.spent += branches;
+        if self.spent > 100_000 {
+            self.stopped = true;
+            self.unevaluated(pointer, "too many branches to validate");
             return false;
         }
         self.depth += 1;

@@ -681,6 +681,15 @@ fn validated_description() -> serde_json::Value {
             "AllGated": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1}}},
             "IntOrNum": {"oneOf": [{"type": "integer"}, {"type": "number"}]},
             "DeepNode": {"anyOf": [{"type": "array", "items": {"$ref": "#/components/schemas/DeepNode"}}, {"type": "string"}]},
+            "ChainH": {"oneOf": [{"$ref": "#/components/schemas/ChainS"}, {"type": "string"}]},
+            "ChainS": {"type": "object", "additionalProperties": false, "properties": {
+                "s": {"$ref": "#/components/schemas/ChainS"},
+                "h": {"$ref": "#/components/schemas/ChainH"},
+                "n": {"type": "integer", "minimum": 0}
+            }},
+            "Twice": {"anyOf": [{"$ref": "#/components/schemas/TwiceP"}, {"$ref": "#/components/schemas/TwiceQ"}]},
+            "TwiceP": {"type": "object", "properties": {"h": {"$ref": "#/components/schemas/Twice"}}},
+            "TwiceQ": {"type": "object", "properties": {"h": {"$ref": "#/components/schemas/Twice"}}},
             "EnumOrObj": {"oneOf": [{"type": "string", "enum": ["a"]}, {"type": "object"}]},
             "EmptyEnum": {"type": "string", "enum": [], "minLength": 1},
             "IntOrStr": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
@@ -1000,6 +1009,21 @@ fn main() {
     let deep = format!("{}\"x\"{}", "[".repeat(12_000), "]".repeat(12_000));
     let node: DeepNode = serde_json::from_str(&deep).expect("decodes");
     assert!(node.validate().unchecked().next().is_some());
+    // So is a chain of structs between holders, each decoded afresh.
+    let mut chain = String::new();
+    for _ in 0..130 {
+        chain.push_str(&r#"{"s":"#.repeat(120));
+        chain.push_str(r#"{"h":"#);
+    }
+    chain.push_str("\"x\"");
+    chain.push_str(&"}".repeat(130 * 121));
+    let h: ChainH = serde_json::from_str(&chain).expect("decodes");
+    assert!(h.validate().unchecked().next().is_some());
+    // Branches that each lead back to the holder: the work is bounded.
+    let twice = format!("{}{{}}{}", r#"{"h":"#.repeat(40), "}".repeat(40));
+    let started = std::time::Instant::now();
+    assert!(report::<Twice>(&twice).iter().any(|f| f.1 == FindingKind::Unevaluated));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
     // A string enum branch reads a JSON string only.
     assert_eq!(report::<EnumOrObj>(r#"{"a":null}"#), vec![]);
     assert_eq!(report::<EnumOrObj>(r#""a""#), vec![]);
@@ -1260,6 +1284,10 @@ func main() {
 		panic("a deep recursive holder passed unwalked")
 	}
 	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
+	twice := strings.Repeat(`{"h":`, 40) + `{}` + strings.Repeat("}", 40)
+	if got := report[api.Twice](twice); len(got) == 0 {
+		panic("doubling branches passed unchecked")
+	}
 	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
 	check(`{"s3":{"p":1}}`, report[api.HoldsSub3](`{"s3":{"p":1}}`), u("/s3"))
 	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
