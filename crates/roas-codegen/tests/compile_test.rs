@@ -578,6 +578,8 @@ fn validated_description() -> serde_json::Value {
                 "additionalProperties": {"type": "string"}},
             "NamesLook": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"pattern": "a(?=b)"}},
             "NamesEnum": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"enum": ["a"]}},
+            "NamesGated": {"type": "object", "additionalProperties": false, "propertyNames": {"maxLength": 1},
+                "properties": {"ab": {"type": "string"}, "c": {"type": "string"}}},
             "NamesTrue": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": true},
             "EachList": {"type": "array", "items": {"type": "string", "maxLength": 1}},
             "Rest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "number", "maximum": 5}},
@@ -808,7 +810,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -973,6 +975,8 @@ fn main() {
     assert_eq!(report::<NamesLook>(r#"{"a":1}"#), vec![u("/a")]);
     assert_eq!(report::<NamesEnum>(r#"{"a":1}"#), vec![u("")]);
     assert_eq!(report::<NamesTrue>(r#"{"a":1}"#), vec![]);
+    // The only failing name compiled out: nothing left to report.
+    assert_eq!(report::<NamesGated>(r#"{"c":"x"}"#), vec![]);
     // Bounds beyond every value, and the one multiple of 2^63 an i64 holds.
     assert_eq!(report::<Edge>(r#"{"big":"x","wide":1.5,"many":[1],"m":-9223372036854775808}"#), vec![]);
     assert_eq!(report::<Edge>(r#"{"m":0}"#), vec![]);
@@ -1394,6 +1398,7 @@ func main() {
 	check(`{"a":1}`, report[api.NamesLook](`{"a":1}`), u("/a"))
 	check(`{"a":1}`, report[api.NamesEnum](`{"a":1}`), u(""))
 	check(`{"a":1}`, report[api.NamesTrue](`{"a":1}`))
+	check(`{"ab":"x"}`, report[api.NamesGated](`{"ab":"x"}`), v("/ab"))
 	check(`edge`, report[api.Edge](`{"big":"x","wide":1.5,"many":[1],"m":-9223372036854775808}`))
 	check(`{"m":0}`, report[api.Edge](`{"m":0}`))
 	check(`{"m":5}`, report[api.Edge](`{"m":5}`), v("/m"))
