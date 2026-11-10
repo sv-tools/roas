@@ -2310,3 +2310,37 @@ fn visit_step(
     ordered.push(index[step.step_id.as_str()]);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HttpResponse;
+    use serde_json::json;
+
+    #[test]
+    fn a_lazy_run_indexes_each_source_once() {
+        let description: Description = serde_json::from_value(json!({
+            "arazzo": "1.1.0", "info": { "title": "T", "version": "1" },
+            "sourceDescriptions": [{ "name": "api", "url": "https://x.test/api.json", "type": "openapi" }],
+            "workflows": [{ "workflowId": "w", "steps": [
+                { "stepId": "a", "operationId": "list" },
+                { "stepId": "b", "operationId": "$sourceDescriptions.api.list" },
+                { "stepId": "c", "operationId": "list" }] }]
+        }))
+        .unwrap();
+        let options = Options::new().source(
+            "api",
+            "https://x.test/api.json",
+            json!({ "openapi": "3.1.0", "servers": [{ "url": "https://x.test" }],
+                "paths": { "/items": { "get": { "operationId": "list" } } } }),
+        );
+        let mut run = Run::start(&description, &options).unwrap();
+        for _ in 0..3 {
+            assert!(matches!(run.advance().unwrap(), Progress::Send(_)));
+            run.supply(HttpResponse::json(200, &json!([]))).unwrap();
+        }
+        assert!(matches!(run.advance().unwrap(), Progress::Done(_)));
+        let resolver = run.resolvers[0].as_ref().expect("the entry's resolver");
+        assert_eq!(resolver.builds, 1);
+    }
+}
