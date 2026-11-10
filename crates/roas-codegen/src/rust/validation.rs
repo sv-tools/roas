@@ -530,11 +530,12 @@ pub(crate) fn body(
                 }
             }
         }
-        TypeKind::StringEnum(_) => {
+        TypeKind::StringEnum(values) => {
             // Membership is the decoder's; the other string constraints
-            // apply to the member's wire value.
+            // apply to the member's wire value. An enum of no members has
+            // no value to check.
             let list = checks::checks(&TypeRef::String, &def.constraints);
-            if !list.is_empty() {
+            if !list.is_empty() && !values.is_empty() {
                 let mut inner = Vec::new();
                 let reads = render(
                     &list,

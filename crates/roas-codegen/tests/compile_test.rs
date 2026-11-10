@@ -680,6 +680,7 @@ fn validated_description() -> serde_json::Value {
             }},
             "AllGated": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1}}},
             "IntOrNum": {"oneOf": [{"type": "integer"}, {"type": "number"}]},
+            "EmptyEnum": {"type": "string", "enum": [], "minLength": 1},
             "IntOrStr": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
             "AllInt": {"allOf": [{"type": "integer"}, {"minimum": 0}]},
             "ArrOrStr": {"oneOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "string"}]},
