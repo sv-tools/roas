@@ -1038,3 +1038,35 @@ fn keywords_a_3_0_model_drops_go_unmentioned_without_validation() {
         generation.diagnostics
     );
 }
+
+#[test]
+fn items_beside_prefix_items_is_reported_not_applied() {
+    let g = generate(
+        &document(serde_json::json!({
+            "Short": {"type": "string", "maxLength": 2},
+            "Pr": {"type": "array", "prefixItems": [{"type": "integer"}], "items": {"$ref": "#/components/schemas/Short"}}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    let warned = |keyword: &str| {
+        g.diagnostics.iter().any(|d| {
+            matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword: k } if k == keyword)
+                && d.pointer.starts_with("/components/schemas/Pr")
+        })
+    };
+    assert!(
+        warned("prefixItems") && warned("items"),
+        "{:?}",
+        g.diagnostics
+    );
+    let text = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("pub struct Pr(pub Vec<serde_json::Value>);"),
+        "{text}"
+    );
+}
