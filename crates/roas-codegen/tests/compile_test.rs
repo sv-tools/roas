@@ -582,7 +582,7 @@ fn validated_description() -> serde_json::Value {
                 "properties": {"ab": {"type": "string"}, "c": {"type": "string"}}},
             "NamesTrue": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": true},
             "EachList": {"type": "array", "items": {"type": "string", "maxLength": 1}},
-            "Rest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "number", "maximum": 5}},
+            "Rest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "integer", "maximum": 5}},
             "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
             "Choice": {"oneOf": [{"$ref": "#/components/schemas/Short"}, {"$ref": "#/components/schemas/Owner"}]},
             "Numeric": {"type": ["integer", "number"]},
@@ -810,7 +810,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -1173,12 +1173,20 @@ fn main() {
     // Pattern members are not judged by `additionalProperties`.
     assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![u("")]);
     assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![u("")]);
-    // Rust cannot read an integer inside a flattened catch-all: undecided,
-    // not a miss.
-    assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![u("")]);
+    // Integers, raw holders and tagged unions decode inside a catch-all.
+    assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![]);
+    let caught: IntCatch = serde_json::from_str(r#"{"aa":"x","b":7,"c":1.0}"#).unwrap();
+    assert_eq!(caught.a.as_deref(), Some("x"));
+    assert_eq!(serde_json::to_string(&caught).unwrap(), r#"{"a":"x","b":7,"c":1}"#);
+    assert!(serde_json::from_str::<IntCatch>(r#"{"b":1.5}"#).is_err());
+    assert!(serde_json::from_str::<IntCatch>(r#"{"a":"x","a":"y"}"#).is_err());
+    assert!(serde_json::from_str::<IntCatch>("[]").is_err());
+    let zoo: Zoo = serde_json::from_str(r#"{"title":"t","a":{"kind":"ZooCat"},"b":{"kind":"ZooDog"}}"#).unwrap();
+    assert_eq!(zoo.additional_properties.len(), 2);
+    assert!(serde_json::from_str::<Zoo>(r#"{"a":{"kind":"Cow"}}"#).is_err());
     // A surrogate escape serde_json will not read as a string: undecided.
     assert_eq!(report::<IntOrStr>(r#""\ud800""#), vec![u("")]);
-    assert_eq!(report::<ZooOrStr>(r#"{"a":{"kind":"ZooCat"}}"#), vec![u("")]);
+    assert_eq!(report::<ZooOrStr>(r#"{"a":{"kind":"ZooCat"}}"#), vec![]);
     // A substitution that fails to decode proves no mismatch.
     assert_eq!(report::<Ip>(r#""x""#), vec![u("")]);
     // Schemas named like the decoding helpers keep their names.
