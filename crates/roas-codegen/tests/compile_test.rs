@@ -560,6 +560,21 @@ fn validated_description() -> serde_json::Value {
             "Coded": {"type": "string", "enum": ["ab", "x1"], "pattern": "^[a-z]+$"},
             "Either": {"oneOf": [{"type": "string", "pattern": "^a"}, {"type": "string", "pattern": "z$"}]},
             "Code": {"type": "string", "pattern": "^[A-Z]{2}$"},
+            "Each": {"type": "object", "properties": {
+                "grid": {"type": "array", "items": {"type": "array", "maxItems": 2, "items": {"type": "integer", "minimum": 0}}},
+                "scores": {"type": "object", "additionalProperties": {"type": "number", "maximum": 1}},
+                "maybe": {"type": "array", "items": {"type": ["string", "null"], "minLength": 2}},
+                "codes": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+$"}},
+                "odd": {"type": "array", "items": {"type": "string", "x-foo": 1, "if": {"type": "string"}, "then": true}}
+            }},
+            "Pf": {"type": "object", "properties": {"p": {"type": "array", "prefixItems": [{"type": "string"}], "items": {"type": "string", "maxLength": 1}}}},
+            "Pu": {"oneOf": [
+                {"type": "array", "prefixItems": [{"type": "string"}], "items": {"type": "string", "maxLength": 1}},
+                {"type": "array", "items": {"type": "integer"}}
+            ]},
+            "GatedRest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "string", "maxLength": 1}},
+            "EachList": {"type": "array", "items": {"type": "string", "maxLength": 1}},
+            "Rest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "number", "maximum": 5}},
             "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
             "Choice": {"oneOf": [{"$ref": "#/components/schemas/Short"}, {"$ref": "#/components/schemas/Owner"}]},
             "Numeric": {"type": ["integer", "number"]},
@@ -787,7 +802,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -883,6 +898,21 @@ fn main() {
         assert_eq!(report::<Patterned>(json), want, "{json}");
     }
     assert_eq!(report::<Code>(r#""AB""#), vec![]);
+    // Inline items and member values are checked one by one.
+    assert_eq!(report::<Each>(r#"{"grid":[[0,1],[2]]}"#), vec![]);
+    assert_eq!(report::<Each>(r#"{"grid":[[0,-1],[1,2,3]]}"#), vec![v("/grid/0/1"), v("/grid/1")]);
+    assert_eq!(report::<Each>(r#"{"scores":{"a":0.5,"b":2}}"#), vec![v("/scores/b")]);
+    assert_eq!(report::<Each>(r#"{"maybe":[null,"ab","a"]}"#), vec![v("/maybe/2")]);
+    assert_eq!(report::<Each>(r#"{"codes":["ab","A1"]}"#), vec![v("/codes/1")]);
+    assert_eq!(report::<Each>(r#"{"odd":[]}"#), vec![]);
+    assert_eq!(report::<Each>(r#"{"odd":["x","y"]}"#), vec![u("/odd/0"), u("/odd/1")]);
+    assert_eq!(report::<EachList>(r#"["a","bc"]"#), vec![v("/1")]);
+    // A gated property lands among the other members: not checked as one.
+    assert_eq!(report::<GatedRest>(r#"{"a":"xyz"}"#), vec![u("")]);
+    // Beside `prefixItems`, `items` is not applied to the prefix.
+    assert_eq!(report::<Pf>(r#"{"p":["abc"]}"#), vec![u("/p")]);
+    assert_eq!(report::<Pu>(r#"["abc"]"#), vec![u("")]);
+    assert_eq!(report::<Rest>(r#"{"a":"x","b":3,"c":9}"#), vec![v("/c")]);
     assert_eq!(report::<Code>(r#""ABC""#), vec![v("")]);
     assert_eq!(report::<Coded>(r#""ab""#), vec![]);
     assert_eq!(report::<Coded>(r#""x1""#), vec![v("")]);
@@ -997,9 +1027,10 @@ fn main() {
     assert_eq!(report::<NoNullList>(r#""a""#), vec![]);
     assert_eq!(report::<NoNull>(r#""a""#), vec![]);
     assert_eq!(report::<PartNull>("null"), vec![u("")]);
-    // Constraints on inline items prove no branch.
-    assert_eq!(report::<Items>("[1]"), vec![u("")]);
-    assert_eq!(report::<StrItems>(r#"["a"]"#), vec![u("")]);
+    // Constraints on inline items decide a branch.
+    assert_eq!(report::<Items>("[1]"), vec![]);
+    assert_eq!(report::<Items>("[5]"), vec![v("")]);
+    assert_eq!(report::<StrItems>(r#"["a"]"#), vec![]);
     // Member patterns are not checked yet, and say so.
     assert_eq!(report::<PatMap>(r#"{"a":"x"}"#), vec![u("")]);
     // A type list left with only its null.
@@ -1007,7 +1038,7 @@ fn main() {
     // A present null reaches a JSON-value wrapper.
     assert_eq!(report::<HoldsScalar>(r#"{"n":null}"#), vec![u("/n")]);
     // What a branch's members leave unchecked proves no match.
-    assert_eq!(report::<PickK>(r#"{"k":[1]}"#), vec![u("")]);
+    assert_eq!(report::<PickK>(r#"{"k":[1]}"#), vec![]);
     assert_eq!(report::<PickC>(r#"{"k":["x"]}"#), vec![u("")]);
     // A type-list member is never dropped.
     assert_eq!(report::<FmtList>("5"), vec![]);
@@ -1133,7 +1164,7 @@ fn main() {
     // Schemas named like the decoding helpers keep their names.
     let _: ObjectOnly = serde_json::from_str(r#"{"s":"a"}"#).unwrap();
     assert_eq!(report::<InlineItems>("[]"), vec![]);
-    assert_eq!(report::<InlineItems>(r#"["a"]"#), vec![u("")]);
+    assert_eq!(report::<InlineItems>(r#"["a","bc","d"]"#), vec![v("/0"), v("/2")]);
     // A string enum branch reads a JSON string only.
     assert_eq!(report::<EnumOrObj>(r#"{"a":null}"#), vec![]);
     assert_eq!(report::<EnumOrObj>(r#""a""#), vec![]);
@@ -1304,6 +1335,17 @@ func main() {
 		check(c.js, report[api.Patterned](c.js), c.want...)
 	}
 	check(`"AB"`, report[api.Code](`"AB"`))
+	check(`{"grid":[[0,1],[2]]}`, report[api.Each](`{"grid":[[0,1],[2]]}`))
+	check(`{"grid":[[0,-1],[1,2,3]]}`, report[api.Each](`{"grid":[[0,-1],[1,2,3]]}`), v("/grid/0/1"), v("/grid/1"))
+	check(`{"scores":{"a":0.5,"b":2}}`, report[api.Each](`{"scores":{"a":0.5,"b":2}}`), v("/scores/b"))
+	check(`{"maybe":[null,"ab","a"]}`, report[api.Each](`{"maybe":[null,"ab","a"]}`), v("/maybe/2"))
+	check(`{"codes":["ab","A1"]}`, report[api.Each](`{"codes":["ab","A1"]}`), v("/codes/1"))
+	check(`{"odd":[]}`, report[api.Each](`{"odd":[]}`))
+	check(`{"odd":["x","y"]}`, report[api.Each](`{"odd":["x","y"]}`), u("/odd/0"), u("/odd/1"))
+	check(`["a","bc"]`, report[api.EachList](`["a","bc"]`), v("/1"))
+	check(`{"p":["abc"]}`, report[api.Pf](`{"p":["abc"]}`), u("/p"))
+	check(`["abc"]`, report[api.Pu](`["abc"]`), u(""))
+	check(`{"a":"x","b":3,"c":9}`, report[api.Rest](`{"a":"x","b":3,"c":9}`), v("/c"))
 	check(`"ABC"`, report[api.Code](`"ABC"`), v(""))
 	check(`"ab"`, report[api.Coded](`"ab"`))
 	check(`"x1"`, report[api.Coded](`"x1"`), v(""))
@@ -1377,12 +1419,13 @@ func main() {
 	check(`"a"`, report[api.NoNull](`"a"`))
 	check(`null`, report[api.NoNull](`null`), v(""))
 	check(`null`, report[api.PartNull](`null`), u(""))
-	check(`[1]`, report[api.Items](`[1]`), u(""))
-	check(`["a"]`, report[api.StrItems](`["a"]`), u(""))
+	check(`[1]`, report[api.Items](`[1]`))
+	check(`[5]`, report[api.Items](`[5]`), v(""))
+	check(`["a"]`, report[api.StrItems](`["a"]`))
 	check(`{"a":"x"}`, report[api.PatMap](`{"a":"x"}`), u(""))
 	check(`null`, report[api.NullOnly](`null`))
 	check(`{"n":null}`, report[api.HoldsScalar](`{"n":null}`), u("/n"))
-	check(`{"k":[1]}`, report[api.PickK](`{"k":[1]}`), u(""))
+	check(`{"k":[1]}`, report[api.PickK](`{"k":[1]}`))
 	check(`{"k":["x"]}`, report[api.PickC](`{"k":["x"]}`), u(""))
 	check(`5`, report[api.FmtList](`5`))
 	check(`"a"`, report[api.EnumF](`"a"`))
@@ -1442,7 +1485,7 @@ func main() {
 	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
 	check(`"x"`, report[api.Ip](`"x"`), u(""))
 	check(`[]`, report[api.InlineItems](`[]`))
-	check(`["a"]`, report[api.InlineItems](`["a"]`), u(""))
+	check(`["a","bc","d"]`, report[api.InlineItems](`["a","bc","d"]`), v("/0"), v("/2"))
 	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)
 	_ = report[api.PadNode](padded)
 	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`), u(""))
