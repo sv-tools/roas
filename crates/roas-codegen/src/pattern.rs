@@ -21,6 +21,8 @@ use oxc_regular_expression::{LiteralParser, Options};
 /// The largest repetition count Go compiles.
 const MAX_COUNT: u64 = 1000;
 const MAX_CHAR: u32 = 0x10FFFF;
+/// The longest pattern read, in bytes.
+const MAX_LEN: usize = 16 * 1024;
 /// How deep groups may nest. oxc's parser recurses per level and needs
 /// tens of KiB a level in a debug build, so this keeps a 2 MiB thread
 /// safe; no real schema nests near it.
@@ -35,6 +37,13 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
     // ECMAScript refuses the pattern.
     if pattern.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1 {
         return Err("not an ECMAScript regular expression: \\ at end of pattern".into());
+    }
+    // oxc's work grows faster than the pattern (named groups are compared
+    // pairwise): a pattern longer than any real one is refused unread.
+    if pattern.len() > MAX_LEN {
+        return Err(format!(
+            "a pattern longer than {MAX_LEN} bytes is not supported"
+        ));
     }
     // The parser and the printer recurse per group: a pattern nested past
     // what Rust compiles anyway is refused before it can exhaust the stack.
@@ -52,12 +61,23 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
             // Many schemas are written for the legacy grammar (`\-` outside a
             // class, say). It means the same as long as nothing in it can
             // match half of an astral character, which `Printer` checks.
+            // A property escape the Unicode grammar refuses (a typo, or one
+            // newer than the parser) would be literal text in the legacy
+            // one: refused rather than matched as `p{…}`.
+            Err(unicode) if pattern.contains("\\p{") || pattern.contains("\\P{") => {
+                return Err(format!(
+                    "its Unicode property escape is not supported: {}",
+                    unicode
+                        .message
+                        .trim_start_matches("Invalid regular expression: ")
+                ));
+            }
             Err(unicode) => {
                 match LiteralParser::new(&allocator, pattern, None, Options::default()).parse() {
                     Ok(ast) => (ast, true),
                     Err(_) => {
                         return Err(format!(
-                            "not an ECMAScript regular expression: {}",
+                            "it cannot be read as an ECMAScript regular expression: {}",
                             unicode
                                 .message
                                 .trim_start_matches("Invalid regular expression: ")
@@ -497,7 +517,12 @@ mod tests {
         // At the limit, on a test thread's stack, in a debug build.
         let at = format!("{}a{}", "(".repeat(64), ")".repeat(64));
         assert!(translate(&at).is_ok());
-        let deep = format!("{}a{}", "(".repeat(100_000), ")".repeat(100_000));
+        assert!(
+            translate(&"a".repeat(16 * 1024 + 1))
+                .unwrap_err()
+                .contains("longer")
+        );
+        let deep = format!("{}a{}", "(".repeat(65), ")".repeat(65));
         assert!(translate(&deep).unwrap_err().contains("nesting"));
         // Brackets in a class or escaped do not nest.
         assert!(translate(&format!("[{}]", "(".repeat(1000))).is_ok());
@@ -524,6 +549,8 @@ mod tests {
             r"[\c]",
             r"[\c-x]",
             "(?<n>a|(?<n>b))",
+            r"\p{Latin}",
+            r"\-\P{Foo}",
             "(?:(?:a{1000}){2}){0}",
             r"[\cA]",
             r"\-(?<n>a|(?<n>b))",
