@@ -263,20 +263,25 @@ pub(crate) fn read_input_text(
         }),
         InputSource::Stdin => format.unwrap_or(InputFormat::Json),
     };
-    let raw = match source {
+    let raw = read_input_raw(source)?;
+    let value = parse_value(&raw, resolved == InputFormat::Yaml)?;
+    Ok((raw, value, resolved))
+}
+
+/// The text of `source`, unparsed.
+pub(crate) fn read_input_raw(source: &InputSource) -> Result<String> {
+    match source {
         InputSource::File(p) => {
-            fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?
+            fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))
         }
         InputSource::Stdin => {
             let mut raw = String::new();
             std::io::stdin()
                 .read_to_string(&mut raw)
                 .context("reading from stdin")?;
-            raw
+            Ok(raw)
         }
-    };
-    let value = parse_value(&raw, resolved == InputFormat::Yaml)?;
-    Ok((raw, value, resolved))
+    }
 }
 
 pub(crate) fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {

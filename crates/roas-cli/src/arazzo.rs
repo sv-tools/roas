@@ -11,7 +11,8 @@ use clap::{Subcommand, ValueEnum};
 use enumset::EnumSet;
 use roas::LoadedDocument;
 use roas::loader::{Loader, LoaderError, ResourceFetcher};
-use roas_arazzo::source_map::SourceMap;
+use roas_arazzo::editor::{Document, Format, Severity};
+use roas_arazzo::source_map::{SourceMap, SourcePosition};
 use roas_arazzo::unknown::UnknownMembers;
 use roas_arazzo::validation::{Error as ArazzoError, Validate, ValidationError, ValidationOptions};
 use roas_arazzo::{v1_0, v1_1};
@@ -28,8 +29,8 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::{
-    Fetcher, InputFormat, InputSource, LoaderKind, build_loader_with, read_input, read_input_text,
-    resolve_input_source, serialize_spec,
+    Fetcher, InputFormat, InputSource, LoaderKind, build_loader_with, read_input, read_input_raw,
+    read_input_text, resolve_input_source, serialize_spec,
 };
 
 /// Arazzo specification version, mirroring [`crate::overlay::OverlayVersion`].
@@ -287,6 +288,40 @@ pub(crate) enum ArazzoCommand {
     Run(Box<ArazzoRunArgs>),
     /// List the workflows a description offers, and what each one takes.
     List(ArazzoListArgs),
+    /// Check a description the way an editor does: read even damaged
+    /// text, and report every finding with its line and column.
+    Check(ArazzoCheckArgs),
+}
+
+#[derive(clap::Args)]
+pub(crate) struct ArazzoCheckArgs {
+    /// Path to the Arazzo file (JSON or YAML). Pass `-`, or omit and
+    /// pipe the description, to read from stdin.
+    file: Option<PathBuf>,
+
+    /// Read the text strictly as this format. By default it is told by
+    /// its first character, and text that looks like JSON but only
+    /// reads as YAML is read as YAML with a warning.
+    #[arg(long, value_enum)]
+    format: Option<InputFormat>,
+
+    /// Skip a specific validation check (repeatable), as `arazzo validate
+    /// --ignore` does.
+    #[arg(long, value_enum)]
+    ignore: Vec<ValidationOptions>,
+
+    /// How to print the findings: one line each (`text`), or as a
+    /// document for tools (`json`, `yaml`).
+    #[arg(long, value_enum, default_value_t = CheckOutput::Text)]
+    output_format: CheckOutput,
+}
+
+/// How `arazzo check` prints its findings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CheckOutput {
+    Text,
+    Json,
+    Yaml,
 }
 
 #[derive(clap::Args)]
@@ -452,7 +487,107 @@ pub(crate) fn run_arazzo(cmd: ArazzoCommand) -> Result<()> {
         ArazzoCommand::Convert(args) => run_arazzo_convert(args),
         ArazzoCommand::Run(args) => run_arazzo_run(*args),
         ArazzoCommand::List(args) => run_arazzo_list(args),
+        ArazzoCommand::Check(args) => run_arazzo_check(args),
     }
+}
+
+fn run_arazzo_check(args: ArazzoCheckArgs) -> Result<()> {
+    let source = resolve_input_source(args.file.as_deref())?;
+    let text = read_input_raw(&source)?;
+    let options = args
+        .ignore
+        .iter()
+        .fold(EnumSet::<ValidationOptions>::empty(), |options, ignore| {
+            options | *ignore
+        });
+    let document = match args.format {
+        Some(InputFormat::Json) => Document::read_as(text, Format::Json, options),
+        Some(InputFormat::Yaml) => Document::read_as(text, Format::Yaml, options),
+        None => Document::read(text, options),
+    };
+    match args.output_format {
+        CheckOutput::Text => print!("{}", check_text(&document)),
+        CheckOutput::Json => print!(
+            "{}",
+            serialize_spec(&check_report(&document), InputFormat::Json, true)?
+        ),
+        CheckOutput::Yaml => print!(
+            "{}",
+            serialize_spec(&check_report(&document), InputFormat::Yaml, false)?
+        ),
+    }
+    let errors = document
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .count();
+    if errors > 0 {
+        bail!(
+            "{}: {errors} error{}",
+            source.display(),
+            if errors == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
+/// One line per finding: `error: #.info.title at line 3, column 10: …`.
+fn check_text(document: &Document) -> String {
+    let mut out = String::new();
+    for diagnostic in document.diagnostics() {
+        let severity = match diagnostic.severity {
+            Severity::Error => "error",
+            _ => "warning",
+        };
+        let path = diagnostic
+            .path
+            .as_deref()
+            .map(|path| format!(" {path}"))
+            .unwrap_or_default();
+        let at = diagnostic
+            .range
+            .map(|range| format!(" at {}", range.start))
+            .unwrap_or_default();
+        out.push_str(&format!("{severity}:{path}{at}: {}\n", diagnostic.message));
+    }
+    out
+}
+
+/// The findings as a document for tools: positions are one-based, with
+/// the column counted both in characters and in UTF-16 code units (an
+/// LSP client's, less one), and the UTF-8 byte offset.
+fn check_report(document: &Document) -> Value {
+    let position = |position: SourcePosition| {
+        serde_json::json!({
+            "line": position.line,
+            "column": position.column,
+            "utf16Column": document.utf16_column(position),
+            "offset": position.offset,
+        })
+    };
+    let diagnostics: Vec<Value> = document
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| {
+            serde_json::json!({
+                "severity": match diagnostic.severity {
+                    Severity::Error => "error",
+                    _ => "warning",
+                },
+                "path": diagnostic.path,
+                "range": diagnostic.range.map(|range| serde_json::json!({
+                    "start": position(range.start),
+                    "end": position(range.end),
+                })),
+                "message": diagnostic.message,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "version": document.version(),
+        "complete": document.is_complete(),
+        "diagnostics": diagnostics,
+    })
 }
 
 fn run_arazzo_validate(args: ArazzoValidateArgs) -> Result<()> {
@@ -1464,6 +1599,148 @@ mod tests {
     fn detect_or_use_arazzo_honors_forced_version() {
         let d = detect_or_use_arazzo(Some(ArazzoVersion::V1_1), v1_1_doc(), "").unwrap();
         assert_eq!(d.version(), ArazzoVersion::V1_1);
+    }
+
+    #[test]
+    fn cli_parses_arazzo_check() {
+        let cli = TestCli::try_parse_from(["roas", "check", "wf.yaml"]).unwrap();
+        let ArazzoCommand::Check(args) = cli.command else {
+            panic!("expected `check`");
+        };
+        assert_eq!(args.output_format, CheckOutput::Text);
+        assert_eq!(args.format, None);
+        let cli = TestCli::try_parse_from([
+            "roas",
+            "check",
+            "--format",
+            "json",
+            "--output-format",
+            "json",
+            "--ignore",
+            "empty-info-title",
+            "wf.json",
+        ])
+        .unwrap();
+        let ArazzoCommand::Check(args) = cli.command else {
+            panic!("expected `check`");
+        };
+        assert_eq!(args.output_format, CheckOutput::Json);
+        assert_eq!(args.format, Some(InputFormat::Json));
+        assert_eq!(args.ignore, [ValidationOptions::IgnoreEmptyInfoTitle]);
+    }
+
+    /// A description whose title is not a string.
+    const BROKEN: &str = "arazzo: 1.1.0
+info:
+  title: [T]
+  version: \"1\"
+sourceDescriptions:
+  - name: a
+    url: u
+workflows:
+  - workflowId: w
+    steps:
+      - stepId: s
+        operationId: o
+";
+
+    #[test]
+    fn check_reports_findings_as_text_and_for_tools() {
+        let document = Document::read(BROKEN, EnumSet::empty());
+        assert_eq!(
+            check_text(&document),
+            "error: #.info.title at line 3, column 10: invalid type: sequence, expected a string\n"
+        );
+        let report = check_report(&document);
+        assert_eq!(report["version"], "1.1.0");
+        assert_eq!(report["complete"], true);
+        let finding = &report["diagnostics"][0];
+        assert_eq!(finding["severity"], "error");
+        assert_eq!(finding["path"], "#.info.title");
+        assert_eq!(
+            finding["range"]["start"],
+            json!({ "line": 3, "column": 10, "utf16Column": 10, "offset": 29 })
+        );
+
+        // A syntax error has no path, and a column after a character
+        // outside the BMP is one more in UTF-16 code units.
+        let document = Document::read("x-\u{1f600}: [\n", EnumSet::empty());
+        let text = check_text(&document);
+        assert!(text.starts_with("error: at line "), "{text}");
+        let report = check_report(&document);
+        assert_eq!(report["complete"], false);
+        let finding = &report["diagnostics"][0];
+        assert_eq!(finding["path"], Value::Null);
+        // Text that declares no version.
+        assert_eq!(report["version"], Value::Null);
+        let end = Document::read("x-\u{1f600}: [1}\n", EnumSet::empty());
+        let start = &check_report(&end)["diagnostics"][0]["range"]["start"];
+        assert_eq!(start["line"], 1, "{start}");
+        assert_eq!(
+            start["utf16Column"].as_u64().unwrap(),
+            start["column"].as_u64().unwrap() + 1,
+            "{start}"
+        );
+    }
+
+    #[test]
+    fn run_arazzo_check_fails_on_errors_only() {
+        let ok = TempFile::write("check-ok.json", &v1_1_doc());
+        for output_format in [CheckOutput::Text, CheckOutput::Json, CheckOutput::Yaml] {
+            run_arazzo(ArazzoCommand::Check(ArazzoCheckArgs {
+                file: Some(ok.0.clone()),
+                format: None,
+                ignore: vec![],
+                output_format,
+            }))
+            .expect("a valid description has no errors");
+        }
+        let broken = TempFile::text("check-broken.yaml", BROKEN);
+        let error = run_arazzo(ArazzoCommand::Check(ArazzoCheckArgs {
+            file: Some(broken.0.clone()),
+            format: Some(InputFormat::Yaml),
+            ignore: vec![],
+            output_format: CheckOutput::Json,
+        }))
+        .unwrap_err();
+        assert!(error.to_string().ends_with(": 1 error"), "{error}");
+        // JSON-looking text that is only YAML: a warning when the format
+        // is told from the text, an error when `--format json` asks for it.
+        let yamlish = TempFile::text(
+            "check-yamlish.json",
+            "{arazzo: 1.1.0, info: {title: T, version: '1'}, sourceDescriptions: [{name: a, url: u}], \
+             workflows: [{workflowId: w, steps: [{stepId: s, operationId: o}]}]}",
+        );
+        let args = |format| ArazzoCheckArgs {
+            file: Some(yamlish.0.clone()),
+            format,
+            ignore: vec![],
+            output_format: CheckOutput::Text,
+        };
+        run_arazzo(ArazzoCommand::Check(args(None))).expect("only a warning");
+        let error = run_arazzo(ArazzoCommand::Check(args(Some(InputFormat::Json)))).unwrap_err();
+        assert!(error.to_string().ends_with(": 1 error"), "{error}");
+        // `--ignore` is honoured.
+        let untitled = TempFile::write(
+            "check-untitled.json",
+            &json!({
+                "arazzo": "1.1.0",
+                "info": { "title": "", "version": "1" },
+                "sourceDescriptions": [{ "name": "a", "url": "u" }],
+                "workflows": [{ "workflowId": "w", "steps": [{ "stepId": "s", "operationId": "o" }] }]
+            }),
+        );
+        let args = |ignore| ArazzoCheckArgs {
+            file: Some(untitled.0.clone()),
+            format: None,
+            ignore,
+            output_format: CheckOutput::Text,
+        };
+        run_arazzo(ArazzoCommand::Check(args(vec![]))).unwrap_err();
+        run_arazzo(ArazzoCommand::Check(args(vec![
+            ValidationOptions::IgnoreEmptyInfoTitle,
+        ])))
+        .expect("the empty title is ignored");
     }
 
     #[test]
