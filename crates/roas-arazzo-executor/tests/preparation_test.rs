@@ -537,7 +537,7 @@ fn model_validation_is_global_and_its_existing_exceptions_remain_available() {
 }
 
 #[test]
-fn root_dependencies_share_fresh_inputs_and_nested_dependency_scheduling_is_explicit() {
+fn root_and_nested_dependencies_share_fresh_inputs() {
     let mut value = document(
         json!([{ "stepId": "main", "operationId": "check", "outputs": { "value": "$inputs.value" } }]),
     );
@@ -566,15 +566,33 @@ fn root_dependencies_share_fresh_inputs_and_nested_dependency_scheduling_is_expl
             .all(|step| step.outputs["value"] == json!(2))
     );
     value["workflows"].as_array_mut().unwrap().push(
-        json!({ "workflowId": "caller", "steps": [{ "stepId": "call", "workflowId": "w" }] }),
+        json!({ "workflowId": "caller", "steps": [{ "stepId": "call", "workflowId": "w",
+            "parameters": [{ "name": "value", "value": 9 }] }] }),
     );
+    // A call into `w` runs its dependency first, with the run's inputs.
     let description = serde_json::from_value(value).unwrap();
-    assert!(
-        prepare(&description, &options.workflow("caller"))
-            .unwrap_err()
-            .to_string()
-            .contains("dependency scheduling for nested calls")
-    );
+    let options = options.workflow("caller");
+    let plan = prepare(&description, &options).unwrap();
+    let mut run = plan
+        .start_with_inputs(serde_json::from_value(json!({ "value": 3 })).unwrap())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(run.advance().unwrap(), Progress::Send(_)));
+        run.supply(roas_arazzo_executor::HttpResponse::json(200, &json!({})))
+            .unwrap();
+    }
+    let Progress::Done(report) = run.advance().unwrap() else {
+        panic!("done")
+    };
+    let ran: Vec<_> = report
+        .steps
+        .iter()
+        .map(|step| step.workflow_id.as_str())
+        .collect();
+    assert_eq!(ran, ["dependency", "w", "caller"]);
+    // The dependency has the run's inputs; `w`, the call's arguments.
+    assert_eq!(report.steps[0].outputs["value"], json!(3));
+    assert_eq!(report.steps[1].outputs["value"], json!(9));
 }
 
 #[test]
