@@ -253,7 +253,19 @@ pub(crate) fn read_input_text(
     source: &InputSource,
     format: Option<InputFormat>,
 ) -> Result<(String, serde_json::Value, InputFormat)> {
-    let resolved = match source {
+    let resolved = resolve_input_format(source, format);
+    let raw = read_input_raw(source)?;
+    let value = parse_value(&raw, resolved == InputFormat::Yaml)?;
+    Ok((raw, value, resolved))
+}
+
+/// The format `source` is read as: `format` when given, else a file's
+/// extension (`.yaml`/`.yml` → YAML, otherwise JSON), and JSON for stdin.
+pub(crate) fn resolve_input_format(
+    source: &InputSource,
+    format: Option<InputFormat>,
+) -> InputFormat {
+    match source {
         InputSource::File(p) => format.unwrap_or_else(|| {
             if path_looks_like_yaml(p) {
                 InputFormat::Yaml
@@ -262,10 +274,7 @@ pub(crate) fn read_input_text(
             }
         }),
         InputSource::Stdin => format.unwrap_or(InputFormat::Json),
-    };
-    let raw = read_input_raw(source)?;
-    let value = parse_value(&raw, resolved == InputFormat::Yaml)?;
-    Ok((raw, value, resolved))
+    }
 }
 
 /// The text of `source`, unparsed.

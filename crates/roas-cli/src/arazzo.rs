@@ -30,7 +30,7 @@ use url::Url;
 
 use crate::{
     Fetcher, InputFormat, InputSource, LoaderKind, build_loader_with, read_input, read_input_raw,
-    read_input_text, resolve_input_source, serialize_spec,
+    read_input_text, resolve_input_format, resolve_input_source, serialize_spec,
 };
 
 /// Arazzo specification version, mirroring [`crate::overlay::OverlayVersion`].
@@ -299,9 +299,7 @@ pub(crate) struct ArazzoCheckArgs {
     /// pipe the description, to read from stdin.
     file: Option<PathBuf>,
 
-    /// Read the text strictly as this format. By default it is told by
-    /// its first character, and text that looks like JSON but only
-    /// reads as YAML is read as YAML with a warning.
+    /// Override format detection (see `arazzo validate --format`).
     #[arg(long, value_enum)]
     format: Option<InputFormat>,
 
@@ -500,11 +498,13 @@ fn run_arazzo_check(args: ArazzoCheckArgs) -> Result<()> {
         .fold(EnumSet::<ValidationOptions>::empty(), |options, ignore| {
             options | *ignore
         });
-    let document = match args.format {
-        Some(InputFormat::Json) => Document::read_as(text, Format::Json, options),
-        Some(InputFormat::Yaml) => Document::read_as(text, Format::Yaml, options),
-        None => Document::read(text, options),
+    // Read as strictly as the other `arazzo` commands read it, so a file
+    // they refuse is not passed here.
+    let format = match resolve_input_format(&source, args.format) {
+        InputFormat::Json => Format::Json,
+        InputFormat::Yaml => Format::Yaml,
     };
+    let document = Document::read_as(text, format, options);
     match args.output_format {
         CheckOutput::Text => print!("{}", check_text(&document)),
         CheckOutput::Json => print!(
@@ -531,14 +531,21 @@ fn run_arazzo_check(args: ArazzoCheckArgs) -> Result<()> {
     Ok(())
 }
 
+/// How a severity is named in `arazzo check`'s output.
+fn severity_label(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        // A level added later is shown as the mildest one known.
+        _ => "warning",
+    }
+}
+
 /// One line per finding: `error: #.info.title at line 3, column 10: …`.
 fn check_text(document: &Document) -> String {
     let mut out = String::new();
     for diagnostic in document.diagnostics() {
-        let severity = match diagnostic.severity {
-            Severity::Error => "error",
-            _ => "warning",
-        };
+        let severity = severity_label(diagnostic.severity);
         let path = diagnostic
             .path
             .as_deref()
@@ -553,9 +560,11 @@ fn check_text(document: &Document) -> String {
     out
 }
 
-/// The findings as a document for tools: positions are one-based, with
-/// the column counted both in characters and in UTF-16 code units (an
-/// LSP client's, less one), and the UTF-8 byte offset.
+/// The findings as a document for tools: lines and columns are
+/// one-based, the column counted both in characters and in UTF-16 code
+/// units (an LSP `character` is that, less one), with the UTF-8 byte
+/// offset. `path` is null for a finding about the text itself, and
+/// `range` when it cannot be located.
 fn check_report(document: &Document) -> Value {
     let position = |position: SourcePosition| {
         serde_json::json!({
@@ -570,10 +579,7 @@ fn check_report(document: &Document) -> Value {
         .iter()
         .map(|diagnostic| {
             serde_json::json!({
-                "severity": match diagnostic.severity {
-                    Severity::Error => "error",
-                    _ => "warning",
-                },
+                "severity": severity_label(diagnostic.severity),
                 "path": diagnostic.path,
                 "range": diagnostic.range.map(|range| serde_json::json!({
                     "start": position(range.start),
@@ -584,7 +590,7 @@ fn check_report(document: &Document) -> Value {
         })
         .collect();
     serde_json::json!({
-        "version": document.version(),
+        "arazzo": document.version(),
         "complete": document.is_complete(),
         "diagnostics": diagnostics,
     })
@@ -1652,7 +1658,7 @@ workflows:
             "error: #.info.title at line 3, column 10: invalid type: sequence, expected a string\n"
         );
         let report = check_report(&document);
-        assert_eq!(report["version"], "1.1.0");
+        assert_eq!(report["arazzo"], "1.1.0");
         assert_eq!(report["complete"], true);
         let finding = &report["diagnostics"][0];
         assert_eq!(finding["severity"], "error");
@@ -1672,7 +1678,7 @@ workflows:
         let finding = &report["diagnostics"][0];
         assert_eq!(finding["path"], Value::Null);
         // Text that declares no version.
-        assert_eq!(report["version"], Value::Null);
+        assert_eq!(report["arazzo"], Value::Null);
         let end = Document::read("x-\u{1f600}: [1}\n", EnumSet::empty());
         let start = &check_report(&end)["diagnostics"][0]["range"]["start"];
         assert_eq!(start["line"], 1, "{start}");
@@ -1680,6 +1686,29 @@ workflows:
             start["utf16Column"].as_u64().unwrap(),
             start["column"].as_u64().unwrap() + 1,
             "{start}"
+        );
+    }
+
+    #[test]
+    fn a_finding_that_cannot_be_located_has_a_null_range() {
+        // A member written twice reads (last wins) but has no map, so the
+        // empty title that wins is reported without a range.
+        let text = r#"{"arazzo": "1.1.0", "info": {"title": "T", "title": "", "version": "1"},
+ "sourceDescriptions": [{"name": "a", "url": "u"}],
+ "workflows": [{"workflowId": "w", "steps": [{"stepId": "s", "operationId": "o"}]}]}"#;
+        let document = Document::read_as(text, Format::Json, EnumSet::empty());
+        let report = check_report(&document);
+        let title = report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["path"] == "#.info.title")
+            .unwrap_or_else(|| panic!("{report}"));
+        assert_eq!(title["range"], Value::Null, "{report}");
+        assert!(
+            check_text(&document).contains("error: #.info.title: "),
+            "{}",
+            check_text(&document)
         );
     }
 
@@ -1704,8 +1733,8 @@ workflows:
         }))
         .unwrap_err();
         assert!(error.to_string().ends_with(": 1 error"), "{error}");
-        // JSON-looking text that is only YAML: a warning when the format
-        // is told from the text, an error when `--format json` asks for it.
+        // YAML in a `.json` file: refused, as the other commands refuse
+        // it, unless `--format yaml` says what it is.
         let yamlish = TempFile::text(
             "check-yamlish.json",
             "{arazzo: 1.1.0, info: {title: T, version: '1'}, sourceDescriptions: [{name: a, url: u}], \
@@ -1717,9 +1746,9 @@ workflows:
             ignore: vec![],
             output_format: CheckOutput::Text,
         };
-        run_arazzo(ArazzoCommand::Check(args(None))).expect("only a warning");
-        let error = run_arazzo(ArazzoCommand::Check(args(Some(InputFormat::Json)))).unwrap_err();
+        let error = run_arazzo(ArazzoCommand::Check(args(None))).unwrap_err();
         assert!(error.to_string().ends_with(": 1 error"), "{error}");
+        run_arazzo(ArazzoCommand::Check(args(Some(InputFormat::Yaml)))).expect("read as YAML");
         // `--ignore` is honoured.
         let untitled = TempFile::write(
             "check-untitled.json",
