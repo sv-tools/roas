@@ -30,7 +30,7 @@ use url::Url;
 
 use crate::{
     Fetcher, InputFormat, InputSource, LoaderKind, build_loader_with, read_input, read_input_raw,
-    read_input_text, resolve_input_format, resolve_input_source, serialize_spec,
+    read_input_text, resolve_input_format, resolve_input_source, serialize_spec, yaml,
 };
 
 /// Arazzo specification version, mirroring [`crate::overlay::OverlayVersion`].
@@ -507,13 +507,15 @@ fn run_arazzo_check(args: ArazzoCheckArgs) -> Result<()> {
     let document = Document::read_as(text, format, options);
     match args.output_format {
         CheckOutput::Text => print!("{}", check_text(&document)),
-        CheckOutput::Json => print!(
+        CheckOutput::Json => println!(
             "{}",
-            serialize_spec(&check_report(&document), InputFormat::Json, true)?
+            serde_json::to_string_pretty(&check_report(&document))
+                .context("serializing the findings as JSON")?
         ),
         CheckOutput::Yaml => print!(
             "{}",
-            serialize_spec(&check_report(&document), InputFormat::Yaml, false)?
+            yaml::typed_to_string(&check_report(&document))
+                .context("serializing the findings as YAML")?
         ),
     }
     let errors = document
@@ -1722,7 +1724,7 @@ workflows:
         // Under `serde_json/arbitrary_precision` a `Value` number would
         // serialize as a mapping; the typed report keeps integers.
         let document = Document::read(BROKEN, EnumSet::empty());
-        let yaml = serialize_spec(&check_report(&document), InputFormat::Yaml, false).unwrap();
+        let yaml = yaml::typed_to_string(&check_report(&document)).unwrap();
         assert!(yaml.contains("line: 3\n"), "{yaml}");
         assert!(yaml.contains("utf16Column: 10\n"), "{yaml}");
         assert!(!yaml.contains("serde_json"), "{yaml}");
