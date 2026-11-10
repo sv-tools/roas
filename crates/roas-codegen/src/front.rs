@@ -436,11 +436,15 @@ impl Translator<'_> {
         let Some(want) = raw.get("type") else {
             return true;
         };
+        // A branch says the type only when it also leaves null out as the
+        // schema does.
+        let nullable = |v: &Value| v.get("nullable") == Some(&Value::Bool(true));
+        let outer_nullable = raw.get("nullable") == Some(&Value::Bool(true));
         let typed = |branch: &Value| {
             let mut current = branch;
             for _ in 0..16 {
                 if let Some(t) = current.get("type") {
-                    return t == want;
+                    return t == want && (outer_nullable || !nullable(current));
                 }
                 match current
                     .get("$ref")

@@ -489,26 +489,41 @@ pub(crate) fn shared_unsupported(ir: &crate::ir::Ir, branches: &[crate::ir::Bran
 /// `bound` is a float32.
 pub(crate) fn f32_neighbours(bound: f64) -> (f32, f32) {
     let rounded = bound as f32;
-    let step = |f: f32, up: bool| {
+    // The next float32 above: from either zero, the smallest subnormal.
+    fn next_up(f: f32) -> f32 {
+        if f == 0.0 {
+            return f32::from_bits(1);
+        }
         let bits = f.to_bits();
-        let next = if (f >= 0.0) == up {
-            if f == 0.0 && !up {
-                0x8000_0001
-            } else {
-                bits + 1
-            }
-        } else if f == 0.0 {
-            1
-        } else {
-            bits - 1
-        };
-        let next = f32::from_bits(next);
+        f32::from_bits(if f > 0.0 { bits + 1 } else { bits - 1 })
+    }
+    let step = |f: f32, up: bool| {
+        let next = if up { next_up(f) } else { -next_up(-f) };
         if next.is_finite() { next } else { f }
     };
     match f64::from(rounded).partial_cmp(&bound) {
         Some(std::cmp::Ordering::Less) => (rounded, step(rounded, true)),
         Some(std::cmp::Ordering::Greater) => (step(rounded, false), rounded),
         _ => (rounded, rounded),
+    }
+}
+
+#[cfg(test)]
+mod neighbours {
+    use super::f32_neighbours;
+
+    #[test]
+    fn steps_across_zero_both_ways() {
+        // A tiny negative rounds to -0.0: the float below it is the
+        // negative smallest subnormal.
+        let (below, above) = f32_neighbours(-7.006492321624085e-46);
+        assert_eq!(below, -f32::from_bits(1));
+        assert_eq!(above, 0.0);
+        let (below, above) = f32_neighbours(7.006492321624085e-46);
+        assert_eq!(below, 0.0);
+        assert_eq!(above, f32::from_bits(1));
+        let (below, above) = f32_neighbours(0.1);
+        assert!(f64::from(below) < 0.1 && f64::from(above) > 0.1);
     }
 }
 

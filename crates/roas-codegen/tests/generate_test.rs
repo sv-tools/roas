@@ -836,7 +836,8 @@ fn keywords_a_3_0_model_drops_are_reported() {
             "NoBound": {"type": "integer", "exclusiveMinimum": true},
             "NullDefault": {"type": "string", "nullable": true, "default": null},
             "Documented": {"allOf": [{"type": "string"}], "description": "a string", "title": "S"},
-            "Pinned": {"type": "integer", "const": 5}
+            "Pinned": {"type": "integer", "const": 5},
+            "NullPart": {"type": "string", "allOf": [{"type": "string", "nullable": true}]}
         }}
     });
     let bytes = serde_json::to_vec(&raw).unwrap();
@@ -860,6 +861,7 @@ fn keywords_a_3_0_model_drops_are_reported() {
         [
             ("/components/schemas/An", "maxLength"),
             ("/components/schemas/Ao", "maxLength"),
+            ("/components/schemas/NullPart", "type"),
             ("/components/schemas/Pinned", "const"),
             ("/components/schemas/Typed", "type")
         ]
