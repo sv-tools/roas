@@ -139,8 +139,8 @@ pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
     let mut out = Vec::new();
     match kind {
         ValueKind::String => {
-            out.extend(c.min_length.map(Check::MinLength));
-            out.extend(c.max_length.map(Check::MaxLength));
+            out.extend(c.min_length.filter(|n| *n > 0).map(Check::MinLength));
+            out.extend(c.max_length.filter(|n| *n < u64::MAX).map(Check::MaxLength));
             if c.pattern.is_some() {
                 out.push(Check::Unevaluated {
                     keyword: "pattern",
@@ -222,8 +222,8 @@ pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
             }
         }
         ValueKind::Array => {
-            out.extend(c.min_items.map(Check::MinItems));
-            out.extend(c.max_items.map(Check::MaxItems));
+            out.extend(c.min_items.filter(|n| *n > 0).map(Check::MinItems));
+            out.extend(c.max_items.filter(|n| *n < u64::MAX).map(Check::MaxItems));
             if c.unique_items {
                 let item = match strip(ty) {
                     TypeRef::Array(item) => item.as_ref(),
@@ -237,8 +237,22 @@ pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
             }
         }
         ValueKind::Map => {
-            out.extend(c.min_properties.map(Check::MinProperties));
-            out.extend(c.max_properties.map(Check::MaxProperties));
+            out.extend(
+                c.min_properties
+                    .filter(|n| *n > 0)
+                    .map(Check::MinProperties),
+            );
+            out.extend(
+                c.max_properties
+                    .filter(|n| *n < u64::MAX)
+                    .map(Check::MaxProperties),
+            );
+            if c.property_names {
+                out.push(Check::Unevaluated {
+                    keyword: "propertyNames",
+                    reason: "member-name schemas are not checked yet".into(),
+                });
+            }
         }
         ValueKind::Other => {}
     }
@@ -248,8 +262,18 @@ pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
 /// The constraints on an object's own members, for a generated struct.
 pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
     let mut out = Vec::new();
-    out.extend(constraints.min_properties.map(Check::MinProperties));
-    out.extend(constraints.max_properties.map(Check::MaxProperties));
+    out.extend(
+        constraints
+            .min_properties
+            .filter(|n| *n > 0)
+            .map(Check::MinProperties),
+    );
+    out.extend(
+        constraints
+            .max_properties
+            .filter(|n| *n < u64::MAX)
+            .map(Check::MaxProperties),
+    );
     if constraints.property_names {
         out.push(Check::Unevaluated {
             keyword: "propertyNames",
@@ -262,6 +286,10 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
 /// Whether the constraints say anything a check above does not cover for
 /// a value of this kind: they are then reported at generation time.
 pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static str> {
+    // A named type checks the constraints it was hoisted with itself.
+    if ty.direct_named().is_some() {
+        return Vec::new();
+    }
     let kind = kind_of(ty);
     let mut out = Vec::new();
     let string = matches!(kind, ValueKind::String);
@@ -367,46 +395,97 @@ fn strip(ty: &TypeRef) -> &TypeRef {
 /// Far enough past any `i64` that a bound beyond it decides every value.
 const SATURATE: i128 = 1 << 70;
 
-fn clamp(value: f64) -> i128 {
-    if value >= SATURATE as f64 {
-        SATURATE
-    } else if value <= -(SATURATE as f64) {
-        -SATURATE
+/// A number as written: sign, significant digits, and the power of ten
+/// they are scaled by. Read from the number's text, which keeps every
+/// digit when the description was read exactly.
+struct Decimal {
+    negative: bool,
+    digits: String,
+    exponent: i64,
+}
+
+fn parse_decimal(n: &Number) -> Option<Decimal> {
+    let text = n.to_string();
+    let (negative, text) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest.to_owned()),
+        None => (false, text),
+    };
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((m, e)) => (m.to_owned(), e.trim_start_matches('+').parse::<i64>().ok()?),
+        None => (text, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((&mantissa, ""));
+    let exponent = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+    let digits = format!("{whole}{fraction}")
+        .trim_start_matches('0')
+        .to_owned();
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // Trailing zeros move into the exponent, so `2.50` is `25e-1`.
+    let trimmed = digits.trim_end_matches('0');
+    let exponent = exponent + (digits.len() - trimmed.len()) as i64;
+    Some(Decimal {
+        negative,
+        digits: trimmed.to_owned(),
+        exponent,
+    })
+}
+
+/// The floor and ceiling of `n`, saturated to `±SATURATE`.
+fn floor_ceil(n: &Number) -> (i128, i128) {
+    let Some(d) = parse_decimal(n) else {
+        return (0, 0);
+    };
+    if d.digits.is_empty() {
+        return (0, 0);
+    }
+    let len = d.digits.len() as i64;
+    let (whole, fractional) = if d.exponent >= 0 {
+        if len + d.exponent > 30 {
+            let edge = if d.negative { -SATURATE } else { SATURATE };
+            return (edge, edge);
+        }
+        let zeros = "0".repeat(d.exponent as usize);
+        (format!("{}{zeros}", d.digits), false)
     } else {
-        value as i128
+        let point = len + d.exponent;
+        if point > 30 {
+            let edge = if d.negative { -SATURATE } else { SATURATE };
+            return (edge, edge);
+        }
+        let whole = if point > 0 {
+            d.digits[..point as usize].to_owned()
+        } else {
+            String::new()
+        };
+        // Trailing zeros were trimmed, so any digit after the point is a
+        // fraction.
+        (whole, true)
+    };
+    let magnitude: i128 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().unwrap_or(SATURATE)
+    };
+    let step = i128::from(fractional);
+    if d.negative {
+        (-magnitude - step, -magnitude)
+    } else {
+        (magnitude, magnitude + step)
     }
 }
 
 /// The smallest integer satisfying `>= n` (or `> n`).
 fn int_lower(n: &Number, exclusive: bool) -> i128 {
-    match exact_int(n) {
-        Some(i) if exclusive => i + 1,
-        Some(i) => i,
-        None => {
-            let f = n.as_f64().unwrap_or(0.0);
-            if exclusive {
-                clamp(f.floor()) + 1
-            } else {
-                clamp(f.ceil())
-            }
-        }
-    }
+    let (floor, ceil) = floor_ceil(n);
+    if exclusive { floor + 1 } else { ceil }
 }
 
 /// The largest integer satisfying `<= n` (or `< n`).
 fn int_upper(n: &Number, exclusive: bool) -> i128 {
-    match exact_int(n) {
-        Some(i) if exclusive => i - 1,
-        Some(i) => i,
-        None => {
-            let f = n.as_f64().unwrap_or(0.0);
-            if exclusive {
-                clamp(f.ceil()) - 1
-            } else {
-                clamp(f.floor())
-            }
-        }
-    }
+    let (floor, ceil) = floor_ceil(n);
+    if exclusive { ceil - 1 } else { floor }
 }
 
 fn gcd(mut a: i128, mut b: i128) -> i128 {
@@ -416,31 +495,21 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
     a
 }
 
-fn exact_int(n: &Number) -> Option<i128> {
-    n.as_i64()
-        .map(i128::from)
-        .or_else(|| n.as_u64().map(i128::from))
-}
-
-/// A number as `digits / 10^scale`, exactly as written when it is an
-/// integer and as its shortest decimal otherwise. `None` when it does not
-/// fit an `i128`.
+/// A number's magnitude as `digits / 10^scale`, exactly as written. `None`
+/// when it does not fit the `i128` arithmetic the check is done in.
 pub(crate) fn decimal(n: &Number) -> Option<(i128, u32)> {
-    if let Some(i) = exact_int(n) {
-        return Some((i.abs(), 0));
+    let d = parse_decimal(n)?;
+    if d.digits.is_empty() {
+        return Some((0, 0));
     }
-    // `Display` for `f64` never uses an exponent, and is the shortest
-    // decimal that reads back as the same float.
-    let text = format!("{}", n.as_f64()?.abs());
-    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
-    let fraction = fraction.trim_end_matches('0');
-    let digits = format!("{whole}{fraction}");
-    let factor: i128 = digits.trim_start_matches('0').parse().ok().or_else(|| {
-        // All zeros.
-        digits.chars().all(|c| c == '0').then_some(0)
-    })?;
-    let scale = u32::try_from(fraction.len()).ok()?;
-    (scale <= 38).then_some((factor, scale))
+    let digits: i128 = d.digits.parse().ok()?;
+    if d.exponent >= 0 {
+        let factor = 10i128.checked_pow(u32::try_from(d.exponent).ok()?)?;
+        Some((digits.checked_mul(factor)?, 0))
+    } else {
+        let scale = u32::try_from(-d.exponent).ok()?;
+        (scale <= 38).then_some((digits, scale))
+    }
 }
 
 #[cfg(test)]

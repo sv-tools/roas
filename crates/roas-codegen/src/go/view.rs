@@ -592,12 +592,27 @@ impl Builder<'_> {
                 ),
                 _ => false,
             };
+            let names = &self.names;
+            let ir = self.ir;
+            let raw_holder = |ty: &TypeRef| match ty {
+                TypeRef::Named(id) => match ir.types.get(id).map(|d| &d.kind) {
+                    Some(TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_)) => {
+                        names.get(id).cloned()
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
             let mut cx = super::validation::Context {
                 validates: &validates,
                 nil_able: &nil_able,
+                raw_holder: &raw_holder,
                 needs: self.needs,
             };
             view.validate = super::validation::body(def, &view, opted_out, &mut cx);
+            if opted_out && view.validate.is_none() {
+                return Err(opt_out_on_alias(def));
+            }
             self.needs = cx.needs;
         }
         Ok(Some(view))
@@ -613,7 +628,9 @@ impl Builder<'_> {
                 let mut fields = Allocator::default();
                 // The methods a generated struct has.
                 fields.reserve("UnmarshalJSONFrom");
-                fields.reserve("Validate");
+                if self.config.validation {
+                    fields.reserve("Validate");
+                }
                 fields.reserve("MarshalJSONTo");
                 let mut required_count = 0;
                 for field in &s.fields {
@@ -753,14 +770,11 @@ impl Builder<'_> {
                 view.tag = u.tag.clone();
                 view.tag_literal = quote(&u.tag);
                 let mut methods = Allocator::default();
-                for reserved in [
-                    "Tag",
-                    "Value",
-                    "MarshalJSONTo",
-                    "UnmarshalJSONFrom",
-                    "Validate",
-                ] {
+                for reserved in ["Tag", "Value", "MarshalJSONTo", "UnmarshalJSONFrom"] {
                     methods.reserve(reserved);
+                }
+                if self.config.validation {
+                    methods.reserve("Validate");
                 }
                 for variant in &u.variants {
                     let base = exported(&variant.suggested_name);
@@ -911,8 +925,11 @@ impl Builder<'_> {
         branches: &[crate::ir::Branch],
     ) -> Result<Vec<BranchView>, GenerateError> {
         let mut methods = Allocator::default();
-        for reserved in ["Raw", "MarshalJSONTo", "UnmarshalJSONFrom", "Validate"] {
+        for reserved in ["Raw", "MarshalJSONTo", "UnmarshalJSONFrom"] {
             methods.reserve(reserved);
+        }
+        if self.config.validation {
+            methods.reserve("Validate");
         }
         let mut out = Vec::new();
         for branch in branches {
@@ -934,6 +951,15 @@ fn null_holding_spelling(spelled: &str) -> bool {
         || spelled == "jsontext.Value"
         || spelled == "any"
         || spelled.starts_with("interface")
+}
+
+/// A type that is an alias shares its target's validation, so a per-type
+/// opt-out on it cannot be honoured: said rather than ignored.
+pub(crate) fn opt_out_on_alias(def: &TypeDef) -> GenerateError {
+    let name = def.component.as_deref().unwrap_or_default();
+    GenerateError::Config(format!(
+        "`types.{name}.validation = false` cannot apply: `{name}` is an alias, which validates as the type it names; opt that type out instead"
+    ))
 }
 
 /// The value type a pointer or a container already gives indirection to.

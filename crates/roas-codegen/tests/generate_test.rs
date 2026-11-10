@@ -751,3 +751,24 @@ fn validation_reports_what_it_cannot_check_and_types_can_opt_out() {
     let plain = generate(&document(pet()), &rust_config("")).unwrap();
     assert!(!plain.files[0].contents.contains("Validate"));
 }
+
+#[test]
+fn an_opt_out_on_an_alias_is_refused_rather_than_ignored() {
+    let components = serde_json::json!({
+        "Short": {"type": "string", "maxLength": 2},
+        "Quiet": {"$ref": "#/components/schemas/Short"}
+    });
+    let config = ConfigFile::from_toml(
+        "validation = true\n[types.Quiet]\nvalidation = false\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Rust))
+    .build()
+    .unwrap();
+    let error = generate(&document(components), &config).unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("alias")),
+        "{error}"
+    );
+}

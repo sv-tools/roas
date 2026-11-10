@@ -545,6 +545,9 @@ impl Builder<'_> {
             let emitted = |id: &SchemaId| self.names.contains_key(id);
             let generated = |ty: &TypeRef| crate::checks::validates(self.ir, &emitted, ty);
             view.validate = super::validation::body(def, &view, &generated, opted_out);
+            if opted_out && view.validate.is_none() {
+                return Err(crate::go::view::opt_out_on_alias(def));
+            }
         }
         let mut seen = std::collections::BTreeSet::new();
         view.derives.retain(|d| seen.insert(d.clone()));

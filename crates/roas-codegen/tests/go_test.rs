@@ -585,3 +585,23 @@ fn a_pointer_substitution_is_isolated_but_takes_null() {
         panic!("go vet failed\n{error}\n{code}");
     }
 }
+
+#[test]
+fn a_validate_property_keeps_its_name_without_validation() {
+    let components = serde_json::json!({
+        "Form": {"type": "object", "properties": {"validate": {"type": "boolean"}}}
+    });
+    let Some(generation) = go(components.clone(), "") else {
+        return;
+    };
+    let code = squeezed(&generation.unwrap().files[0].contents);
+    assert!(
+        code.contains("Validate *bool `json:\"validate,omitzero\"`"),
+        "{code}"
+    );
+    let Some(generation) = go(components, "validation = true\n") else {
+        return;
+    };
+    let code = squeezed(&generation.unwrap().files[0].contents);
+    assert!(code.contains("Validate2 *bool"), "{code}");
+}

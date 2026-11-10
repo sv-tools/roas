@@ -180,10 +180,13 @@ impl ValidationReport {
         self.findings.iter().filter(|f| f.kind == FindingKind::Unevaluated)
     }
 
+    // Unused when no type has a check of that kind.
+    #[allow(dead_code)]
     fn violation(&mut self, pointer: &str, message: impl Into<String>) {
         self.findings.push(Finding { pointer: pointer.to_owned(), kind: FindingKind::Violation, message: message.into() });
     }
 
+    #[allow(dead_code)]
     fn unevaluated(&mut self, pointer: &str, message: impl Into<String>) {
         self.findings.push(Finding { pointer: pointer.to_owned(), kind: FindingKind::Unevaluated, message: message.into() });
     }

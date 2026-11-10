@@ -118,6 +118,11 @@ pub(crate) struct TaggedUnion {
 pub(crate) struct Branch {
     pub suggested_name: Vec<String>,
     pub ty: TypeRef,
+    /// Constraints an inline branch declares that its type cannot carry.
+    pub constraints: Constraints,
+    /// The projection applies only to objects: a typeless schema's object
+    /// keywords constrain objects and say nothing about other values.
+    pub object_only: bool,
 }
 
 #[derive(Debug, Clone)]

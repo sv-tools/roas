@@ -3,9 +3,9 @@
 //! slices, maps and pointers is written out from the type's shape.
 
 use crate::checks::{self, Check, Unique, ValueKind};
-use crate::front::IntWidth;
+use crate::front::{FloatWidth, IntWidth};
 use crate::go::view::TypeView;
-use crate::ir::{Additional, TypeDef, TypeKind, TypeRef};
+use crate::ir::{Additional, Branch, TypeDef, TypeKind, TypeRef};
 
 /// What the rendered checks need imported.
 #[derive(Debug, Default, Clone, Copy)]
@@ -14,6 +14,8 @@ pub(crate) struct Needs {
     pub math: bool,
     /// Map keys walked in order: `maps` and `slices`.
     pub sorted: bool,
+    /// A raw holder is built from `null`: `jsontext`.
+    pub jsontext: bool,
 }
 
 pub(crate) struct Context<'a> {
@@ -21,52 +23,75 @@ pub(crate) struct Context<'a> {
     pub validates: &'a dyn Fn(&TypeRef) -> bool,
     /// A named type spelled as a pointer alias, which may be nil.
     pub nil_able: &'a dyn Fn(&TypeRef) -> bool,
+    /// The Go name of the raw holder (open union or composition) `ty`
+    /// names, if it names one.
+    pub raw_holder: &'a dyn Fn(&TypeRef) -> Option<String>,
     pub needs: Needs,
 }
 
-/// Go's `%q`-free literal for a message: the text is ours, ASCII and
-/// quote-free except where a literal from the description is quoted.
 fn lit(text: &str) -> String {
     crate::go::naming::quote(text)
 }
 
-/// Statements checking `list` on the value expression `e`, findings at the
-/// pointer expression `p` into the report `r`. True when they read `e`.
+/// Where a check reads and reports: the value, the pointer and the
+/// report, as Go expressions.
+#[derive(Clone, Copy)]
+struct At<'a> {
+    e: &'a str,
+    p: &'a str,
+    r: &'a str,
+}
+
+/// Statements checking `list` at `at`. True when they read the value.
 fn render(
     list: &[Check],
     (kind, item): (ValueKind, Option<&TypeRef>),
-    (e, p, r): (&str, &str, &str),
+    at: At<'_>,
     out: &mut Vec<String>,
     needs: &mut Needs,
 ) -> bool {
-    let reads = list.iter().any(|check| {
-        !matches!(
-            check,
-            Check::Unevaluated { .. }
-                | Check::NumMultipleOf {
-                    integral: false,
-                    ..
-                }
-        )
-    });
+    let At { e, p, r } = at;
+    // Some checks only report that they could not be made, and a bound
+    // beyond every value emits nothing: the value is read only when a
+    // check that reads it emitted something.
+    let mut reads = false;
     let (floor, ceiling) = match kind {
         ValueKind::Integer(IntWidth::Int32) => (i128::from(i32::MIN), i128::from(i32::MAX)),
         _ => (i128::from(i64::MIN), i128::from(i64::MAX)),
     };
+    // A count compared as `uint64`, which holds any bound a schema can
+    // state; `int` would not.
+    let count = |what: &str, op: &str, n: u64, message: String| {
+        format!(
+            "if uint64({what}) {op} {n} {{ {r}.violation({p}, fmt.Sprintf({}, {what})) }}",
+            lit(&message)
+        )
+    };
     for check in list {
+        let before = out.len();
         match check {
             Check::MinLength(n) => {
                 needs.utf8 = true;
                 out.push(format!(
-                    "if n := utf8.RuneCountInString(string({e})); n < {n} {{ {r}.violation({p}, fmt.Sprintf({}, n)) }}",
-                    lit(&format!("is %d characters long, shorter than minLength {n}"))
+                    "{{ n := utf8.RuneCountInString(string({e})); {} }}",
+                    count(
+                        "n",
+                        "<",
+                        *n,
+                        format!("is %d characters long, shorter than minLength {n}")
+                    )
                 ));
             }
             Check::MaxLength(n) => {
                 needs.utf8 = true;
                 out.push(format!(
-                    "if n := utf8.RuneCountInString(string({e})); n > {n} {{ {r}.violation({p}, fmt.Sprintf({}, n)) }}",
-                    lit(&format!("is %d characters long, longer than maxLength {n}"))
+                    "{{ n := utf8.RuneCountInString(string({e})); {} }}",
+                    count(
+                        "n",
+                        ">",
+                        *n,
+                        format!("is %d characters long, longer than maxLength {n}")
+                    )
                 ));
             }
             Check::IntAtLeast {
@@ -103,8 +128,15 @@ fn render(
             }
             Check::IntMultipleOf { divisor, literal } => {
                 let message = lit(&format!("%d is not a multiple of {literal}"));
-                if *divisor > i128::from(i64::MAX) {
-                    // Larger than any value: only zero is a multiple.
+                let min = i128::from(i64::MIN);
+                if *divisor == -min {
+                    // 2^63: zero and math.MinInt64 are its only multiples
+                    // an int64 can hold.
+                    out.push(format!(
+                        "if x := int64({e}); x != 0 && x != -9223372036854775808 {{ {r}.violation({p}, fmt.Sprintf({message}, x)) }}"
+                    ));
+                } else if *divisor > i128::from(i64::MAX) {
+                    // Larger than any int64: only zero is a multiple.
                     out.push(format!(
                         "if int64({e}) != 0 {{ {r}.violation({p}, fmt.Sprintf({message}, int64({e}))) }}"
                     ));
@@ -118,31 +150,41 @@ fn render(
                 bound,
                 exclusive,
                 literal,
-            } => {
-                let (op, keyword) = if *exclusive {
-                    (">", "exclusiveMinimum")
-                } else {
-                    (">=", "minimum")
-                };
-                out.push(format!(
-                    "if !(float64({e}) {op} {bound:?}) {{ {r}.violation({p}, fmt.Sprintf({}, float64({e}))) }}",
-                    lit(&format!("%v is below {keyword} {literal}"))
-                ));
             }
-            Check::NumAtMost {
+            | Check::NumAtMost {
                 bound,
                 exclusive,
                 literal,
             } => {
-                let (op, keyword) = if *exclusive {
-                    ("<", "exclusiveMaximum")
-                } else {
-                    ("<=", "maximum")
+                let at_least = matches!(check, Check::NumAtLeast { .. });
+                let (op, keyword, word) = match (at_least, exclusive) {
+                    (true, false) => (">=", "minimum", "below"),
+                    (true, true) => (">", "exclusiveMinimum", "below"),
+                    (false, false) => ("<=", "maximum", "above"),
+                    (false, true) => ("<", "exclusiveMaximum", "above"),
                 };
-                out.push(format!(
-                    "if !(float64({e}) {op} {bound:?}) {{ {r}.violation({p}, fmt.Sprintf({}, float64({e}))) }}",
-                    lit(&format!("%v is above {keyword} {literal}"))
-                ));
+                let float = matches!(kind, ValueKind::Number(FloatWidth::Float));
+                // Compared at the value's own width: a float32 bound is the
+                // constant rounded to float32, as the value was.
+                let value = if float {
+                    format!("float32({e})")
+                } else {
+                    format!("float64({e})")
+                };
+                let violation = format!(
+                    "{r}.violation({p}, fmt.Sprintf({}, {value}))",
+                    lit(&format!("%v is {word} {keyword} {literal}"))
+                );
+                if float && !(*bound as f32).is_finite() {
+                    // Beyond every float32: always or never met.
+                    if (*bound > 0.0) == at_least {
+                        out.push(violation);
+                    }
+                } else {
+                    out.push(format!(
+                        "if !({value} {op} {bound:?}) {{ {violation} }}"
+                    ));
+                }
             }
             Check::NumMultipleOf { integral, literal } => {
                 let unevaluated = format!(
@@ -159,13 +201,17 @@ fn render(
                     out.push(unevaluated);
                 }
             }
-            Check::MinItems(n) => out.push(format!(
-                "if len({e}) < {n} {{ {r}.violation({p}, fmt.Sprintf({}, len({e}))) }}",
-                lit(&format!("has %d items, fewer than minItems {n}"))
+            Check::MinItems(n) => out.push(count(
+                &format!("len({e})"),
+                "<",
+                *n,
+                format!("has %d items, fewer than minItems {n}"),
             )),
-            Check::MaxItems(n) => out.push(format!(
-                "if len({e}) > {n} {{ {r}.violation({p}, fmt.Sprintf({}, len({e}))) }}",
-                lit(&format!("has %d items, more than maxItems {n}"))
+            Check::MaxItems(n) => out.push(count(
+                &format!("len({e})"),
+                ">",
+                *n,
+                format!("has %d items, more than maxItems {n}"),
             )),
             Check::UniqueItems(Unique::Exact) => {
                 let key = match item {
@@ -184,19 +230,32 @@ fn render(
             Check::UniqueItems(Unique::Unknown) => out.push(format!(
                 "if len({e}) > 1 {{ {r}.unevaluated({p}, \"uniqueItems: items of this type are not compared yet\") }}"
             )),
-            Check::MinProperties(n) => out.push(format!(
-                "if len({e}) < {n} {{ {r}.violation({p}, fmt.Sprintf({}, len({e}))) }}",
-                lit(&format!("has %d members, fewer than minProperties {n}"))
+            Check::MinProperties(n) => out.push(count(
+                &format!("len({e})"),
+                "<",
+                *n,
+                format!("has %d members, fewer than minProperties {n}"),
             )),
-            Check::MaxProperties(n) => out.push(format!(
-                "if len({e}) > {n} {{ {r}.violation({p}, fmt.Sprintf({}, len({e}))) }}",
-                lit(&format!("has %d members, more than maxProperties {n}"))
+            Check::MaxProperties(n) => out.push(count(
+                &format!("len({e})"),
+                ">",
+                *n,
+                format!("has %d members, more than maxProperties {n}"),
             )),
             Check::Unevaluated { keyword, reason } => out.push(format!(
                 "{r}.unevaluated({p}, {})",
                 lit(&format!("{keyword}: {reason}"))
             )),
         }
+        reads |= out.len() > before
+            && !matches!(
+                check,
+                Check::Unevaluated { .. }
+                    | Check::NumMultipleOf {
+                        integral: false,
+                        ..
+                    }
+            );
     }
     reads
 }
@@ -211,18 +270,11 @@ fn item_of(ty: &TypeRef) -> Option<&TypeRef> {
 }
 
 /// Recursion into the generated types `ty` holds, from the value `e`.
-fn recurse(
-    ty: &TypeRef,
-    e: &str,
-    p: &str,
-    r: &str,
-    depth: usize,
-    out: &mut Vec<String>,
-    cx: &mut Context<'_>,
-) {
+fn recurse(ty: &TypeRef, at: At<'_>, depth: usize, out: &mut Vec<String>, cx: &mut Context<'_>) {
     if !(cx.validates)(ty) {
         return;
     }
+    let At { e, p, r } = at;
     match ty {
         TypeRef::Named(_) if (cx.nil_able)(ty) => {
             out.push(format!("if {e} != nil {{ {e}.validateInto({p}, {r}) }}"))
@@ -230,17 +282,21 @@ fn recurse(
         TypeRef::Named(_) => out.push(format!("{e}.validateInto({p}, {r})")),
         TypeRef::Boxed(inner) | TypeRef::Nullable(inner) => {
             let mut body = Vec::new();
-            recurse(inner, &format!("(*{e})"), p, r, depth, &mut body, cx);
+            let deref = format!("(*{e})");
+            recurse(inner, At { e: &deref, ..at }, depth, &mut body, cx);
             out.push(format!("if {e} != nil {{ {} }}", body.join("; ")));
         }
         TypeRef::Array(inner) => {
             let (i, item) = (format!("i{depth}"), format!("item{depth}"));
+            let pointer = format!("childPointer({p}, fmt.Sprint({i}))");
             let mut body = Vec::new();
             recurse(
                 inner,
-                &item,
-                &format!("childPointer({p}, fmt.Sprint({i}))"),
-                r,
+                At {
+                    e: &item,
+                    p: &pointer,
+                    r,
+                },
                 depth + 1,
                 &mut body,
                 cx,
@@ -253,12 +309,15 @@ fn recurse(
         TypeRef::Map(inner) => {
             cx.needs.sorted = true;
             let key = format!("k{depth}");
+            let (value, pointer) = (format!("{e}[{key}]"), format!("childPointer({p}, {key})"));
             let mut body = Vec::new();
             recurse(
                 inner,
-                &format!("{e}[{key}]"),
-                &format!("childPointer({p}, {key})"),
-                r,
+                At {
+                    e: &value,
+                    p: &pointer,
+                    r,
+                },
                 depth + 1,
                 &mut body,
                 cx,
@@ -272,20 +331,44 @@ fn recurse(
     }
 }
 
-/// Checks then recursion on a value of type `ty` at `e`.
+/// Checks then recursion on a value of type `ty` at `at`. True when the
+/// statements read the value.
 fn value(
     ty: &TypeRef,
     list: &[Check],
-    e: &str,
-    p: &str,
+    at: At<'_>,
     out: &mut Vec<String>,
     cx: &mut Context<'_>,
 ) -> bool {
-    let kind = checks::kind_of(ty);
-    let reads = render(list, (kind, item_of(ty)), (e, p, "r"), out, &mut cx.needs);
+    let reads = render(
+        list,
+        (checks::kind_of(ty), item_of(ty)),
+        at,
+        out,
+        &mut cx.needs,
+    );
     let before = out.len();
-    recurse(ty, e, p, "r", 0, out, cx);
+    recurse(ty, at, 0, out, cx);
     reads || out.len() > before
+}
+
+/// The checks and recursion on one branch's decoded value `x`, into the
+/// report `r`, and whether they read `x`.
+fn branch(branch: &Branch, r: &str, cx: &mut Context<'_>) -> (Vec<String>, bool) {
+    let list = checks::checks(&branch.ty, &branch.constraints);
+    let mut body = Vec::new();
+    let reads = value(
+        &branch.ty,
+        &list,
+        At {
+            e: "x",
+            p: "pointer",
+            r,
+        },
+        &mut body,
+        cx,
+    );
+    (body, reads)
 }
 
 /// The body of `validateInto` for one type, or `None` when it has no
@@ -303,37 +386,39 @@ pub(crate) fn body(
     if opted_out {
         return Some(out);
     }
+    let own = At {
+        e: "v",
+        p: "pointer",
+        r: "r",
+    };
     match &def.kind {
         TypeKind::Struct(s) => {
             let mut members = Vec::new();
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
                 let list = checks::checks(&field.ty, &field.constraints);
-                // The field holds the value directly, behind a pointer, or in
-                // a `Nullable`.
-                let (guard, access) = if field_view.ty.starts_with("Nullable[") {
-                    (
-                        Some(format!("v.{name}.Value != nil")),
-                        format!("(*v.{name}.Value)"),
-                    )
-                } else if field_view.ty.starts_with('*') {
-                    (Some(format!("v.{name} != nil")), format!("(*v.{name})"))
-                } else {
-                    (None, format!("v.{name}"))
-                };
-                members.push(
-                    match (field.required, field_view.ty.starts_with("Nullable[")) {
-                        (true, _) => "members++".to_owned(),
-                        (false, true) => format!("if v.{name}.Set {{ members++ }}"),
-                        (false, false) => format!("if v.{name} != nil {{ members++ }}"),
-                    },
-                );
+                let in_nullable = field_view.ty.starts_with("Nullable[");
+                members.push(match (field.required, in_nullable) {
+                    (true, _) => "members++".to_owned(),
+                    (false, true) => format!("if v.{name}.Set {{ members++ }}"),
+                    (false, false) => format!("if v.{name} != nil {{ members++ }}"),
+                });
                 let inner_ty = match &field.ty {
                     TypeRef::Boxed(inner) => inner.as_ref(),
                     other => other,
                 };
                 let mut body = Vec::new();
-                let reads = value(inner_ty, &list, "x", "p", &mut body, cx);
+                let reads = value(
+                    inner_ty,
+                    &list,
+                    At {
+                        e: "x",
+                        p: "p",
+                        r: "r",
+                    },
+                    &mut body,
+                    cx,
+                );
                 if body.is_empty() {
                     continue;
                 }
@@ -342,63 +427,96 @@ pub(crate) fn body(
                     field_view.literal
                 )];
                 // Bound only when read; Go refuses an unused variable.
-                let bind = if reads {
-                    format!("x := {access}; ")
-                } else {
-                    String::new()
-                };
-                match guard {
-                    Some(guard) => {
-                        block.push(format!("if {guard} {{ {bind}{} }}", body.join("; ")))
+                let bind = |access: &str| {
+                    if reads {
+                        format!("x := {access}; ")
+                    } else {
+                        String::new()
                     }
-                    None => block.push(format!("{bind}{}", body.join("; "))),
+                };
+                let holder = (cx.raw_holder)(inner_ty);
+                let statements = body.join("; ");
+                if let Some(holder) = holder.filter(|_| in_nullable && !field.nullable) {
+                    // A raw holder is in a `Nullable` because `null` is one
+                    // of the values it holds, not because the schema allows
+                    // null outright: a present null is validated too.
+                    cx.needs.jsontext = true;
+                    block.push(format!(
+                        "if v.{name}.Set {{ x := {holder}{{raw: jsontext.Value(\"null\")}}; if v.{name}.Value != nil {{ x = *v.{name}.Value }}; {statements} }}"
+                    ));
+                } else if in_nullable {
+                    block.push(format!(
+                        "if v.{name}.Value != nil {{ {}{statements} }}",
+                        bind(&format!("(*v.{name}.Value)"))
+                    ));
+                } else if field_view.ty.starts_with('*') {
+                    block.push(format!(
+                        "if v.{name} != nil {{ {}{statements} }}",
+                        bind(&format!("(*v.{name})"))
+                    ));
+                } else {
+                    block.push(format!("{}{statements}", bind(&format!("v.{name}"))));
                 }
                 out.push(format!("{{ {} }}", block.join("; ")));
             }
             if let Additional::CatchAll(ty) = &s.additional {
                 let name = &view.extra_name;
                 members.push(format!("members += len(v.{name})"));
+                let map = format!("v.{name}");
                 recurse(
                     &TypeRef::Map(Box::new(ty.clone())),
-                    &format!("v.{name}"),
-                    "pointer",
-                    "r",
+                    At { e: &map, ..own },
                     0,
                     &mut out,
                     cx,
                 );
             }
             let list = checks::object_checks(&def.constraints);
-            if !list.is_empty() {
+            let counted = list
+                .iter()
+                .any(|c| matches!(c, Check::MinProperties(_) | Check::MaxProperties(_)));
+            if counted {
                 out.push("members := 0".to_owned());
                 out.extend(members);
-                for check in &list {
-                    match check {
-                        Check::MinProperties(n) => out.push(format!(
-                            "if members < {n} {{ r.violation(pointer, fmt.Sprintf({}, members)) }}",
-                            lit(&format!("has %d members, fewer than minProperties {n}"))
-                        )),
-                        Check::MaxProperties(n) => out.push(format!(
-                            "if members > {n} {{ r.violation(pointer, fmt.Sprintf({}, members)) }}",
-                            lit(&format!("has %d members, more than maxProperties {n}"))
-                        )),
-                        other => {
-                            render(
-                                std::slice::from_ref(other),
-                                (ValueKind::Other, None),
-                                ("v", "pointer", "r"),
-                                &mut out,
-                                &mut cx.needs,
-                            );
-                        }
+            }
+            for check in &list {
+                match check {
+                    Check::MinProperties(n) => out.push(format!(
+                        "if uint64(members) < {n} {{ r.violation(pointer, fmt.Sprintf({}, members)) }}",
+                        lit(&format!("has %d members, fewer than minProperties {n}"))
+                    )),
+                    Check::MaxProperties(n) => out.push(format!(
+                        "if uint64(members) > {n} {{ r.violation(pointer, fmt.Sprintf({}, members)) }}",
+                        lit(&format!("has %d members, more than maxProperties {n}"))
+                    )),
+                    other => {
+                        render(
+                            std::slice::from_ref(other),
+                            (ValueKind::Other, None),
+                            own,
+                            &mut out,
+                            &mut cx.needs,
+                        );
                     }
                 }
             }
         }
+        TypeKind::StringEnum(_) => {
+            // Membership is the decoder's; the other string constraints
+            // apply to the member's wire value.
+            let list = checks::checks(&TypeRef::String, &def.constraints);
+            render(
+                &list,
+                (ValueKind::String, None),
+                own,
+                &mut out,
+                &mut cx.needs,
+            );
+        }
         TypeKind::UnionTagged(u) => {
             for (variant, variant_view) in u.variants.iter().zip(&view.variants) {
                 let mut body = Vec::new();
-                recurse(&variant.ty, "x", "pointer", "r", 0, &mut body, cx);
+                recurse(&variant.ty, At { e: "x", ..own }, 0, &mut body, cx);
                 if !body.is_empty() {
                     out.push(format!(
                         "if x, ok := v.{}(); ok {{ {} }}",
@@ -410,15 +528,15 @@ pub(crate) fn body(
         }
         TypeKind::UnionOpen(u) => {
             out.push("certain, uncertain := 0, 0".to_owned());
-            for (branch, branch_view) in u.branches.iter().zip(&view.branches) {
+            for (b, branch_view) in u.branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
-                let mut body = Vec::new();
-                recurse(&branch.ty, "x", "pointer", "branch", 0, &mut body, cx);
+                let (body, reads) = branch(b, "branch", cx);
                 if body.is_empty() {
                     out.push(format!("if _, ok := v.{accessor}(); ok {{ certain++ }}"));
                 } else {
+                    let binding = if reads { "x" } else { "_" };
                     out.push(format!(
-                        "if x, ok := v.{accessor}(); ok {{ branch := &ValidationReport{{}}; {}; if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ certain++ }} else {{ uncertain++ }} }} }}",
+                        "if {binding}, ok := v.{accessor}(); ok {{ branch := &ValidationReport{{}}; {}; if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ certain++ }} else {{ uncertain++ }} }} }}",
                         body.join("; ")
                     ));
                 }
@@ -430,46 +548,50 @@ pub(crate) fn body(
             }
         }
         TypeKind::ComposedOpen(branches) => {
-            for (branch, branch_view) in branches.iter().zip(&view.branches) {
+            for (b, branch_view) in branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let message = lit(&format!(
                     "does not satisfy the allOf part read by {accessor}"
                 ));
-                let mut body = Vec::new();
-                recurse(&branch.ty, "x", "pointer", "r", 0, &mut body, cx);
-                if body.is_empty() {
-                    out.push(format!(
-                        "if _, ok := v.{accessor}(); !ok {{ r.violation(pointer, {message}) }}"
-                    ));
+                let (body, reads) = branch(b, "r", cx);
+                let part = if body.is_empty() {
+                    format!("if _, ok := v.{accessor}(); !ok {{ r.violation(pointer, {message}) }}")
                 } else {
-                    out.push(format!(
-                        "if x, ok := v.{accessor}(); ok {{ {} }} else {{ r.violation(pointer, {message}) }}",
+                    let binding = if reads { "x" } else { "_" };
+                    format!(
+                        "if {binding}, ok := v.{accessor}(); ok {{ {} }} else {{ r.violation(pointer, {message}) }}",
                         body.join("; ")
-                    ));
-                }
+                    )
+                };
+                // A typeless schema's object keywords say nothing about a
+                // value that is not an object.
+                out.push(if b.object_only {
+                    format!("if v.raw.Kind() == '{{' {{ {part} }}")
+                } else {
+                    part
+                });
             }
         }
         TypeKind::Newtype(inner) | TypeKind::Alias(inner) => {
             // A defined type does not inherit its underlying type's
             // methods: recursion goes through a conversion.
             let list = checks::checks(inner, &def.constraints);
-            let converted = format!("{}(v)", view.inner);
-            let kind = checks::kind_of(inner);
             render(
                 &list,
-                (kind, item_of(inner)),
-                ("v", "pointer", "r"),
+                (checks::kind_of(inner), item_of(inner)),
+                own,
                 &mut out,
                 &mut cx.needs,
             );
+            let converted = format!("{}(v)", view.inner);
             let target = if matches!(inner, TypeRef::Named(_)) {
                 converted.as_str()
             } else {
                 "v"
             };
-            recurse(inner, target, "pointer", "r", 0, &mut out, cx);
+            recurse(inner, At { e: target, ..own }, 0, &mut out, cx);
         }
-        TypeKind::StringEnum(_) | TypeKind::Extern => {}
+        TypeKind::Extern => {}
     }
     Some(out)
 }

@@ -2,32 +2,53 @@
 //! `Validate::validate_into`.
 
 use crate::checks::{self, Check, Unique, ValueKind};
-use crate::front::IntWidth;
-use crate::ir::{Additional, TypeDef, TypeKind, TypeRef};
+use crate::front::{FloatWidth, IntWidth};
+use crate::ir::{Additional, Branch, TypeDef, TypeKind, TypeRef};
 use crate::rust::view::TypeView;
 
-/// Statements checking `checks` on `v`, a `&T` of the value's type, with
-/// findings at the pointer expression `p` (a `&str`). True when they read
-/// the value: some checks only report that they could not be made.
-fn render(list: &[Check], kind: ValueKind, v: &str, p: &str, out: &mut Vec<String>) -> bool {
-    let int = |v: &str| format!("i128::from({v}.0)");
-    let reads = list.iter().any(|check| {
-        !matches!(
-            check,
-            Check::Unevaluated { .. }
-                | Check::NumMultipleOf {
-                    integral: false,
-                    ..
-                }
-        )
-    });
+/// Where a check reads and reports: the value (a `&T`, parenthesised),
+/// the pointer (a `&str`) and the report (a `&mut ValidationReport`).
+#[derive(Clone, Copy)]
+struct At<'a> {
+    v: &'a str,
+    p: &'a str,
+    r: &'a str,
+}
+
+/// A float bound compared at the value's own width, so a value that
+/// rounds to exactly the bound is not pushed past it by a widening.
+/// `Err` decides the comparison statically, for a bound beyond the width.
+fn float_bound(bound: f64, width: FloatWidth) -> Result<String, f64> {
+    match width {
+        FloatWidth::Double => Ok(format!("{bound:?}")),
+        FloatWidth::Float => {
+            let narrowed = bound as f32;
+            if narrowed.is_finite() {
+                Ok(format!("{narrowed:?}_f32"))
+            } else {
+                Err(bound)
+            }
+        }
+    }
+}
+
+/// Statements checking `list` at `at`. True when they read the value: some
+/// checks only report that they could not be made.
+fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) -> bool {
+    let At { v, p, r } = at;
+    let int = format!("i128::from({v}.0)");
+    // Some checks only report that they could not be made, and a bound
+    // beyond every value emits nothing: the value is read only when a
+    // check that reads it emitted something.
+    let mut reads = false;
     for check in list {
+        let before = out.len();
         match check {
             Check::MinLength(n) => out.push(format!(
-                "{{ let n = {v}.chars().count(); if n < {n} {{ report.violation({p}, format!(\"is {{n}} characters long, shorter than minLength {n}\")); }} }}"
+                "{{ let n = {v}.chars().count(); if (n as u64) < {n} {{ {r}.violation({p}, format!(\"is {{n}} characters long, shorter than minLength {n}\")); }} }}"
             )),
             Check::MaxLength(n) => out.push(format!(
-                "{{ let n = {v}.chars().count(); if n > {n} {{ report.violation({p}, format!(\"is {{n}} characters long, longer than maxLength {n}\")); }} }}"
+                "{{ let n = {v}.chars().count(); if (n as u64) > {n} {{ {r}.violation({p}, format!(\"is {{n}} characters long, longer than maxLength {n}\")); }} }}"
             )),
             Check::IntAtLeast {
                 bound,
@@ -40,8 +61,7 @@ fn render(list: &[Check], kind: ValueKind, v: &str, p: &str, out: &mut Vec<Strin
                 };
                 if *bound > floor {
                     out.push(format!(
-                        "if {} < {bound} {{ report.violation({p}, format!(\"{{}} is below {keyword} {literal}\", {v}.0)); }}",
-                        int(v)
+                        "if {int} < {bound} {{ {r}.violation({p}, format!(\"{{}} is below {keyword} {literal}\", {v}.0)); }}"
                     ));
                 }
             }
@@ -56,16 +76,14 @@ fn render(list: &[Check], kind: ValueKind, v: &str, p: &str, out: &mut Vec<Strin
                 };
                 if *bound < ceiling {
                     out.push(format!(
-                        "if {} > {bound} {{ report.violation({p}, format!(\"{{}} is above {keyword} {literal}\", {v}.0)); }}",
-                        int(v)
+                        "if {int} > {bound} {{ {r}.violation({p}, format!(\"{{}} is above {keyword} {literal}\", {v}.0)); }}"
                     ));
                 }
             }
             Check::IntMultipleOf { divisor, literal } => {
                 if *divisor != 1 {
                     out.push(format!(
-                        "if {} % {divisor} != 0 {{ report.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v}.0)); }}",
-                        int(v)
+                        "if {int} % {divisor} != 0 {{ {r}.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v}.0)); }}"
                     ));
                 }
             }
@@ -73,95 +91,143 @@ fn render(list: &[Check], kind: ValueKind, v: &str, p: &str, out: &mut Vec<Strin
                 bound,
                 exclusive,
                 literal,
-            } => {
-                let (op, keyword) = if *exclusive {
-                    (">", "exclusiveMinimum")
-                } else {
-                    (">=", "minimum")
-                };
-                out.push(format!(
-                    "if !(f64::from(*{v}) {op} {bound:?}) {{ report.violation({p}, format!(\"{{}} is below {keyword} {literal}\", {v})); }}"
-                ));
             }
-            Check::NumAtMost {
+            | Check::NumAtMost {
                 bound,
                 exclusive,
                 literal,
             } => {
-                let (op, keyword) = if *exclusive {
-                    ("<", "exclusiveMaximum")
-                } else {
-                    ("<=", "maximum")
+                let at_least = matches!(check, Check::NumAtLeast { .. });
+                let (op, keyword, word) = match (at_least, exclusive) {
+                    (true, false) => (">=", "minimum", "below"),
+                    (true, true) => (">", "exclusiveMinimum", "below"),
+                    (false, false) => ("<=", "maximum", "above"),
+                    (false, true) => ("<", "exclusiveMaximum", "above"),
                 };
-                out.push(format!(
-                    "if !(f64::from(*{v}) {op} {bound:?}) {{ report.violation({p}, format!(\"{{}} is above {keyword} {literal}\", {v})); }}"
-                ));
+                let width = match kind {
+                    ValueKind::Number(width) => width,
+                    _ => FloatWidth::Double,
+                };
+                let value = match width {
+                    FloatWidth::Double => format!("f64::from(*{v})"),
+                    FloatWidth::Float => format!("*{v}"),
+                };
+                let violation = format!(
+                    "{r}.violation({p}, format!(\"{{}} is {word} {keyword} {literal}\", {v}))"
+                );
+                match float_bound(*bound, width) {
+                    Ok(bound) => out.push(format!(
+                        "if !({value} {op} {bound}) {{ {violation}; }}"
+                    )),
+                    // Beyond every value of the width: always or never met.
+                    Err(bound) if (bound > 0.0) == at_least => out.push(format!("{violation};")),
+                    Err(_) => {}
+                }
             }
             Check::NumMultipleOf { integral, literal } => {
                 let unevaluated = format!(
-                    "report.unevaluated({p}, \"multipleOf {literal}: a decoded float has lost its literal, so only a fraction against a whole multiple is decided\")"
+                    "{r}.unevaluated({p}, \"multipleOf {literal}: a decoded float has lost its literal, so only a fraction against a whole multiple is decided\")"
                 );
                 if *integral {
                     // A fraction never came from a whole-number literal, so
                     // it is no multiple of a whole number; anything else
                     // may have been rounded on the way in.
                     out.push(format!(
-                        "if f64::from(*{v}).fract() != 0.0 {{ report.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v})); }} else {{ {unevaluated}; }}"
+                        "if f64::from(*{v}).fract() != 0.0 {{ {r}.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v})); }} else {{ {unevaluated}; }}"
                     ));
                 } else {
                     out.push(format!("{unevaluated};"));
                 }
             }
             Check::MinItems(n) => out.push(format!(
-                "if {v}.len() < {n} {{ report.violation({p}, format!(\"has {{}} items, fewer than minItems {n}\", {v}.len())); }}"
+                "if ({v}.len() as u64) < {n} {{ {r}.violation({p}, format!(\"has {{}} items, fewer than minItems {n}\", {v}.len())); }}"
             )),
             Check::MaxItems(n) => out.push(format!(
-                "if {v}.len() > {n} {{ report.violation({p}, format!(\"has {{}} items, more than maxItems {n}\", {v}.len())); }}"
+                "if ({v}.len() as u64) > {n} {{ {r}.violation({p}, format!(\"has {{}} items, more than maxItems {n}\", {v}.len())); }}"
             )),
             Check::UniqueItems(Unique::Exact) => out.push(format!(
-                "{{ let mut seen = std::collections::BTreeSet::new(); for (i, item) in {v}.iter().enumerate() {{ if !seen.insert(item) {{ report.violation(&child_pointer({p}, &i.to_string()), \"repeats an earlier item; uniqueItems is true\"); }} }} }}"
+                "{{ let mut seen = std::collections::BTreeSet::new(); for (i, item) in {v}.iter().enumerate() {{ if !seen.insert(item) {{ {r}.violation(&child_pointer({p}, &i.to_string()), \"repeats an earlier item; uniqueItems is true\"); }} }} }}"
             )),
             Check::UniqueItems(Unique::Float) => out.push(format!(
-                "if {v}.iter().enumerate().any(|(i, a)| {v}[..i].contains(a)) {{ report.unevaluated({p}, \"uniqueItems: equal floats may come from different numbers\"); }}"
+                "if {v}.iter().enumerate().any(|(i, a)| {v}[..i].contains(a)) {{ {r}.unevaluated({p}, \"uniqueItems: equal floats may come from different numbers\"); }}"
             )),
             Check::UniqueItems(Unique::Unknown) => out.push(format!(
-                "if {v}.len() > 1 {{ report.unevaluated({p}, \"uniqueItems: items of this type are not compared yet\"); }}"
+                "if {v}.len() > 1 {{ {r}.unevaluated({p}, \"uniqueItems: items of this type are not compared yet\"); }}"
             )),
             Check::MinProperties(n) => out.push(format!(
-                "if {v}.len() < {n} {{ report.violation({p}, format!(\"has {{}} members, fewer than minProperties {n}\", {v}.len())); }}"
+                "if ({v}.len() as u64) < {n} {{ {r}.violation({p}, format!(\"has {{}} members, fewer than minProperties {n}\", {v}.len())); }}"
             )),
             Check::MaxProperties(n) => out.push(format!(
-                "if {v}.len() > {n} {{ report.violation({p}, format!(\"has {{}} members, more than maxProperties {n}\", {v}.len())); }}"
+                "if ({v}.len() as u64) > {n} {{ {r}.violation({p}, format!(\"has {{}} members, more than maxProperties {n}\", {v}.len())); }}"
             )),
             Check::Unevaluated { keyword, reason } => out.push(format!(
-                "report.unevaluated({p}, {:?});",
+                "{r}.unevaluated({p}, {:?});",
                 format!("{keyword}: {reason}")
             )),
         }
+        reads |= out.len() > before
+            && !matches!(
+                check,
+                Check::Unevaluated { .. }
+                    | Check::NumMultipleOf {
+                        integral: false,
+                        ..
+                    }
+            );
     }
     reads
 }
 
 /// Checks on a value position: nullability seen through, then the
 /// constraints.
-fn value(ty: &TypeRef, list: &[Check], v: &str, p: &str, out: &mut Vec<String>) -> bool {
+fn value(ty: &TypeRef, list: &[Check], at: At<'_>, out: &mut Vec<String>) -> bool {
     if list.is_empty() {
         return false;
     }
-    let kind = checks::kind_of(ty);
     match ty {
         TypeRef::Nullable(inner) => {
             let mut body = Vec::new();
-            if value(inner, list, "v", p, &mut body) {
-                out.push(format!("if let Some(v) = {v} {{ {} }}", body.join(" ")));
+            if value(inner, list, At { v: "v", ..at }, &mut body) {
+                out.push(format!(
+                    "if let Some(v) = {} {{ {} }}",
+                    at.v,
+                    body.join(" ")
+                ));
             } else {
-                out.push(format!("if {v}.is_some() {{ {} }}", body.join(" ")));
+                out.push(format!("if {}.is_some() {{ {} }}", at.v, body.join(" ")));
             }
             true
         }
-        TypeRef::Boxed(inner) => value(inner, list, v, p, out),
-        _ => render(list, kind, v, p, out),
+        TypeRef::Boxed(inner) => value(inner, list, at, out),
+        _ => render(list, checks::kind_of(ty), at, out),
     }
+}
+
+/// The checks and recursion on one branch's decoded value `v` (owned),
+/// into the report `r` (passed on as `arg`). Empty when the branch is
+/// only decoded.
+fn branch(
+    branch: &Branch,
+    generated: &dyn Fn(&TypeRef) -> bool,
+    (r, arg): (&str, &str),
+) -> (Vec<String>, bool) {
+    let list = checks::checks(&branch.ty, &branch.constraints);
+    let mut body = Vec::new();
+    let mut reads = value(
+        &branch.ty,
+        &list,
+        At {
+            v: "(&v)",
+            p: "pointer",
+            r,
+        },
+        &mut body,
+    );
+    if generated(&branch.ty) {
+        body.push(format!("v.validate_into(pointer, {arg});"));
+        reads = true;
+    }
+    (body, reads)
 }
 
 /// The body of `validate_into` for one type, or `None` when it gets no
@@ -179,6 +245,11 @@ pub(crate) fn body(
     if opted_out {
         return Some(out);
     }
+    let report = At {
+        v: "self",
+        p: "pointer",
+        r: "report",
+    };
     match &def.kind {
         TypeKind::Struct(s) => {
             let mut present = Vec::new();
@@ -186,20 +257,31 @@ pub(crate) fn body(
                 let name = &field_view.name;
                 let list = checks::checks(&field.ty, &field.constraints);
                 let recurse = generated(&field.ty);
-                present.push(match (field.required, field.nullable) {
-                    (true, _) => "1".to_owned(),
-                    _ => format!("usize::from(self.{name}.is_some())"),
+                present.push(if field.required {
+                    "1".to_owned()
+                } else {
+                    format!("usize::from(self.{name}.is_some())")
                 });
-                if list.is_empty() && !recurse {
+                let mut inner = Vec::new();
+                let reads = value(
+                    &field.ty,
+                    &list,
+                    At {
+                        v: "v",
+                        p: "&p",
+                        r: "report",
+                    },
+                    &mut inner,
+                );
+                // Every check may have been decided away.
+                if inner.is_empty() && !recurse {
                     continue;
                 }
                 let mut block = vec![format!(
                     "let p = child_pointer(pointer, {:?});",
                     field.raw_name
                 )];
-                if !list.is_empty() {
-                    let mut inner = Vec::new();
-                    let reads = value(&field.ty, &list, "v", "&p", &mut inner);
+                if !inner.is_empty() {
                     let binding = if reads { "v" } else { "_" };
                     let pattern = match (field.required, field.nullable) {
                         (true, false) => None,
@@ -230,7 +312,10 @@ pub(crate) fn body(
                 }
             }
             let list = checks::object_checks(&def.constraints);
-            if !list.is_empty() {
+            let counted = list
+                .iter()
+                .any(|c| matches!(c, Check::MinProperties(_) | Check::MaxProperties(_)));
+            if counted {
                 out.push(format!(
                     "let members: usize = {};",
                     if present.is_empty() {
@@ -239,25 +324,50 @@ pub(crate) fn body(
                         present.join(" + ")
                     }
                 ));
-                for check in &list {
-                    match check {
-                        Check::MinProperties(n) => out.push(format!(
-                            "if members < {n} {{ report.violation(pointer, format!(\"has {{members}} members, fewer than minProperties {n}\")); }}"
-                        )),
-                        Check::MaxProperties(n) => out.push(format!(
-                            "if members > {n} {{ report.violation(pointer, format!(\"has {{members}} members, more than maxProperties {n}\")); }}"
-                        )),
-                        other => {
-                            render(
-                                std::slice::from_ref(other),
-                                ValueKind::Other,
-                                "self",
-                                "pointer",
-                                &mut out,
-                            );
-                        }
+            }
+            for check in &list {
+                match check {
+                    Check::MinProperties(n) => out.push(format!(
+                        "if (members as u64) < {n} {{ report.violation(pointer, format!(\"has {{members}} members, fewer than minProperties {n}\")); }}"
+                    )),
+                    Check::MaxProperties(n) => out.push(format!(
+                        "if (members as u64) > {n} {{ report.violation(pointer, format!(\"has {{members}} members, more than maxProperties {n}\")); }}"
+                    )),
+                    other => {
+                        render(
+                            std::slice::from_ref(other),
+                            ValueKind::Other,
+                            report,
+                            &mut out,
+                        );
                     }
                 }
+            }
+        }
+        TypeKind::StringEnum(_) => {
+            // Membership is the decoder's; the other string constraints
+            // apply to the member's wire value.
+            let list = checks::checks(&TypeRef::String, &def.constraints);
+            if !list.is_empty() {
+                let mut inner = Vec::new();
+                let reads = render(
+                    &list,
+                    ValueKind::String,
+                    At { v: "v", ..report },
+                    &mut inner,
+                );
+                if reads {
+                    let arms: Vec<String> = view
+                        .variants
+                        .iter()
+                        .map(|variant| format!("Self::{} => {:?},", variant.name, variant.value))
+                        .collect();
+                    out.push(format!(
+                        "let v: &str = match self {{ {} }};",
+                        arms.join(" ")
+                    ));
+                }
+                out.extend(inner);
             }
         }
         TypeKind::UnionTagged(u) => {
@@ -276,28 +386,36 @@ pub(crate) fn body(
                     }
                 })
                 .collect();
-            out.push(format!("match self {{ {} }}", arms.join(" ")));
+            if !arms.iter().all(|arm| arm.ends_with("(_) => {}")) {
+                out.push(format!("match self {{ {} }}", arms.join(" ")));
+            }
         }
         TypeKind::UnionOpen(u) => {
-            let validated = u.branches.iter().any(|b| generated(&b.ty));
+            let mut lines = Vec::new();
+            let mut checked = false;
+            for (b, branch_view) in u.branches.iter().zip(&view.branches) {
+                let accessor = &branch_view.accessor;
+                let (body, reads) = branch(b, generated, ("branch", "&mut branch"));
+                if body.is_empty() {
+                    lines.push(format!(
+                        "if self.{accessor}().is_some() {{ certain += 1; }}"
+                    ));
+                } else {
+                    checked = true;
+                    let binding = if reads { "v" } else { "_" };
+                    lines.push(format!(
+                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = ValidationReport::default(); {} if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ certain += 1; }} else {{ uncertain += 1; }} }} }}",
+                        body.join(" ")
+                    ));
+                }
+            }
             out.push("let mut certain = 0usize;".to_owned());
-            out.push(if validated {
+            out.push(if checked {
                 "let mut uncertain = 0usize;".to_owned()
             } else {
                 "let uncertain = 0usize;".to_owned()
             });
-            for (branch, branch_view) in u.branches.iter().zip(&view.branches) {
-                let accessor = &branch_view.accessor;
-                if generated(&branch.ty) {
-                    out.push(format!(
-                        "if let Some(v) = self.{accessor}() {{ let mut branch = ValidationReport::default(); v.validate_into(pointer, &mut branch); if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ certain += 1; }} else {{ uncertain += 1; }} }} }}"
-                    ));
-                } else {
-                    out.push(format!(
-                        "if self.{accessor}().is_some() {{ certain += 1; }}"
-                    ));
-                }
-            }
+            out.extend(lines);
             if u.exclusive {
                 out.push("if certain + uncertain == 0 { report.violation(pointer, \"matches none of the oneOf branches\"); } else if certain > 1 { report.violation(pointer, format!(\"matches {certain} oneOf branches; exactly one must\")); } else if !(certain == 1 && uncertain == 0) { report.unevaluated(pointer, \"oneOf: whether exactly one branch matches depends on constraints that were not evaluated\"); }".to_owned());
             } else {
@@ -305,31 +423,49 @@ pub(crate) fn body(
             }
         }
         TypeKind::ComposedOpen(branches) => {
-            for (branch, branch_view) in branches.iter().zip(&view.branches) {
+            for (b, branch_view) in branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let message = format!(
                     "does not satisfy the allOf part read by {}",
                     accessor.trim_start_matches("as_")
                 );
-                if generated(&branch.ty) {
-                    out.push(format!(
-                        "match self.{accessor}() {{ Some(v) => v.validate_into(pointer, report), None => report.violation(pointer, {message:?}), }}"
-                    ));
-                } else {
-                    out.push(format!(
+                let (body, reads) = branch(b, generated, ("report", "report"));
+                let part = if body.is_empty() {
+                    format!(
                         "if self.{accessor}().is_none() {{ report.violation(pointer, {message:?}); }}"
-                    ));
-                }
+                    )
+                } else {
+                    let binding = if reads { "v" } else { "_" };
+                    format!(
+                        "match self.{accessor}() {{ Some({binding}) => {{ {} }} None => report.violation(pointer, {message:?}), }}",
+                        body.join(" ")
+                    )
+                };
+                // A typeless schema's object keywords say nothing about a
+                // value that is not an object.
+                out.push(if b.object_only {
+                    format!("if self.raw.get().trim_start().starts_with('{{') {{ {part} }}")
+                } else {
+                    part
+                });
             }
         }
         TypeKind::Newtype(inner) | TypeKind::Alias(inner) => {
             let list = checks::checks(inner, &def.constraints);
-            let _ = value(inner, &list, "(&self.0)", "pointer", &mut out);
+            let _ = value(
+                inner,
+                &list,
+                At {
+                    v: "(&self.0)",
+                    ..report
+                },
+                &mut out,
+            );
             if generated(inner) {
                 out.push("self.0.validate_into(pointer, report);".to_owned());
             }
         }
-        TypeKind::StringEnum(_) | TypeKind::Extern => {}
+        TypeKind::Extern => {}
     }
     Some(out)
 }

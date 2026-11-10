@@ -543,7 +543,24 @@ fn validated_description() -> serde_json::Value {
             "Owner": {"type": "object", "properties": {"nick": {"type": ["string", "null"], "maxLength": 3}}},
             "Short": {"type": "string", "maxLength": 2},
             "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
-            "Choice": {"oneOf": [{"$ref": "#/components/schemas/Short"}, {"$ref": "#/components/schemas/Owner"}]}
+            "Choice": {"oneOf": [{"$ref": "#/components/schemas/Short"}, {"$ref": "#/components/schemas/Owner"}]},
+            "Numeric": {"type": ["integer", "number"]},
+            "Shaped": {"properties": {"x": {"type": "string"}}},
+            "Inline": {"oneOf": [{"type": "string", "maxLength": 2}, {"type": "integer"}]},
+            "Letters": {"type": "string", "enum": ["a", "abcd"], "maxLength": 2},
+            "Fine": {"type": "object", "properties": {
+                "f": {"type": "number", "format": "float", "maximum": 0.1},
+                "choice": {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+            }},
+            "Named": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"maxLength": 3}},
+            "Edge": {"type": "object", "properties": {
+                "big": {"type": "string", "maxLength": 9223372036854775808u64, "minLength": 0},
+                "m": {"type": "integer", "multipleOf": 9223372036854775808u64},
+                "wide": {"type": "number", "format": "float", "maximum": 1e300, "minimum": -1e300},
+                "many": {"type": "array", "items": {"type": "integer"}, "maxItems": 18446744073709551615u64}
+            }},
+            "Closed": {"type": "object", "additionalProperties": false, "propertyNames": {"maxLength": 1}, "properties": {"a": {"type": "string"}}},
+            "TypeList": {"type": ["string", "integer"], "maxLength": 3, "minimum": 5}
         }}
     })
 }
@@ -624,6 +641,36 @@ fn main() {
     assert_eq!(report::<Choice>(r#""ab""#), vec![]);
     assert_eq!(report::<Choice>(r#""abc""#), vec![v("")]);
     assert_eq!(report::<Choice>(r#"{"nick":"ok"}"#), vec![]);
+    // A type list accepts what any member does, overlaps included.
+    assert_eq!(report::<Numeric>("1"), vec![]);
+    assert_eq!(report::<Numeric>("1.5"), vec![]);
+    // A typeless schema's object keywords say nothing about non-objects.
+    assert_eq!(report::<Shaped>("42"), vec![]);
+    assert_eq!(report::<Shaped>(r#"{"x":1}"#), vec![v("")]);
+    // An inline branch keeps its constraints.
+    assert_eq!(report::<Inline>(r#""ab""#), vec![]);
+    assert_eq!(report::<Inline>(r#""abcd""#), vec![v("")]);
+    assert_eq!(report::<Inline>("5"), vec![]);
+    // Enum members still meet the other string constraints.
+    assert_eq!(report::<Letters>(r#""a""#), vec![]);
+    assert_eq!(report::<Letters>(r#""abcd""#), vec![v("")]);
+    // A float compared at its own width: 0.1 is its own maximum.
+    assert_eq!(report::<Fine>(r#"{"f":0.1}"#), vec![]);
+    assert_eq!(report::<Fine>(r#"{"f":0.2}"#), vec![v("/f")]);
+    // A null in an open holder is one of its values, and matches no branch.
+    assert_eq!(report::<Fine>(r#"{"choice":null}"#), vec![v("/choice")]);
+    // Member names are not checked yet, and say so.
+    assert_eq!(report::<Named>(r#"{"abcd":1}"#), vec![u("")]);
+    // Bounds beyond every value, and the one multiple of 2^63 an i64 holds.
+    assert_eq!(report::<Edge>(r#"{"big":"x","wide":1.5,"many":[1],"m":-9223372036854775808}"#), vec![]);
+    assert_eq!(report::<Edge>(r#"{"m":0}"#), vec![]);
+    assert_eq!(report::<Edge>(r#"{"m":5}"#), vec![v("/m")]);
+    assert_eq!(report::<Closed>(r#"{"a":"x"}"#), vec![u("")]);
+    // A type list's constraints apply to the member they fit.
+    assert_eq!(report::<TypeList>(r#""ab""#), vec![]);
+    assert_eq!(report::<TypeList>("7"), vec![]);
+    assert_eq!(report::<TypeList>(r#""abcdef""#), vec![v("")]);
+    assert_eq!(report::<TypeList>("1"), vec![v("")]);
     println!("validation behaves");
 }
 "##;
@@ -751,6 +798,27 @@ func main() {
 	check(`"ab"`, report[api.Choice](`"ab"`))
 	check(`"abc"`, report[api.Choice](`"abc"`), v(""))
 	check(`{"nick":"ok"}`, report[api.Choice](`{"nick":"ok"}`))
+	check(`1`, report[api.Numeric](`1`))
+	check(`1.5`, report[api.Numeric](`1.5`))
+	check(`42`, report[api.Shaped](`42`))
+	check(`{"x":1}`, report[api.Shaped](`{"x":1}`), v(""))
+	check(`"ab"`, report[api.Inline](`"ab"`))
+	check(`"abcd"`, report[api.Inline](`"abcd"`), v(""))
+	check(`5`, report[api.Inline](`5`))
+	check(`"a"`, report[api.Letters](`"a"`))
+	check(`"abcd"`, report[api.Letters](`"abcd"`), v(""))
+	check(`{"f":0.1}`, report[api.Fine](`{"f":0.1}`))
+	check(`{"f":0.2}`, report[api.Fine](`{"f":0.2}`), v("/f"))
+	check(`{"choice":null}`, report[api.Fine](`{"choice":null}`), v("/choice"))
+	check(`{"abcd":1}`, report[api.Named](`{"abcd":1}`), u(""))
+	check(`edge`, report[api.Edge](`{"big":"x","wide":1.5,"many":[1],"m":-9223372036854775808}`))
+	check(`{"m":0}`, report[api.Edge](`{"m":0}`))
+	check(`{"m":5}`, report[api.Edge](`{"m":5}`), v("/m"))
+	check(`{"a":"x"}`, report[api.Closed](`{"a":"x"}`), u(""))
+	check(`"ab"`, report[api.TypeList](`"ab"`))
+	check(`7`, report[api.TypeList](`7`))
+	check(`"abcdef"`, report[api.TypeList](`"abcdef"`), v(""))
+	check(`1`, report[api.TypeList](`1`), v(""))
 	fmt.Println("validation behaves")
 }
 "##;

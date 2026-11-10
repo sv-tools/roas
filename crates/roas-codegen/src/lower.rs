@@ -307,10 +307,14 @@ impl<'a> Lowerer<'a> {
                 Branch {
                     suggested_name: target_hint,
                     ty: TypeRef::Named(target_id),
+                    constraints: Default::default(),
+                    object_only: false,
                 },
                 Branch {
                     suggested_name: sibling_hint,
+                    constraints: branch_constraints(&projection.ty, &siblings.constraints),
                     ty: projection.ty,
+                    object_only: false,
                 },
             ]),
             has_error: false,
@@ -540,6 +544,8 @@ impl<'a> Lowerer<'a> {
                 TypeKind::ComposedOpen(vec![Branch {
                     suggested_name: object_hint,
                     ty: TypeRef::Named(projection),
+                    constraints: Default::default(),
+                    object_only: true,
                 }])
             }
             Kind::Object { .. } if named => TypeKind::Struct(self.object(schema, &name)),
@@ -556,9 +562,11 @@ impl<'a> Lowerer<'a> {
                 branches: self.branches(branches, &name, "variant"),
                 exclusive: false,
             }),
+            // `type: [integer, number]` accepts what any member accepts,
+            // overlaps included: it is `anyOf`, not `oneOf`.
             Kind::TypeUnion { branches } => TypeKind::UnionOpen(OpenUnion {
                 branches: self.type_branches(branches, &name),
-                exclusive: true,
+                exclusive: false,
             }),
             _ => {
                 // A scalar, array, map or any reaches here only as a
@@ -669,6 +677,7 @@ impl<'a> Lowerer<'a> {
                 let mut hint = name.to_vec();
                 hint.push("value".to_owned());
                 let value = self.position(slot, &hint);
+                self.inline_constraints(slot, &value, "additionalProperties");
                 Additional::CatchAll(wrap_nullable(value))
             }
         };
@@ -691,9 +700,12 @@ impl<'a> Lowerer<'a> {
                 hint.push(format!("{word} {}", i + 1));
                 let suggested_name = self.branch_name(slot, &hint);
                 let lowered = self.position(slot, &hint);
+                let ty = wrap_nullable(lowered);
                 Branch {
                     suggested_name,
-                    ty: wrap_nullable(lowered),
+                    constraints: slot_constraints(slot, &ty),
+                    ty,
+                    object_only: false,
                 }
             })
             .collect()
@@ -710,9 +722,12 @@ impl<'a> Lowerer<'a> {
                 let mut hint = name.to_vec();
                 hint.push(word.to_owned());
                 let lowered = self.position(slot, &hint);
+                let ty = wrap_nullable(lowered);
                 Branch {
                     suggested_name: hint,
-                    ty: wrap_nullable(lowered),
+                    constraints: slot_constraints(slot, &ty),
+                    ty,
+                    object_only: false,
                 }
             })
             .collect()
@@ -1239,6 +1254,27 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+/// What an inline branch constrains that no named type carries for it.
+fn slot_constraints(slot: &Slot, ty: &TypeRef) -> crate::front::Constraints {
+    match slot {
+        Slot::Inline(schema) => branch_constraints(ty, &schema.constraints),
+        Slot::Ref { .. } => Default::default(),
+    }
+}
+
+/// A named type checks its own constraints; anything else keeps them on
+/// the branch.
+fn branch_constraints(
+    ty: &TypeRef,
+    constraints: &crate::front::Constraints,
+) -> crate::front::Constraints {
+    if ty.direct_named().is_some() {
+        Default::default()
+    } else {
+        constraints.clone()
+    }
+}
+
 fn wrap_nullable(lowered: Lowered) -> TypeRef {
     if lowered.nullable {
         TypeRef::Nullable(Box::new(lowered.ty))
@@ -1611,7 +1647,18 @@ mod tests {
             "Some": {"anyOf": [{"type": "string"}, {"type": "boolean"}]}
         }));
         assert!(
-            matches!(&def(&ir, "/components/schemas/Either").kind, TypeKind::UnionOpen(u) if u.exclusive && u.branches.len() == 2)
+            matches!(&def(&ir, "/components/schemas/Either").kind, TypeKind::UnionOpen(u) if !u.exclusive && u.branches.len() == 2)
+        );
+        // A type list accepts what any member does; each member keeps the
+        // constraints that apply to it, for validation.
+        let TypeKind::UnionOpen(either) = &def(&ir, "/components/schemas/Either").kind else {
+            unreachable!()
+        };
+        assert!(
+            either
+                .branches
+                .iter()
+                .any(|b| b.constraints.minimum.is_some())
         );
         assert!(
             matches!(&def(&ir, "/components/schemas/Some").kind, TypeKind::UnionOpen(u) if !u.exclusive && u.branches.len() == 2)
