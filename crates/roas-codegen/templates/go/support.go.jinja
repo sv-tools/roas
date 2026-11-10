@@ -287,6 +287,20 @@ type Finding struct {
 // it could not check, rather than stopping at the first.
 type ValidationReport struct {
 	Findings []Finding
+	// depth counts the raw holders the walk is inside: each decodes
+	// afresh, so nothing else bounds a recursive value.
+	depth int
+}
+
+// enter steps into a raw holder; past the limit, the rest is reported
+// unevaluated instead of walked.
+func (r *ValidationReport) enter(pointer string) bool {
+	if r.depth >= 128 {
+		r.unevaluated(pointer, "nested too deep to validate")
+		return false
+	}
+	r.depth++
+	return true
 }
 
 // IsValid is true only when nothing was found, so a constraint that could

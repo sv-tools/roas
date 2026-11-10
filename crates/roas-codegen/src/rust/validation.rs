@@ -637,7 +637,7 @@ pub(crate) fn body(
                     checked = true;
                     let binding = if reads { "v" } else { "_" };
                     lines.push(format!(
-                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = ValidationReport::default(); {} if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}{beyond}",
+                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = report.nested(); {} if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}{beyond}",
                         body.join(" ")
                     ));
                 }
@@ -734,6 +734,21 @@ pub(crate) fn body(
             }
         }
         TypeKind::Extern => {}
+    }
+    // A raw holder decodes each projection afresh: its depth is bounded
+    // here, through the report.
+    if matches!(def.kind, TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_)) && !out.is_empty() {
+        let mut wrapped = vec![
+            "if !report.enter(pointer) { return; }".to_owned(),
+            "let run = |report: &mut ValidationReport| {".to_owned(),
+        ];
+        wrapped.extend(out);
+        wrapped.extend([
+            "};".to_owned(),
+            "run(report);".to_owned(),
+            "report.leave();".to_owned(),
+        ]);
+        out = wrapped;
     }
     Some(out)
 }

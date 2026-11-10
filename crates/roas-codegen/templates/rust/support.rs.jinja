@@ -220,6 +220,9 @@ fn wide_number(raw: &str, int_limit: f64, float32: bool) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationReport {
     pub findings: Vec<Finding>,
+    /// How many raw holders deep the walk is: each decodes afresh, so
+    /// nothing else bounds a recursive value.
+    depth: usize,
 }
 
 /// One finding, at an RFC 6901 JSON Pointer into the value.
@@ -251,6 +254,29 @@ impl ValidationReport {
 
     pub fn unchecked(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|f| f.kind == FindingKind::Unevaluated)
+    }
+
+    /// A report for one branch, as deep as this one.
+    #[allow(dead_code)]
+    fn nested(&self) -> Self {
+        Self { findings: Vec::new(), depth: self.depth }
+    }
+
+    /// Steps into a raw holder; past the limit, the rest is reported
+    /// unevaluated instead of walked.
+    #[allow(dead_code)]
+    fn enter(&mut self, pointer: &str) -> bool {
+        if self.depth >= 128 {
+            self.unevaluated(pointer, "nested too deep to validate");
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    #[allow(dead_code)]
+    fn leave(&mut self) {
+        self.depth -= 1;
     }
 
     // Unused when no type has a check of that kind.

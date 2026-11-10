@@ -57,6 +57,9 @@ pub(crate) struct BranchView {
     pub constructor: String,
     pub ty: String,
     pub doc: Vec<String>,
+    /// A statement refusing a raw value the branch type would wrongly
+    /// decode: serde's derived enum also reads `{"a": null}` as `"a"`.
+    pub guard: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -797,7 +800,39 @@ impl Builder<'_> {
             let base = snake(&branch.suggested_name);
             let name = allocator.allocate(base);
             let ty = self.spell(&branch.ty)?;
+            let (inner, nullable) = match &branch.ty {
+                TypeRef::Nullable(inner) => (inner.as_ref(), true),
+                other => (other, false),
+            };
+            // Through aliases and newtypes, which decode as their target.
+            let string_enum = {
+                let mut current = inner.direct_named();
+                let mut found = false;
+                for _ in 0..=self.ir.types.len() {
+                    let Some(id) = current else { break };
+                    match self.ir.types.get(id).map(|d| &d.kind) {
+                        Some(TypeKind::StringEnum(_)) => {
+                            found = true;
+                            break;
+                        }
+                        Some(TypeKind::Alias(next) | TypeKind::Newtype(next)) => {
+                            current = next.direct_named();
+                        }
+                        _ => break,
+                    }
+                }
+                found
+            };
+            let guard = string_enum.then(|| {
+                let null = if nullable {
+                    " && raw.trim_end() != \"null\""
+                } else {
+                    ""
+                };
+                format!("let raw = self.raw.get().trim_start(); if !raw.starts_with('\"'){null} {{ return None; }}")
+            });
             out.push(BranchView {
+                guard,
                 accessor: format!("as_{name}"),
                 constructor: format!("from_{name}"),
                 doc: vec![format!("The value read as `{ty}`, when it is one.")],

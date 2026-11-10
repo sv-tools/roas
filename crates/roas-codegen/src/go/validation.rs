@@ -774,7 +774,7 @@ pub(crate) fn body(
                 } else {
                     let binding = if reads { "x" } else { "_" };
                     out.push(format!(
-                        "if {binding}, ok := v.{accessor}(); ok {{ branch := &ValidationReport{{}}; {}; if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ {counter}++ }} else {{ uncertain++ }} }} }}{beyond}",
+                        "if {binding}, ok := v.{accessor}(); ok {{ branch := &ValidationReport{{depth: r.depth}}; {}; if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ {counter}++ }} else {{ uncertain++ }} }} }}{beyond}",
                         body.join("; ")
                     ));
                 }
@@ -861,6 +861,16 @@ pub(crate) fn body(
             recurse(inner, At { e: target, ..own }, 0, &mut out, cx);
         }
         TypeKind::Extern => {}
+    }
+    // A raw holder decodes each projection afresh: its depth is bounded
+    // here, through the report.
+    if matches!(def.kind, TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_)) && !out.is_empty() {
+        let mut wrapped = vec![
+            "if !r.enter(pointer) { return }".to_owned(),
+            "defer func() { r.depth-- }()".to_owned(),
+        ];
+        wrapped.extend(out);
+        out = wrapped;
     }
     Some(out)
 }

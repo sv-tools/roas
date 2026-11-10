@@ -680,6 +680,8 @@ fn validated_description() -> serde_json::Value {
             }},
             "AllGated": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1}}},
             "IntOrNum": {"oneOf": [{"type": "integer"}, {"type": "number"}]},
+            "DeepNode": {"anyOf": [{"type": "array", "items": {"$ref": "#/components/schemas/DeepNode"}}, {"type": "string"}]},
+            "EnumOrObj": {"oneOf": [{"type": "string", "enum": ["a"]}, {"type": "object"}]},
             "EmptyEnum": {"type": "string", "enum": [], "minLength": 1},
             "IntOrStr": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
             "AllInt": {"allOf": [{"type": "integer"}, {"minimum": 0}]},
@@ -994,6 +996,13 @@ fn main() {
     assert!(report::<AllInt>("1e400").iter().all(|f| f.1 == FindingKind::Unevaluated));
     assert_eq!(report::<ArrOrStr>("[1e19]"), vec![u("")]);
     assert_eq!(report::<ObjOrStr>(r#"{"n":1e19}"#), vec![u("")]);
+    // A recursive holder is walked only so deep, then reported.
+    let deep = format!("{}\"x\"{}", "[".repeat(12_000), "]".repeat(12_000));
+    let node: DeepNode = serde_json::from_str(&deep).expect("decodes");
+    assert!(node.validate().unchecked().next().is_some());
+    // A string enum branch reads a JSON string only.
+    assert_eq!(report::<EnumOrObj>(r#"{"a":null}"#), vec![]);
+    assert_eq!(report::<EnumOrObj>(r#""a""#), vec![]);
     // A branch that misses for its value is still a miss.
     assert_eq!(report::<IntOrStr>("true"), vec![v("")]);
     assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
@@ -1062,6 +1071,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 
 	"generated/api"
 )
@@ -1246,6 +1256,10 @@ func main() {
 	check(`[1e19]`, report[api.ArrOrStr](`[1e19]`), u(""))
 	check(`{"n":1e19}`, report[api.ObjOrStr](`{"n":1e19}`), u(""))
 	check(`true`, report[api.IntOrStr](`true`), v(""))
+	if got := report[api.DeepNode](strings.Repeat("[", 2000) + `"x"` + strings.Repeat("]", 2000)); len(got) == 0 {
+		panic("a deep recursive holder passed unwalked")
+	}
+	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
 	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
 	check(`{"s3":{"p":1}}`, report[api.HoldsSub3](`{"s3":{"p":1}}`), u("/s3"))
 	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
