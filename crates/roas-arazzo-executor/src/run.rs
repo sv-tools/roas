@@ -305,6 +305,19 @@ enum Then {
     Retry,
     /// End the workflow that left: a `goto` does not come back.
     EndCaller,
+    /// Run the next workflow the waiting entry depends on, or, after the
+    /// last, that entry itself.
+    Dependency,
+}
+
+/// A call, `goto` or `retry` target waiting for the workflows it depends on.
+struct Deferred<'d> {
+    /// Dependencies still to run, in `dependsOn` order.
+    remaining: Vec<(Doc, &'d Workflow)>,
+    doc: Doc,
+    workflow: &'d Workflow,
+    inputs: Value,
+    caller: (String, Then),
 }
 
 /// One workflow in progress.
@@ -417,6 +430,11 @@ pub struct Run<'d> {
     /// Workflows still to run — dependencies first, then the one asked
     /// for.
     queue: Vec<(Doc, &'d Workflow)>,
+    /// Workflows that finished as a dependency — of the root, or of a
+    /// call, `goto` or `retry` target — each of which runs once in a run.
+    dependencies_done: BTreeSet<(Doc, String)>,
+    /// Entries waiting for their dependencies, innermost last.
+    deferred: Vec<Deferred<'d>>,
     /// Finished workflows, per document: `$workflows.<id>` names a workflow
     /// of the document the expression is written in.
     finished: Vec<BTreeMap<String, WorkflowState>>,
@@ -531,6 +549,8 @@ impl<'d> Run<'d> {
             documents,
             frames: Vec::new(),
             queue,
+            dependencies_done: BTreeSet::new(),
+            deferred: Vec::new(),
             pending: None,
             wait: None,
             records: Vec::new(),
@@ -892,6 +912,85 @@ impl<'d> Run<'d> {
         Ok(())
     }
 
+    /// Enter a call, `goto` or `retry` target after the workflows it
+    /// depends on. Those run as the root's dependencies do: each once in a
+    /// run, with the run's inputs, so one that already finished as a
+    /// dependency is not run again. One still running further up — the
+    /// target depends on a workflow that is, directly or not, entering it
+    /// — can never finish first, which is a `dependsOn` cycle.
+    fn enter_after_dependencies(
+        &mut self,
+        doc: Doc,
+        workflow: &'d Workflow,
+        inputs: Value,
+        caller: (String, Then),
+    ) -> Result<(), ExecutionError> {
+        let mut remaining = ordered_workflows(&self.documents, doc, workflow)?;
+        // The target itself comes last.
+        remaining.pop();
+        remaining.retain(|(doc, dependency)| {
+            !self
+                .dependencies_done
+                .contains(&(*doc, dependency.workflow_id.clone()))
+        });
+        if remaining.is_empty() {
+            return self.enter(doc, workflow, inputs, Some(caller));
+        }
+        if let Some((_, running)) = remaining.iter().find(|(doc, dependency)| {
+            self.frames.iter().any(|frame| {
+                frame.doc == *doc
+                    && frame.workflow.workflow_id == dependency.workflow_id
+                    && is_dependency(frame)
+            })
+        }) {
+            return Err(locate(
+                &self.documents,
+                doc,
+                ExecutionError::Circular(running.workflow_id.clone()),
+            ));
+        }
+        self.deferred.push(Deferred {
+            remaining,
+            doc,
+            workflow,
+            inputs,
+            caller,
+        });
+        self.next_dependency()
+    }
+
+    /// Enter the next dependency the innermost deferred entry waits for,
+    /// skipping one a deeper entry ran meanwhile; after the last, the
+    /// entry itself.
+    fn next_dependency(&mut self) -> Result<(), ExecutionError> {
+        loop {
+            let deferred = self
+                .deferred
+                .last_mut()
+                .expect("an entry waiting for its dependencies");
+            if deferred.remaining.is_empty() {
+                let Deferred {
+                    doc,
+                    workflow,
+                    inputs,
+                    caller,
+                    ..
+                } = self.deferred.pop().expect("the entry just looked at");
+                return self.enter(doc, workflow, inputs, Some(caller));
+            }
+            let (doc, dependency) = deferred.remaining.remove(0);
+            let step_id = deferred.caller.0.clone();
+            if self
+                .dependencies_done
+                .contains(&(doc, dependency.workflow_id.clone()))
+            {
+                continue;
+            }
+            let inputs = Value::Object(self.root_inputs.clone());
+            return self.enter(doc, dependency, inputs, Some((step_id, Then::Dependency)));
+        }
+    }
+
     /// Finish the top frame: name its outputs and give them to whoever
     /// is waiting.
     fn leave(&mut self) -> Result<(), ExecutionError> {
@@ -921,6 +1020,10 @@ impl<'d> Run<'d> {
                 outputs: outputs.clone(),
             },
         );
+        if is_dependency(&frame) {
+            self.dependencies_done
+                .insert((frame.doc, frame.workflow.workflow_id.clone()));
+        }
 
         let Some((step_id, then)) = frame.caller else {
             // A root workflow: its outputs are the run's, unless it was
@@ -934,12 +1037,24 @@ impl<'d> Run<'d> {
                     steps: std::mem::take(&mut self.records),
                 }));
             } else {
+                // A dependency a nested entry already ran is not run again.
+                // The one asked for comes last and is never skipped: every
+                // workflow it depends on runs before it, so no nested entry
+                // can depend on it while one of those is still running.
+                while self.queue.len() > 1
+                    && self
+                        .dependencies_done
+                        .contains(&(self.queue[0].0, self.queue[0].1.workflow_id.clone()))
+                {
+                    self.queue.remove(0);
+                }
                 let (doc, next) = self.queue.remove(0);
                 let inputs = Value::Object(self.root_inputs.clone());
                 self.enter(doc, next, inputs, None)?;
             }
             return Ok(());
         };
+
         let Some(parent) = self.frames.last() else {
             return Ok(());
         };
@@ -967,6 +1082,8 @@ impl<'d> Run<'d> {
             // A `retry` sent the run through another workflow first;
             // now the step that failed is tried again.
             Then::Retry => Ok(()),
+            // One of the workflows an entry waits for is done.
+            Then::Dependency => self.next_dependency(),
             // An ordinary workflow step: it ends like any other step,
             // with its own criteria, outputs and actions.
             Then::Advance => {
@@ -1012,7 +1129,7 @@ impl<'d> Run<'d> {
             .bind_call(index)
             .map_err(|error| locate(&self.documents, here, error))?;
         // The callee locates its own errors.
-        self.enter(doc, workflow, inputs, Some((step_id, Then::Advance)))
+        self.enter_after_dependencies(doc, workflow, inputs, (step_id, Then::Advance))
     }
 
     /// Resolve a workflow step's target and bind its arguments, in the
@@ -1027,7 +1144,6 @@ impl<'d> Run<'d> {
         let wanted = step.workflow_id.clone().unwrap_or_default();
         let (doc, at) = self.documents.resolve(frame.doc, &wanted)?;
         let workflow = self.documents.workflow(doc, at);
-        invocable(&wanted, workflow)?;
         let description = self.documents.get(frame.doc).description;
 
         // A workflow step's parameters are the workflow's inputs.
@@ -1350,12 +1466,10 @@ impl<'d> Run<'d> {
                             .resolve(frame.doc, &workflow_id)
                             .map_err(|error| locate(&self.documents, here, error))?;
                         let workflow = self.documents.workflow(doc, at);
-                        invocable(&workflow_id, workflow)
-                            .map_err(|error| locate(&self.documents, here, error))?;
                         let inputs = self
                             .arguments(&arguments)
                             .map_err(|error| locate(&self.documents, here, error))?;
-                        self.enter(doc, workflow, inputs, Some((step_id, Then::Retry)))
+                        self.enter_after_dependencies(doc, workflow, inputs, (step_id, Then::Retry))
                     }
                     // Nothing named: this step, again.
                     (None, None) => Ok(()),
@@ -1381,12 +1495,10 @@ impl<'d> Run<'d> {
                     .resolve(frame.doc, &workflow_id)
                     .map_err(|error| locate(&self.documents, here, error))?;
                 let workflow = self.documents.workflow(doc, at);
-                invocable(&workflow_id, workflow)
-                    .map_err(|error| locate(&self.documents, here, error))?;
                 let inputs = self
                     .arguments(&arguments)
                     .map_err(|error| locate(&self.documents, here, error))?;
-                self.enter(doc, workflow, inputs, Some((step_id, Then::EndCaller)))
+                self.enter_after_dependencies(doc, workflow, inputs, (step_id, Then::EndCaller))
             }
             Action::Goto { .. } => Ok(()),
         }
@@ -1458,18 +1570,9 @@ fn describe(action: &Action) -> Option<String> {
     }
 }
 
-/// Whether `workflow` may be entered by a call, `goto` or `retry` named
-/// `reference`. Only the run's own workflow and its dependencies are
-/// scheduled after their `dependsOn`; a nested target with dependencies of
-/// its own would run without them, so both execution paths refuse it.
-pub(crate) fn invocable(reference: &str, workflow: &Workflow) -> Result<(), ExecutionError> {
-    if workflow.depends_on.is_empty() {
-        Ok(())
-    } else {
-        Err(ExecutionError::Unsupported(format!(
-            "called workflow `{reference}` declares dependsOn; dependency scheduling for nested calls is not supported"
-        )))
-    }
+/// Whether `frame` runs as a dependency — of the root, or of a nested entry.
+fn is_dependency(frame: &Frame<'_>) -> bool {
+    matches!(frame.caller, None | Some((_, Then::Dependency)))
 }
 
 /// Name the external document an error was raised in, so an operation,

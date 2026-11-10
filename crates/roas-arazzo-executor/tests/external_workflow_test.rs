@@ -1191,27 +1191,52 @@ fn a_linked_source_that_is_not_arazzo_says_so() {
 }
 
 #[test]
-fn a_called_external_workflow_with_its_own_dependencies_is_rejected_on_both_paths() {
+fn a_called_external_workflows_own_dependencies_run_first_in_its_document() {
     let mut documents = standard();
     documents[2].1["workflows"][0]["dependsOn"] = json!(["other"]);
     documents[2].1 = with_workflow(
         documents[2].1.clone(),
         json!({ "workflowId": "other", "steps": [{
-            "stepId": "get", "operationId": "$sourceDescriptions.api.getThing" }] }),
+            "stepId": "get", "operationId": "$sourceDescriptions.api.getThing",
+            "parameters": [{ "name": "id", "in": "query", "value": "$inputs.id" }] }] }),
     );
     let graph = Graph::new(&documents);
-    let error = prepare(&graph.description, &graph.options("main")).unwrap_err();
-    assert!(error.to_string().contains("declares dependsOn"), "{error}");
-    // The lazy run refuses at the call, before the callee or its dependency
-    // sends anything; the reference is the entry's, so it stays unwrapped.
-    let mut client = Fake::new().reply(200, &ok("root")).reply(200, &ok("local"));
-    let error = execute(&graph.description, &graph.options("main"), &mut client).unwrap_err();
-    assert!(
-        matches!(&error, ExecutionError::Unsupported(reason)
-            if reason.contains("`$sourceDescriptions.shared.child` declares dependsOn")),
-        "{error}"
+    let replies = || {
+        Fake::new()
+            .reply(200, &ok("root"))
+            .reply(200, &ok("local"))
+            .reply(200, &ok("other"))
+            .reply(200, &ok("external"))
+    };
+    let options = graph.options("main");
+    let mut client = replies();
+    let lazy = execute(&graph.description, &options, &mut client).unwrap();
+    // `other` is the shared document's, run with the run's own inputs
+    // (`id=seed`) just before the external child that needs it.
+    let ran: Vec<_> = lazy
+        .steps
+        .iter()
+        .map(|step| (step.document.as_deref(), step.workflow_id.as_str()))
+        .collect();
+    assert_eq!(
+        ran,
+        [
+            (None, "main"),
+            (None, "child"),
+            (None, "main"),
+            (Some(SHARED), "other"),
+            (Some(SHARED), "child"),
+            (None, "main"),
+        ]
     );
-    assert_eq!(client.sent().len(), 2);
+    assert!(
+        client.sent()[2].url.ends_with("id=seed"),
+        "{}",
+        client.sent()[2].url
+    );
+    let plan = prepare(&graph.description, &options).unwrap();
+    let checked = plan.execute(&mut replies()).unwrap();
+    assert_eq!(trace(&checked), trace(&lazy));
 }
 
 #[cfg(feature = "input-validation")]

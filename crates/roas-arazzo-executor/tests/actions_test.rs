@@ -717,49 +717,172 @@ fn a_workflow_depended_on_twice_runs_once() {
     );
 }
 
+/// The workflow ids of a report's steps, in the order they finished.
+fn order(report: &roas_arazzo_executor::ExecutionReport) -> Vec<String> {
+    report
+        .steps
+        .iter()
+        .map(|step| format!("{}.{}", step.workflow_id, step.step_id))
+        .collect()
+}
+
 #[test]
-fn a_call_goto_or_retry_into_a_workflow_with_dependencies_is_refused_on_both_paths() {
+fn a_call_goto_or_retry_into_a_workflow_with_dependencies_runs_them_first_on_both_paths() {
+    // The dependency reads the run's own inputs, not the arguments the
+    // target was entered with.
     let dependency = json!({ "workflowId": "dependency",
-        "steps": [{ "stepId": "dep", "operationId": "listPets" }] });
+        "steps": [{ "stepId": "dep", "operationId": "listPets",
+            "outputs": { "token": "$inputs.token" } }] });
     let target = json!({ "workflowId": "target", "dependsOn": ["dependency"],
-        "steps": [{ "stepId": "inner", "operationId": "listPets" }] });
-    // What the caller does before it reaches the target, as requests sent.
-    for (caller, sent_before) in [
+        "steps": [{ "stepId": "inner", "operationId": "listPets",
+            "outputs": { "token": "$inputs.token" } }] });
+    let argument = json!([{ "name": "token", "value": "argument" }]);
+    for (caller, expected) in [
         (
             json!({ "workflowId": "caller", "steps": [
-                { "stepId": "call", "workflowId": "target" }] }),
-            0,
+                { "stepId": "call", "workflowId": "target", "parameters": argument }] }),
+            vec!["dependency.dep", "target.inner", "caller.call"],
         ),
         (
             json!({ "workflowId": "caller", "steps": [{
                 "stepId": "first", "operationId": "listPets",
-                "onSuccess": [{ "name": "away", "type": "goto", "workflowId": "target" }] }] }),
-            1,
+                "onSuccess": [{ "name": "away", "type": "goto", "workflowId": "target",
+                    "parameters": argument }] }] }),
+            vec!["caller.first", "dependency.dep", "target.inner"],
         ),
         (
             json!({ "workflowId": "caller", "steps": [{
                 "stepId": "first", "operationId": "listPets",
                 "successCriteria": [{ "condition": "$statusCode == 201" }],
                 "onFailure": [{ "name": "again", "type": "retry",
-                    "workflowId": "target", "retryLimit": 1 }] }] }),
-            1,
+                    "workflowId": "target", "retryLimit": 1, "parameters": argument }] }] }),
+            vec![
+                "caller.first",
+                "dependency.dep",
+                "target.inner",
+                "caller.first",
+            ],
         ),
     ] {
         let description = description(
             json!([caller.clone(), dependency.clone(), target.clone()]),
             None,
         );
-        let options = options().workflow("caller");
-        let mut client = Fake::new().reply(200, &json!([])).reply(200, &json!([]));
-        let lazy = execute(&description, &options, &mut client).unwrap_err();
-        assert!(
-            matches!(&lazy, ExecutionError::Unsupported(reason)
-                if reason.contains("`target` declares dependsOn")),
-            "{caller}: {lazy}"
-        );
-        // The target never starts, so its dependency is never skipped silently.
-        assert_eq!(client.sent().len(), sent_before, "{caller}");
-        let checked = roas_arazzo_executor::prepare(&description, &options).unwrap_err();
-        assert!(checked.to_string().contains(&lazy.to_string()), "{checked}");
+        let options = options().workflow("caller").input("token", "root");
+        let replies = || (0..4).fold(Fake::new(), |client, _| client.reply(200, &json!([])));
+        let lazy = execute(&description, &options, &mut replies()).expect("the lazy run");
+        assert_eq!(order(&lazy), expected, "{caller}");
+        let dep = lazy
+            .steps
+            .iter()
+            .find(|step| step.step_id == "dep")
+            .unwrap();
+        assert_eq!(dep.outputs["token"], "root", "{caller}");
+        let inner = lazy
+            .steps
+            .iter()
+            .find(|step| step.step_id == "inner")
+            .unwrap();
+        assert_eq!(inner.outputs["token"], "argument", "{caller}");
+        let plan = roas_arazzo_executor::prepare(&description, &options).expect("a plan");
+        let checked = plan.execute(&mut replies()).expect("the prepared run");
+        assert_eq!(order(&checked), expected, "{caller}");
     }
+}
+
+#[test]
+fn a_dependency_runs_once_however_many_entries_need_it() {
+    // The root depends on `shared`, and calls two workflows that do too,
+    // one of them twice: `shared` runs once, first.
+    let description = description(
+        json!([
+            { "workflowId": "w", "dependsOn": ["shared"], "steps": [
+                { "stepId": "one", "workflowId": "a" },
+                { "stepId": "two", "workflowId": "b" },
+                { "stepId": "three", "workflowId": "a" }] },
+            { "workflowId": "a", "dependsOn": ["shared"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] },
+            { "workflowId": "b", "dependsOn": ["shared"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] },
+            { "workflowId": "shared", "steps": [{ "stepId": "s", "operationId": "listPets" }] }
+        ]),
+        None,
+    );
+    let mut client = (0..4).fold(Fake::new(), |client, _| client.reply(200, &json!([])));
+    let report = execute(&description, &options().workflow("w"), &mut client).unwrap();
+    assert_eq!(
+        order(&report),
+        ["shared.s", "a.s", "w.one", "b.s", "w.two", "a.s", "w.three"]
+    );
+}
+
+#[test]
+fn a_root_dependency_a_nested_entry_ran_first_is_not_run_again() {
+    // `w` depends on `x` then `y`; `x` calls `t`, which needs `y` — so `y`
+    // runs inside `x`, and the root queue does not run it a second time.
+    let description = description(
+        json!([
+            { "workflowId": "w", "dependsOn": ["x", "y"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] },
+            { "workflowId": "x", "steps": [{ "stepId": "call", "workflowId": "t" }] },
+            { "workflowId": "y", "steps": [{ "stepId": "s", "operationId": "listPets" }] },
+            { "workflowId": "t", "dependsOn": ["y"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] }
+        ]),
+        None,
+    );
+    let mut client = (0..3).fold(Fake::new(), |client, _| client.reply(200, &json!([])));
+    let report = execute(&description, &options().workflow("w"), &mut client).unwrap();
+    assert_eq!(order(&report), ["y.s", "t.s", "x.call", "w.s"]);
+    assert_eq!(client.sent().len(), 3);
+}
+
+#[test]
+fn a_dependency_a_deeper_entry_ran_meanwhile_is_skipped() {
+    // `t` waits for `x` then `y`; `x` itself calls `u`, which needs `y`,
+    // so `y` runs inside `x` and `t` does not run it again.
+    let description = description(
+        json!([
+            { "workflowId": "w", "steps": [{ "stepId": "call", "workflowId": "t" }] },
+            { "workflowId": "t", "dependsOn": ["x", "y"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] },
+            { "workflowId": "x", "steps": [{ "stepId": "call", "workflowId": "u" }] },
+            { "workflowId": "u", "dependsOn": ["y"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] },
+            { "workflowId": "y", "steps": [{ "stepId": "s", "operationId": "listPets" }] }
+        ]),
+        None,
+    );
+    let mut client = (0..3).fold(Fake::new(), |client, _| client.reply(200, &json!([])));
+    let report = execute(&description, &options().workflow("w"), &mut client).unwrap();
+    assert_eq!(order(&report), ["y.s", "u.s", "x.call", "t.s", "w.call"]);
+}
+
+#[test]
+fn entering_a_workflow_that_depends_on_one_still_running_is_a_cycle() {
+    // `w` calls `t`, and `t` depends on `w`, which cannot finish first.
+    let description = description(
+        json!([
+            { "workflowId": "w", "steps": [
+                { "stepId": "first", "operationId": "listPets" },
+                { "stepId": "call", "workflowId": "t" }] },
+            { "workflowId": "t", "dependsOn": ["w"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] }
+        ]),
+        None,
+    );
+    let options = options().workflow("w");
+    let mut client = Fake::new().reply(200, &json!([]));
+    let error = execute(&description, &options, &mut client).unwrap_err();
+    assert!(
+        matches!(&error, ExecutionError::Circular(id) if id == "w"),
+        "{error}"
+    );
+    // Nothing of `t` was sent.
+    assert_eq!(client.sent().len(), 1);
+    let plan = roas_arazzo_executor::prepare(&description, &options).expect("a plan");
+    let failure = plan
+        .execute(&mut Fake::new().reply(200, &json!([])))
+        .unwrap_err();
+    assert_eq!(failure.error.to_string(), error.to_string());
 }

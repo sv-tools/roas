@@ -200,8 +200,9 @@ structurally validates every external document it enters. A `dependsOn` cycle,
 whether within one document or through several, fails preparation. Recursive
 calls (`a` calls `b` calls `a`) are not static errors; they stop at the
 workflow-depth limit with a partial report. Source-graph cycles are harmless data,
-and `goto` loops stop at the step limit. Calls to external workflows with their
-own `dependsOn` are rejected, as for local calls.
+and `goto` loops stop at the step limit. An external workflow entered by a
+call, `goto` or `retry` runs its own `dependsOn` first, in its own document, as
+a local one does.
 
 Dependencies receive the root inputs, as local dependencies do. An external
 dependency's outputs are recorded in its own document's `$workflows` namespace.
@@ -334,7 +335,7 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 - **Actions** — `end`, `goto` a step or a workflow, and `retry`, which honours `retryAfter`, defaults to a single attempt when `retryLimit` is absent, may send the run through another step or workflow before trying again, and gives way to the next failure action once its limit is spent.
 - **Outputs** at step and workflow level, including [`Selector`](https://spec.openapis.org/arazzo/v1.1.0.html#selector-object)s, readable by later steps as `$steps.<id>.outputs.<name>`.
 - **Runtime expressions** — `$url`, `$method`, `$statusCode`, `$request.*`, `$response.*`, `$inputs`, `$outputs`, `$steps`, `$workflows.<id>.inputs` / `.outputs`, `$sourceDescriptions`, `$components`, and `$self`.
-- **`dependsOn`** between steps and between workflows, which orders them and rejects circles — as does reading another step's outputs, which orders the two without anyone having to say so.
+- **`dependsOn`** between steps and between workflows, which orders them and rejects circles — as does reading another step's outputs, which orders the two without anyone having to say so. A workflow entered by a call, `goto` or `retry` runs what it depends on first, as the run's own workflow does: each dependency once in a run, with the run's inputs (not the arguments of the call), so one that already ran as a dependency — of the root or of an earlier entry — is not run again. A dependency still running further up (`a` calls `b`, and `b` depends on `a`) can never finish first, and stops the run with `ExecutionError::Circular`.
 
 A step that calls a workflow is a step like any other: what it called becomes its outputs, its own `outputs` are named on top, its `successCriteria` are judged, its `timeout` covers the whole call, and its `onSuccess` / `onFailure` decide where the workflow goes next. It gets a record of its own in the report — `Performed::Workflow` rather than `Performed::Request`.
 
@@ -360,7 +361,7 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | JSON Pointer selectors and criteria (v1.1) | Typed | — | Constant pointers' syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | Preparation error | Not run |
 | Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
-| `dependsOn` | Typed | Step and workflow ids | Cycles rejected; a call, `goto` or `retry` to a workflow with its own `dependsOn` is refused | One at a time; no parallel scheduling; that call or transfer is refused when reached |
+| `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time; no parallel scheduling; a call, `goto` or `retry` target's dependencies run first, each once in a run, with the run's inputs |
 
 ## Condition profile
 
@@ -517,10 +518,9 @@ Source identity loading is opt-in and occurs before preparation;
 referenced OpenAPI resolution uses the already-supplied document graph.
 JSONPath execution supports `rfc9535`, not the alternate Goessner draft: preparation
 refuses another version up front, and a lazy run refuses it when it reaches it.
-Entry-workflow dependencies are supported; calls/recovery transfers to workflows
-with their own `dependsOn` are rejected because the engine does not yet schedule
-those nested dependencies. Preparation rejects them before any request; a lazy
-run rejects the transfer when it reaches it, before the target starts.
+The dependencies of the run's workflow, and of a workflow a call or recovery
+transfer enters, are scheduled on both paths; a dependency a nested entry needs
+is checked against its input schema when it starts, as a call's target is.
 
 ### Locations and offsets
 
@@ -695,9 +695,10 @@ Arazzo document, so it is reported as an error. Local calls, their reports and t
 unchanged.
 
 A lazy run (`execute`, `Run::start`) used to enter a called, `goto` or `retry`
-target that declares its own `dependsOn` without running those dependencies. It
-now stops there with the `ExecutionError::Unsupported` that preparation already
-reported, so both paths refuse the same descriptions.
+target that declares its own `dependsOn` without running those dependencies.
+Both paths now run them first, each once in a run and with the run's inputs, as
+the run's own workflow's dependencies run; such a description is no longer
+refused.
 
 A lazy run also used to evaluate a JSONPath criterion, selector or replacement
 target of any `version` as RFC 9535. It now stops at any version but `rfc9535`,

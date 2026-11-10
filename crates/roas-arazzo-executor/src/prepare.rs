@@ -644,7 +644,7 @@ impl<'d> Compiler<'d> {
         self.finding(site, offset, PreparationIssue::Execution(error));
     }
 
-    fn target(&mut self, id: &str, site: &Site<'d>, invocation: bool) {
+    fn target(&mut self, id: &str, site: &Site<'d>) {
         let unsupplied = self.unsupplied_external(id);
         if self.current == Doc::ENTRY
             && let Some(alias) = Documents::alias(id)
@@ -656,11 +656,6 @@ impl<'d> Compiler<'d> {
         }
         match self.documents.resolve(self.current, id) {
             Ok((doc, index)) => {
-                if invocation
-                    && let Err(error) = run::invocable(id, self.documents.workflow(doc, index))
-                {
-                    self.error(site, error);
-                }
                 self.pending.insert((doc, index));
             }
             // Listed above; the caller supplies it before full preparation.
@@ -689,7 +684,7 @@ impl<'d> Compiler<'d> {
             self.error(&site.field("inputs"), error);
         }
         for (index, id) in workflow.depends_on.iter().enumerate() {
-            self.target(id, &site.item("dependsOn", index), false);
+            self.target(id, &site.item("dependsOn", index));
         }
         // Dependency cycles in a called/recovery workflow are invalid too,
         // including cycles that pass through another document.
@@ -707,7 +702,7 @@ impl<'d> Compiler<'d> {
                 ..site.item("steps", index)
             };
             if let Some(id) = &step.workflow_id {
-                self.target(id, &step_site.field("workflowId"), true);
+                self.target(id, &step_site.field("workflowId"));
             } else {
                 let missing = run::unsupplied(self.documents.get(self.current));
                 self.operation_sources(step, &step_site);
@@ -1030,7 +1025,7 @@ impl<'d> Compiler<'d> {
             );
         }
         if let Some(id) = workflow {
-            self.target(id, &site.field("workflowId"), true);
+            self.target(id, &site.field("workflowId"));
         }
     }
 
