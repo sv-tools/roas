@@ -38,6 +38,9 @@ struct Index<'a> {
 pub(crate) struct Resolver<'a> {
     options: &'a Options,
     indexes: BTreeMap<String, Result<Index<'a>, OperationError>>,
+    /// How many indexes were built, for tests that a run reuses them.
+    #[cfg(test)]
+    pub(crate) builds: usize,
 }
 
 impl<'a> Resolver<'a> {
@@ -45,6 +48,8 @@ impl<'a> Resolver<'a> {
         Self {
             options,
             indexes: BTreeMap::new(),
+            #[cfg(test)]
+            builds: 0,
         }
     }
 
@@ -287,6 +292,10 @@ impl<'a> Resolver<'a> {
 
     fn index(&mut self, name: &str) -> Result<&Index<'a>, OperationError> {
         if !self.indexes.contains_key(name) {
+            #[cfg(test)]
+            {
+                self.builds += 1;
+            }
             self.indexes.insert(name.into(), self.build(name));
         }
         self.indexes

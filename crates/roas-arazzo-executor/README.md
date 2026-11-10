@@ -220,8 +220,10 @@ and v1.1 execution model.
 ### OpenAPI operation resolution
 
 Preparation builds one borrowed operation index per needed source and retains
-resolved endpoints for repeated runs. The lazy APIs use the same resolver but
-rebuild its indexes for each request step; use preparation to reuse that work.
+resolved endpoints for repeated runs. The lazy APIs use the same resolver,
+indexing each source the first time a step of the run needs it and reusing that
+index for the rest of the run (the indexes are kept until the run is dropped);
+use preparation to reuse that work across runs.
 Both resolve inline operations and local/external Path Item `$ref` chains while
 preserving the path where each operation is mounted.
 Source values are never rewritten and schemas are not dereferenced.
