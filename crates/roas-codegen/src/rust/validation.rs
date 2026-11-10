@@ -129,8 +129,11 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     )),
                     // Past every float32 but not every f64: compared wide,
                     // so a value decoded as an infinity is still caught.
+                    // Past every float32 but not every f64: an infinity
+                    // came from some literal past the float range, on
+                    // either side of the bound.
                     Err(bound) if bound.is_finite() => out.push(format!(
-                        "if !(f64::from(*{v}) {op} {bound:?}) {{ {violation}; }}"
+                        "if {v}.is_infinite() {{ {r}.unevaluated({p}, \"{keyword} {literal}: the value is past the float range\"); }} else if !(f64::from(*{v}) {op} {bound:?}) {{ {violation}; }}"
                     )),
                     // Beyond every value: always or never met.
                     Err(bound) if (bound > 0.0) == at_least => out.push(format!("{violation};")),
@@ -146,7 +149,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     // it is no multiple of a whole number; anything else
                     // may have been rounded on the way in.
                     out.push(format!(
-                        "if f64::from(*{v}).fract() != 0.0 {{ {r}.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v})); }} else {{ {unevaluated}; }}"
+                        "if f64::from(*{v}).is_finite() && f64::from(*{v}).fract() != 0.0 {{ {r}.violation({p}, format!(\"{{}} is not a multiple of {literal}\", {v})); }} else {{ {unevaluated}; }}"
                     ));
                 } else {
                     out.push(format!("{unevaluated};"));
@@ -210,6 +213,9 @@ fn value(ty: &TypeRef, list: &[Check], at: At<'_>, out: &mut Vec<String>) -> boo
                     "if let Some(v) = {scrutinee} {{ {} }}",
                     body.join(" ")
                 ));
+            } else if body.is_empty() {
+                // Every check was decided away.
+                return false;
             } else {
                 out.push(format!("if {}.is_some() {{ {} }}", at.v, body.join(" ")));
             }

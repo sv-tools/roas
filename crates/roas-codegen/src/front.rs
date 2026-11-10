@@ -604,7 +604,14 @@ impl Translator<'_> {
         if let Kind::Object { typeless, .. } = &mut front.kind {
             *typeless = false;
         }
-        front.nullable = nullable;
+        // A shared `enum` or `const` without null leaves it out, whatever
+        // the list says.
+        let admits_null = |key: &str| match object.get(key) {
+            Some(Value::Array(values)) if key == "enum" => values.iter().any(Value::is_null),
+            Some(value) if key == "const" => value.is_null(),
+            _ => true,
+        };
+        front.nullable = nullable && admits_null("enum") && admits_null("const");
         front
     }
 

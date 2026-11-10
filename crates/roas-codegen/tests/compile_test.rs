@@ -590,9 +590,25 @@ fn validated_description() -> serde_json::Value {
             "EnumN": {"type": ["string", "null"], "enum": ["ab", "cde", null], "maxLength": 2},
             "F32X": {"type": "number", "format": "float", "exclusiveMaximum": 1},
             "HolderC": {"anyOf": [{"type": "string"}, {"type": "integer"}], "const": "only"},
-            "NullC": {"type": "object", "properties": {"n": {"type": ["integer", "null"], "const": 3}}},
+            "NullC": {"type": "object", "required": ["n"], "properties": {"n": {"const": 3}}},
             "HoldsBoth": {"type": "object", "properties": {"b": {"$ref": "#/components/schemas/Both"}}},
-            "NullSib": {"$ref": "#/components/schemas/MaybeText", "type": ["string", "null"]}
+            "NullSib": {"$ref": "#/components/schemas/MaybeText", "type": ["string", "null"]},
+            "EdgeBranch": {"oneOf": [{"type": ["integer", "null"], "format": "int32", "minimum": -2147483648i64}, {"type": "string"}]},
+            "FInf": {"type": "object", "properties": {
+                "f": {"type": "number", "format": "float", "maximum": 1e40},
+                "m": {"type": "number", "format": "float", "multipleOf": 1}
+            }},
+            "Mid": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "maximum": 1.0000000596046448}}},
+            "NoNull": {"oneOf": [{"type": ["string", "null"], "enum": ["a"]}, {"type": "integer"}]},
+            "NoNullList": {"type": ["string", "boolean", "null"], "enum": ["a", true]},
+            "PartNull": {"allOf": [
+                {"type": ["string", "null"], "pattern": "^a", "if": {"type": "null"}, "then": false},
+                {"type": ["string", "null"]}
+            ]},
+            "Items": {"oneOf": [
+                {"type": "array", "items": {"type": "integer", "maximum": 3}},
+                {"type": "array", "items": {"type": "integer", "minimum": 10}}
+            ]}
         }}
     })
 }
@@ -721,7 +737,7 @@ fn main() {
     assert_eq!(report::<Extended>(r#"{"q":"a","z":"bc"}"#), vec![v("/z")]);
     // serde_json reads an f32 past its range as an infinity; the bound,
     // past every f32 but not every f64, still catches it.
-    assert_eq!(report::<Tiny>(r#"{"f":1e39}"#), vec![v("/f")]);
+    assert_eq!(report::<Tiny>(r#"{"f":1e39}"#), vec![u("/f")]);
     assert_eq!(report::<Tiny>(r#"{"f":1.5}"#), vec![]);
     // A referenced numeric enum is unchecked too: no certain double match.
     assert_eq!(report::<PicksRef>("1"), vec![u("")]);
@@ -752,6 +768,18 @@ fn main() {
     // both sides allow it.
     assert!(report::<HoldsBoth>(r#"{"b":null}"#).contains(&v("/b")));
     assert_eq!(report::<NullSib>("null"), vec![]);
+    assert_eq!(report::<EdgeBranch>(r#""a""#), vec![]);
+    // serde_json reads a float past its range as an infinity, from some
+    // literal on either side of the bound.
+    assert_eq!(report::<FInf>(r#"{"f":1e39}"#), vec![u("/f")]);
+    assert_eq!(report::<FInf>(r#"{"m":1e39}"#), vec![u("/m")]);
+    assert_eq!(report::<Mid>(r#"{"f":1.0000000596046448}"#), vec![u("/f")]);
+    // An enum without null leaves null out of a type list.
+    assert_eq!(report::<NoNullList>(r#""a""#), vec![]);
+    assert_eq!(report::<NoNull>(r#""a""#), vec![]);
+    assert_eq!(report::<PartNull>("null"), vec![u("")]);
+    // Constraints on inline items prove no branch.
+    assert_eq!(report::<Items>("[1]"), vec![u("")]);
     println!("validation behaves");
 }
 "##;
@@ -934,6 +962,14 @@ func main() {
 		panic(fmt.Sprintf("null intersection field: got %v", got))
 	}
 	check(`null`, report[api.NullSib](`null`))
+	check(`"a"`, report[api.EdgeBranch](`"a"`))
+	check(`{"f":1.0000000596046448}`, report[api.Mid](`{"f":1.0000000596046448}`), u("/f"))
+	check(`"a"`, report[api.NoNullList](`"a"`))
+	check(`null`, report[api.NoNullList](`null`), v(""))
+	check(`"a"`, report[api.NoNull](`"a"`))
+	check(`null`, report[api.NoNull](`null`), v(""))
+	check(`null`, report[api.PartNull](`null`), u(""))
+	check(`[1]`, report[api.Items](`[1]`), u(""))
 	fmt.Println("validation behaves")
 }
 "##;

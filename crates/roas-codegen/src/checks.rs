@@ -314,10 +314,9 @@ pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {
 /// Whether an allOf part needs a finding of its own for what goes
 /// unchecked: its own checks already report one where they can.
 pub(crate) fn part_unsure(branch: &crate::ir::Branch) -> bool {
-    unsure(branch)
-        && !checks(&branch.ty, &branch.constraints)
-            .iter()
-            .any(|c| matches!(c, Check::Unevaluated { .. }))
+    // Only what is reported for every value, null included, stands in
+    // for it.
+    unsure(branch) && presence_checks(&branch.ty, &branch.constraints).is_empty()
 }
 
 /// What the constraints declare that nothing checks yet: a decoded value

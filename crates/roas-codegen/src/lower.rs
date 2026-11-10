@@ -1320,7 +1320,37 @@ fn schema_unchecked(schema: &FrontSchema) -> bool {
             ..
         }
     );
-    numeric_enum || schema.const_value.is_some() || !schema.unsupported.is_empty()
+    numeric_enum
+        || schema.const_value.is_some()
+        || !schema.unsupported.is_empty()
+        || inline_inner_unchecked(schema)
+}
+
+/// Whether an inline array's items or map's values say what no check
+/// carries: they have no generated type of their own to check it.
+fn inline_inner_unchecked(schema: &FrontSchema) -> bool {
+    let inner = match &schema.kind {
+        Kind::Array { items: Some(slot) } => slot,
+        Kind::Object {
+            properties,
+            required,
+            additional: FrontAdditional::Schema(slot),
+            typeless: false,
+        } if properties.is_empty() && required.is_empty() => slot,
+        _ => return false,
+    };
+    let Slot::Inline(inner) = inner else {
+        return false;
+    };
+    // Generated as a type of its own, it checks itself.
+    let named = match &inner.kind {
+        Kind::Object { properties, .. } => !properties.is_empty(),
+        Kind::String { enum_values, .. } => enum_values.is_some(),
+        _ => false,
+    };
+    !named
+        && (!crate::checks::present_keywords(&inner.constraints).is_empty()
+            || schema_unchecked(inner))
 }
 
 /// What an inline branch constrains that no named type carries for it.
