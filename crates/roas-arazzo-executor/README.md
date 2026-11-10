@@ -199,7 +199,10 @@ Preparation compiles the statically reachable workflow graph across documents an
 structurally validates every external document it enters. A `dependsOn` cycle,
 whether within one document or through several, fails preparation. Recursive
 calls (`a` calls `b` calls `a`) are not static errors; they stop at the
-workflow-depth limit with a partial report. Source-graph cycles are harmless data,
+workflow-depth limit with a partial report. Nor is a call into a workflow that
+depends on one still running (`a` calls `b`, and `b` depends on `a`): the run
+stops there with `ExecutionError::Circular`, named in the document of the
+dependency. Source-graph cycles are harmless data,
 and `goto` loops stop at the step limit. An external workflow entered by a
 call, `goto` or `retry` runs its own `dependsOn` first, in its own document, as
 a local one does.

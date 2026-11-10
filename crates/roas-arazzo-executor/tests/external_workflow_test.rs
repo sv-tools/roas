@@ -1239,6 +1239,40 @@ fn a_called_external_workflows_own_dependencies_run_first_in_its_document() {
     assert_eq!(trace(&checked), trace(&lazy));
 }
 
+#[test]
+fn a_cycle_through_another_document_at_run_time_names_the_dependencys_document() {
+    // `main` calls the shared `child`; `child` calls the entry's `helper`,
+    // which depends on that running `child`: the cycle is the shared
+    // document's.
+    let mut documents = standard();
+    let shared = &mut documents[2].1;
+    shared["sourceDescriptions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "name": "root", "url": ROOT, "type": "arazzo" }));
+    shared["workflows"][0]["steps"] = json!([{ "stepId": "back",
+        "workflowId": "$sourceDescriptions.root.helper" }]);
+    shared["workflows"][0]["outputs"] = json!({});
+    documents[0].1 = with_workflow(
+        documents[0].1.clone(),
+        json!({ "workflowId": "helper", "dependsOn": ["$sourceDescriptions.shared.child"],
+            "steps": [{ "stepId": "get", "operationId": "$sourceDescriptions.api.getThing" }] }),
+    );
+    let graph = Graph::new(&documents);
+    let options = graph.options("main");
+    let replies = || Fake::new().reply(200, &ok("root")).reply(200, &ok("local"));
+    let lazy = execute(&graph.description, &options, &mut replies()).unwrap_err();
+    assert!(
+        matches!(&lazy, ExecutionError::InDocument { document, error }
+            if document == SHARED
+                && matches!(error.as_ref(), ExecutionError::Circular(id) if id == "child")),
+        "{lazy:?}"
+    );
+    let plan = prepare(&graph.description, &options).unwrap();
+    let failure = plan.execute(&mut replies()).unwrap_err();
+    assert_eq!(failure.error.to_string(), lazy.to_string());
+}
+
 #[cfg(feature = "input-validation")]
 mod input_validation {
     use super::*;

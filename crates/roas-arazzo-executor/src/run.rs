@@ -941,14 +941,15 @@ impl<'d> Run<'d> {
             return self.enter(doc, workflow, inputs, Some(caller));
         }
         // However it was entered, a running workflow waits for this entry.
-        if let Some((_, running)) = remaining.iter().find(|(doc, dependency)| {
+        if let Some((running_doc, running)) = remaining.iter().find(|(doc, dependency)| {
             self.frames.iter().any(|frame| {
                 frame.doc == *doc && frame.workflow.workflow_id == dependency.workflow_id
             })
         }) {
+            // Named in the dependency's own document, as a static cycle is.
             return Err(locate(
                 &self.documents,
-                doc,
+                *running_doc,
                 ExecutionError::Circular(running.workflow_id.clone()),
             ));
         }
