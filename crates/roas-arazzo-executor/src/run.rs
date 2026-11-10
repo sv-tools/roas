@@ -264,6 +264,11 @@ impl Options {
     /// Each request's [`HttpRequest::timeout`](crate::HttpRequest::timeout)
     /// is cut to the time left, and a retry wait that would outlast it is
     /// not taken: the run stops with [`ExecutionError::TimedOut`] instead.
+    /// So does a response that comes back after the time is spent, and a
+    /// client failure then (see [`Run::client_failure`]). The limit is
+    /// checked whenever the run hands control back or is given a response,
+    /// so work in between — such as an XPath evaluation, which may take up
+    /// to 2 seconds — can run past it before the run stops.
     /// A step that runs out of the run's time is not a failed step, so its
     /// `onFailure` actions do not run.
     #[must_use]
@@ -685,13 +690,23 @@ impl<'d> Run<'d> {
         }
     }
 
-    /// What a client failure stops the run with: [`ExecutionError::TimedOut`]
-    /// once the run's time is up — the request was cut to it — and
-    /// [`ExecutionError::Client`] otherwise.
-    pub(crate) fn client_failure(&self, error: crate::ClientError) -> ExecutionError {
-        match self.deadline {
-            Some(deadline) if Instant::now() >= deadline => self.timed_out(),
-            _ => error.into(),
+    fn out_of_time(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// What a client that could not carry out the request
+    /// [`Run::advance`] asked for stops the run with, for a caller driving
+    /// the run itself: [`ExecutionError::TimedOut`] once the run's
+    /// [`Options::timeout`] is spent — the request's timeout was cut to
+    /// it, so that is most likely why the client gave up — and
+    /// [`ExecutionError::Client`] otherwise. The `execute` functions use it.
+    #[must_use]
+    pub fn client_failure(&self, error: crate::ClientError) -> ExecutionError {
+        if self.out_of_time() {
+            self.timed_out()
+        } else {
+            error.into()
         }
     }
 
@@ -782,6 +797,11 @@ impl<'d> Run<'d> {
         let Some(mut pending) = self.pending.take() else {
             return Err(ExecutionError::NotWaiting);
         };
+        // A response that came back after the run's time is not judged:
+        // running out of time ends the run, it does not fail the step.
+        if self.out_of_time() {
+            return Err(self.timed_out());
+        }
         let elapsed = pending.started.elapsed();
         let status = response.status;
         pending.exchange.response_body = response.body_value();

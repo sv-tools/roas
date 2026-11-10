@@ -29,7 +29,9 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     /// The encoded body, if the step has one.
     pub body: Option<Vec<u8>>,
-    /// How long the step is willing to wait, from `Step.timeout`.
+    /// How long the step is willing to wait, from `Step.timeout`, cut to
+    /// the time the run has left under
+    /// [`Options::timeout`](crate::Options::timeout).
     pub timeout: Option<Duration>,
 }
 

@@ -163,21 +163,97 @@ fn a_client_that_gives_up_at_the_deadline_times_the_run_out() {
 #[test]
 fn each_run_of_a_plan_has_its_own_time() {
     let description = workflow(json!([list(None)]));
-    let options = options().timeout(Duration::ZERO);
+    let options = options().timeout(Duration::from_millis(100));
     let plan = prepare(&description, &options).expect("a plan");
+    // Longer than the limit passes between preparing and running.
+    std::thread::sleep(Duration::from_millis(200));
     for _ in 0..2 {
-        let error = plan.execute(&mut Fake::new()).unwrap_err();
-        assert!(
-            matches!(error.error, ExecutionError::TimedOut { .. }),
-            "{error}"
-        );
+        let report = plan
+            .execute(&mut Fake::new().reply(200, &json!({})))
+            .expect("a report");
+        assert!(report.is_success(), "{report}");
     }
-    let options = self::options().timeout(Duration::from_secs(60));
+    let options = self::options().timeout(Duration::ZERO);
     let plan = prepare(&description, &options).expect("a plan");
-    let report = plan
-        .execute(&mut Fake::new().reply(200, &json!({})))
-        .expect("a report");
-    assert!(report.is_success(), "{report}");
+    let error = plan.execute(&mut Fake::new()).unwrap_err();
+    assert!(
+        matches!(error.error, ExecutionError::TimedOut { .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_response_after_the_deadline_is_not_judged() {
+    let mut ending = list(None);
+    ending["successCriteria"] = json!([{ "condition": "$statusCode == 200" }]);
+    ending["onFailure"] = json!([{ "name": "stop", "type": "end" }]);
+    let description = workflow(json!([ending]));
+    let options = options().timeout(Duration::from_millis(20));
+    let mut run = Run::start(&description, &options).expect("a run");
+    assert!(matches!(run.advance(), Ok(Progress::Send(_))));
+    std::thread::sleep(Duration::from_millis(40));
+    let error = run.supply(HttpResponse::json(503, &json!({}))).unwrap_err();
+    assert!(matches!(error, ExecutionError::TimedOut { .. }), "{error}");
+    // Not recorded as a failed step, and nothing more happens.
+    assert!(run.partial_report().steps.is_empty());
+    assert!(matches!(run.advance(), Err(ExecutionError::Stopped)));
+    // A caller driving the run maps a late client failure the same way.
+    let mut run = Run::start(&description, &options).expect("a run");
+    assert!(matches!(run.advance(), Ok(Progress::Send(_))));
+    let early = run.client_failure(ClientError("refused".to_owned()));
+    assert!(matches!(early, ExecutionError::Client(_)), "{early}");
+    std::thread::sleep(Duration::from_millis(40));
+    let late = run.client_failure(ClientError("timed out".to_owned()));
+    assert!(matches!(late, ExecutionError::TimedOut { .. }), "{late}");
+}
+
+#[test]
+fn a_later_request_gets_what_is_left() {
+    let description = workflow(json!([
+        list(None),
+        { "stepId": "again", "operationId": "listPets", "dependsOn": ["list"] }
+    ]));
+    let options = options().timeout(Duration::from_millis(500));
+    let mut run = Run::start(&description, &options).expect("a run");
+    assert!(matches!(run.advance(), Ok(Progress::Send(_))));
+    std::thread::sleep(Duration::from_millis(200));
+    run.supply(HttpResponse::json(200, &json!({})))
+        .expect("the response is understood");
+    let Ok(Progress::Send(request)) = run.advance() else {
+        panic!("a second request");
+    };
+    let left = request.timeout.expect("a timeout");
+    assert!(left <= Duration::from_millis(300), "{left:?}");
+}
+
+#[test]
+fn a_retry_wait_in_a_called_workflow_counts_too() {
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "api", "url": "https://api.example.com/openapi.json", "type": "openapi" }
+        ],
+        "workflows": [
+            { "workflowId": "w", "steps": [{ "stepId": "call", "workflowId": "inner" }] },
+            { "workflowId": "inner", "steps": [{
+                "stepId": "list",
+                "operationId": "listPets",
+                "successCriteria": [{ "condition": "$statusCode == 200" }],
+                "onFailure": [{ "name": "again", "type": "retry", "retryAfter": 120 }]
+            }] }
+        ],
+    }))
+    .expect("a v1.1 description");
+    let options = options().timeout(Duration::from_secs(60));
+    let mut run = Run::start(&description, &options).expect("a run");
+    assert!(matches!(run.advance(), Ok(Progress::Send(_))));
+    run.supply(HttpResponse::json(503, &json!({})))
+        .expect("the response is understood");
+    assert!(matches!(
+        run.advance(),
+        Err(ExecutionError::TimedOut { .. })
+    ));
 }
 
 #[tokio::test]

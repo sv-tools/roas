@@ -459,7 +459,8 @@ pub(crate) struct ArazzoRunArgs {
     max_steps: Option<usize>,
 
     /// Stop the run if it has not finished after this many milliseconds,
-    /// the unit of a step's `timeout`. No limit by default.
+    /// the unit of a step's `timeout`. It starts once the sources are
+    /// loaded and the run is prepared. No limit by default.
     #[arg(long, value_name = "MS")]
     timeout: Option<u64>,
 
