@@ -449,6 +449,10 @@ pub struct Run<'d> {
     halted: bool,
     /// Per document; validators are keyed by workflow id within it.
     input_schemas: Vec<crate::input::InputSchemas>,
+    /// Per document, made when one of its steps first resolves an
+    /// operation without a plan: each source is indexed once in a run, not
+    /// once per request.
+    resolvers: Vec<Option<crate::operation_index::Resolver<'d>>>,
 }
 
 /// The ambient scope of a document that has an entered workflow.
@@ -548,6 +552,7 @@ impl<'d> Run<'d> {
             prepared,
             root_inputs,
             ambients: (0..documents.len()).map(|_| None).collect(),
+            resolvers: (0..documents.len()).map(|_| None).collect(),
             finished: vec![BTreeMap::new(); documents.len()],
             documents,
             frames: Vec::new(),
@@ -672,7 +677,8 @@ impl<'d> Run<'d> {
             }
 
             let (request, exchange) = self
-                .build(index)
+                .endpoint(index)
+                .and_then(|endpoint| self.build(index, endpoint))
                 .map_err(|error| locate(&self.documents, doc, error))?;
             let attempt = self
                 .frames
@@ -1202,28 +1208,37 @@ impl<'d> Run<'d> {
         Ok(Value::Object(inputs))
     }
 
-    /// Assemble the request a step wants sent.
-    fn build(&self, index: usize) -> Result<(HttpRequest, Exchange), ExecutionError> {
-        let frame = self.frames.last().expect("a frame to build in");
-        let step = &frame.workflow.steps[index];
-        let document = self.documents.get(frame.doc);
-        let endpoint = match self.prepared {
-            Some(prepared) => prepared
+    /// The operation a step sends to: the plan's, or resolved in the step's
+    /// own document — one of its sources, with its base-URL overrides — by
+    /// that document's resolver, which indexes each source once in a run.
+    fn endpoint(&mut self, index: usize) -> Result<operation::Endpoint, ExecutionError> {
+        let frame = self.frames.last().expect("a frame to resolve in");
+        let (doc, workflow) = (frame.doc, frame.workflow);
+        let step = &workflow.steps[index];
+        if let Some(prepared) = self.prepared {
+            return prepared
                 .endpoints
-                .get(&(
-                    frame.doc,
-                    frame.workflow.workflow_id.as_str(),
-                    step.step_id.as_str(),
-                ))
+                .get(&(doc, workflow.workflow_id.as_str(), step.step_id.as_str()))
                 .cloned()
                 .ok_or_else(|| {
                     ExecutionError::Unsupported("operation is outside the prepared plan".into())
-                })?,
-            // A step's operation is one of its own document's sources, with
-            // that document's base-URL overrides.
-            None => crate::operation_index::Resolver::new(document.options)
-                .resolve(step, &unsupplied(document))?,
-        };
+                });
+        }
+        let document = *self.documents.get(doc);
+        let resolver = self.resolvers[doc.0]
+            .get_or_insert_with(|| crate::operation_index::Resolver::new(document.options));
+        Ok(resolver.resolve(step, &unsupplied(&document))?)
+    }
+
+    /// Assemble the request a step wants sent to `endpoint`.
+    fn build(
+        &self,
+        index: usize,
+        endpoint: operation::Endpoint,
+    ) -> Result<(HttpRequest, Exchange), ExecutionError> {
+        let frame = self.frames.last().expect("a frame to build in");
+        let step = &frame.workflow.steps[index];
+        let document = self.documents.get(frame.doc);
         let scope = scope(
             frame,
             &frame.steps,
