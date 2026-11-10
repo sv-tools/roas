@@ -386,19 +386,54 @@ impl Translator<'_> {
                 let key = key.as_str();
                 // Rewritten rather than lost: `nullable` into the type
                 // list, `example` into `examples`, a boolean exclusive
-                // bound into a numeric one. A `type` beside a composition
-                // and a 2.0 `discriminator` name are dropped, but say
-                // nothing the generated type or the branches do not.
+                // bound into a numeric one. A 2.0 `discriminator` name is
+                // dropped but asserts nothing; a `type` beside a
+                // composition is dropped, and lost unless the branches
+                // already say it.
                 let rewritten = match key {
-                    "nullable" | "x-nullable" | "example" | "type" | "discriminator" => true,
+                    "nullable" | "x-nullable" | "example" | "discriminator" => true,
+                    "type" => self.type_implied(raw),
                     "minimum" => has("exclusiveMinimum"),
                     "maximum" => has("exclusiveMaximum"),
+                    // `false` says what the inclusive bound already does.
+                    "exclusiveMinimum" | "exclusiveMaximum" => raw[key] == Value::Bool(false),
                     _ => false,
                 };
                 !rewritten && !has(key)
             })
             .cloned()
             .collect()
+    }
+
+    /// Whether a legacy composition's `type` is already said by its
+    /// branches: by one of an `allOf`, by every one of an `anyOf` or a
+    /// `oneOf`, directly or through a local `$ref`.
+    fn type_implied(&self, raw: &serde_json::Map<String, Value>) -> bool {
+        let Some(want) = raw.get("type") else {
+            return true;
+        };
+        let typed = |branch: &Value| {
+            let mut current = branch;
+            for _ in 0..16 {
+                if let Some(t) = current.get("type") {
+                    return t == want;
+                }
+                match current
+                    .get("$ref")
+                    .and_then(Value::as_str)
+                    .and_then(|r| r.strip_prefix('#'))
+                    .and_then(|p| self.raw.pointer(p))
+                {
+                    Some(next) => current = next,
+                    None => return false,
+                }
+            }
+            false
+        };
+        let branches = |key: &str| raw.get(key).and_then(Value::as_array);
+        branches("allOf").is_some_and(|b| b.iter().any(typed))
+            || branches("anyOf").is_some_and(|b| b.iter().all(typed))
+            || branches("oneOf").is_some_and(|b| b.iter().all(typed))
     }
 
     fn type_written(&self, pointer: &str) -> bool {
@@ -624,43 +659,42 @@ impl Translator<'_> {
                 other => other,
             }
         };
+        // Only the list's null is left: read as `type: null`, so what else
+        // the list says still stands.
+        let null_admitted = nullable && (self.legacy_nullable || shared_admits_null(&object));
+        let null_only = || -> FrontSchema {
+            // The `enum` and `const` were found to admit null;
+            // what applies to other types does not apply here.
+            let null_keywords = keywords_for(&SchemaType::Null);
+            let only: serde_json::Map<String, Value> = object
+                .iter()
+                .filter(|(key, _)| {
+                    let key = key.as_str();
+                    let other_type = [
+                        SchemaType::String,
+                        SchemaType::Number,
+                        SchemaType::Integer,
+                        SchemaType::Object,
+                        SchemaType::Array,
+                        SchemaType::Boolean,
+                    ]
+                    .iter()
+                    .any(|t| keywords_for(t).contains(&key));
+                    !matches!(key, "enum" | "const")
+                        && (null_keywords.contains(&key) || !other_type)
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            match read_as(&SchemaType::Null, false, &only) {
+                Member::Read(member) => *member,
+                _ => self.leaf(pointer.clone(), Kind::Null),
+            }
+        };
         let mut front = match members.as_slice() {
             [] => self.leaf(pointer.clone(), Kind::Null),
             [one] => match read(one, false) {
                 Member::Read(member) => *member,
-                // Only the list's null is left, if it has one.
-                // Only the list's null is left: read as `type: null`, so
-                // what else the list says still stands.
-                Member::Nothing
-                    if nullable && (self.legacy_nullable || shared_admits_null(&object)) =>
-                {
-                    // The `enum` and `const` were found to admit null;
-                    // what applies to other types does not apply here.
-                    let null_keywords = keywords_for(&SchemaType::Null);
-                    let only: serde_json::Map<String, Value> = object
-                        .iter()
-                        .filter(|(key, _)| {
-                            let key = key.as_str();
-                            let other_type = [
-                                SchemaType::String,
-                                SchemaType::Number,
-                                SchemaType::Integer,
-                                SchemaType::Object,
-                                SchemaType::Array,
-                                SchemaType::Boolean,
-                            ]
-                            .iter()
-                            .any(|t| keywords_for(t).contains(&key));
-                            !matches!(key, "enum" | "const")
-                                && (null_keywords.contains(&key) || !other_type)
-                        })
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    match read_as(&SchemaType::Null, false, &only) {
-                        Member::Read(member) => *member,
-                        _ => self.leaf(pointer.clone(), Kind::Null),
-                    }
-                }
+                Member::Nothing if null_admitted => null_only(),
                 Member::Nothing => self.leaf(pointer.clone(), Kind::Never),
                 // Not lost without a word: the schema is reported as
                 // one the generator does not handle.
@@ -671,7 +705,7 @@ impl Translator<'_> {
                 }
             },
             many => {
-                let branches = many
+                let branches: Vec<Slot> = many
                     .iter()
                     .filter_map(|t| match read(t, true) {
                         Member::Read(member) => Some(member),
@@ -688,6 +722,11 @@ impl Translator<'_> {
                     })
                     .map(Slot::Inline)
                     .collect();
+                if branches.is_empty() && null_admitted {
+                    let mut front = null_only();
+                    front.nullable = true;
+                    return front;
+                }
                 let mut front = self.leaf(pointer.clone(), Kind::TypeUnion { branches });
                 // A keyword that applies to none of the member types is read
                 // by no branch; report it on the union rather than lose it.

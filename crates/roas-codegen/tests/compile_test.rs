@@ -656,6 +656,10 @@ fn validated_description() -> serde_json::Value {
             "Dated": {"type": "object", "properties": {"d": {"type": "string", "format": "date", "minLength": 5}}},
             "SmallMaps": {"type": "array", "items": {"additionalProperties": {"type": "string"}, "maxProperties": 2}},
             "Money": {"type": "string", "maxLength": 3},
+            "Base2": {"type": "string", "maxLength": 2},
+            "AliasSub": {"$ref": "#/components/schemas/Base2"},
+            "HoldsAliasSub": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/AliasSub"}}},
+            "ListNullOnly": {"type": ["string", "integer", "null"], "enum": [null], "if": {}, "then": false},
             "EnumObj": {"type": ["object", "string"], "enum": ["a", {"x": 1}]},
             "NullIf": {"type": ["string", "null"], "enum": [null], "if": {}, "then": false},
             "NIfAlias": {"$ref": "#/components/schemas/NIf"},
@@ -692,7 +696,8 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
         "types": {"NIfOff": {"validation": false}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
-            "Money": {"rust": {"name": "String"}, "go": {"name": "string"}}
+            "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
+            "AliasSub": {"rust": {"name": "String"}, "go": {"name": "string"}}
         }
     }))
     .unwrap();
@@ -921,6 +926,9 @@ fn main() {
     assert_eq!(report::<EnumObj>(r#"{"x":2}"#), vec![u("")]);
     // A list left with its null keeps what else it says.
     assert_eq!(report::<NullIf>("null"), vec![u("")]);
+    assert_eq!(report::<ListNullOnly>("null"), vec![u("")]);
+    // A substituted reference keeps what its target declares.
+    assert_eq!(report::<HoldsAliasSub>(r#"{"v":"long"}"#), vec![u("/v")]);
     // An alias spelled as a newtype has its target's null.
     assert_eq!(report::<HoldsNIfAlias>(r#"{"v":null}"#), vec![u("/v")]);
     println!("validation behaves");
@@ -1151,6 +1159,8 @@ func main() {
 	check(`"a"`, report[api.EnumObj](`"a"`))
 	check(`{"x":2}`, report[api.EnumObj](`{"x":2}`), u(""))
 	check(`null`, report[api.NullIf](`null`), u(""))
+	check(`null`, report[api.ListNullOnly](`null`), u(""))
+	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))
 	check(`{"v":null}`, report[api.HoldsNIfAlias](`{"v":null}`), u("/v"))
 	fmt.Println("validation behaves")
 }

@@ -824,7 +824,14 @@ fn keywords_a_3_0_model_drops_are_reported() {
         "components": {"schemas": {
             "N": {"type": "string", "maxLength": 3},
             "Ao": {"allOf": [{"$ref": "#/components/schemas/N"}], "maxLength": 2},
-            "An": {"anyOf": [{"type": "string"}, {"type": "integer"}], "maxLength": 2}
+            "An": {"anyOf": [{"type": "string"}, {"type": "integer"}], "maxLength": 2},
+            "Obj": {"type": "object", "properties": {"y": {"type": "string"}}},
+            "Typed": {"type": "object", "allOf": [{"properties": {"x": {"type": "string"}}}]},
+            "Implied": {"type": "object", "allOf": [
+                {"$ref": "#/components/schemas/Obj"},
+                {"properties": {"x": {"type": "string"}}}
+            ]},
+            "Inclusive": {"type": "integer", "minimum": 1, "exclusiveMinimum": false}
         }}
     });
     let bytes = serde_json::to_vec(&raw).unwrap();
@@ -847,7 +854,8 @@ fn keywords_a_3_0_model_drops_are_reported() {
         lost,
         [
             ("/components/schemas/An", "maxLength"),
-            ("/components/schemas/Ao", "maxLength")
+            ("/components/schemas/Ao", "maxLength"),
+            ("/components/schemas/Typed", "type")
         ]
     );
 }

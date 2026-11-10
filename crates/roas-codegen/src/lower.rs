@@ -155,7 +155,9 @@ impl<'a> Lowerer<'a> {
                     schema.description.clone(),
                     schema.constraints.clone(),
                 ),
-                Slot::Ref { description, .. } => (None, description.clone(), Default::default()),
+                Slot::Ref { description, .. } => {
+                    (None, description.clone(), self.referenced_constraints(slot))
+                }
             };
             self.register(TypeDef {
                 id,
@@ -382,6 +384,45 @@ impl<'a> Lowerer<'a> {
                 Slot::Ref { .. } => return false,
             };
             return schema_unchecked(schema);
+        }
+    }
+
+    /// The constraints a reference stands for, through a chain of
+    /// references; siblings that assert are kept as unsupported, since
+    /// they are not merged.
+    fn referenced_constraints(&self, slot: &Slot) -> crate::front::Constraints {
+        let mut seen = BTreeSet::new();
+        let mut current = slot;
+        let mut extra = Vec::new();
+        loop {
+            match current {
+                Slot::Inline(schema) => {
+                    let mut c = schema.constraints.clone();
+                    for keyword in extra {
+                        if !c.unsupported.contains(&keyword) {
+                            c.unsupported.push(keyword);
+                        }
+                    }
+                    return c;
+                }
+                Slot::Ref {
+                    target: RefTarget::Component(name),
+                    siblings,
+                    ..
+                } => {
+                    if siblings.is_some() {
+                        extra.push("$ref siblings".to_owned());
+                    }
+                    if !seen.insert(name.clone()) {
+                        return Default::default();
+                    }
+                    match self.front.components.get(name) {
+                        Some(next) => current = next,
+                        None => return Default::default(),
+                    }
+                }
+                Slot::Ref { .. } => return Default::default(),
+            }
         }
     }
 
