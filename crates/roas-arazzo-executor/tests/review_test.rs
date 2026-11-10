@@ -1325,6 +1325,22 @@ fn a_lazy_run_refuses_a_jsonpath_version_it_does_not_evaluate() {
             { "target": "$.x", "targetSelectorType": goessner, "value": 1 }
         ] }
     }]));
+    // Also from an output whose context names a step that never ran: an
+    // unsupported language is a fault in the description, whatever ran.
+    let mut description = one(json!([
+        { "stepId": "a", "operationId": "listPets", "successCriteria": [{ "condition": "$statusCode == 200" }] },
+        { "stepId": "b", "operationId": "placeOrder" }
+    ]));
+    description.workflows[0].outputs.insert(
+        "late".to_owned(),
+        serde_json::from_value(
+            json!({ "type": goessner, "context": "$steps.b.outputs.y", "selector": "$.x" }),
+        )
+        .expect("a selector"),
+    );
+    let mut client = Fake::new().reply(500, &json!({}));
+    let error = execute(&description, &options(), &mut client).unwrap_err();
+    assert!(error.to_string().contains("RFC9535"), "{error}");
     // RFC 9535 itself still runs.
     let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
     let steps = json!([{

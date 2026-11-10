@@ -111,13 +111,11 @@ pub(crate) fn resolve(value: &Value, scope: &Scope<'_>) -> Result<Value, SelectE
 
 /// What a selector picks out of the data its context names.
 pub(crate) fn select(selector: &Selector, scope: &Scope<'_>) -> Result<Value, SelectError> {
+    // A language the engine cannot evaluate is refused whatever the context
+    // holds, even one naming a step that never ran.
+    let language = kind_of(&selector.type_)?;
     let context = expression::evaluate(&selector.context, scope)?;
-    let picked = apply(
-        kind_of(&selector.type_)?,
-        &selector.selector,
-        &context,
-        scope.compiled,
-    )?;
+    let picked = apply(language, &selector.selector, &context, scope.compiled)?;
     picked.ok_or_else(|| SelectError::Empty {
         selector: selector.selector.clone(),
         context: selector.context.clone(),
