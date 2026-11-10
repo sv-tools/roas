@@ -399,7 +399,10 @@ struct Frame<'d> {
     /// Where to come back to once a receive that was joined is done — the
     /// step that needed it, or the end of the workflow — and the detour
     /// that was pending there.
-    resume: Option<(usize, Option<usize>)>,
+    /// A stack: a step a joined receive goes back to may itself join one.
+    resume: Vec<(usize, Option<usize>)>,
+    /// An `end`, or a `goto` to another workflow, finished it.
+    ended: bool,
     outcome: Outcome,
 }
 
@@ -427,6 +430,12 @@ struct Completion {
     given: BTreeMap<String, Value>,
     /// Whether it counts as passed when the step states no criteria.
     default_pass: bool,
+    /// The step failed whatever its criteria say — a receive that got no
+    /// message — so they are not evaluated, and it names no outputs.
+    failed: bool,
+    /// Its workflow had already ended (`end`, or a `goto` to another
+    /// workflow) when it completed: its action is recorded, not taken.
+    settled: bool,
     attempt: u32,
     performed: Performed,
     elapsed: Duration,
@@ -775,7 +784,33 @@ impl<'d> Run<'d> {
         }
     }
 
+    /// Every subscription still open — listening, or done with but not yet
+    /// handed out as [`Progress::Unsubscribe`]. A caller driving the run
+    /// itself closes these when it stops early, as the `execute` functions
+    /// do.
+    #[must_use]
+    pub fn open_subscriptions(&self) -> Vec<SubscriptionId> {
+        let mut open = self.closing.clone();
+        for frame in &self.frames {
+            open.extend(
+                frame
+                    .listening
+                    .iter()
+                    .map(|listening| listening.subscription),
+            );
+        }
+        open.sort();
+        open
+    }
+
     fn advance_inner(&mut self) -> Result<Progress, ExecutionError> {
+        // A subscription that is done with is closed before a retry waits.
+        if self.pending.is_none()
+            && self.joining.is_none()
+            && let Some(subscription) = self.closing.pop()
+        {
+            return Ok(Progress::Unsubscribe(subscription));
+        }
         if let Some(wait) = self.wait.take() {
             return Ok(Progress::Wait(wait));
         }
@@ -794,9 +829,6 @@ impl<'d> Run<'d> {
                 url: format!("subscription {subscription}"),
             });
         }
-        if let Some(subscription) = self.closing.pop() {
-            return Ok(Progress::Unsubscribe(subscription));
-        }
         // Asking for more means the message went out.
         if let Some(sent) = self.sending.take() {
             let performed = Performed::Message {
@@ -811,6 +843,8 @@ impl<'d> Run<'d> {
                     exchange: Some(sent.exchange),
                     given: BTreeMap::new(),
                     default_pass: true,
+                    failed: false,
+                    settled: false,
                     attempt: sent.attempt,
                     performed,
                     elapsed: sent.started.elapsed(),
@@ -842,6 +876,11 @@ impl<'d> Run<'d> {
                 let mut needs = steps_named_by(step, frame.workflow, description)
                     .map_err(|error| locate(&self.documents, frame.doc, error))?;
                 needs.extend(step.depends_on.iter().cloned());
+                // The workflow's own actions are judged after this step.
+                needs.extend(
+                    workflow_action_reads(frame.workflow, description)
+                        .map_err(|error| locate(&self.documents, frame.doc, error))?,
+                );
                 if let Some(listening) = frame
                     .listening
                     .iter()
@@ -941,6 +980,8 @@ impl<'d> Run<'d> {
                 exchange: Some(pending.exchange),
                 given: BTreeMap::new(),
                 default_pass: (200..400).contains(&status),
+                failed: false,
+                settled: false,
                 attempt: pending.attempt,
                 performed,
                 elapsed,
@@ -1005,7 +1046,8 @@ impl<'d> Run<'d> {
         listening.exchange.message = message;
         // The receive completes where it was needed, then the run comes
         // back there.
-        frame.resume = Some((frame.at, frame.detour.take()));
+        let settled = frame.ended;
+        frame.resume.push((frame.at, frame.detour.take()));
         frame.at = frame
             .order
             .iter()
@@ -1023,6 +1065,8 @@ impl<'d> Run<'d> {
                 exchange: Some(listening.exchange),
                 given: BTreeMap::new(),
                 default_pass: delivered,
+                failed: !delivered,
+                settled,
                 attempt: listening.attempt,
                 performed,
                 elapsed: listening.started.elapsed(),
@@ -1095,7 +1139,13 @@ impl<'d> Run<'d> {
                     reason,
                 }
             })?;
-        let receive = step.action == Some(StepAction::Receive);
+        let Some(action) = step.action else {
+            return Err(ExecutionError::BadRequest {
+                step: step.step_id.clone(),
+                reason: "it names a channel but no `action`".into(),
+            });
+        };
+        let receive = action == StepAction::Receive;
         let payload = body(step, &scope, &resolved.content_type)?;
         let attempt = frame.attempts.get(&step.step_id).copied().unwrap_or(0) + 1;
         let timeout = step
@@ -1260,12 +1310,19 @@ impl<'d> Run<'d> {
 
             // Criteria, where a step states them, are the whole
             // judgement: a step that says `$statusCode == 404` means it.
-            let mut passed = if step.success_criteria.is_empty() {
+            let mut passed = if done.failed {
+                false
+            } else if step.success_criteria.is_empty() {
                 done.default_pass
             } else {
                 true
             };
-            for criterion in &step.success_criteria {
+            let judged = if done.failed {
+                &[][..]
+            } else {
+                &step.success_criteria[..]
+            };
+            for criterion in judged {
                 let holds =
                     evaluate_criterion(criterion, &scope, &mut self.records[record].criteria)
                         .map_err(|error| locate(&self.documents, here, error))?;
@@ -1304,6 +1361,18 @@ impl<'d> Run<'d> {
         let action = self
             .decide(index, passed, done.exchange.as_ref(), record)
             .map_err(|error| locate(&self.documents, here, error))?;
+        if done.settled {
+            // Nothing is left to go to: say what it would have done, and
+            // go back to where it was needed.
+            self.records[record].action = describe(&action)
+                .map(|action| format!("{action}, not taken: the workflow had ended"));
+            let frame = self.frames.last_mut().expect("the frame is still there");
+            if let Some((back, detour)) = frame.resume.pop() {
+                frame.at = back;
+                frame.detour = detour;
+            }
+            return Ok(());
+        }
         self.records[record].action = describe(&action);
         self.apply(action)
     }
@@ -1377,7 +1446,8 @@ impl<'d> Run<'d> {
             started: Instant::now(),
             detour: None,
             listening: Vec::new(),
-            resume: None,
+            resume: Vec::new(),
+            ended: false,
             outcome: Outcome::Succeeded,
         });
         Ok(())
@@ -1555,6 +1625,8 @@ impl<'d> Run<'d> {
                     },
                 );
                 parent.at = parent.order.len();
+                parent.resume.clear();
+                parent.ended = true;
                 parent.outcome = frame.outcome;
                 Ok(())
             }
@@ -1583,6 +1655,8 @@ impl<'d> Run<'d> {
                         exchange: None,
                         given: outputs,
                         default_pass: frame.outcome != Outcome::Failed && !timed_out,
+                        failed: false,
+                        settled: false,
                         attempt,
                         performed: Performed::Workflow {
                             // The reference as the calling step wrote it: a
@@ -1909,7 +1983,7 @@ impl<'d> Run<'d> {
                 // back there.
                 if let Some(back) = frame.detour.take() {
                     frame.at = back;
-                } else if let Some((back, detour)) = frame.resume.take() {
+                } else if let Some((back, detour)) = frame.resume.pop() {
                     frame.at = back;
                     frame.detour = detour;
                 } else {
@@ -1920,7 +1994,8 @@ impl<'d> Run<'d> {
             Action::End(outcome) => {
                 frame.outcome = outcome;
                 frame.at = frame.order.len();
-                frame.resume = None;
+                frame.resume.clear();
+                frame.ended = true;
                 // Nothing is forced on the caller here: a workflow that
                 // ends failed comes back through the step that called
                 // it, whose own `onFailure` may yet have something to
@@ -1977,7 +2052,7 @@ impl<'d> Run<'d> {
             } => {
                 frame.at = position_of(frame, &step_id)
                     .map_err(|error| locate(&self.documents, here, error))?;
-                if let Some((_, detour)) = frame.resume.take() {
+                if let Some((_, detour)) = frame.resume.pop() {
                     frame.detour = detour;
                 }
                 Ok(())
@@ -2712,6 +2787,40 @@ fn steps_named_by(
     }
 
     found.remove(&step.step_id);
+    Ok(found)
+}
+
+/// The steps a workflow's own `successActions` / `failureActions` read.
+fn workflow_action_reads(
+    workflow: &Workflow,
+    description: &Description,
+) -> Result<BTreeSet<String>, ExecutionError> {
+    let mut found = BTreeSet::new();
+    let mut collect = |parsed: Expression<'_>| {
+        if let Some(id) = parsed.step_id() {
+            found.insert(id.to_owned());
+        }
+    };
+    for entry in &workflow.success_actions {
+        if let Ok(action) = success_action(entry, description) {
+            for criterion in &action.criteria {
+                criterion::references(criterion)?
+                    .into_iter()
+                    .for_each(&mut collect);
+            }
+            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
+        }
+    }
+    for entry in &workflow.failure_actions {
+        if let Ok(action) = failure_action(entry, description) {
+            for criterion in &action.criteria {
+                criterion::references(criterion)?
+                    .into_iter()
+                    .for_each(&mut collect);
+            }
+            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
+        }
+    }
     Ok(found)
 }
 

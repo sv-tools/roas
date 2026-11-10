@@ -238,6 +238,7 @@ pub(crate) struct Messages<'m, M: MessageClient + ?Sized>(pub(crate) &'m mut M);
 
 pub(crate) trait Carrier {
     fn carry(&mut self, run: &Run<'_>, progress: Progress) -> Result<Carried, ExecutionError>;
+    fn close(&mut self, subscription: SubscriptionId);
 }
 
 /// What came of a message progress.
@@ -277,6 +278,10 @@ impl<M: MessageClient + ?Sized> Carrier for Messages<'_, M> {
             Progress::Send(_) | Progress::Wait(_) | Progress::Done(_) => Carried::Nothing,
         })
     }
+
+    fn close(&mut self, subscription: SubscriptionId) {
+        self.0.unsubscribe(subscription);
+    }
 }
 
 /// Why a run without a message client cannot carry on.
@@ -287,6 +292,29 @@ fn no_messages() -> ExecutionError {
 }
 
 pub(crate) fn drive_with<C: HttpClient + ?Sized>(
+    run: &mut Run<'_>,
+    client: &mut C,
+    mut messages: Option<&mut dyn Carrier>,
+) -> Result<ExecutionReport, ExecutionFailure> {
+    let result = drive_loop(
+        run,
+        client,
+        messages
+            .as_mut()
+            .map(|messages| &mut **messages as &mut dyn Carrier),
+    );
+    // A run that stopped early leaves its subscriptions open; close them.
+    if result.is_err()
+        && let Some(messages) = messages
+    {
+        for subscription in run.open_subscriptions() {
+            messages.close(subscription);
+        }
+    }
+    result
+}
+
+fn drive_loop<C: HttpClient + ?Sized>(
     run: &mut Run<'_>,
     client: &mut C,
     mut messages: Option<&mut dyn Carrier>,
@@ -370,6 +398,23 @@ pub(crate) async fn drive_async_with<
     C: AsyncHttpClient + ?Sized,
     M: AsyncMessageClient + ?Sized,
 >(
+    run: &mut Run<'_>,
+    client: &mut C,
+    mut messages: Option<&mut AsyncMessages<'_, M>>,
+) -> Result<ExecutionReport, ExecutionFailure> {
+    let result = drive_async_loop(run, client, messages.as_deref_mut()).await;
+    // A run that stopped early leaves its subscriptions open; close them.
+    if result.is_err()
+        && let Some(AsyncMessages(messages)) = messages
+    {
+        for subscription in run.open_subscriptions() {
+            messages.unsubscribe(subscription);
+        }
+    }
+    result
+}
+
+async fn drive_async_loop<C: AsyncHttpClient + ?Sized, M: AsyncMessageClient + ?Sized>(
     run: &mut Run<'_>,
     client: &mut C,
     mut messages: Option<&mut AsyncMessages<'_, M>>,

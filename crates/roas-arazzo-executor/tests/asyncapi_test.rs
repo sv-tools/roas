@@ -892,3 +892,220 @@ fn a_stopped_run_takes_no_message() {
     ));
     assert!(matches!(run.deliver(None), Err(ExecutionError::Stopped)));
 }
+
+#[test]
+fn a_receive_that_gets_nothing_fails_whatever_its_criteria_and_outputs_say() {
+    let mut step = receive();
+    step["successCriteria"] = json!([{ "condition": "$inputs.id == 'c-7'" }]);
+    step["onFailure"] = json!([{ "name": "give-up", "type": "end" }]);
+    let description = description(json!([step]), json!({}));
+    let report =
+        execute_with_messages(&description, &options(), &mut Fake::new(), &mut Fake::new())
+            .unwrap();
+    assert_eq!(report.outcome, Outcome::Failed, "{report}");
+    assert!(report.steps[0].criteria.is_empty());
+    assert!(report.steps[0].outputs.is_empty());
+    assert_eq!(report.steps[0].action.as_deref(), Some("ended, failed"));
+}
+
+#[test]
+fn joins_inside_a_retry_detour_come_back_to_the_right_steps() {
+    let mut confirm = receive();
+    confirm["successCriteria"] =
+        json!([{ "condition": "$message.payload#/status == 'confirmed'" }]);
+    confirm["onFailure"] = json!([{ "name": "again", "type": "retry", "stepId": "t" }]);
+    let mut second = receive();
+    second["stepId"] = json!("r2");
+    second["operationId"] = json!("$sourceDescriptions.orders.placeOrder");
+    second["parameters"] = json!([{ "name": "region", "in": "channel", "value": "eu" }]);
+    second.as_object_mut().unwrap().remove("correlationId");
+    second.as_object_mut().unwrap().remove("outputs");
+    let description = description(
+        json!([
+            confirm,
+            second,
+            { "stepId": "b", "operationId": "ping", "dependsOn": ["confirm"] },
+            { "stepId": "t", "operationId": "ping", "dependsOn": ["r2"] }
+        ]),
+        json!({}),
+    );
+    let mut messages = Fake::new()
+        .message("confirmations", confirmation("c-7", "pending"))
+        .message("confirmations", confirmation("c-7", "confirmed"))
+        .message("orders.eu", IncomingMessage::json(&json!(1)));
+    let mut http = Fake::new()
+        .reply(200, &json!({}))
+        .reply(200, &json!({}))
+        .reply(200, &json!({}));
+    let report = execute_with_messages(&description, &options(), &mut http, &mut messages).unwrap();
+    let ran: Vec<_> = report
+        .steps
+        .iter()
+        .map(|step| step.step_id.as_str())
+        .collect();
+    assert_eq!(ran, ["confirm", "r2", "t", "confirm", "b", "t"], "{report}");
+    // `r2` listened once.
+    assert_eq!(messages.subscribed().len(), 3);
+    assert!(report.is_success(), "{report}");
+}
+
+#[test]
+fn a_run_that_stops_early_closes_its_subscriptions() {
+    let description = description(
+        json!([receive(), { "stepId": "ping", "operationId": "ping" }]),
+        json!({}),
+    );
+    // The HTTP client has no reply scripted, so the run fails.
+    let mut messages = Fake::new();
+    let failure = execute_with_messages(&description, &options(), &mut Fake::new(), &mut messages)
+        .unwrap_err();
+    assert!(matches!(failure.error, ExecutionError::Client(_)));
+    assert_eq!(messages.unsubscribed(), [SubscriptionId(1)]);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let mut messages = Fake::new();
+    runtime.block_on(async {
+        execute_with_messages_async(&description, &options(), &mut Fake::new(), &mut messages)
+            .await
+            .unwrap_err();
+    });
+    assert_eq!(messages.unsubscribed(), [SubscriptionId(1)]);
+    // A manual driver can ask which are open.
+    let options = options();
+    let mut run = Run::start(&description, &options).unwrap();
+    assert!(matches!(run.advance(), Ok(Progress::Subscribe(_))));
+    assert_eq!(run.open_subscriptions(), [SubscriptionId(1)]);
+}
+
+#[test]
+fn preparation_refuses_what_a_run_would() {
+    for (step, expected) in [
+        (
+            json!({ "stepId": "s", "channelPath": "$sourceDescriptions.orders#/channels/plain",
+                    "action": "receive", "correlationId": "x" }),
+            "says where its correlation id is",
+        ),
+        (
+            json!({ "stepId": "s", "operationId": "placeOrder", "action": "send" }),
+            "no `channel` parameter gives `{region}`",
+        ),
+    ] {
+        let description = description(json!([step]), json!({}));
+        let error = prepare(&description, &options()).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    // A lazy run refuses a channel with no action.
+    let description = description(
+        json!([{ "stepId": "s", "channelPath": "$sourceDescriptions.orders#/channels/plain" }]),
+        json!({}),
+    );
+    let failure =
+        execute_with_messages(&description, &options(), &mut Fake::new(), &mut Fake::new())
+            .unwrap_err();
+    assert!(
+        failure.error.to_string().contains("no `action`"),
+        "{}",
+        failure.error
+    );
+}
+
+#[test]
+fn a_workflow_action_that_reads_a_receive_joins_it() {
+    let mut description = description(
+        json!([receive(), { "stepId": "ping", "operationId": "ping" }, { "stepId": "ping2", "operationId": "ping" }]),
+        json!({}),
+    );
+    description.workflows[0].success_actions = serde_json::from_value(json!([
+        { "name": "done", "type": "end", "criteria": [{ "condition": "$steps.confirm.outputs.status == 'ok'" }] }
+    ]))
+    .unwrap();
+    let mut messages = Fake::new().message("confirmations", confirmation("c-7", "ok"));
+    let mut http = Fake::new().reply(200, &json!({})).reply(200, &json!({}));
+    let report = execute_with_messages(&description, &options(), &mut http, &mut messages).unwrap();
+    let ran: Vec<_> = report
+        .steps
+        .iter()
+        .map(|step| step.step_id.as_str())
+        .collect();
+    assert_eq!(ran, ["confirm"], "{report}");
+    assert_eq!(report.outcome, Outcome::Ended);
+}
+
+#[test]
+fn a_receive_joined_after_the_workflow_ended_takes_no_action() {
+    let mut step = receive();
+    step["onSuccess"] = json!([{ "name": "late", "type": "goto", "stepId": "late" }]);
+    let description = description(
+        json!([
+            step,
+            { "stepId": "x", "operationId": "ping", "onSuccess": [{ "name": "stop", "type": "end" }] },
+            { "stepId": "late", "operationId": "ping" }
+        ]),
+        json!({}),
+    );
+    let mut messages = Fake::new().message("confirmations", confirmation("c-7", "ok"));
+    let mut http = Fake::new().reply(200, &json!({}));
+    let report = execute_with_messages(&description, &options(), &mut http, &mut messages).unwrap();
+    let ran: Vec<_> = report
+        .steps
+        .iter()
+        .map(|step| step.step_id.as_str())
+        .collect();
+    assert_eq!(ran, ["x", "confirm"], "{report}");
+    assert_eq!(report.outcome, Outcome::Ended);
+    assert_eq!(
+        report.steps[1].action.as_deref(),
+        Some("goto step `late`, not taken: the workflow had ended")
+    );
+}
+
+#[test]
+fn referenced_operations_and_channel_items_are_followed() {
+    let mut v3 = asyncapi_3();
+    v3["operations"]["refd"] = json!({ "$ref": "#/components/operations/refd" });
+    v3["components"]["operations"] = json!({
+        "refd": { "action": "send", "channel": { "$ref": "#/channels/confirmations" } }
+    });
+    let mut v2 = asyncapi_2();
+    v2["channels"]["shared"] = json!({ "$ref": "#/components/channels/shared" });
+    v2["channels"]["broken"] = json!({ "$ref": "#/nowhere" });
+    v2["components"] =
+        json!({ "channels": { "shared": { "publish": { "operationId": "share" } } } });
+    let options = options()
+        .source("orders", "https://example.com/asyncapi.json", v3)
+        .source("legacy", "https://example.com/legacy.json", v2);
+    let description = description(
+        json!([
+            { "stepId": "a", "operationId": "$sourceDescriptions.orders.refd", "action": "send" },
+            { "stepId": "b", "operationId": "$sourceDescriptions.legacy.share", "action": "send" }
+        ]),
+        json!({}),
+    );
+    let mut messages = Fake::new();
+    execute_with_messages(&description, &options, &mut Fake::new(), &mut messages).unwrap();
+    let addresses: Vec<_> = messages
+        .published()
+        .iter()
+        .map(|message| message.channel.address.as_str())
+        .collect();
+    assert_eq!(addresses, ["confirmations", "shared"]);
+}
+
+#[test]
+fn a_retry_wait_comes_after_the_old_subscription_is_closed() {
+    let mut step = receive();
+    step["onFailure"] = json!([{ "name": "again", "type": "retry", "retryAfter": 5 }]);
+    let description = description(json!([step]), json!({}));
+    let options = options();
+    let mut run = Run::start(&description, &options).unwrap();
+    assert!(matches!(run.advance(), Ok(Progress::Subscribe(_))));
+    assert!(matches!(run.advance(), Ok(Progress::Receive { .. })));
+    run.deliver(None).unwrap();
+    assert!(matches!(
+        run.advance(),
+        Ok(Progress::Unsubscribe(SubscriptionId(1)))
+    ));
+    assert!(matches!(run.advance(), Ok(Progress::Wait(_))));
+    assert!(matches!(run.advance(), Ok(Progress::Subscribe(_))));
+}

@@ -754,6 +754,7 @@ impl<'d> Compiler<'d> {
                     let sources = &self.documents.get(self.current).options.sources;
                     match crate::channel::resolve(step, sources, &missing) {
                         Ok(channel) => {
+                            self.channel_checks(workflow, step, &channel, &step_site);
                             self.channels.insert(
                                 (self.current, &workflow.workflow_id, &step.step_id),
                                 channel,
@@ -950,6 +951,49 @@ impl<'d> Compiler<'d> {
                     what: "a source description not declared by this document".into(),
                 },
             ),
+        }
+    }
+
+    /// What a run would refuse about a resolved channel, said up front.
+    fn channel_checks(
+        &mut self,
+        workflow: &'d Workflow,
+        step: &'d Step,
+        channel: &crate::channel::Resolved,
+        site: &Site<'d>,
+    ) {
+        if step.action == Some(roas_arazzo::v1_1::StepAction::Receive)
+            && step.correlation_id.is_some()
+            && channel.correlation.is_empty()
+        {
+            self.error(
+                &site.field("correlationId"),
+                ExecutionError::BadRequest {
+                    step: step.step_id.clone(),
+                    reason: format!(
+                        "it waits for a `correlationId`, but no message of channel `{}` \
+                         says where its correlation id is",
+                        channel.channel.address
+                    ),
+                },
+            );
+        }
+        let description = self.description();
+        if let Ok(parameters) = run::effective_parameters(workflow, step, description) {
+            let given = parameters
+                .iter()
+                .filter(|template| template.location() == ParameterLocation::Channel)
+                .map(|template| (template.parameter.name.clone(), String::new()))
+                .collect();
+            if let Err(reason) = crate::channel::address(&channel.channel.address, &given) {
+                self.error(
+                    &site.field("parameters"),
+                    ExecutionError::BadRequest {
+                        step: step.step_id.clone(),
+                        reason,
+                    },
+                );
+            }
         }
     }
 

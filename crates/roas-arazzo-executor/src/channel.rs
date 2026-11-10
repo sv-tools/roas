@@ -181,6 +181,9 @@ enum Found<'v> {
 fn find<'v>(document: &'v Value, id: &str) -> Option<Found<'v>> {
     if is_v2(document) {
         for (key, channel) in document.get("channels")?.as_object()? {
+            let Ok(channel) = follow(document, Some(channel), key) else {
+                continue;
+            };
             for which in ["publish", "subscribe"] {
                 if let Some(operation) = channel.get(which)
                     && operation.get("operationId").and_then(Value::as_str) == Some(id)
@@ -195,8 +198,9 @@ fn find<'v>(document: &'v Value, id: &str) -> Option<Found<'v>> {
         }
         None
     } else {
+        let operation = document.get("operations")?.get(id)?;
         Some(Found::V3 {
-            operation: document.get("operations")?.get(id)?,
+            operation: follow(document, Some(operation), id).ok()?,
         })
     }
 }
@@ -268,7 +272,11 @@ fn finish(
             .filter_map(|server| {
                 // 3.x references a server; 2.6 names one.
                 let name = match server.get("$ref").and_then(Value::as_str) {
-                    Some(reference) => reference.rsplit('/').next()?.to_owned(),
+                    Some(reference) => reference
+                        .rsplit('/')
+                        .next()?
+                        .replace("~1", "/")
+                        .replace("~0", "~"),
                     None => server.as_str()?.to_owned(),
                 };
                 let object = follow(document, all.get(&name), &name).ok()?.clone();
