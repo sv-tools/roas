@@ -21,8 +21,10 @@ use oxc_regular_expression::{LiteralParser, Options};
 /// The largest repetition count Go compiles.
 const MAX_COUNT: u64 = 1000;
 const MAX_CHAR: u32 = 0x10FFFF;
-/// Rust's `regex` nesting limit: anything deeper never compiles there.
-const MAX_NESTING: usize = 250;
+/// How deep groups may nest. oxc's parser recurses per level and needs
+/// tens of KiB a level in a debug build, so this keeps a 2 MiB thread
+/// safe; no real schema nests near it.
+const MAX_NESTING: usize = 64;
 const SURROGATES: (u32, u32) = (0xD800, 0xDFFF);
 const LEGACY: &str =
     "it is valid only without the Unicode flag, where part of it can match half of a character";
@@ -67,7 +69,7 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
     let mut printer = Printer {
         legacy,
         source: pattern,
-        names: Vec::new(),
+        names: Default::default(),
         budget: MAX_COUNT,
         out: String::new(),
     };
@@ -87,7 +89,7 @@ struct Printer<'a> {
     /// The pattern as written: a character's span reads into it.
     source: &'a str,
     /// Group names seen so far.
-    names: Vec<String>,
+    names: std::collections::HashSet<String>,
     /// How many times what is printed next may be repeated, through every
     /// count around it: Go refuses a nesting whose counts multiply past
     /// 1000.
@@ -144,7 +146,9 @@ impl Printer<'_> {
                 let saved = self.budget;
                 if !matches!((q.min, q.max), (0, None) | (1, None) | (0, Some(1))) {
                     match q.max.unwrap_or(q.min) {
-                        0 => self.budget = u64::MAX,
+                        // Go checks what is inside afresh: `{0}` lifts
+                        // nothing.
+                        0 => self.budget = MAX_COUNT,
                         m if m > self.budget => {
                             return Err(format!(
                                 "nested repetition counts multiplying past {MAX_COUNT} are not supported"
@@ -187,10 +191,9 @@ impl Printer<'_> {
                 // oxc accepts a name repeated inside its own group, which
                 // ECMAScript refuses; any repeat is refused here.
                 if let Some(name) = &g.name {
-                    if self.names.iter().any(|n| n == name.as_str()) {
+                    if !self.names.insert(name.as_str().to_owned()) {
                         return Err(format!("the group name `{name}` is repeated"));
                     }
-                    self.names.push(name.as_str().to_owned());
                 }
                 self.group(&g.body)?;
             }
@@ -224,7 +227,7 @@ impl Printer<'_> {
                 .get(c.span.start as usize..c.span.end as usize)
                 .is_none_or(|text| text == "\\")
         {
-            return Err("a `\\c` not followed by a letter is not supported".into());
+            return Err("this `\\c` escape is not supported".into());
         }
         self.explicit(c.value, c.value)
     }
@@ -466,6 +469,8 @@ mod tests {
         assert_eq!(ok("a{1000}"), "a{1000}");
         assert_eq!(ok("(?:a{2}){500}"), "(?:a{2}){500}");
         assert_eq!(ok("(?:a*){1000}"), "(?:a*){1000}");
+        assert_eq!(ok("(?:(?:a{1000}){0}){2}"), "(?:(?:a{1000}){0}){2}");
+        assert_eq!(ok("(?:a{1000}){0}"), "(?:a{1000}){0}");
         assert_eq!(ok(r"[\\]"), r"\\");
         assert_eq!(ok(r"\cJ"), r"\x{A}");
         assert_eq!(ok(r"\0"), r"\x{0}");
@@ -489,6 +494,9 @@ mod tests {
 
     #[test]
     fn deep_nesting_is_refused_before_parsing() {
+        // At the limit, on a test thread's stack, in a debug build.
+        let at = format!("{}a{}", "(".repeat(64), ")".repeat(64));
+        assert!(translate(&at).is_ok());
         let deep = format!("{}a{}", "(".repeat(100_000), ")".repeat(100_000));
         assert!(translate(&deep).unwrap_err().contains("nesting"));
         // Brackets in a class or escaped do not nest.
@@ -516,6 +524,8 @@ mod tests {
             r"[\c]",
             r"[\c-x]",
             "(?<n>a|(?<n>b))",
+            "(?:(?:a{1000}){2}){0}",
+            r"[\cA]",
             r"\-(?<n>a|(?<n>b))",
             "a\\",
             r"^\d+$\",
