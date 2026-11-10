@@ -1297,6 +1297,16 @@ fn ambiguity_already_proven_is_said_before_a_missing_source() {
 
 // ---- a lazy run checks the JSONPath version, as preparation does ----
 
+/// An XPath type the engine refuses: any without the `xpath` feature,
+/// an unknown version with it.
+fn xpath_refused() -> Value {
+    if cfg!(feature = "xpath") {
+        json!({ "type": "xpath", "version": "xpath-40" })
+    } else {
+        json!("xpath")
+    }
+}
+
 #[test]
 fn a_lazy_run_refuses_a_jsonpath_version_it_does_not_evaluate() {
     let goessner = json!({ "type": "jsonpath", "version": "draft-goessner-dispatch-jsonpath-00" });
@@ -1349,7 +1359,7 @@ fn a_lazy_run_refuses_a_jsonpath_version_it_does_not_evaluate() {
     description.workflows[0].outputs.insert(
         "late".to_owned(),
         serde_json::from_value(
-            json!({ "type": "xpath", "context": "$steps.b.outputs.y", "selector": "/x" }),
+            json!({ "type": xpath_refused(), "context": "$steps.b.outputs.y", "selector": "/x" }),
         )
         .expect("a selector"),
     );
@@ -1409,4 +1419,57 @@ fn a_lazy_v1_0_run_refuses_the_goessner_draft_and_runs_a_jsonpath_without_a_vers
         v1_0(json!({ "type": "jsonpath", "context": "$response.body", "condition": "$.x" }));
     let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
     assert!(roas_arazzo_executor::execute_v1_0(&description, &options(), &mut client).is_ok());
+}
+
+// ---- a body that is not JSON is its text ----------------------------
+
+#[test]
+fn a_response_body_that_is_not_json_is_read_as_its_text() {
+    let description = one(json!([{
+        "stepId": "a",
+        "operationId": "listPets",
+        "successCriteria": [{ "condition": "$response.body == 'pong'" }],
+        "outputs": { "body": "$response.body" }
+    }]));
+    let mut text = HttpResponse::json(200, &Value::Null);
+    text.headers = vec![("content-type".to_owned(), "text/plain".to_owned())];
+    text.body = b"pong".to_vec();
+    let report = execute(&description, &options(), &mut Fake::new().reply_with(text)).unwrap();
+    assert!(report.is_success(), "{report}");
+    assert_eq!(report.steps[0].outputs["body"], json!("pong"));
+    // JSONPath and JSON Pointer judge the text as a JSON string: only
+    // the whole of it matches.
+    let typed = |criterion: Value| {
+        let description = one(json!([{
+            "stepId": "a",
+            "operationId": "listPets",
+            "successCriteria": [criterion]
+        }]));
+        let mut text = HttpResponse::json(200, &Value::Null);
+        text.body = b"<html>oops</html>".to_vec();
+        let report = execute(&description, &options(), &mut Fake::new().reply_with(text)).unwrap();
+        assert_eq!(report.steps[0].criteria[0].error, None, "{report}");
+        report.is_success()
+    };
+    assert!(!typed(
+        json!({ "type": "jsonpath", "context": "$response.body", "condition": "$.id" })
+    ));
+    assert!(typed(
+        json!({ "type": "jsonpath", "context": "$response.body", "condition": "$" })
+    ));
+    let pointer = |condition: &str| json!({ "type": { "type": "jsonpointer", "version": "rfc6901" }, "context": "$response.body", "condition": condition });
+    assert!(!typed(pointer("/id")));
+    assert!(typed(pointer("")));
+    // An empty body is still no body at all.
+    let mut empty = HttpResponse::json(204, &Value::Null);
+    empty.body.clear();
+    let report = execute(&description, &options(), &mut Fake::new().reply_with(empty)).unwrap();
+    assert!(!report.is_success());
+    assert!(
+        report.steps[0].criteria[0]
+            .error
+            .as_ref()
+            .is_some_and(|error| error.to_string().contains("a response body")),
+        "{report}"
+    );
 }

@@ -2437,6 +2437,113 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxixml-fn"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a55b5c42265efe41359f0cc0ebfb9b1c0d52755bac9673c20ea0acebdd847d3"
+dependencies = [
+ "oxixml-infoset",
+ "oxixml-iri",
+ "oxixml-qname",
+ "oxixml-regex",
+ "oxixml-support",
+ "oxixml-text",
+ "oxixml-unicode",
+ "oxixml-xsd",
+]
+
+[[package]]
+name = "oxixml-infoset"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f16a250c82345d9e77eed7d6d5a68aa8aba1056c6d469291566d0213f1a6d204"
+dependencies = [
+ "oxixml-iri",
+ "oxixml-qname",
+ "oxixml-support",
+ "oxixml-xml",
+ "oxixml-xsd",
+]
+
+[[package]]
+name = "oxixml-iri"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876520f85a4d66ccdbf499d8c9c501a60543ed091eefc7b475141ff1d159d94e"
+dependencies = [
+ "oxixml-support",
+ "oxixml-text",
+]
+
+[[package]]
+name = "oxixml-qname"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9caf21e5676e02e6c7953180af5bff88049a4f6426ffd754702d5753cae8ad8b"
+dependencies = [
+ "oxixml-unicode",
+]
+
+[[package]]
+name = "oxixml-regex"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e765f73cac537d1a8462bc368cfed614e444748f9d856369c4a7c68f9b0c8420"
+dependencies = [
+ "oxixml-unicode",
+]
+
+[[package]]
+name = "oxixml-support"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "822ab227407d022b23cba7e0f58d9dcb31851636983f6b9852c69fa2b658bd52"
+
+[[package]]
+name = "oxixml-text"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "758208d48bd16d75ce434bbbeea2afa2054cb7b500b8ecfe552add148f1509a0"
+dependencies = [
+ "oxixml-support",
+]
+
+[[package]]
+name = "oxixml-unicode"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f4fe405939d195999b5e957038d6c66e14ee766c94a98b08309afa04548bdb6"
+
+[[package]]
+name = "oxixml-xml"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0397a4a82dc1e65bc2392afdac9a4a134f2a7d1acedf461ecfeee3464a6ea52c"
+dependencies = [
+ "oxixml-support",
+]
+
+[[package]]
+name = "oxixml-xpath"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06488fc8cdfd38f2fdd51d0dd076bc61b31734ae862fbe9932eb7b0abeb81c4a"
+dependencies = [
+ "oxixml-fn",
+ "oxixml-infoset",
+ "oxixml-qname",
+ "oxixml-regex",
+ "oxixml-support",
+ "oxixml-xsd",
+]
+
+[[package]]
+name = "oxixml-xsd"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8ea470c30c6cefe7aa62ef4e2f09178f9042b70fc7a9a13b201f6e523a9550f"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2932,6 +3039,8 @@ version = "0.2.0"
 dependencies = [
  "enumset",
  "jsonschema",
+ "oxixml-infoset",
+ "oxixml-xpath",
  "regex",
  "reqwest",
  "roas",

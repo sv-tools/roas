@@ -26,6 +26,9 @@ default = []
 # binary, which changes how the other commands compare numbers — for
 # example, `collapse` would stop treating `1.0` and `1.00` as equal.
 exact-numbers = ["roas-codegen/exact-numbers"]
+# Run XPath criteria and selectors in `arazzo run`. Off by default: it adds
+# an XPath 1.0-3.1 engine to the binary.
+xpath = ["roas-arazzo-executor/xpath"]
 
 [dependencies]
 roas = { workspace = true, features = ["clap", "v2", "v3_0", "v3_1", "v3_2"] }

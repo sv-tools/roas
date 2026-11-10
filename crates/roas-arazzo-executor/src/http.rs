@@ -93,6 +93,27 @@ impl HttpResponse {
     pub fn body_as_json(&self) -> Option<serde_json::Value> {
         serde_json::from_slice(&self.body).ok()
     }
+
+    /// The body as a runtime expression sees it: parsed JSON when it is
+    /// JSON, its text when it is UTF-8 — XML and plain text are kept as
+    /// strings, which is what an XPath context reads — and `None` when it
+    /// is empty or neither. A body in another encoding is not decoded
+    /// lossily: replacing what cannot be read would change the data
+    /// criteria and selectors judge.
+    pub(crate) fn body_value(&self) -> Option<serde_json::Value> {
+        if self.body.is_empty() {
+            return None;
+        }
+        // A byte-order mark is no part of either.
+        let body = self
+            .body
+            .strip_prefix(b"\xef\xbb\xbf")
+            .unwrap_or(&self.body);
+        serde_json::from_slice(body).ok().or_else(|| {
+            let text = std::str::from_utf8(body).ok()?;
+            Some(serde_json::Value::String(text.to_owned()))
+        })
+    }
 }
 
 fn header<'h>(headers: &'h [(String, String)], name: &str) -> Option<&'h str> {
@@ -186,6 +207,22 @@ mod tests {
         };
         assert_eq!(response.body_as_json(), None);
         assert_eq!(response.text(), "not json");
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_its_utf8_text_or_nothing() {
+        let body = |bytes: &[u8]| {
+            let mut response = HttpResponse::json(200, &json!(null));
+            response.body = bytes.to_vec();
+            response.body_value()
+        };
+        assert_eq!(body(b"{\"a\":1}"), Some(json!({ "a": 1 })));
+        assert_eq!(body(b"<a>caf\xc3\xa9</a>"), Some(json!("<a>café</a>")));
+        assert_eq!(body(b"\xef\xbb\xbf<a/>"), Some(json!("<a/>")));
+        assert_eq!(body(b"\xef\xbb\xbf{\"a\":1}"), Some(json!({ "a": 1 })));
+        // ISO-8859-1 `café` is not UTF-8, and is not guessed at.
+        assert_eq!(body(b"<a>caf\xe9</a>"), None);
+        assert_eq!(body(b""), None);
     }
 
     #[test]

@@ -376,7 +376,7 @@ fn within(exchange: &Exchange, parts: &[&str], expression: &str) -> Result<Value
             match what {
                 "header" => header(&response()?.headers, rest, expression),
                 "body" => exchange.response_body.clone().ok_or_else(|| {
-                    missing(expression, "a JSON response body, which this step has none")
+                    missing(expression, "a response body, which this step has none")
                 }),
                 other => Err(ExpressionError::Unknown(format!("$response.{other}"))),
             }
