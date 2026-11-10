@@ -316,14 +316,16 @@ fn codegen_extensions_are_gated() {
 }
 
 #[test]
+fn generated_rust_is_a_module_not_a_crate() {
+    // The output is a module in the user's own crate, which owns its
+    // Cargo.toml: there is no crate to name.
+    assert!(ConfigFile::from_toml("[rust]\ncrate_name = \"pets\"\n", Path::new("/")).is_err());
+}
+
+#[test]
 fn settings_this_release_cannot_honour_are_refused() {
-    for toml in ["validation = true\n", "[rust]\ncrate_name = \"pets\"\n"] {
-        let error = generate(&document(pet()), &rust_config(toml)).unwrap_err();
-        assert!(
-            matches!(error, GenerateError::Unsupported(_)),
-            "{toml}: {error}"
-        );
-    }
+    let error = generate(&document(pet()), &rust_config("validation = true\n")).unwrap_err();
+    assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
 }
 
 #[test]
