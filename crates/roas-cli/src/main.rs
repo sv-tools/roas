@@ -366,8 +366,8 @@ pub(crate) fn build_loader_with<W: ResourceFetcher + 'static>(
 ///
 /// Used by both `validate --print` (compact, pipeline-friendly) and
 /// `convert` (pretty, file-friendly).
-pub(crate) fn serialize_spec(
-    value: &serde_json::Value,
+pub(crate) fn serialize_spec<T: serde::Serialize>(
+    value: &T,
     format: InputFormat,
     pretty_json: bool,
 ) -> Result<String> {

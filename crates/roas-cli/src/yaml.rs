@@ -54,7 +54,9 @@ pub(crate) fn from_str(raw: &str) -> Result<Value, serde_saphyr::Error> {
 /// Write `value` as YAML. Strings that a YAML 1.1 reader would take for
 /// something else (`"3.1.0"`, `"n"`, `"yes"`) are quoted, and the
 /// document ends with a newline.
-pub(crate) fn to_string(value: &Value) -> Result<String, serde_saphyr::SerializeError> {
+pub(crate) fn to_string<T: serde::Serialize>(
+    value: &T,
+) -> Result<String, serde_saphyr::SerializeError> {
     serde_saphyr::to_string(value)
 }
 

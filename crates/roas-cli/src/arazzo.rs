@@ -565,35 +565,62 @@ fn check_text(document: &Document) -> String {
 /// units (an LSP `character` is that, less one), with the UTF-8 byte
 /// offset. `path` is null for a finding about the text itself, and
 /// `range` when it cannot be located.
-fn check_report(document: &Document) -> Value {
-    let position = |position: SourcePosition| {
-        serde_json::json!({
-            "line": position.line,
-            "column": position.column,
-            "utf16Column": document.utf16_column(position),
-            "offset": position.offset,
-        })
+fn check_report(document: &Document) -> CheckReport<'_> {
+    let position = |position: SourcePosition| CheckPosition {
+        line: position.line,
+        column: position.column,
+        utf16_column: document.utf16_column(position),
+        offset: position.offset,
     };
-    let diagnostics: Vec<Value> = document
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| {
-            serde_json::json!({
-                "severity": severity_label(diagnostic.severity),
-                "path": diagnostic.path,
-                "range": diagnostic.range.map(|range| serde_json::json!({
-                    "start": position(range.start),
-                    "end": position(range.end),
-                })),
-                "message": diagnostic.message,
+    CheckReport {
+        arazzo: document.version(),
+        complete: document.is_complete(),
+        diagnostics: document
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| CheckFinding {
+                severity: severity_label(diagnostic.severity),
+                path: diagnostic.path.as_deref(),
+                range: diagnostic.range.map(|range| CheckRange {
+                    start: position(range.start),
+                    end: position(range.end),
+                }),
+                message: &diagnostic.message,
             })
-        })
-        .collect();
-    serde_json::json!({
-        "arazzo": document.version(),
-        "complete": document.is_complete(),
-        "diagnostics": diagnostics,
-    })
+            .collect(),
+    }
+}
+
+// Typed rather than a `serde_json::Value`, so the coordinates stay plain
+// integers in YAML when `serde_json/arbitrary_precision` is on.
+#[derive(serde::Serialize)]
+struct CheckReport<'a> {
+    arazzo: Option<&'a str>,
+    complete: bool,
+    diagnostics: Vec<CheckFinding<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct CheckFinding<'a> {
+    severity: &'static str,
+    path: Option<&'a str>,
+    range: Option<CheckRange>,
+    message: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct CheckRange {
+    start: CheckPosition,
+    end: CheckPosition,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckPosition {
+    line: usize,
+    column: usize,
+    utf16_column: usize,
+    offset: usize,
 }
 
 fn run_arazzo_validate(args: ArazzoValidateArgs) -> Result<()> {
@@ -1657,7 +1684,7 @@ workflows:
             check_text(&document),
             "error: #.info.title at line 3, column 10: invalid type: sequence, expected a string\n"
         );
-        let report = check_report(&document);
+        let report = serde_json::to_value(check_report(&document)).unwrap();
         assert_eq!(report["arazzo"], "1.1.0");
         assert_eq!(report["complete"], true);
         let finding = &report["diagnostics"][0];
@@ -1673,20 +1700,32 @@ workflows:
         let document = Document::read("x-\u{1f600}: [\n", EnumSet::empty());
         let text = check_text(&document);
         assert!(text.starts_with("error: at line "), "{text}");
-        let report = check_report(&document);
+        let report = serde_json::to_value(check_report(&document)).unwrap();
         assert_eq!(report["complete"], false);
         let finding = &report["diagnostics"][0];
         assert_eq!(finding["path"], Value::Null);
         // Text that declares no version.
         assert_eq!(report["arazzo"], Value::Null);
         let end = Document::read("x-\u{1f600}: [1}\n", EnumSet::empty());
-        let start = &check_report(&end)["diagnostics"][0]["range"]["start"];
+        let end = serde_json::to_value(check_report(&end)).unwrap();
+        let start = &end["diagnostics"][0]["range"]["start"];
         assert_eq!(start["line"], 1, "{start}");
         assert_eq!(
             start["utf16Column"].as_u64().unwrap(),
             start["column"].as_u64().unwrap() + 1,
             "{start}"
         );
+    }
+
+    #[test]
+    fn check_report_coordinates_are_plain_integers_in_yaml() {
+        // Under `serde_json/arbitrary_precision` a `Value` number would
+        // serialize as a mapping; the typed report keeps integers.
+        let document = Document::read(BROKEN, EnumSet::empty());
+        let yaml = serialize_spec(&check_report(&document), InputFormat::Yaml, false).unwrap();
+        assert!(yaml.contains("line: 3\n"), "{yaml}");
+        assert!(yaml.contains("utf16Column: 10\n"), "{yaml}");
+        assert!(!yaml.contains("serde_json"), "{yaml}");
     }
 
     #[test]
@@ -1697,7 +1736,7 @@ workflows:
  "sourceDescriptions": [{"name": "a", "url": "u"}],
  "workflows": [{"workflowId": "w", "steps": [{"stepId": "s", "operationId": "o"}]}]}"#;
         let document = Document::read_as(text, Format::Json, EnumSet::empty());
-        let report = check_report(&document);
+        let report = serde_json::to_value(check_report(&document)).unwrap();
         let title = report["diagnostics"]
             .as_array()
             .unwrap()
