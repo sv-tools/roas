@@ -10,7 +10,8 @@
 //! client to [subscribe](MessageClient::subscribe) when the step is
 //! reached and carries on; the client keeps what arrives on that
 //! subscription until the engine [asks for it](MessageClient::receive) —
-//! when a later step depends on the receive, or the workflow ends.
+//! when a later step depends on the receive, or the workflow runs out of
+//! steps. An `end` closes what is still listening without asking.
 
 use crate::http::ClientError;
 use serde_json::Value;

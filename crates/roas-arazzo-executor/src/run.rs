@@ -435,9 +435,6 @@ struct Completion {
     /// The step failed whatever its criteria say — a receive that got no
     /// message — so they are not evaluated, and it names no outputs.
     failed: bool,
-    /// Its workflow had already ended (`end`, or a `goto` to another
-    /// workflow) when it completed: its action is recorded, not taken.
-    settled: bool,
     attempt: u32,
     performed: Performed,
     elapsed: Duration,
@@ -847,7 +844,6 @@ impl<'d> Run<'d> {
                     given: BTreeMap::new(),
                     default_pass: true,
                     failed: false,
-                    settled: false,
                     attempt: sent.attempt,
                     performed,
                     elapsed: sent.started.elapsed(),
@@ -863,10 +859,25 @@ impl<'d> Run<'d> {
                 return Err(ExecutionError::Stopped);
             };
             // The frame is spent: name its outputs and hand them back —
-            // once every receive it started has its message.
+            // once every receive it started has its message. After an
+            // `end` nothing more is judged: whatever is still listening is
+            // closed unheard.
             if frame.at >= frame.order.len() {
+                if frame.ended && !frame.listening.is_empty() {
+                    let frame = self.frames.last_mut().expect("the frame is still there");
+                    let closed: Vec<_> = frame
+                        .listening
+                        .drain(..)
+                        .map(|listening| listening.subscription)
+                        .collect();
+                    self.closing.extend(closed.into_iter().rev());
+                    continue;
+                }
                 if let Some(listening) = frame.listening.first() {
                     return Ok(self.join(listening.subscription));
+                }
+                if let Some(subscription) = self.closing.pop() {
+                    return Ok(Progress::Unsubscribe(subscription));
                 }
                 self.leave()?;
                 continue;
@@ -984,7 +995,6 @@ impl<'d> Run<'d> {
                 given: BTreeMap::new(),
                 default_pass: (200..400).contains(&status),
                 failed: false,
-                settled: false,
                 attempt: pending.attempt,
                 performed,
                 elapsed,
@@ -1049,7 +1059,6 @@ impl<'d> Run<'d> {
         listening.exchange.message = message;
         // The receive completes where it was needed, then the run comes
         // back there.
-        let settled = frame.ended;
         frame
             .resume
             .push((listening.step, frame.at, frame.detour.take()));
@@ -1071,7 +1080,6 @@ impl<'d> Run<'d> {
                 given: BTreeMap::new(),
                 default_pass: delivered,
                 failed: !delivered,
-                settled,
                 attempt: listening.attempt,
                 performed,
                 elapsed: listening.started.elapsed(),
@@ -1366,23 +1374,6 @@ impl<'d> Run<'d> {
         let action = self
             .decide(index, passed, done.exchange.as_ref(), record)
             .map_err(|error| locate(&self.documents, here, error))?;
-        if done.settled {
-            // Nothing is left to go to: say what it would have done, and
-            // go back to where it was needed. A receive that fails fails
-            // the workflow, ended or not: a retry or goto that is not
-            // taken recovers nothing.
-            self.records[record].action = describe(&action)
-                .map(|action| format!("{action}, not taken: the workflow had ended"));
-            let frame = self.frames.last_mut().expect("the frame is still there");
-            if !passed {
-                frame.outcome = Outcome::Failed;
-            }
-            if let Some((_, back, detour)) = pop_resume(frame, index) {
-                frame.at = back;
-                frame.detour = detour;
-            }
-            return Ok(());
-        }
         self.records[record].action = describe(&action);
         self.apply(action)
     }
@@ -1666,7 +1657,6 @@ impl<'d> Run<'d> {
                         given: outputs,
                         default_pass: frame.outcome != Outcome::Failed && !timed_out,
                         failed: false,
-                        settled: false,
                         attempt,
                         performed: Performed::Workflow {
                             // The reference as the calling step wrote it: a

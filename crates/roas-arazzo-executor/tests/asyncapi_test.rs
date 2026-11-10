@@ -1059,34 +1059,6 @@ fn a_workflow_action_that_reads_a_receive_joins_it() {
 }
 
 #[test]
-fn a_receive_joined_after_the_workflow_ended_takes_no_action() {
-    let mut step = receive();
-    step["onSuccess"] = json!([{ "name": "late", "type": "goto", "stepId": "late" }]);
-    let description = description(
-        json!([
-            step,
-            { "stepId": "x", "operationId": "ping", "onSuccess": [{ "name": "stop", "type": "end" }] },
-            { "stepId": "late", "operationId": "ping" }
-        ]),
-        json!({}),
-    );
-    let mut messages = Fake::new().message("confirmations", confirmation("c-7", "ok"));
-    let mut http = Fake::new().reply(200, &json!({}));
-    let report = execute_with_messages(&description, &options(), &mut http, &mut messages).unwrap();
-    let ran: Vec<_> = report
-        .steps
-        .iter()
-        .map(|step| step.step_id.as_str())
-        .collect();
-    assert_eq!(ran, ["x", "confirm"], "{report}");
-    assert_eq!(report.outcome, Outcome::Ended);
-    assert_eq!(
-        report.steps[1].action.as_deref(),
-        Some("goto step `late`, not taken: the workflow had ended")
-    );
-}
-
-#[test]
 fn referenced_operations_and_channel_items_are_followed() {
     let mut v3 = asyncapi_3();
     v3["operations"]["refd"] = json!({ "$ref": "#/components/operations/refd" });
@@ -1212,50 +1184,6 @@ fn a_goto_out_of_a_retry_detour_still_comes_back_to_the_receive() {
 }
 
 #[test]
-fn a_receive_joined_after_an_end_that_fails_fails_the_workflow() {
-    let mut confirm = receive();
-    confirm["timeout"] = json!(0);
-    let description = description(
-        json!([
-            confirm,
-            { "stepId": "x", "operationId": "ping", "onSuccess": [{ "name": "stop", "type": "end" }] }
-        ]),
-        json!({}),
-    );
-    let mut http = Fake::new().reply(200, &json!({}));
-    let report =
-        execute_with_messages(&description, &options(), &mut http, &mut Fake::new()).unwrap();
-    assert_eq!(report.outcome, Outcome::Failed, "{report}");
-    // A retry or goto that is not taken recovers nothing either.
-    for recovery in [
-        json!({ "name": "again", "type": "retry", "retryLimit": 3 }),
-        json!({ "name": "jump", "type": "goto", "stepId": "x" }),
-    ] {
-        let mut confirm = receive();
-        confirm["timeout"] = json!(0);
-        confirm["onFailure"] = json!([recovery]);
-        let description = self::description(
-            json!([
-                confirm,
-                { "stepId": "x", "operationId": "ping", "onSuccess": [{ "name": "stop", "type": "end" }] }
-            ]),
-            json!({}),
-        );
-        let mut http = Fake::new().reply(200, &json!({}));
-        let report =
-            execute_with_messages(&description, &options(), &mut http, &mut Fake::new()).unwrap();
-        assert_eq!(report.outcome, Outcome::Failed, "{report}");
-        assert!(
-            report.steps[1]
-                .action
-                .as_deref()
-                .is_some_and(|action| action.ends_with("not taken: the workflow had ended")),
-            "{report}"
-        );
-    }
-}
-
-#[test]
 fn a_message_is_read_only_where_there_is_one() {
     for (steps, outputs) in [
         (
@@ -1345,4 +1273,82 @@ fn an_untyped_source_may_hold_asyncapi_operations() {
         .unwrap();
     assert!(report.is_success(), "{report}");
     assert_eq!(messages.published().len(), 1);
+}
+
+#[test]
+fn an_end_closes_the_receives_still_listening_unheard() {
+    // No timeout and no time limit: joined, it would wait forever.
+    let mut confirm = receive();
+    confirm.as_object_mut().unwrap().remove("timeout");
+    confirm["onSuccess"] = json!([{ "name": "late", "type": "goto", "stepId": "late" }]);
+    let description = description(
+        json!([
+            confirm,
+            { "stepId": "x", "operationId": "ping",
+              "successCriteria": [{ "condition": "$statusCode == 200" }],
+              "onSuccess": [{ "name": "stop", "type": "end" }],
+              "onFailure": [{ "name": "give-up", "type": "end" }] },
+            { "stepId": "late", "operationId": "ping" }
+        ]),
+        json!({}),
+    );
+    for (status, outcome) in [(200, Outcome::Ended), (500, Outcome::Failed)] {
+        // A message is waiting, but nothing asks for it.
+        let mut messages = Fake::new().message("confirmations", confirmation("c-7", "ok"));
+        let mut http = Fake::new().reply(status, &json!({}));
+        let report =
+            execute_with_messages(&description, &options(), &mut http, &mut messages).unwrap();
+        let ran: Vec<_> = report
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect();
+        assert_eq!(ran, ["x"], "{report}");
+        assert_eq!(report.outcome, outcome, "{report}");
+        assert!(messages.received().is_empty());
+        assert_eq!(messages.unsubscribed(), [SubscriptionId(1)]);
+    }
+    // Driven by hand: the subscription is closed, then the run is done.
+    let options = options();
+    let mut run = Run::start(&description, &options).unwrap();
+    assert!(matches!(run.advance(), Ok(Progress::Subscribe(_))));
+    assert!(matches!(run.advance(), Ok(Progress::Send(_))));
+    run.supply(HttpResponse::json(200, &json!({}))).unwrap();
+    assert!(matches!(
+        run.advance(),
+        Ok(Progress::Unsubscribe(SubscriptionId(1)))
+    ));
+    assert!(run.open_subscriptions().is_empty());
+    assert!(matches!(run.advance(), Ok(Progress::Done(_))));
+}
+
+#[test]
+fn an_end_in_a_called_workflow_closes_its_receives() {
+    let description: Description = serde_json::from_value(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "orders", "url": "https://example.com/asyncapi.json", "type": "asyncapi" },
+            { "name": "api", "url": "https://api.example.com/openapi.json", "type": "openapi" }
+        ],
+        "workflows": [
+            { "workflowId": "w", "steps": [
+                { "stepId": "call", "workflowId": "inner",
+                  "parameters": [{ "name": "id", "value": "$inputs.id" }] },
+                { "stepId": "after", "operationId": "ping" }
+            ] },
+            { "workflowId": "inner", "steps": [
+                receive(),
+                { "stepId": "x", "operationId": "ping",
+                  "onSuccess": [{ "name": "stop", "type": "end" }] }
+            ] }
+        ],
+    }))
+    .unwrap();
+    let mut messages = Fake::new();
+    let mut http = Fake::new().reply(200, &json!({})).reply(200, &json!({}));
+    let report = execute_with_messages(&description, &options(), &mut http, &mut messages).unwrap();
+    assert!(report.is_success(), "{report}");
+    assert!(messages.received().is_empty());
+    assert_eq!(messages.unsubscribed(), [SubscriptionId(1)]);
 }
