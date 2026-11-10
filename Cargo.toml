@@ -44,8 +44,8 @@ include_dir = "0.7"
 syn = { version = "3", features = ["full", "parsing"] }
 # ECMAScript's own regex grammar, for a schema's `pattern`. The two oxc
 # crates move in lockstep, and 0.146 is the newest that builds on Rust 1.95.
-oxc_regular_expression = "0.146"
-oxc_allocator = "0.146"
+oxc_regular_expression = "0.157"
+oxc_allocator = "0.157"
 tower = { version = "0.5", default-features = false }
 notify = "8.2"
 percent-encoding = "2.3.2"
