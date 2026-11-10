@@ -623,6 +623,13 @@ pub(crate) fn body(
                                 format!("if self.{}.is_some() {{ {statement} }}", field_view.name)
                             };
                             let gates = field_view.cfg.join(" ");
+                            // Compiled out, the statement reads nothing: the
+                            // parameters must still count as used.
+                            if !gates.is_empty()
+                                && !out.iter().any(|l| l.starts_with("let _ = (pointer"))
+                            {
+                                out.insert(0, "let _ = (pointer, &report);".to_owned());
+                            }
                             out.push(
                                 format!("{gates} {{ {statement} }}").trim_start().to_owned(),
                             );
