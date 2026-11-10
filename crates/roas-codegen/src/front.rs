@@ -384,9 +384,17 @@ impl Translator<'_> {
                 ..
             }
         );
+        // A required member with no property of its own lands in the
+        // catch-all, where decoding does not ask for it.
+        let undeclared = matches!(
+            &front.kind,
+            Kind::Object { properties, required, .. }
+                if required.iter().any(|r| !properties.contains_key(r))
+        );
         for (present, keyword) in [
             (numeric_enum, "enum"),
             (front.const_value.is_some(), "const"),
+            (undeclared, "required"),
         ] {
             if present && !front.constraints.unenforced.contains(&keyword) {
                 front.constraints.unenforced.push(keyword);

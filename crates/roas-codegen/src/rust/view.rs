@@ -78,6 +78,8 @@ pub(crate) struct TypeView {
     /// The statements of `Validate::validate_into`, with validation on;
     /// `None` for no implementation (an alias shares its target's).
     pub validate: Option<Vec<String>>,
+    /// The statements of `Validate::validate_null`; empty for none.
+    pub validate_null: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -537,6 +539,7 @@ impl Builder<'_> {
             tag: String::new(),
             exclusive: false,
             validate: None,
+            validate_null: Vec::new(),
         };
         let result = self.fill_kind(def, &mut view)?;
         if !result {
@@ -548,6 +551,9 @@ impl Builder<'_> {
             let emitted = |id: &SchemaId| self.names.contains_key(id);
             let generated = |ty: &TypeRef| crate::checks::validates(self.ir, &emitted, ty);
             view.validate = super::validation::body(self.ir, def, &view, &generated, opted_out);
+            if view.validate.is_some() && !opted_out {
+                view.validate_null = super::validation::null_body(def);
+            }
             if opted_out && view.validate.is_none() {
                 return Err(crate::go::view::opt_out_on_alias(def));
             }
@@ -752,12 +758,26 @@ impl Builder<'_> {
                 TypeRef::Nullable(inner) => (inner.as_ref(), true),
                 other => (other, false),
             };
-            let is_struct = inner.direct_named().is_some_and(|id| {
-                matches!(
-                    self.ir.types.get(id).map(|d| &d.kind),
-                    Some(crate::ir::TypeKind::Struct(_))
-                )
-            });
+            // Through aliases and transparent newtypes, which decode as
+            // their target does.
+            let is_struct = {
+                let mut current = inner.direct_named();
+                let mut found = false;
+                for _ in 0..=self.ir.types.len() {
+                    let Some(id) = current else { break };
+                    match self.ir.types.get(id).map(|d| &d.kind) {
+                        Some(TypeKind::Struct(_)) => {
+                            found = true;
+                            break;
+                        }
+                        Some(TypeKind::Alias(next) | TypeKind::Newtype(next)) => {
+                            current = next.direct_named();
+                        }
+                        _ => break,
+                    }
+                }
+                found
+            };
             let guard = is_struct.then(|| {
                 let null = if nullable {
                     " && raw.trim_end() != \"null\""

@@ -148,7 +148,20 @@ pub(crate) fn presence_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Ch
     if ty.direct_named().is_some() {
         return Vec::new();
     }
-    unenforced(constraints)
+    let mut out = unenforced(constraints);
+    // Raw JSON may be any kind of value: what applies to one kind is not
+    // decided for it yet.
+    if matches!(strip(ty), TypeRef::Any) {
+        out.extend(
+            declared_keywords(constraints)
+                .into_iter()
+                .map(|keyword| Check::Unevaluated {
+                    keyword,
+                    reason: "a raw JSON value is not checked against it yet".into(),
+                }),
+        );
+    }
+    out
 }
 
 /// The checks that apply to a non-null value of type `ty`.
@@ -327,6 +340,40 @@ fn pattern_properties(c: &Constraints) -> Option<Check> {
     })
 }
 
+/// What a nullable type's `null` is checked against: the checks that
+/// apply whatever the value. A use site holds that `null` outside the type
+/// (`Option`, a nil pointer), so the type is asked for them on its behalf.
+pub(crate) fn null_checks(def: &crate::ir::TypeDef) -> Vec<Check> {
+    if !def.nullable {
+        return Vec::new();
+    }
+    match &def.kind {
+        TypeKind::Alias(_) | TypeKind::Extern => Vec::new(),
+        TypeKind::Newtype(inner) => presence_checks(inner, &def.constraints),
+        _ => unenforced(&def.constraints),
+    }
+}
+
+/// The unhandled keywords every branch of a union shares: a type list
+/// gives them to each member, and they constrain its `null` too.
+pub(crate) fn shared_unsupported(branches: &[crate::ir::Branch]) -> Vec<Check> {
+    let Some((first, rest)) = branches.split_first() else {
+        return Vec::new();
+    };
+    let shared: Vec<String> = first
+        .constraints
+        .unsupported
+        .iter()
+        .filter(|k| rest.iter().all(|b| b.constraints.unsupported.contains(k)))
+        .cloned()
+        .collect();
+    if shared.is_empty() {
+        Vec::new()
+    } else {
+        vec![Check::Unsupported(shared)]
+    }
+}
+
 /// Whether decoding a branch proves nothing: it declares what neither its
 /// type nor a generated check enforces.
 pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {
@@ -352,6 +399,9 @@ pub(crate) fn unenforced(c: &Constraints) -> Vec<Check> {
             keyword,
             reason: match keyword {
                 "enum" => "numeric enums are not checked yet".into(),
+                "required" => {
+                    "a required member with no property of its own is not checked yet".into()
+                }
                 _ => format!("`{keyword}` is not checked yet"),
             },
         })
@@ -362,8 +412,9 @@ pub(crate) fn unenforced(c: &Constraints) -> Vec<Check> {
 /// Whether the constraints say anything a check above does not cover for
 /// a value of this kind: they are then reported at generation time.
 pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static str> {
-    // A named type checks the constraints it was hoisted with itself.
-    if ty.direct_named().is_some() {
+    // A named type checks the constraints it was hoisted with itself, and
+    // raw JSON reports them at run time.
+    if ty.direct_named().is_some() || matches!(strip(ty), TypeRef::Any) {
         return Vec::new();
     }
     let kind = kind_of(ty);
@@ -484,6 +535,13 @@ pub(crate) fn loops_back(ir: &Ir, holder: &crate::diagnostic::SchemaId, ty: &Typ
 
 /// Every constraint keyword `c` declares.
 pub(crate) fn present_keywords(c: &Constraints) -> Vec<&'static str> {
+    let mut out = declared_keywords(c);
+    out.extend(c.unenforced.iter().copied());
+    out
+}
+
+/// The keyword constraints the schema declares, whatever value they apply to.
+fn declared_keywords(c: &Constraints) -> Vec<&'static str> {
     [
         (c.min_length.is_some(), "minLength"),
         (c.max_length.is_some(), "maxLength"),
@@ -503,7 +561,6 @@ pub(crate) fn present_keywords(c: &Constraints) -> Vec<&'static str> {
     ]
     .into_iter()
     .filter_map(|(present, keyword)| present.then_some(keyword))
-    .chain(c.unenforced.iter().copied())
     .collect()
 }
 

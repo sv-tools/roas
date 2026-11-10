@@ -203,6 +203,14 @@ pub trait Validate {
 
     /// Adds the findings for this value, found at `pointer`, to `report`.
     fn validate_into(&self, pointer: &str, report: &mut ValidationReport);
+
+    /// Adds the findings for a `null` of this type, held outside it as
+    /// `None`, found at `pointer`.
+    fn validate_null(_pointer: &str, _report: &mut ValidationReport)
+    where
+        Self: Sized,
+    {
+    }
 }
 
 impl<T: Validate> Validate for Vec<T> {
@@ -215,8 +223,9 @@ impl<T: Validate> Validate for Vec<T> {
 
 impl<T: Validate> Validate for Option<T> {
     fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
-        if let Some(value) = self {
-            value.validate_into(pointer, report);
+        match self {
+            Some(value) => value.validate_into(pointer, report),
+            None => T::validate_null(pointer, report),
         }
     }
 }
@@ -224,6 +233,10 @@ impl<T: Validate> Validate for Option<T> {
 impl<T: Validate> Validate for Box<T> {
     fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
         (**self).validate_into(pointer, report);
+    }
+
+    fn validate_null(pointer: &str, report: &mut ValidationReport) {
+        T::validate_null(pointer, report);
     }
 }
 

@@ -29,6 +29,8 @@ pub(crate) struct Context<'a> {
     /// A branch that comes back to the holder being validated with the
     /// same raw value: decoded, never validated, or it would not finish.
     pub loops: &'a dyn Fn(&TypeRef) -> bool,
+    /// The Go name of a named type with a `validateNull`, through aliases.
+    pub null_name: &'a dyn Fn(&TypeRef) -> Option<String>,
     pub needs: Needs,
 }
 
@@ -277,6 +279,7 @@ fn render(
             && !matches!(
                 check,
                 Check::Unevaluated { .. }
+                    | Check::Unsupported(_)
                     | Check::NumMultipleOf {
                         integral: false,
                         ..
@@ -310,7 +313,17 @@ fn recurse(ty: &TypeRef, at: At<'_>, depth: usize, out: &mut Vec<String>, cx: &m
             let mut body = Vec::new();
             let deref = format!("(*{e})");
             recurse(inner, At { e: &deref, ..at }, depth, &mut body, cx);
-            out.push(format!("if {e} != nil {{ {} }}", body.join("; ")));
+            match matches!(ty, TypeRef::Nullable(_))
+                .then(|| (cx.null_name)(inner))
+                .flatten()
+            {
+                Some(name) => out.push(format!(
+                    "if {e} != nil {{ {} }} else {{ {} }}",
+                    body.join("; "),
+                    null_call(&name, p, r)
+                )),
+                None => out.push(format!("if {e} != nil {{ {} }}", body.join("; "))),
+            }
         }
         TypeRef::Array(inner) => {
             let (i, item) = (format!("i{depth}"), format!("item{depth}"));
@@ -355,6 +368,29 @@ fn recurse(ty: &TypeRef, at: At<'_>, depth: usize, out: &mut Vec<String>, cx: &m
         }
         _ => {}
     }
+}
+
+/// A `null` of the type `name` checked at `p` into `r`.
+fn null_call(name: &str, p: &str, r: &str) -> String {
+    format!("var zero {name}; zero.validateNull({p}, {r})")
+}
+
+/// The body of `validateNull` for one type: empty when a `null` of it
+/// has nothing to check.
+pub(crate) fn null_body(def: &TypeDef, cx: &mut Context<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    render(
+        &checks::null_checks(def),
+        (ValueKind::Other, None),
+        At {
+            e: "v",
+            p: "pointer",
+            r: "r",
+        },
+        &mut out,
+        &mut cx.needs,
+    );
+    out
 }
 
 /// Checks then recursion on a value of type `ty` at `at`. True when the
@@ -546,13 +582,20 @@ pub(crate) fn body(
                         "if v.{name}.Set {{ x := {holder}; if v.{name}.Value != nil {{ x = *v.{name}.Value }}; {statements} }}"
                     ));
                 } else if in_nullable {
+                    let null = (cx.null_name)(inner_ty)
+                        .map(|t| format!(" else if v.{name}.Set {{ {} }}", null_call(&t, "p", "r")))
+                        .unwrap_or_default();
                     block.push(format!(
-                        "if v.{name}.Value != nil {{ {}{statements} }}",
+                        "if v.{name}.Value != nil {{ {}{statements} }}{null}",
                         bind(&format!("(*v.{name}.Value)"))
                     ));
                 } else if field_view.ty.starts_with('*') {
+                    let null = (cx.null_name)(inner_ty)
+                        .filter(|_| field.nullable)
+                        .map(|t| format!(" else {{ {} }}", null_call(&t, "p", "r")))
+                        .unwrap_or_default();
                     block.push(format!(
-                        "if v.{name} != nil {{ {}{statements} }}",
+                        "if v.{name} != nil {{ {}{statements} }}{null}",
                         bind(&format!("(*v.{name})"))
                     ));
                 } else {
@@ -629,8 +672,18 @@ pub(crate) fn body(
         }
         TypeKind::UnionOpen(u) => {
             if def.nullable {
-                // A raw null is a value its schema allows.
-                out.push("if v.raw.Kind() == 'n' { return }".to_owned());
+                // A raw null is a value its schema allows, under what every
+                // member says.
+                let mut null = Vec::new();
+                render(
+                    &checks::shared_unsupported(&u.branches),
+                    (ValueKind::Other, None),
+                    own,
+                    &mut null,
+                    &mut cx.needs,
+                );
+                null.push("return".to_owned());
+                out.push(format!("if v.raw.Kind() == 'n' {{ {} }}", null.join("; ")));
             }
             out.push("certain, uncertain := 0, 0".to_owned());
             for (b, branch_view) in u.branches.iter().zip(&view.branches) {

@@ -45,6 +45,7 @@ const VALIDATION_NAMES: &[&str] = &[
     "p",
     "x",
     "f",
+    "zero",
 ];
 
 const TEMPLATE_NAMES: &[&str] = &[
@@ -185,6 +186,8 @@ pub(crate) struct TypeView {
     /// The statements of `validateInto`, with validation on; `None` for
     /// no methods of its own (an alias).
     pub validate: Option<Vec<String>>,
+    /// The statements of `validateNull`; empty for none.
+    pub validate_null: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -586,6 +589,7 @@ impl Builder<'_> {
             marshal: false,
             from_raw: String::new(),
             validate: None,
+            validate_null: Vec::new(),
         };
         if !self.fill_kind(def, &mut view)? {
             return Ok(None);
@@ -606,13 +610,13 @@ impl Builder<'_> {
             // Through aliases, as `holds_null` sees them.
             let raw_holder = |ty: &TypeRef| {
                 let mut id = ty.direct_named()?;
-                // A JSON-value wrapper holds `null` itself.
-                if let TypeKind::Newtype(TypeRef::Any) = &ir.types.get(id)?.kind {
-                    let name = names.get(id)?;
-                    return Some(format!("{name}(jsontext.Value(\"null\"))"));
-                }
                 for _ in 0..=ir.types.len() {
                     match &ir.types.get(id)?.kind {
+                        // A JSON-value wrapper holds `null` itself.
+                        TypeKind::Newtype(TypeRef::Any) => {
+                            let name = names.get(id)?;
+                            return Some(format!("{name}(jsontext.Value(\"null\"))"));
+                        }
                         TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_) => {
                             let name = names.get(id)?;
                             return Some(format!("{name}{{raw: jsontext.Value(\"null\")}}"));
@@ -627,14 +631,31 @@ impl Builder<'_> {
             };
             let holder_id = def.id.clone();
             let loops = |ty: &TypeRef| crate::checks::loops_back(ir, &holder_id, ty);
+            // Through aliases, which share their target's methods.
+            let null_name = |ty: &TypeRef| {
+                let mut id = ty.direct_named()?;
+                for _ in 0..=ir.types.len() {
+                    let def = ir.types.get(id)?;
+                    match &def.kind {
+                        TypeKind::Alias(inner) => id = inner.direct_named()?,
+                        _ if crate::checks::null_checks(def).is_empty() => return None,
+                        _ => return names.get(&def.id).cloned(),
+                    }
+                }
+                None
+            };
             let mut cx = super::validation::Context {
                 validates: &validates,
                 nil_able: &nil_able,
                 raw_holder: &raw_holder,
                 loops: &loops,
+                null_name: &null_name,
                 needs: self.needs,
             };
             view.validate = super::validation::body(def, &view, opted_out, &mut cx);
+            if view.validate.is_some() && !opted_out {
+                view.validate_null = super::validation::null_body(def, &mut cx);
+            }
             if opted_out && view.validate.is_none() {
                 return Err(opt_out_on_alias(def));
             }

@@ -5,5 +5,9 @@ impl Validate for {{ t.name }} {
     fn validate_into(&self, {% if t.validate %}pointer{% else %}_pointer{% endif %}: &str, {% if t.validate %}report{% else %}_report{% endif %}: &mut ValidationReport) {
 {% for line in t.validate %}        {{ line }}
 {% endfor %}    }
-}
+{% if t.validate_null %}
+    fn validate_null(pointer: &str, report: &mut ValidationReport) {
+{% for line in t.validate_null %}        {{ line }}
+{% endfor %}    }
+{% endif %}}
 {% endblock %}

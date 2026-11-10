@@ -189,6 +189,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
             && !matches!(
                 check,
                 Check::Unevaluated { .. }
+                    | Check::Unsupported(_)
                     | Check::NumMultipleOf {
                         integral: false,
                         ..
@@ -273,6 +274,23 @@ fn branch(
 /// at its use sites, but decoded directly it holds a raw `null`, which is
 /// valid.
 const NULL_IS_VALID: &str = "if self.raw.get().trim() == \"null\" { return; }";
+
+/// The body of `validate_null` for one type: empty when a `null` of it
+/// has nothing to check.
+pub(crate) fn null_body(def: &TypeDef) -> Vec<String> {
+    let mut out = Vec::new();
+    render(
+        &checks::null_checks(def),
+        ValueKind::Other,
+        At {
+            v: "_",
+            p: "pointer",
+            r: "report",
+        },
+        &mut out,
+    );
+    out
+}
 
 /// The body of `validate_into` for one type, or `None` when it gets no
 /// implementation (a type alias shares its target's).
@@ -472,7 +490,21 @@ pub(crate) fn body(
         }
         TypeKind::UnionOpen(u) => {
             if def.nullable {
-                out.push(NULL_IS_VALID.to_owned());
+                let mut null = Vec::new();
+                render(
+                    &checks::shared_unsupported(&u.branches),
+                    ValueKind::Other,
+                    report,
+                    &mut null,
+                );
+                out.push(if null.is_empty() {
+                    NULL_IS_VALID.to_owned()
+                } else {
+                    format!(
+                        "if self.raw.get().trim() == \"null\" {{ {} return; }}",
+                        null.join(" ")
+                    )
+                });
             }
             let mut lines = Vec::new();
             let mut checked = false;

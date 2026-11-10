@@ -10,4 +10,9 @@ func (v {{ t.name }}) Validate() *ValidationReport {
 func (v {{ t.name }}) validateInto(pointer string, r *ValidationReport) {
 {% for line in t.validate %}	{{ line }}
 {% endfor %}}
-{% endblock %}
+{% if t.validate_null %}
+// validateNull checks a null held outside a {{ t.name }}, as a nil.
+func (v {{ t.name }}) validateNull(pointer string, r *ValidationReport) {
+{% for line in t.validate_null %}	{{ line }}
+{% endfor %}}
+{% endif %}{% endblock %}

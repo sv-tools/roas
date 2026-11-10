@@ -632,7 +632,20 @@ fn validated_description() -> serde_json::Value {
                 {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
                 {"type": "array", "items": {"type": "string"}}
             ]},
-            "ClosedOrInt": {"anyOf": [{"$ref": "#/components/schemas/Closed"}, {"type": "integer"}]}
+            "ClosedOrInt": {"anyOf": [{"$ref": "#/components/schemas/Closed"}, {"type": "integer"}]},
+            "RawMin": {"minProperties": 1},
+            "ReqOnly": {"type": "object", "required": ["k"]},
+            "ClosedAlias": {"$ref": "#/components/schemas/Closed"},
+            "AliasOrArr": {"oneOf": [
+                {"$ref": "#/components/schemas/ClosedAlias"},
+                {"type": "array", "items": {"type": "string"}}
+            ]},
+            "NIf": {"type": ["string", "null"], "if": {"type": "null"}, "then": false},
+            "HoldsNIf": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/NIf"}}},
+            "ListIf": {"type": ["string", "integer", "null"], "if": {"type": "null"}, "then": false},
+            "ScalarAlias": {"$ref": "#/components/schemas/Scalar"},
+            "HoldsScalarAlias": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/ScalarAlias"}}},
+            "EnumIf": {"type": "string", "enum": ["a"], "if": {"const": "a"}, "then": false}
         }}
     })
 }
@@ -820,6 +833,16 @@ fn main() {
     // A struct is decoded from an object only.
     assert_eq!(report::<ObjOrArr>(r#"["x"]"#), vec![]);
     assert_eq!(report::<ClosedOrInt>("[]"), vec![v("")]);
+    assert_eq!(report::<AliasOrArr>(r#"["x"]"#), vec![]);
+    // Raw JSON is not checked against kind-specific keywords yet.
+    assert_eq!(report::<RawMin>("{}"), vec![u("")]);
+    // A required member decoding does not ask for.
+    assert_eq!(report::<ReqOnly>("{}"), vec![u("")]);
+    // A null held outside its type is checked for it.
+    assert_eq!(report::<HoldsNIf>(r#"{"v":null}"#), vec![u("/v")]);
+    assert_eq!(report::<ListIf>("null"), vec![u("")]);
+    assert_eq!(report::<HoldsScalarAlias>(r#"{"n":null}"#), vec![u("/n")]);
+    assert_eq!(report::<EnumIf>(r#""a""#), vec![u("")]);
     println!("validation behaves");
 }
 "##;
@@ -1020,6 +1043,13 @@ func main() {
 	check(`"a"`, report[api.EnumF](`"a"`))
 	check(`["x"]`, report[api.ObjOrArr](`["x"]`))
 	check(`[]`, report[api.ClosedOrInt](`[]`), v(""))
+	check(`["x"]`, report[api.AliasOrArr](`["x"]`))
+	check(`{}`, report[api.RawMin](`{}`), u(""))
+	check(`{}`, report[api.ReqOnly](`{}`), u(""))
+	check(`{"v":null}`, report[api.HoldsNIf](`{"v":null}`), u("/v"))
+	check(`null`, report[api.ListIf](`null`), u(""))
+	check(`{"n":null}`, report[api.HoldsScalarAlias](`{"n":null}`), u("/n"))
+	check(`"a"`, report[api.EnumIf](`"a"`), u(""))
 	fmt.Println("validation behaves")
 }
 "##;
