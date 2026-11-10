@@ -186,6 +186,7 @@ pub struct PreparedWorkflow<'d> {
     pub(crate) queue: Vec<(Doc, &'d Workflow)>,
     pub(crate) orders: BTreeMap<(Doc, &'d str), Vec<usize>>,
     pub(crate) endpoints: BTreeMap<(Doc, &'d str, &'d str), Endpoint>,
+    pub(crate) channels: BTreeMap<(Doc, &'d str, &'d str), crate::channel::Resolved>,
     selected: &'d Workflow,
     diagnostics: Vec<PreparationDiagnostic>,
 }
@@ -207,6 +208,13 @@ impl PreparedWorkflow<'_> {
     #[must_use]
     pub fn condition_profile(&self) -> &'static str {
         CONDITION_PROFILE
+    }
+
+    /// Whether a workflow the plan may run has AsyncAPI steps, which need a
+    /// message client: [`Self::execute_with_messages`].
+    #[must_use]
+    pub fn uses_messages(&self) -> bool {
+        !self.channels.is_empty()
     }
 
     /// Non-fatal preparation findings. A plan never contains fatal diagnostics.
@@ -257,6 +265,39 @@ impl PreparedWorkflow<'_> {
         })?;
         crate::drive_async(&mut run, client).await
     }
+
+    /// Execute the plan with a client for its AsyncAPI steps' messages too.
+    /// # Errors
+    /// As [`crate::execute_with_messages`].
+    pub fn execute_with_messages<C: HttpClient + ?Sized, M: crate::MessageClient + ?Sized>(
+        &self,
+        client: &mut C,
+        messages: &mut M,
+    ) -> Result<ExecutionReport, ExecutionFailure> {
+        let mut run = self.start().map_err(|error| ExecutionFailure {
+            error,
+            report: None,
+        })?;
+        crate::drive_with(&mut run, client, Some(&mut crate::Messages(messages)))
+    }
+
+    /// Async counterpart of [`Self::execute_with_messages`].
+    /// # Errors
+    /// As [`crate::execute_with_messages`].
+    pub async fn execute_with_messages_async<
+        C: AsyncHttpClient + ?Sized,
+        M: crate::AsyncMessageClient + ?Sized,
+    >(
+        &self,
+        client: &mut C,
+        messages: &mut M,
+    ) -> Result<ExecutionReport, ExecutionFailure> {
+        let mut run = self.start().map_err(|error| ExecutionFailure {
+            error,
+            report: None,
+        })?;
+        crate::drive_async_with(&mut run, client, Some(&mut crate::AsyncMessages(messages))).await
+    }
 }
 
 /// Prepare a selected workflow without sending requests or fetching sources.
@@ -287,6 +328,7 @@ pub fn prepare<'d>(
         queue,
         orders: compiler.orders,
         endpoints: compiler.endpoints,
+        channels: compiler.channels,
         diagnostics: compiler.diagnostics,
     })
 }
@@ -340,6 +382,7 @@ fn compile<'d>(
         validated: BTreeSet::from([Doc::ENTRY]),
         orders: BTreeMap::new(),
         endpoints: BTreeMap::new(),
+        channels: BTreeMap::new(),
         reads: BTreeMap::new(),
         required_sources: BTreeSet::new(),
         resolve_operations,
@@ -495,6 +538,7 @@ struct Compiler<'d> {
     validated: BTreeSet<Doc>,
     orders: BTreeMap<(Doc, &'d str), Vec<usize>>,
     endpoints: BTreeMap<(Doc, &'d str, &'d str), Endpoint>,
+    channels: BTreeMap<(Doc, &'d str, &'d str), crate::channel::Resolved>,
     reads: BTreeMap<(Doc, &'d str, &'d str), BTreeSet<String>>,
     /// Entry-document aliases only.
     required_sources: BTreeSet<String>,
@@ -703,6 +747,31 @@ impl<'d> Compiler<'d> {
             };
             if let Some(id) = &step.workflow_id {
                 self.target(id, &step_site.field("workflowId"));
+            } else if step.action.is_some() || step.channel_path.is_some() {
+                self.channel_sources(step, &step_site);
+                if self.resolve_operations {
+                    let missing = run::unsupplied(self.documents.get(self.current));
+                    let sources = &self.documents.get(self.current).options.sources;
+                    match crate::channel::resolve(step, sources, &missing) {
+                        Ok(channel) => {
+                            self.channels.insert(
+                                (self.current, &workflow.workflow_id, &step.step_id),
+                                channel,
+                            );
+                        }
+                        Err(error) => self.error(
+                            &step_site.field(if step.channel_path.is_some() {
+                                "channelPath"
+                            } else {
+                                "operationId"
+                            }),
+                            error,
+                        ),
+                    }
+                }
+                if let Some(id) = &step.correlation_id {
+                    self.literal(id, &step_site.field("correlationId"));
+                }
             } else {
                 let missing = run::unsupplied(self.documents.get(self.current));
                 self.operation_sources(step, &step_site);
@@ -835,12 +904,19 @@ impl<'d> Compiler<'d> {
                     Value::String("prepared".into()),
                 );
             }
-            self.parameter(&template, &site, step.workflow_id.is_none());
+            let asynchronous = step.action.is_some() || step.channel_path.is_some();
+            self.parameter(&template, &site, step.workflow_id.is_none(), asynchronous);
         }
         path
     }
 
     fn need_source(&mut self, name: &str, site: &Site<'d>) {
+        self.need_source_of(name, site, false);
+    }
+
+    /// `asynchronous`: the step is an AsyncAPI step, which needs an
+    /// AsyncAPI source rather than an HTTP one.
+    fn need_source_of(&mut self, name: &str, site: &Site<'d>, asynchronous: bool) {
         match self
             .description()
             .source_descriptions
@@ -849,13 +925,15 @@ impl<'d> Compiler<'d> {
         {
             Some(source)
                 if source.type_ == Some(SourceType::Arazzo)
-                    || source.type_ == Some(SourceType::Asyncapi) =>
+                    || (source.type_ == Some(SourceType::Asyncapi)) != asynchronous =>
             {
                 self.error(
                     site,
-                    ExecutionError::Unsupported(format!(
-                        "source `{name}` does not describe supported HTTP operations"
-                    )),
+                    ExecutionError::Unsupported(if asynchronous {
+                        format!("source `{name}` is not an AsyncAPI description")
+                    } else {
+                        format!("source `{name}` does not describe supported HTTP operations")
+                    }),
                 )
             }
             Some(_) => {
@@ -875,11 +953,42 @@ impl<'d> Compiler<'d> {
         }
     }
 
-    fn operation_sources(&mut self, step: &Step, site: &Site<'d>) {
-        if step.channel_path.is_some() || step.action.is_some() {
-            self.error(site, operation::OperationError::Async(step.step_id.clone()));
-            return;
+    /// The sources an AsyncAPI step needs.
+    fn channel_sources(&mut self, step: &Step, site: &Site<'d>) {
+        let (named, site) = match (&step.channel_path, &step.operation_id) {
+            (Some(path), _) => {
+                let document = path
+                    .split_once('#')
+                    .map_or(path.as_str(), |(document, _)| document);
+                let name = document
+                    .trim()
+                    .strip_prefix("{$sourceDescriptions.")
+                    .and_then(|rest| rest.strip_suffix(".url}"))
+                    .or_else(|| document.trim().strip_prefix("$sourceDescriptions."));
+                (name, site.field("channelPath"))
+            }
+            (None, Some(id)) => (
+                id.strip_prefix("$sourceDescriptions.")
+                    .and_then(|rest| rest.split_once('.'))
+                    .map(|(name, _)| name),
+                site.field("operationId"),
+            ),
+            (None, None) => (None, site.field("operationId")),
+        };
+        match named {
+            Some(name) => self.need_source_of(name, &site, true),
+            None if self.current == Doc::ENTRY => self.required_sources.extend(
+                self.description()
+                    .source_descriptions
+                    .iter()
+                    .filter(|source| source.type_ != Some(SourceType::Arazzo))
+                    .map(|source| source.name.clone()),
+            ),
+            None => {}
         }
+    }
+
+    fn operation_sources(&mut self, step: &Step, site: &Site<'d>) {
         if let Some(operation) = &step.operation_id {
             let site = site.field("operationId");
             if let Some(rest) = operation.strip_prefix("$sourceDescriptions.") {
@@ -974,8 +1083,27 @@ impl<'d> Compiler<'d> {
         }
     }
 
-    fn parameter(&mut self, template: &ParameterTemplate<'d>, site: &Site<'d>, operation: bool) {
-        if operation
+    fn parameter(
+        &mut self,
+        template: &ParameterTemplate<'d>,
+        site: &Site<'d>,
+        operation: bool,
+        asynchronous: bool,
+    ) {
+        if asynchronous {
+            if !matches!(
+                template.location(),
+                ParameterLocation::Channel | ParameterLocation::Header
+            ) || template.parameter.in_.is_none()
+            {
+                self.error(
+                    &site.field("in"),
+                    ExecutionError::Unsupported(
+                        "an AsyncAPI step's parameters are in `channel` or `header`".into(),
+                    ),
+                );
+            }
+        } else if operation
             && (template.parameter.in_.is_none()
                 || template.location() == ParameterLocation::Channel)
         {
@@ -1003,7 +1131,7 @@ impl<'d> Compiler<'d> {
                         } else {
                             site.component(entry)
                         };
-                        self.parameter(&parameter, &site, false);
+                        self.parameter(&parameter, &site, false, false);
                     }
                 }
                 Err(error) => self.error(&site, error),
@@ -1266,6 +1394,21 @@ impl<'d> Compiler<'d> {
     fn reference(&mut self, parsed: &Expression<'_>, site: &Site<'d>, offset: usize) {
         let error =
             match parsed.root {
+                // Only an AsyncAPI step has a message; a workflow-level
+                // action may run after one, so it is not refused there.
+                Root::Message
+                    if site.step.is_some_and(|step| {
+                        step.action.is_none() && step.channel_path.is_none()
+                    }) =>
+                {
+                    Some(
+                        ExpressionError::Missing {
+                            expression: parsed.text.into(),
+                            what: "a message, which only an AsyncAPI step has".into(),
+                        }
+                        .into(),
+                    )
+                }
                 Root::Steps => {
                     let id = parsed.parts[0];
                     if !site.workflow.is_some_and(|workflow| {
@@ -1293,7 +1436,6 @@ impl<'d> Compiler<'d> {
                 {
                     Some(expression::undeclared_workflow(parsed.text, parsed.parts[0]).into())
                 }
-                Root::Message => Some(ExpressionError::Unsupported(parsed.text.into()).into()),
                 Root::Sources
                     if !self
                         .description()

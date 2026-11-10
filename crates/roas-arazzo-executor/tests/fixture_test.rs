@@ -94,6 +94,7 @@ fn the_store_being_busy_is_retried_the_way_the_description_asks() {
             }
             Progress::Wait(duration) => waits.push(duration),
             Progress::Done(report) => break report,
+            progress => panic!("unexpected progress: {progress:?}"),
         }
     };
 

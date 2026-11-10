@@ -262,6 +262,7 @@ fn a_retry_tries_again_and_asks_for_the_delay_it_wants() {
             }
             Progress::Wait(duration) => waits.push(duration),
             Progress::Done(report) => break report,
+            progress => panic!("unexpected progress: {progress:?}"),
         }
     };
 
@@ -543,17 +544,32 @@ fn an_operation_no_description_holds_stops_the_run() {
 }
 
 #[test]
-fn an_async_step_says_it_is_not_run_rather_than_being_skipped() {
-    let description = around(json!({
-        "workflowId": "watchPets",
-        "steps": [{
-            "stepId": "watch",
-            "channelPath": "{$sourceDescriptions.events.url}#/channels/pets",
-            "action": "receive"
-        }]
+fn an_async_step_without_a_message_client_says_so_rather_than_being_skipped() {
+    let description = description(json!({
+        "arazzo": "1.1.0",
+        "info": { "title": "T", "version": "1.0.0" },
+        "sourceDescriptions": [
+            { "name": "events", "url": "https://api.example.com/asyncapi.json", "type": "asyncapi" }
+        ],
+        "workflows": [{
+            "workflowId": "watchPets",
+            "steps": [{
+                "stepId": "watch",
+                "channelPath": "{$sourceDescriptions.events.url}#/channels/pets",
+                "action": "receive"
+            }]
+        }],
     }));
-    let error = execute(&description, &options(), &mut Fake::new()).unwrap_err();
-    assert!(error.to_string().contains("AsyncAPI step"), "got: {error}");
+    let options = Options::new().source(
+        "events",
+        "https://api.example.com/asyncapi.json",
+        json!({ "asyncapi": "3.0.0", "channels": { "pets": { "address": "pets" } } }),
+    );
+    let error = execute(&description, &options, &mut Fake::new()).unwrap_err();
+    assert!(
+        error.to_string().contains("needs a message client"),
+        "got: {error}"
+    );
 }
 
 #[test]

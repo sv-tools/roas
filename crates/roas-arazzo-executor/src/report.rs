@@ -89,6 +89,17 @@ pub enum Performed {
         /// How that workflow finished.
         outcome: Outcome,
     },
+    /// The step sent a message to, or received one from, an AsyncAPI
+    /// channel.
+    Message {
+        /// `send` or `receive`, as the step's `action` says.
+        action: String,
+        /// The channel's address.
+        channel: String,
+        /// Whether a message went out, or came in before the receive
+        /// timed out.
+        delivered: bool,
+    },
 }
 
 /// One attempt at one step.
@@ -131,7 +142,7 @@ impl StepRecord {
     pub fn status(&self) -> Option<u16> {
         match &self.performed {
             Performed::Request { status, .. } => Some(*status),
-            Performed::Workflow { .. } => None,
+            Performed::Workflow { .. } | Performed::Message { .. } => None,
         }
     }
 
@@ -140,7 +151,7 @@ impl StepRecord {
     pub fn method(&self) -> Option<&str> {
         match &self.performed {
             Performed::Request { method, .. } => Some(method),
-            Performed::Workflow { .. } => None,
+            Performed::Workflow { .. } | Performed::Message { .. } => None,
         }
     }
 
@@ -149,7 +160,7 @@ impl StepRecord {
     pub fn url(&self) -> Option<&str> {
         match &self.performed {
             Performed::Request { url, .. } => Some(url),
-            Performed::Workflow { .. } => None,
+            Performed::Workflow { .. } | Performed::Message { .. } => None,
         }
     }
 }
@@ -193,6 +204,17 @@ impl fmt::Display for ExecutionReport {
                     workflow_id,
                     outcome,
                 } => write!(f, "- {} → workflow `{workflow_id}` {outcome}", step.step_id)?,
+                Performed::Message {
+                    action,
+                    channel,
+                    delivered,
+                } => {
+                    let arrow = if action == "send" { "→" } else { "←" };
+                    write!(f, "- {} {action} {arrow} `{channel}`", step.step_id)?;
+                    if !delivered {
+                        write!(f, " (nothing arrived)")?;
+                    }
+                }
             }
             if let Some(document) = &step.document {
                 write!(f, " (workflow `{}` of {document})", step.workflow_id)?;

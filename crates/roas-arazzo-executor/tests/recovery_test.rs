@@ -97,7 +97,6 @@ fn unsupported_criteria_are_terminal_even_with_recovery_available() {
         json!({ "condition": "/root", "type": { "type": "xpath", "version": "xpath-31" }, "context": "$response.body" }),
         #[cfg(feature = "xpath")]
         json!({ "condition": "/root", "type": { "type": "xpath", "version": "xpath-40" }, "context": "$response.body" }),
-        json!({ "condition": "$message.header.foo" }),
     ] {
         for in_action in [false, true] {
             let mut value = document(json!([{

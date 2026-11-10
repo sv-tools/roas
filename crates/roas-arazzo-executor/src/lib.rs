@@ -23,7 +23,8 @@
 //! the same engine runs under a blocking client, an async one, or a fake
 //! that never touches a network. Implement [`HttpClient`] (or
 //! [`AsyncHttpClient`]), or enable the `reqwest` feature for ready-made
-//! ones.
+//! ones. AsyncAPI steps publish and listen through a [`MessageClient`]
+//! (or [`AsyncMessageClient`]) in the same way; see [`execute_with_messages`].
 //!
 //! Source descriptions are loaded the same way: fetching them is IO, so
 //! the caller supplies the parsed documents through
@@ -45,17 +46,19 @@
 //!
 //! ## What it does not do yet
 //!
-//! AsyncAPI steps (`channelPath` / `action`), XPath criteria and
+//! AsyncAPI steps without a message client — run them with
+//! [`execute_with_messages`] — XPath criteria and
 //! selectors without the `xpath` feature (and, with it, XPath versions
 //! Arazzo does not name, XPath payload replacement targets, and the XPath
 //! functions it refuses), and parallel `dependsOn`
-//! execution. Unsupported execution capabilities are reported when
+//! execution beyond an AsyncAPI receive listening in the background. Unsupported execution capabilities are reported when
 //! reached, or statically by preparation. The optional `input-validation` feature supports
 //! offline JSON Schema 2020-12 when [`Options::input_validation`] enables it.
 //! Plans compile schemas; each run validates its actual bound inputs at entry.
 //! The [README's support matrix](https://crates.io/crates/roas-arazzo-executor#support-matrix)
 //! separates what is parsed, resolved, validated and executed.
 
+mod channel;
 mod criterion;
 mod documents;
 mod expression;
@@ -63,6 +66,7 @@ mod http;
 mod input;
 #[cfg(feature = "input-validation")]
 mod input_catalog;
+mod message;
 mod operation;
 mod operation_document;
 #[cfg(feature = "source-graph")]
@@ -98,6 +102,10 @@ pub use http::{
     AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, SendFuture, SleepFuture,
 };
 pub use input::{InputError, InputValidation, InputViolation};
+pub use message::{
+    AsyncMessageClient, Channel, DoneFuture, IncomingMessage, MessageClient, OutgoingMessage,
+    ReceiveFuture, Subscription, SubscriptionId,
+};
 pub use operation::OperationError;
 #[cfg(feature = "source-graph")]
 pub use operation_graph::ReferenceDiagnostic;
@@ -179,6 +187,110 @@ pub(crate) fn drive<C: HttpClient + ?Sized>(
     run: &mut Run<'_>,
     client: &mut C,
 ) -> Result<ExecutionReport, ExecutionFailure> {
+    drive_with(run, client, None)
+}
+
+/// Run a workflow whose AsyncAPI steps publish to and listen on channels
+/// through `messages`, and whose other steps send requests with `client`.
+///
+/// [`execute`] and its kin refuse an AsyncAPI step; this is the same
+/// engine with somewhere for its messages to go.
+///
+/// # Errors
+///
+/// As [`execute_with_report`]; a failure of either client stops the run.
+pub fn execute_with_messages<C: HttpClient + ?Sized, M: MessageClient + ?Sized>(
+    description: &Description,
+    options: &Options,
+    client: &mut C,
+    messages: &mut M,
+) -> Result<ExecutionReport, ExecutionFailure> {
+    let mut run = Run::start(description, options).map_err(|error| ExecutionFailure {
+        error,
+        report: None,
+    })?;
+    drive_with(&mut run, client, Some(&mut Messages(messages)))
+}
+
+/// Async counterpart of [`execute_with_messages`].
+///
+/// # Errors
+///
+/// As [`execute_with_messages`].
+pub async fn execute_with_messages_async<
+    C: AsyncHttpClient + ?Sized,
+    M: AsyncMessageClient + ?Sized,
+>(
+    description: &Description,
+    options: &Options,
+    client: &mut C,
+    messages: &mut M,
+) -> Result<ExecutionReport, ExecutionFailure> {
+    let mut run = Run::start(description, options).map_err(|error| ExecutionFailure {
+        error,
+        report: None,
+    })?;
+    drive_async_with(&mut run, client, Some(&mut AsyncMessages(messages))).await
+}
+
+/// A message client behind one object-safe face.
+pub(crate) struct Messages<'m, M: MessageClient + ?Sized>(pub(crate) &'m mut M);
+
+pub(crate) trait Carrier {
+    fn carry(&mut self, run: &Run<'_>, progress: Progress) -> Result<Carried, ExecutionError>;
+}
+
+/// What came of a message progress.
+pub(crate) enum Carried {
+    Nothing,
+    Message(Option<IncomingMessage>),
+}
+
+impl<M: MessageClient + ?Sized> Carrier for Messages<'_, M> {
+    fn carry(&mut self, run: &Run<'_>, progress: Progress) -> Result<Carried, ExecutionError> {
+        let client = &mut *self.0;
+        Ok(match progress {
+            Progress::Publish(message) => {
+                client
+                    .publish(&message)
+                    .map_err(|error| run.client_failure(error))?;
+                Carried::Nothing
+            }
+            Progress::Subscribe(subscription) => {
+                client
+                    .subscribe(&subscription)
+                    .map_err(|error| run.client_failure(error))?;
+                Carried::Nothing
+            }
+            Progress::Receive {
+                subscription,
+                timeout,
+            } => Carried::Message(
+                client
+                    .receive(subscription, timeout)
+                    .map_err(|error| run.client_failure(error))?,
+            ),
+            Progress::Unsubscribe(subscription) => {
+                client.unsubscribe(subscription);
+                Carried::Nothing
+            }
+            Progress::Send(_) | Progress::Wait(_) | Progress::Done(_) => Carried::Nothing,
+        })
+    }
+}
+
+/// Why a run without a message client cannot carry on.
+fn no_messages() -> ExecutionError {
+    ExecutionError::Unsupported(
+        "an AsyncAPI step needs a message client — run it with `execute_with_messages`".into(),
+    )
+}
+
+pub(crate) fn drive_with<C: HttpClient + ?Sized>(
+    run: &mut Run<'_>,
+    client: &mut C,
+    mut messages: Option<&mut dyn Carrier>,
+) -> Result<ExecutionReport, ExecutionFailure> {
     loop {
         match run.advance().map_err(|error| run.failure(error))? {
             Progress::Send(request) => {
@@ -189,6 +301,17 @@ pub(crate) fn drive<C: HttpClient + ?Sized>(
             }
             Progress::Wait(duration) => std::thread::sleep(duration),
             Progress::Done(report) => return Ok(*report),
+            progress => {
+                let Some(messages) = messages.as_deref_mut() else {
+                    return Err(run.failure(no_messages()));
+                };
+                if let Carried::Message(message) = messages
+                    .carry(run, progress)
+                    .map_err(|error| run.failure(error))?
+                {
+                    run.deliver(message).map_err(|error| run.failure(error))?;
+                }
+            }
         }
     }
 }
@@ -232,6 +355,25 @@ pub(crate) async fn drive_async<C: AsyncHttpClient + ?Sized>(
     run: &mut Run<'_>,
     client: &mut C,
 ) -> Result<ExecutionReport, ExecutionFailure> {
+    drive_async_with(
+        run,
+        client,
+        None::<&mut AsyncMessages<'_, dyn AsyncMessageClient + Send>>,
+    )
+    .await
+}
+
+/// An async message client, as the async driver uses it.
+pub(crate) struct AsyncMessages<'m, M: AsyncMessageClient + ?Sized>(pub(crate) &'m mut M);
+
+pub(crate) async fn drive_async_with<
+    C: AsyncHttpClient + ?Sized,
+    M: AsyncMessageClient + ?Sized,
+>(
+    run: &mut Run<'_>,
+    client: &mut C,
+    mut messages: Option<&mut AsyncMessages<'_, M>>,
+) -> Result<ExecutionReport, ExecutionFailure> {
     loop {
         match run.advance().map_err(|error| run.failure(error))? {
             Progress::Send(request) => {
@@ -243,6 +385,33 @@ pub(crate) async fn drive_async<C: AsyncHttpClient + ?Sized>(
             }
             Progress::Wait(duration) => client.sleep(duration).await,
             Progress::Done(report) => return Ok(*report),
+            progress => {
+                let Some(AsyncMessages(messages)) = messages.as_deref_mut() else {
+                    return Err(run.failure(no_messages()));
+                };
+                match progress {
+                    Progress::Publish(message) => messages
+                        .publish(&message)
+                        .await
+                        .map_err(|error| run.failure(run.client_failure(error)))?,
+                    Progress::Subscribe(subscription) => messages
+                        .subscribe(&subscription)
+                        .await
+                        .map_err(|error| run.failure(run.client_failure(error)))?,
+                    Progress::Receive {
+                        subscription,
+                        timeout,
+                    } => {
+                        let message = messages
+                            .receive(subscription, timeout)
+                            .await
+                            .map_err(|error| run.failure(run.client_failure(error)))?;
+                        run.deliver(message).map_err(|error| run.failure(error))?;
+                    }
+                    Progress::Unsubscribe(subscription) => messages.unsubscribe(subscription),
+                    Progress::Send(_) | Progress::Wait(_) | Progress::Done(_) => {}
+                }
+            }
         }
     }
 }
@@ -274,4 +443,31 @@ pub fn execute_v1_0_with_report<C: HttpClient + ?Sized>(
     client: &mut C,
 ) -> Result<ExecutionReport, ExecutionFailure> {
     execute_with_report(&Description::from(description.clone()), options, client)
+}
+
+#[cfg(test)]
+mod send_tests {
+    /// The async entry points stay usable from a spawned task.
+    #[test]
+    fn futures_are_send() {
+        fn send<T: Send>(_: &T) {}
+        let description: roas_arazzo::v1_1::Description =
+            serde_json::from_value(serde_json::json!({
+                "arazzo": "1.1.0",
+                "info": { "title": "T", "version": "1" },
+                "sourceDescriptions": [],
+                "workflows": [{ "workflowId": "w", "steps": [] }]
+            }))
+            .expect("a description");
+        let options = crate::Options::new();
+        let mut client = crate::testing::Fake::new();
+        let mut messages = crate::testing::Fake::new();
+        send(&crate::execute_async(&description, &options, &mut client));
+        send(&crate::execute_with_messages_async(
+            &description,
+            &options,
+            &mut client,
+            &mut messages,
+        ));
+    }
 }

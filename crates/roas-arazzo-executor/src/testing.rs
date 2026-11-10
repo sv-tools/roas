@@ -9,7 +9,12 @@
 use crate::http::{
     AsyncHttpClient, ClientError, HttpClient, HttpRequest, HttpResponse, SendFuture, SleepFuture,
 };
+use crate::message::{
+    AsyncMessageClient, DoneFuture, IncomingMessage, MessageClient, OutgoingMessage, ReceiveFuture,
+    Subscription, SubscriptionId,
+};
 use serde_json::Value;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 /// An HTTP client that replies from a script.
@@ -21,6 +26,12 @@ pub struct Fake {
     /// Every duration it was asked to wait, in order.
     waited: Vec<Duration>,
     at: usize,
+    /// Messages still to arrive, by channel address.
+    inbox: BTreeMap<String, VecDeque<IncomingMessage>>,
+    published: Vec<OutgoingMessage>,
+    subscribed: Vec<Subscription>,
+    received: Vec<(SubscriptionId, Option<Duration>)>,
+    unsubscribed: Vec<SubscriptionId>,
 }
 
 impl Fake {
@@ -48,6 +59,56 @@ impl Fake {
     #[must_use]
     pub fn sent(&self) -> &[HttpRequest] {
         &self.sent
+    }
+
+    /// Have `message` arrive on the channel at `address`, after any
+    /// scripted before it. A receive with nothing left times out.
+    #[must_use]
+    pub fn message(mut self, address: impl Into<String>, message: IncomingMessage) -> Self {
+        self.inbox
+            .entry(address.into())
+            .or_default()
+            .push_back(message);
+        self
+    }
+
+    /// Every message the run published, in order.
+    #[must_use]
+    pub fn published(&self) -> &[OutgoingMessage] {
+        &self.published
+    }
+
+    /// Every subscription the run made, in order.
+    #[must_use]
+    pub fn subscribed(&self) -> &[Subscription] {
+        &self.subscribed
+    }
+
+    /// Every message the run asked for, with how long it would wait.
+    #[must_use]
+    pub fn received(&self) -> &[(SubscriptionId, Option<Duration>)] {
+        &self.received
+    }
+
+    /// Every subscription the run closed, in order.
+    #[must_use]
+    pub fn unsubscribed(&self) -> &[SubscriptionId] {
+        &self.unsubscribed
+    }
+
+    fn next_message(
+        &mut self,
+        id: SubscriptionId,
+        timeout: Option<Duration>,
+    ) -> Option<IncomingMessage> {
+        self.received.push((id, timeout));
+        let address = &self
+            .subscribed
+            .iter()
+            .find(|subscription| subscription.id == id)?
+            .channel
+            .address;
+        self.inbox.get_mut(address)?.pop_front()
     }
 
     /// Every wait the run asked for, in order — the delays a `retry`
@@ -88,6 +149,57 @@ impl AsyncHttpClient for Fake {
     /// Returns at once: a test should not spend the delay it asserts on.
     fn sleep(&self, _duration: Duration) -> SleepFuture<'_> {
         Box::pin(std::future::ready(()))
+    }
+}
+
+impl MessageClient for Fake {
+    fn publish(&mut self, message: &OutgoingMessage) -> Result<(), ClientError> {
+        self.published.push(message.clone());
+        Ok(())
+    }
+
+    fn subscribe(&mut self, subscription: &Subscription) -> Result<(), ClientError> {
+        self.subscribed.push(subscription.clone());
+        Ok(())
+    }
+
+    /// The next scripted message for the subscription's channel, at once,
+    /// or `None` — a timeout — when there is none left.
+    fn receive(
+        &mut self,
+        subscription: SubscriptionId,
+        timeout: Option<Duration>,
+    ) -> Result<Option<IncomingMessage>, ClientError> {
+        Ok(self.next_message(subscription, timeout))
+    }
+
+    fn unsubscribe(&mut self, subscription: SubscriptionId) {
+        self.unsubscribed.push(subscription);
+    }
+}
+
+impl AsyncMessageClient for Fake {
+    fn publish<'a>(&'a mut self, message: &'a OutgoingMessage) -> DoneFuture<'a> {
+        let done = MessageClient::publish(self, message);
+        Box::pin(std::future::ready(done))
+    }
+
+    fn subscribe<'a>(&'a mut self, subscription: &'a Subscription) -> DoneFuture<'a> {
+        let done = MessageClient::subscribe(self, subscription);
+        Box::pin(std::future::ready(done))
+    }
+
+    fn receive(
+        &mut self,
+        subscription: SubscriptionId,
+        timeout: Option<Duration>,
+    ) -> ReceiveFuture<'_> {
+        let message = Ok(self.next_message(subscription, timeout));
+        Box::pin(std::future::ready(message))
+    }
+
+    fn unsubscribe(&mut self, subscription: SubscriptionId) {
+        MessageClient::unsubscribe(self, subscription);
     }
 }
 
