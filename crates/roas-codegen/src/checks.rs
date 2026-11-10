@@ -89,6 +89,12 @@ pub(crate) enum Check {
     /// Keywords the generator does not handle at all: whatever the value,
     /// it is reported as unevaluated.
     Unsupported(Vec<String>),
+    /// What the items or members of a non-empty array or map declare that
+    /// nothing checks on them.
+    ItemsUnevaluated {
+        keyword: &'static str,
+        reason: String,
+    },
 }
 
 /// The kind of value `ty` holds once nullability and boxing are seen
@@ -378,7 +384,23 @@ pub(crate) fn null_raw(def: &crate::ir::TypeDef) -> bool {
 
 /// What a substituted component declares, at a position holding it: the
 /// user's type is not checked against it.
-pub(crate) fn extern_checks(ir: &crate::ir::Ir, ty: &TypeRef) -> Vec<Check> {
+///
+/// `wrappers` counts a newtype over a substitution too, for a backend that
+/// spells it as an alias with no validator of its own. Inside an array or
+/// map the items are not checked either, which a non-empty one reports.
+pub(crate) fn extern_checks(ir: &crate::ir::Ir, ty: &TypeRef, wrappers: bool) -> Vec<Check> {
+    if let TypeRef::Array(inner) | TypeRef::Map(inner) = strip(ty) {
+        return extern_checks(ir, inner, wrappers)
+            .into_iter()
+            .map(|check| match check {
+                Check::Unevaluated { keyword, reason }
+                | Check::ItemsUnevaluated { keyword, reason } => {
+                    Check::ItemsUnevaluated { keyword, reason }
+                }
+                other => other,
+            })
+            .collect();
+    }
     let Some(mut id) = ty.direct_named() else {
         return Vec::new();
     };
@@ -391,6 +413,17 @@ pub(crate) fn extern_checks(ir: &crate::ir::Ir, ty: &TypeRef) -> Vec<Check> {
                 Some(next) => id = next,
                 None => return Vec::new(),
             },
+            TypeKind::Newtype(TypeRef::Extern(_)) if wrappers => {
+                let c = &def.constraints;
+                return declared_keywords(c)
+                    .into_iter()
+                    .map(|keyword| Check::Unevaluated {
+                        keyword,
+                        reason: "a substituted type is not checked against it".into(),
+                    })
+                    .chain(unenforced(c))
+                    .collect();
+            }
             TypeKind::Extern => {
                 let c = &def.constraints;
                 let mut out = unenforced(c);
@@ -417,16 +450,21 @@ pub(crate) fn has_null_hook(def: &crate::ir::TypeDef) -> bool {
 
 /// The unhandled keywords every branch of a union shares: a type list
 /// gives them to each member, and they constrain its `null` too.
-pub(crate) fn shared_unsupported(branches: &[crate::ir::Branch]) -> Vec<Check> {
+pub(crate) fn shared_unsupported(ir: &crate::ir::Ir, branches: &[crate::ir::Branch]) -> Vec<Check> {
+    // A hoisted branch keeps its keywords on its own definition.
+    let of = |b: &crate::ir::Branch| -> Vec<String> {
+        match b.ty.direct_named().and_then(|id| ir.types.get(id)) {
+            Some(def) => def.constraints.unsupported.clone(),
+            None => b.constraints.unsupported.clone(),
+        }
+    };
     let Some((first, rest)) = branches.split_first() else {
         return Vec::new();
     };
-    let shared: Vec<String> = first
-        .constraints
-        .unsupported
-        .iter()
-        .filter(|k| rest.iter().all(|b| b.constraints.unsupported.contains(k)))
-        .cloned()
+    let rest: Vec<Vec<String>> = rest.iter().map(of).collect();
+    let shared: Vec<String> = of(first)
+        .into_iter()
+        .filter(|k| rest.iter().all(|r| r.contains(k)))
         .collect();
     if shared.is_empty() {
         Vec::new()

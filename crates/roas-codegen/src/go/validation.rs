@@ -33,6 +33,7 @@ pub(crate) struct Context<'a> {
     pub null_name: &'a dyn Fn(&TypeRef) -> Option<String>,
     /// What a substituted component declares, at a position holding it.
     pub extern_checks: &'a dyn Fn(&TypeRef) -> Vec<Check>,
+    pub ir: &'a crate::ir::Ir,
     pub needs: Needs,
 }
 
@@ -273,6 +274,10 @@ fn render(
             Check::Unsupported(keywords) => out.push(format!(
                 "{r}.unevaluated({p}, {})",
                 lit(&format!("{}: not handled by the generator", keywords.join(", ")))
+            )),
+            Check::ItemsUnevaluated { keyword, reason } => out.push(format!(
+                "if len({e}) > 0 {{ {r}.unevaluated({p}, {}) }}",
+                lit(&format!("{keyword} on the items: {reason}"))
             )),
         }
         reads |= out.len() > before
@@ -622,6 +627,13 @@ pub(crate) fn body(
                     &mut out,
                     cx,
                 );
+                render(
+                    &(cx.extern_checks)(&TypeRef::Map(Box::new(ty.clone()))),
+                    (ValueKind::Other, None),
+                    At { e: &map, ..own },
+                    &mut out,
+                    &mut cx.needs,
+                );
             }
             let list = checks::object_checks(&def.constraints);
             let counted = list
@@ -684,7 +696,7 @@ pub(crate) fn body(
                 // member says.
                 let mut null = Vec::new();
                 render(
-                    &checks::shared_unsupported(&u.branches),
+                    &checks::shared_unsupported(cx.ir, &u.branches),
                     (ValueKind::Other, None),
                     own,
                     &mut null,

@@ -20,6 +20,8 @@ pub(crate) struct SupportView {
     pub int64: bool,
     pub int32: bool,
     pub raw_holder: bool,
+    /// A closed struct reads through `ObjectOnly`.
+    pub object_only: bool,
     /// Generated validation is on: the report types and `Validate`.
     pub validation: bool,
 }
@@ -300,6 +302,7 @@ impl Builder<'_> {
             "reject_null",
             "require_present",
             "integer_token",
+            "ObjectOnly",
         ] {
             allocator.reserve(reserved);
         }
@@ -655,6 +658,7 @@ impl Builder<'_> {
                         view.attrs.push("#[serde(deny_unknown_fields)]".to_owned());
                         view.attrs.push("#[serde(remote = \"Self\")]".to_owned());
                         view.object_only = true;
+                        self.support.object_only = true;
                     }
                     Additional::CatchAll(ty) => {
                         let inner = self.spell(ty)?;

@@ -6,18 +6,14 @@
 {% if t.object_only %}{% block object_only %}
 impl serde::Serialize for {{ t.name }} {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        {{ t.name }}::serialize(self, serializer)
+        Self::serialize(self, serializer)
     }
 }
 
 // Read from a JSON object only: serde's derive would take an array too.
 impl<'de> serde::Deserialize<'de> for {{ t.name }} {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = <Box<serde_json::value::RawValue> as serde::Deserialize>::deserialize(deserializer)?;
-        if !raw.get().trim_start().starts_with('{') {
-            return Err(serde::de::Error::custom(format!("{}: want a JSON object, got {}", {{ t.raw_name | tojson }}, raw.get())));
-        }
-        {{ t.name }}::deserialize(&mut serde_json::Deserializer::from_str(raw.get())).map_err(serde::de::Error::custom)
+        Self::deserialize(ObjectOnly(deserializer))
     }
 }
 {% endblock %}{% endif %}{% block trailing %}{% endblock %}

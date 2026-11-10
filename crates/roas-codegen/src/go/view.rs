@@ -655,7 +655,12 @@ impl Builder<'_> {
                 raw_holder: &raw_holder,
                 loops: &loops,
                 null_name: &null_name,
-                extern_checks: &|ty: &TypeRef| crate::checks::extern_checks(ir, ty),
+                // A newtype over a substitution is an alias in Go, with no
+                // validator of its own.
+                extern_checks: &|ty: &TypeRef| {
+                    crate::checks::extern_checks(ir, ty, !self.validates(ty))
+                },
+                ir,
                 needs: self.needs,
             };
             view.validate = super::validation::body(def, &view, opted_out, &mut cx);

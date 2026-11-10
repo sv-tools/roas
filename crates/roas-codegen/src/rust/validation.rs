@@ -194,6 +194,10 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 "{r}.unevaluated({p}, {:?});",
                 format!("{}: not handled by the generator", keywords.join(", "))
             )),
+            Check::ItemsUnevaluated { keyword, reason } => out.push(format!(
+                "if !{v}.is_empty() {{ {r}.unevaluated({p}, {:?}); }}",
+                format!("{keyword} on the items: {reason}")
+            )),
         }
         reads |= out.len() > before
             && !matches!(
@@ -264,7 +268,7 @@ fn branch(
         &mut body,
     );
     let mut list = checks::value_checks(&branch.ty, &branch.constraints);
-    list.extend(checks::extern_checks(ir, &branch.ty));
+    list.extend(checks::extern_checks(ir, &branch.ty, false));
     let mut reads = value(
         &branch.ty,
         &list,
@@ -352,7 +356,7 @@ pub(crate) fn body(
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
                 let mut list = checks::value_checks(&field.ty, &field.constraints);
-                list.extend(checks::extern_checks(ir, &field.ty));
+                list.extend(checks::extern_checks(ir, &field.ty, false));
                 let recurse = generated(&field.ty);
                 present.push(if field.required {
                     "1".to_owned()
@@ -426,6 +430,17 @@ pub(crate) fn body(
                 if generated(ty) {
                     out.push(format!("self.{name}.validate_into(pointer, report);"));
                 }
+                let field = format!("self.{name}");
+                render(
+                    &checks::extern_checks(ir, &TypeRef::Map(Box::new(ty.clone())), false),
+                    ValueKind::Other,
+                    At {
+                        v: &field,
+                        p: "pointer",
+                        r: "report",
+                    },
+                    &mut out,
+                );
             }
             let list = checks::object_checks(&def.constraints);
             let counted = list
@@ -510,7 +525,7 @@ pub(crate) fn body(
             if def.nullable {
                 let mut null = Vec::new();
                 render(
-                    &checks::shared_unsupported(&u.branches),
+                    &checks::shared_unsupported(ir, &u.branches),
                     ValueKind::Other,
                     report,
                     &mut null,
@@ -613,7 +628,7 @@ pub(crate) fn body(
                 &mut out,
             );
             let mut list = checks::value_checks(inner, &def.constraints);
-            list.extend(checks::extern_checks(ir, inner));
+            list.extend(checks::extern_checks(ir, inner, false));
             let _ = value(
                 inner,
                 &list,

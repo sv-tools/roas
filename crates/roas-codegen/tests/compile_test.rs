@@ -656,6 +656,18 @@ fn validated_description() -> serde_json::Value {
             "Dated": {"type": "object", "properties": {"d": {"type": "string", "format": "date", "minLength": 5}}},
             "SmallMaps": {"type": "array", "items": {"additionalProperties": {"type": "string"}, "maxProperties": 2}},
             "Money": {"type": "string", "maxLength": 3},
+            "Monies": {"type": "array", "items": {"$ref": "#/components/schemas/Money"}},
+            "MoneyMap": {"type": "object", "properties": {"x": {"type": "string"}}, "additionalProperties": {"$ref": "#/components/schemas/Money"}},
+            "DateAlias": {"type": "string", "format": "date", "maxLength": 2},
+            "HoldsDate": {"type": "object", "properties": {"d": {"$ref": "#/components/schemas/DateAlias"}}},
+            "Node": {"type": "object", "additionalProperties": false, "properties": {
+                "next": {"$ref": "#/components/schemas/Node"}, "n": {"type": "integer"}
+            }},
+            "Leaf": {"type": "object", "additionalProperties": false, "properties": {"s": {"type": "string"}}},
+            "Leaves": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Leaf"}},
+            "S": {"type": "object", "additionalProperties": false, "properties": {"x": {"type": "string"}}},
+            "D": {"type": "object", "additionalProperties": false, "properties": {"x": {"type": "string"}}},
+            "ListObj": {"type": ["string", "object", "null"], "properties": {"p": {"type": "string"}}, "if": {}, "then": {"type": "string"}},
             "HoldsMoney": {"type": "object", "properties": {"m": {"$ref": "#/components/schemas/Money"}}},
             "NestedClosed": {"oneOf": [
                 {"type": "array", "items": {"$ref": "#/components/schemas/Closed"}},
@@ -885,6 +897,20 @@ fn main() {
     assert_eq!(report::<NestedClosed>(r#"[["x"]]"#), vec![]);
     // A substituted component is not checked against what it declares.
     assert_eq!(report::<HoldsMoney>(r#"{"m":"abcdef"}"#), vec![u("/m")]);
+    assert_eq!(report::<Monies>(r#"["abcdef"]"#), vec![u("")]);
+    assert_eq!(report::<Monies>("[]"), vec![]);
+    assert_eq!(report::<MoneyMap>(r#"{"k":"abcdef"}"#), vec![u("")]);
+    assert_eq!(report::<HoldsDate>(r#"{"d":"long"}"#), vec![u("/d")]);
+    // A closed struct keeps the decoder's depth limit, and decodes inside
+    // a flattened map.
+    let deep = |depth: usize| format!("{}{{}}{}", r#"{"next":"#.repeat(depth), "}".repeat(depth));
+    assert!(serde_json::from_str::<Node>(&deep(200)).is_err());
+    assert!(serde_json::from_str::<Node>(&deep(100_000)).is_err());
+    assert!(serde_json::from_str::<Node>(&deep(10)).is_ok());
+    assert_eq!(report::<Leaves>(r#"{"a":{"s":"b"}}"#), vec![]);
+    assert!(serde_json::from_str::<S>(r#"{"x":"y"}"#).is_ok() && serde_json::from_str::<D>("[]").is_err());
+    // A null held by a type list with a hoisted member keeps the shared keywords.
+    assert_eq!(report::<ListObj>("null"), vec![u("")]);
     println!("validation behaves");
 }
 "##;
@@ -1104,6 +1130,12 @@ func main() {
 	check(`[{"a":"1","b":"2","c":"3"}]`, report[api.SmallMaps](`[{"a":"1","b":"2","c":"3"}]`), v("/0"))
 	check(`[["x"]]`, report[api.NestedClosed](`[["x"]]`))
 	check(`{"m":"abcdef"}`, report[api.HoldsMoney](`{"m":"abcdef"}`), u("/m"))
+	check(`["abcdef"]`, report[api.Monies](`["abcdef"]`), u(""))
+	check(`[]`, report[api.Monies](`[]`))
+	check(`{"k":"abcdef"}`, report[api.MoneyMap](`{"k":"abcdef"}`), u(""))
+	check(`{"d":"long"}`, report[api.HoldsDate](`{"d":"long"}`), u("/d"))
+	check(`{"a":{"s":"b"}}`, report[api.Leaves](`{"a":{"s":"b"}}`))
+	check(`null`, report[api.ListObj](`null`), u(""))
 	fmt.Println("validation behaves")
 }
 "##;
