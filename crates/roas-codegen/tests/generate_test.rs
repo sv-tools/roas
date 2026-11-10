@@ -821,6 +821,19 @@ fn a_pattern_is_translated_or_reported() {
             .iter()
             .any(|d| d.name == "regex")
     );
+    // Nor when the text only appears in a value or an unchecked pattern.
+    let components = serde_json::json!({
+        "Word": {"type": "string", "enum": ["regex::Regex::new(", "b"], "minLength": 1},
+        "Look": {"type": "string", "pattern": "regex::Regex(?=b)"}
+    });
+    let generation = generate(&document(components), &config).unwrap();
+    assert!(
+        !generation
+            .dependencies
+            .rust
+            .iter()
+            .any(|d| d.name == "regex")
+    );
 }
 
 #[test]
