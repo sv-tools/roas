@@ -18,6 +18,8 @@ pub(crate) struct Needs {
     pub slices: bool,
     /// A raw holder is built from `null`: `jsontext`.
     pub jsontext: bool,
+    /// A `pattern` is matched: `regexp`, `sync` and `matchPattern`.
+    pub pattern: bool,
 }
 
 pub(crate) struct Context<'a> {
@@ -90,6 +92,15 @@ fn render(
                         *n,
                         format!("is %d characters long, shorter than minLength {n}")
                     )
+                ));
+            }
+            Check::Pattern { regex, source } => {
+                needs.pattern = true;
+                out.push(format!(
+                    "if matched, compiled := matchPattern({}, string({e})); !compiled {{ {r}.unevaluated({p}, {}) }} else if !matched {{ {r}.violation({p}, {}) }}",
+                    lit(regex),
+                    lit(&format!("pattern {source:?}: too large to compile here")),
+                    lit(&format!("does not match pattern {source:?}")),
                 ));
             }
             Check::MaxLength(n) => {

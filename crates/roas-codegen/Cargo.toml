@@ -46,6 +46,9 @@ url.workspace = true
 minijinja.workspace = true
 include_dir.workspace = true
 syn.workspace = true
+oxc_regular_expression.workspace = true
+oxc_allocator.workspace = true
+regex-syntax.workspace = true
 
 [dev-dependencies]
 enumset.workspace = true

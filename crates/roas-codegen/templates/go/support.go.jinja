@@ -224,7 +224,27 @@ func (*Null) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 }
 {% endif %}
 {% if support.validation %}
-// wideNumber says whether raw has a number a generated type may fail to
+{% if support.patterns %}// patterns holds each pattern compiled, or nil when it is too large to.
+var patterns sync.Map
+
+// matchPattern says whether s matches the regex src, compiled once, and
+// whether it could be compiled at all.
+func matchPattern(src, s string) (matched, compiled bool) {
+	re, ok := patterns.Load(src)
+	if !ok {
+		c, err := regexp.Compile(src)
+		if err != nil {
+			c = nil
+		}
+		re, _ = patterns.LoadOrStore(src, c)
+	}
+	if c := re.(*regexp.Regexp); c != nil {
+		return c.MatchString(s), true
+	}
+	return false, false
+}
+
+{% endif %}// wideNumber says whether raw has a number a generated type may fail to
 // decode for its range rather than its value: a whole number from intLimit
 // on, one past the 32-bit float range when narrow holds, or one past
 // float64 — or nests deeper than the decoder reads. A union branch that

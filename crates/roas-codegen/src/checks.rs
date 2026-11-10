@@ -40,6 +40,11 @@ pub(crate) enum Unique {
 pub(crate) enum Check {
     MinLength(u64),
     MaxLength(u64),
+    /// `pattern`, as a regex both targets read as ECMAScript does.
+    Pattern {
+        regex: String,
+        source: String,
+    },
     /// The smallest integer allowed, from `minimum` or `exclusiveMinimum`.
     IntAtLeast {
         bound: i128,
@@ -179,10 +184,16 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
         ValueKind::String => {
             out.extend(c.min_length.filter(|n| *n > 0).map(Check::MinLength));
             out.extend(c.max_length.filter(|n| *n < u64::MAX).map(Check::MaxLength));
-            if c.pattern.is_some() {
-                out.push(Check::Unevaluated {
-                    keyword: "pattern",
-                    reason: "patterns are not checked yet".into(),
+            if let Some(source) = &c.pattern {
+                out.push(match crate::pattern::translate(source) {
+                    Ok(regex) => Check::Pattern {
+                        regex,
+                        source: source.clone(),
+                    },
+                    Err(reason) => Check::Unevaluated {
+                        keyword: "pattern",
+                        reason: format!("{source:?} is not checked: {reason}"),
+                    },
                 });
             }
         }
@@ -793,7 +804,7 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
 /// nothing a schema says is dropped without a word.
 pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    let mut warn = |id: &crate::diagnostic::SchemaId, pointer: String, keyword: &str| {
+    let mut warn = |id: &crate::diagnostic::SchemaId, pointer: String, keyword: &str, message| {
         out.push(Diagnostic {
             severity: Severity::Warning,
             kind: DiagnosticKind::Unvalidated {
@@ -801,9 +812,7 @@ pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
             },
             schema_id: id.clone(),
             pointer: source_of(&pointer),
-            message: format!(
-                "`{keyword}` does not apply to a value of this type, so validation does not check it"
-            ),
+            message,
         });
     };
     for id in &ir.order {
@@ -811,31 +820,54 @@ pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
             continue;
         }
         let def = &ir.types[id];
+        // Each value position: where it is, its type and its constraints.
+        let mut positions: Vec<(String, &TypeRef, &Constraints)> = Vec::new();
         match &def.kind {
             TypeKind::Struct(s) => {
                 for field in &s.fields {
                     let mut pointer = def.id.pointer.clone();
                     push_token(&mut pointer, "properties");
                     push_token(&mut pointer, &field.raw_name);
-                    for keyword in unchecked_keywords(&field.ty, &field.constraints) {
-                        warn(&def.id, format!("{pointer}/{keyword}"), keyword);
-                    }
+                    positions.push((pointer, &field.ty, &field.constraints));
                 }
             }
             TypeKind::Newtype(inner) => {
-                for keyword in unchecked_keywords(inner, &def.constraints) {
-                    warn(&def.id, format!("{}/{keyword}", def.id.pointer), keyword);
-                }
+                positions.push((def.id.pointer.clone(), inner, &def.constraints));
+            }
+            TypeKind::StringEnum(_) => {
+                positions.push((def.id.pointer.clone(), &TypeRef::String, &def.constraints));
             }
             TypeKind::UnionOpen(crate::ir::OpenUnion { branches, .. })
             | TypeKind::ComposedOpen(branches) => {
                 for branch in branches {
-                    for keyword in unchecked_keywords(&branch.ty, &branch.constraints) {
-                        warn(&def.id, format!("{}/{keyword}", def.id.pointer), keyword);
-                    }
+                    positions.push((def.id.pointer.clone(), &branch.ty, &branch.constraints));
                 }
             }
             _ => {}
+        }
+        for (pointer, ty, c) in positions {
+            for keyword in unchecked_keywords(ty, c) {
+                warn(
+                    &def.id,
+                    format!("{pointer}/{keyword}"),
+                    keyword,
+                    format!(
+                        "`{keyword}` does not apply to a value of this type, so validation does not check it"
+                    ),
+                );
+            }
+            if ty.direct_named().is_none()
+                && kind_of(ty) == ValueKind::String
+                && let Some(source) = &c.pattern
+                && let Err(reason) = crate::pattern::translate(source)
+            {
+                warn(
+                    &def.id,
+                    format!("{pointer}/pattern"),
+                    "pattern",
+                    format!("pattern {source:?} is reported as unevaluated: {reason}"),
+                );
+            }
         }
     }
     out

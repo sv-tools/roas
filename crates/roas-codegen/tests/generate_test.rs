@@ -753,6 +753,72 @@ fn validation_reports_what_it_cannot_check_and_types_can_opt_out() {
 }
 
 #[test]
+fn a_pattern_is_translated_or_reported() {
+    let components = serde_json::json!({
+        "Pet": {"type": "object", "properties": {
+            "code": {"type": "string", "pattern": "^\\d+$"},
+            "look": {"type": "string", "pattern": "a(?=b)"}
+        }}
+    });
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml("validation = true\n", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let generation = generate(&document(components.clone()), &config).unwrap();
+        let unvalidated: Vec<_> = generation
+            .diagnostics
+            .iter()
+            .filter_map(|d| match &d.kind {
+                DiagnosticKind::Unvalidated { keyword } => {
+                    Some((keyword.as_str(), d.pointer.as_str(), d.message.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        // Only the one that cannot mean the same in both engines.
+        assert_eq!(unvalidated.len(), 1, "{unvalidated:?}");
+        assert_eq!(unvalidated[0].0, "pattern");
+        assert_eq!(
+            unvalidated[0].1,
+            "/components/schemas/Pet/properties/look/pattern"
+        );
+        assert!(unvalidated[0].2.contains("lookaround"), "{unvalidated:?}");
+        let code = &generation.files[0].contents;
+        // `\d` is ECMAScript's ASCII digit, spelled out for both engines.
+        assert!(code.contains("^[0-9]+$"), "{code}");
+        if language == Target::Rust {
+            assert!(
+                generation
+                    .dependencies
+                    .rust
+                    .iter()
+                    .any(|d| d.name == "regex"),
+                "{:?}",
+                generation.dependencies
+            );
+        } else {
+            assert!(code.contains("\"regexp\""), "{code}");
+        }
+    }
+    // No pattern checked, no regex engine.
+    let config = ConfigFile::from_toml("validation = true\n", Path::new("/"))
+        .unwrap()
+        .merge(target(Target::Rust))
+        .build()
+        .unwrap();
+    let generation = generate(&document(pet()), &config).unwrap();
+    assert!(
+        !generation
+            .dependencies
+            .rust
+            .iter()
+            .any(|d| d.name == "regex")
+    );
+}
+
+#[test]
 fn an_opt_out_on_an_alias_is_refused_rather_than_ignored() {
     let components = serde_json::json!({
         "Short": {"type": "string", "maxLength": 2},

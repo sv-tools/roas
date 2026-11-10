@@ -51,6 +51,17 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
             Check::MaxLength(n) => out.push(format!(
                 "{{ let n = {v}.chars().count(); if (n as u64) > {n} {{ {r}.violation({p}, format!(\"is {{n}} characters long, longer than maxLength {n}\")); }} }}"
             )),
+            Check::Pattern { regex, source } => {
+                // An argument needs no parentheses, and rustc says so.
+                let arg = v.strip_prefix('(').and_then(|v| v.strip_suffix(')')).unwrap_or(v);
+                // Compiled once, where it is used. A pattern past what the
+                // engine compiles (its size limit) is not checked, not failed.
+                out.push(format!(
+                    "{{ static RE: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| regex::Regex::new({regex:?}).ok()); match RE.as_ref() {{ Some(re) => {{ if !re.is_match({arg}) {{ {r}.violation({p}, {:?}); }} }} None => {r}.unevaluated({p}, {:?}), }} }}",
+                    format!("does not match pattern {source:?}"),
+                    format!("pattern {source:?}: too large to compile here"),
+                ))
+            }
             Check::IntAtLeast {
                 bound,
                 keyword,

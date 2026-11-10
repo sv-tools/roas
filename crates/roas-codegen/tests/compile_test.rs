@@ -544,6 +544,22 @@ fn validated_description() -> serde_json::Value {
             },
             "Owner": {"type": "object", "properties": {"nick": {"type": ["string", "null"], "maxLength": 3}}},
             "Short": {"type": "string", "maxLength": 2},
+            "Patterned": {"type": "object", "properties": {
+                "digits": {"type": "string", "pattern": "^\\d+$"},
+                "space": {"type": "string", "pattern": "^\\s$"},
+                "dot": {"type": "string", "pattern": "^.$"},
+                "word": {"type": "string", "pattern": "^\\w+$"},
+                "legacy": {"type": "string", "pattern": "^\\d{3}\\-\\d{4}$"},
+                "amp": {"type": "string", "pattern": "^[a&&b]+$"},
+                "astral": {"type": "string", "pattern": "^😀{2}$"},
+                "boundary": {"type": "string", "pattern": "\\bx"},
+                "maybe": {"type": ["string", "null"], "pattern": "a"},
+                "none": {"type": "string", "pattern": "[]"},
+                "any": {"type": "string", "pattern": "^[^]$"}
+            }},
+            "Coded": {"type": "string", "enum": ["ab", "x1"], "pattern": "^[a-z]+$"},
+            "Either": {"oneOf": [{"type": "string", "pattern": "^a"}, {"type": "string", "pattern": "z$"}]},
+            "Code": {"type": "string", "pattern": "^[A-Z]{2}$"},
             "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
             "Choice": {"oneOf": [{"$ref": "#/components/schemas/Short"}, {"$ref": "#/components/schemas/Owner"}]},
             "Numeric": {"type": ["integer", "number"]},
@@ -838,7 +854,43 @@ fn main() {
     assert_eq!(report::<Pet>(r#"{"name":"a","tags":["a","b","c","d"]}"#), vec![v("/tags")]);
     assert_eq!(report::<Pet>(r#"{"name":"a","tags":["a","b","a"]}"#), vec![v("/tags/2")]);
     // Patterns are not checked yet, and say so.
-    assert_eq!(report::<Pet>(r#"{"name":"a","code":"b"}"#), vec![u("/code")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","code":"b"}"#), vec![v("/code")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","code":"ab"}"#), vec![]);
+    // Patterns mean what ECMAScript says, in either language.
+    for (json, want) in [
+        (r#"{"digits":"123"}"#, vec![]),
+        (r#"{"digits":"١٢٣"}"#, vec![v("/digits")]),
+        (r#"{"space":"\u00a0"}"#, vec![]),
+        (r#"{"space":"\u3000"}"#, vec![]),
+        (r#"{"space":"x"}"#, vec![v("/space")]),
+        (r#"{"dot":"\u2028"}"#, vec![v("/dot")]),
+        (r#"{"dot":"😀"}"#, vec![]),
+        (r#"{"word":"é"}"#, vec![v("/word")]),
+        (r#"{"legacy":"123-4567"}"#, vec![]),
+        (r#"{"legacy":"1234567"}"#, vec![v("/legacy")]),
+        (r#"{"amp":"a&b"}"#, vec![]),
+        (r#"{"amp":"c"}"#, vec![v("/amp")]),
+        (r#"{"astral":"😀😀"}"#, vec![]),
+        (r#"{"astral":"😀"}"#, vec![v("/astral")]),
+        (r#"{"boundary":"x"}"#, vec![u("/boundary")]),
+        (r#"{"maybe":null}"#, vec![]),
+        (r#"{"maybe":"xax"}"#, vec![]),
+        (r#"{"maybe":"x"}"#, vec![v("/maybe")]),
+        (r#"{"none":""}"#, vec![v("/none")]),
+        (r#"{"any":"😀"}"#, vec![]),
+        (r#"{"any":"ab"}"#, vec![v("/any")]),
+    ] {
+        assert_eq!(report::<Patterned>(json), want, "{json}");
+    }
+    assert_eq!(report::<Code>(r#""AB""#), vec![]);
+    assert_eq!(report::<Code>(r#""ABC""#), vec![v("")]);
+    assert_eq!(report::<Coded>(r#""ab""#), vec![]);
+    assert_eq!(report::<Coded>(r#""x1""#), vec![v("")]);
+    // Patterns decide which branches match.
+    assert_eq!(report::<Either>(r#""ab""#), vec![]);
+    assert_eq!(report::<Either>(r#""xz""#), vec![]);
+    assert_eq!(report::<Either>(r#""az""#), vec![v("")]);
+    assert_eq!(report::<Either>(r#""x""#), vec![v("")]);
     // Members: counted on the object, and on a map.
     assert_eq!(report::<Pet>(r#"{"name":"a"}"#), vec![v("")]);
     assert_eq!(report::<Pet>(r#"{"name":"a","age":2,"weight":1,"ratio":1.5,"tags":["x"]}"#), vec![v(""), v("/ratio")]);
@@ -1212,7 +1264,8 @@ func main() {
 		{`{"name":"a","tags":[]}`, []found{v("/tags")}},
 		{`{"name":"a","tags":["a","b","c","d"]}`, []found{v("/tags")}},
 		{`{"name":"a","tags":["a","b","a"]}`, []found{v("/tags/2")}},
-		{`{"name":"a","code":"b"}`, []found{u("/code")}},
+		{`{"name":"a","code":"b"}`, []found{v("/code")}},
+		{`{"name":"a","code":"ab"}`, nil},
 		{`{"name":"a"}`, []found{v("")}},
 		{`{"name":"a","age":2,"weight":1,"ratio":1.5,"tags":["x"]}`, []found{v(""), v("/ratio")}},
 		{`{"name":"a","extra":{"x":1,"y":2}}`, []found{v("/extra")}},
@@ -1222,6 +1275,42 @@ func main() {
 	} {
 		check(c.js, report[P](c.js), c.want...)
 	}
+	for _, c := range []struct {
+		js   string
+		want []found
+	}{
+		{`{"digits":"123"}`, nil},
+		{`{"digits":"١٢٣"}`, []found{v("/digits")}},
+		{`{"space":"\u00a0"}`, nil},
+		{`{"space":"\u3000"}`, nil},
+		{`{"space":"x"}`, []found{v("/space")}},
+		{`{"dot":"\u2028"}`, []found{v("/dot")}},
+		{`{"dot":"😀"}`, nil},
+		{`{"word":"é"}`, []found{v("/word")}},
+		{`{"legacy":"123-4567"}`, nil},
+		{`{"legacy":"1234567"}`, []found{v("/legacy")}},
+		{`{"amp":"a&b"}`, nil},
+		{`{"amp":"c"}`, []found{v("/amp")}},
+		{`{"astral":"😀😀"}`, nil},
+		{`{"astral":"😀"}`, []found{v("/astral")}},
+		{`{"boundary":"x"}`, []found{u("/boundary")}},
+		{`{"maybe":null}`, nil},
+		{`{"maybe":"xax"}`, nil},
+		{`{"maybe":"x"}`, []found{v("/maybe")}},
+		{`{"none":""}`, []found{v("/none")}},
+		{`{"any":"😀"}`, nil},
+		{`{"any":"ab"}`, []found{v("/any")}},
+	} {
+		check(c.js, report[api.Patterned](c.js), c.want...)
+	}
+	check(`"AB"`, report[api.Code](`"AB"`))
+	check(`"ABC"`, report[api.Code](`"ABC"`), v(""))
+	check(`"ab"`, report[api.Coded](`"ab"`))
+	check(`"x1"`, report[api.Coded](`"x1"`), v(""))
+	check(`"ab"`, report[api.Either](`"ab"`))
+	check(`"xz"`, report[api.Either](`"xz"`))
+	check(`"az"`, report[api.Either](`"az"`), v(""))
+	check(`"x"`, report[api.Either](`"x"`), v(""))
 	check(`["ab","abc"]`, report[api.Shorts](`["ab","abc"]`), v("/1"))
 	check(`"ab"`, report[api.Choice](`"ab"`))
 	check(`"abc"`, report[api.Choice](`"abc"`), v(""))

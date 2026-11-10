@@ -40,6 +40,7 @@ mod generate;
 mod go;
 mod ir;
 mod lower;
+mod pattern;
 mod report;
 mod rust;
 mod source;

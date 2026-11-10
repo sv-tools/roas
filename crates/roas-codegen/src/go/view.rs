@@ -40,6 +40,10 @@ const VALIDATION_NAMES: &[&str] = &[
     "repeated",
     "childPointer",
     "wideNumber",
+    "matchPattern",
+    "patterns",
+    "matched",
+    "compiled",
     "members",
     "seen",
     "item",
@@ -109,6 +113,8 @@ pub(crate) struct SupportView {
     pub isolated: Vec<String>,
     /// Generated validation is on: the report types and `Validator`.
     pub validation: bool,
+    /// A `pattern` is checked: `matchPattern`.
+    pub patterns: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -307,6 +313,10 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         }
         if builder.needs.utf8 {
             builtin.push(("unicode/utf8", "utf8"));
+        }
+        if builder.needs.pattern {
+            builtin.extend([("regexp", "regexp"), ("sync", "sync")]);
+            builder.support.patterns = true;
         }
         imports.extend(builtin.iter().map(|(path, _)| quote(path)));
         let mut used: BTreeMap<&str, &str> =

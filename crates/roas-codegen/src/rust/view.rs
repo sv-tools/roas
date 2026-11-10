@@ -224,6 +224,17 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             },
         },
     ];
+    // A checked `pattern` is matched with `regex`.
+    if types
+        .iter()
+        .flat_map(|t| t.validate.iter().flatten())
+        .any(|line| line.contains("regex::Regex"))
+    {
+        dependencies.push(RustDependency {
+            name: "regex".into(),
+            features: Vec::new(),
+        });
+    }
     for import in builder.externs.values() {
         let dependency = RustDependency {
             name: import.clone(),
