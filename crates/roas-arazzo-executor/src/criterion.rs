@@ -79,7 +79,8 @@ pub enum CriterionError {
     /// A typed criterion arrived without the `context` it needs.
     #[error("a `{0}` criterion needs a `context`")]
     MissingContext(&'static str),
-    /// XPath, which this crate does not evaluate.
+    /// A language or version this crate does not evaluate: XPath, or
+    /// JSONPath other than RFC 9535.
     #[error("{0} criteria are not supported by this executor")]
     Unsupported(&'static str),
 }
@@ -116,7 +117,9 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
             Err(CriterionError::Unsupported("XPath"))
         }
         // Evaluated as RFC 9535, so no other version is pretended to be.
-        Some(CriterionType::Expression(expression)) if !crate::select::is_rfc9535(expression) => {
+        Some(CriterionType::Expression(expression))
+            if !crate::select::jsonpath_version_supported(expression) =>
+        {
             Err(CriterionError::Unsupported("non-RFC9535 JSONPath"))
         }
         Some(CriterionType::Expression(expression)) => match expression.type_ {

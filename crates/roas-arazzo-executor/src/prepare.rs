@@ -1099,7 +1099,7 @@ impl<'d> Compiler<'d> {
                 self.expression(context, &site.field("context"), 0);
             }
             if let Some(CriterionType::Expression(expression)) = &criterion.type_
-                && !select::is_rfc9535(expression)
+                && !select::jsonpath_version_supported(expression)
             {
                 self.error(
                     &site.field("type.version"),

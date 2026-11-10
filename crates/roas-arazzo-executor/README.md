@@ -700,8 +700,11 @@ now stops there with the `ExecutionError::Unsupported` that preparation already
 reported, so both paths refuse the same descriptions.
 
 A lazy run also used to evaluate a JSONPath criterion, selector or replacement
-target of any `version` as RFC 9535. It now stops with the `Unsupported` error
-preparation already reported for any version but `rfc9535`. That includes v1.0
+target of any `version` as RFC 9535. It now stops at any version but `rfc9535`,
+as preparation already did: with `ExecutionError::Criterion(CriterionError::Unsupported(_))`
+for a criterion and `ExecutionError::Select(SelectError::Unsupported(_))` for a
+selector or replacement target (preparation reports a criterion's version as
+`ExecutionError::Unsupported`, at `type.version`). That includes v1.0
 criteria that name the Goessner draft, the only JSONPath version v1.0 allows; a
 v1.0 `jsonpath` criterion with no version still runs.
 

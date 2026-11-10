@@ -1378,3 +1378,35 @@ fn a_lazy_run_refuses_a_jsonpath_version_it_does_not_evaluate() {
     }]);
     assert!(execute(&one(steps), &options(), &mut client).is_ok());
 }
+
+#[test]
+#[cfg(feature = "v1_0")]
+fn a_lazy_v1_0_run_refuses_the_goessner_draft_and_runs_a_jsonpath_without_a_version() {
+    let v1_0 = |criterion: Value| -> roas_arazzo::v1_0::Description {
+        serde_json::from_value(json!({
+            "arazzo": "1.0.1",
+            "info": { "title": "T", "version": "1.0.0" },
+            "sourceDescriptions": [
+                { "name": "petStore", "url": "https://api.example.com/openapi.json", "type": "openapi" }
+            ],
+            "workflows": [{ "workflowId": "w", "steps": [{
+                "stepId": "a", "operationId": "listPets", "successCriteria": [criterion]
+            }] }]
+        }))
+        .expect("a v1.0 description")
+    };
+    // The only JSONPath version v1.0 names is one this engine does not evaluate.
+    let description = v1_0(json!({
+        "type": "jsonpath", "version": "draft-goessner-dispatch-jsonpath-00",
+        "context": "$response.body", "condition": "$.x"
+    }));
+    let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
+    let error =
+        roas_arazzo_executor::execute_v1_0(&description, &options(), &mut client).unwrap_err();
+    assert!(error.to_string().contains("RFC9535"), "{error}");
+    // Without a version it is plain `jsonpath`, evaluated as RFC 9535.
+    let description =
+        v1_0(json!({ "type": "jsonpath", "context": "$response.body", "condition": "$.x" }));
+    let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
+    assert!(roas_arazzo_executor::execute_v1_0(&description, &options(), &mut client).is_ok());
+}

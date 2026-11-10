@@ -65,7 +65,9 @@ pub enum SelectError {
         /// The runtime expression naming what it applied to.
         context: String,
     },
-    /// XPath: no engine here, and pretending otherwise would be worse.
+    /// A language or version this crate does not evaluate — XPath, or
+    /// JSONPath other than RFC 9535: no engine here, and pretending
+    /// otherwise would be worse.
     #[error("{0} expressions are not supported by this executor")]
     Unsupported(&'static str),
 }
@@ -132,7 +134,7 @@ pub(crate) enum Language {
 /// Read a `SelectorType` as a language this crate can apply.
 pub(crate) fn kind_of(type_: &SelectorType) -> Result<Language, SelectError> {
     if let SelectorType::Expression(expression) = type_
-        && !is_rfc9535(expression)
+        && !jsonpath_version_supported(expression)
     {
         return Err(SelectError::Unsupported("non-RFC9535 JSONPath"));
     }
@@ -150,7 +152,7 @@ pub(crate) fn kind_of(type_: &SelectorType) -> Result<Language, SelectError> {
 
 /// Whether the engine evaluates what an expression type names: any
 /// language but JSONPath, and JSONPath only as RFC 9535.
-pub(crate) fn is_rfc9535(expression: &roas_arazzo::v1_1::ExpressionType) -> bool {
+pub(crate) fn jsonpath_version_supported(expression: &roas_arazzo::v1_1::ExpressionType) -> bool {
     expression.type_ != ExpressionKind::Jsonpath || expression.version == "rfc9535"
 }
 
