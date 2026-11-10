@@ -1273,6 +1273,32 @@ fn a_cycle_through_another_document_at_run_time_names_the_dependencys_document()
     assert_eq!(failure.error.to_string(), lazy.to_string());
 }
 
+#[test]
+fn a_run_time_cycle_on_an_entry_dependency_stays_bare() {
+    // `main` calls the shared `child`, which depends on the entry's running
+    // `main`: the cycle is the entry document's, so it is not wrapped.
+    let mut documents = standard();
+    let shared = &mut documents[2].1;
+    shared["sourceDescriptions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "name": "root", "url": ROOT, "type": "arazzo" }));
+    shared["workflows"][0]["dependsOn"] = json!(["$sourceDescriptions.root.main"]);
+    let graph = Graph::new(&documents);
+    let options = graph.options("main");
+    let replies = || Fake::new().reply(200, &ok("root")).reply(200, &ok("local"));
+    let mut client = replies();
+    let lazy = execute(&graph.description, &options, &mut client).unwrap_err();
+    assert!(
+        matches!(&lazy, ExecutionError::Circular(id) if id == "main"),
+        "{lazy:?}"
+    );
+    assert_eq!(client.sent().len(), 2);
+    let plan = prepare(&graph.description, &options).unwrap();
+    let failure = plan.execute(&mut replies()).unwrap_err();
+    assert_eq!(failure.error.to_string(), lazy.to_string());
+}
+
 #[cfg(feature = "input-validation")]
 mod input_validation {
     use super::*;
