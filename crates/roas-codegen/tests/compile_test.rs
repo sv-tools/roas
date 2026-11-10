@@ -560,7 +560,16 @@ fn validated_description() -> serde_json::Value {
                 "many": {"type": "array", "items": {"type": "integer"}, "maxItems": 18446744073709551615u64}
             }},
             "Closed": {"type": "object", "additionalProperties": false, "propertyNames": {"maxLength": 1}, "properties": {"a": {"type": "string"}}},
-            "TypeList": {"type": ["string", "integer"], "maxLength": 3, "minimum": 5}
+            "TypeList": {"type": ["string", "integer"], "maxLength": 3, "minimum": 5},
+            "MaybeShort": {"oneOf": [{"type": ["string", "null"], "maxLength": 2}, {"type": "integer"}]},
+            "Picks": {"oneOf": [{"type": "integer", "enum": [1]}, {"type": "integer", "enum": [2]}]},
+            "Itself": {"anyOf": [{"$ref": "#/components/schemas/Itself"}, {"type": "string"}]},
+            "ChoiceAlias": {"$ref": "#/components/schemas/Choice"},
+            "Holds": {"type": "object", "properties": {"c": {"$ref": "#/components/schemas/ChoiceAlias"}}},
+            "OrNull": {"type": ["string", "integer", "null"], "maxLength": 1},
+            "Base": {"type": "object", "properties": {"q": {"type": "string"}}},
+            "Extended": {"$ref": "#/components/schemas/Base", "properties": {"z": {"type": "string", "maxLength": 1}}},
+            "Tiny": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "maximum": 3.5e38}}}
         }}
     })
 }
@@ -671,6 +680,26 @@ fn main() {
     assert_eq!(report::<TypeList>("7"), vec![]);
     assert_eq!(report::<TypeList>(r#""abcdef""#), vec![v("")]);
     assert_eq!(report::<TypeList>("1"), vec![v("")]);
+    // A nullable inline branch: checked behind its null.
+    assert_eq!(report::<MaybeShort>(r#""ab""#), vec![]);
+    assert_eq!(report::<MaybeShort>(r#""abc""#), vec![v("")]);
+    assert_eq!(report::<MaybeShort>("null"), vec![]);
+    // Decoding proves no match where an enum goes unchecked.
+    assert_eq!(report::<Picks>("1"), vec![u("")]);
+    // A composition naming itself is decoded, not validated forever.
+    assert_eq!(report::<Itself>(r#""a""#), vec![]);
+    // A null through an alias of an open union is still checked.
+    assert_eq!(report::<Holds>(r#"{"c":null}"#), vec![v("/c")]);
+    // A type list with null holds a raw null validly.
+    assert_eq!(report::<OrNull>("null"), vec![]);
+    assert_eq!(report::<OrNull>(r#""ab""#), vec![v("")]);
+    // `$ref` with sibling properties: each part checked once, no loop.
+    assert_eq!(report::<Extended>(r#"{"q":"a","z":"b"}"#), vec![]);
+    assert_eq!(report::<Extended>(r#"{"q":"a","z":"bc"}"#), vec![v("/z")]);
+    // serde_json reads an f32 past its range as an infinity; the bound,
+    // past every f32 but not every f64, still catches it.
+    assert_eq!(report::<Tiny>(r#"{"f":1e39}"#), vec![v("/f")]);
+    assert_eq!(report::<Tiny>(r#"{"f":1.5}"#), vec![]);
     println!("validation behaves");
 }
 "##;
@@ -819,6 +848,16 @@ func main() {
 	check(`7`, report[api.TypeList](`7`))
 	check(`"abcdef"`, report[api.TypeList](`"abcdef"`), v(""))
 	check(`1`, report[api.TypeList](`1`), v(""))
+	check(`"ab"`, report[api.MaybeShort](`"ab"`))
+	check(`"abc"`, report[api.MaybeShort](`"abc"`), v(""))
+	check(`null`, report[api.MaybeShort](`null`))
+	check(`1`, report[api.Picks](`1`), u(""))
+	check(`"a"`, report[api.Itself](`"a"`))
+	check(`{"c":null}`, report[api.Holds](`{"c":null}`), v("/c"))
+	check(`null`, report[api.OrNull](`null`))
+	check(`"ab"`, report[api.OrNull](`"ab"`), v(""))
+	check(`{"q":"a","z":"b"}`, report[api.Extended](`{"q":"a","z":"b"}`))
+	check(`{"q":"a","z":"bc"}`, report[api.Extended](`{"q":"a","z":"bc"}`), v("/z"))
 	fmt.Println("validation behaves")
 }
 "##;

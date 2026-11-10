@@ -26,6 +26,9 @@ pub(crate) struct Context<'a> {
     /// The Go name of the raw holder (open union or composition) `ty`
     /// names, if it names one.
     pub raw_holder: &'a dyn Fn(&TypeRef) -> Option<String>,
+    /// A branch that comes back to the holder being validated with the
+    /// same raw value: decoded, never validated, or it would not finish.
+    pub loops: &'a dyn Fn(&TypeRef) -> bool,
     pub needs: Needs,
 }
 
@@ -175,14 +178,23 @@ fn render(
                     "{r}.violation({p}, fmt.Sprintf({}, {value}))",
                     lit(&format!("%v is {word} {keyword} {literal}"))
                 );
-                if float && !(*bound as f32).is_finite() {
-                    // Beyond every float32: always or never met.
+                if !bound.is_finite() {
+                    // Beyond every value: always or never met.
                     if (*bound > 0.0) == at_least {
                         out.push(violation);
                     }
-                } else {
+                } else if float && (*bound as f32).is_finite() {
+                    // The bound as float32 rounds it, exactly as Rust does;
+                    // left to Go's constant conversion a midpoint could
+                    // round the other way.
                     out.push(format!(
-                        "if !({value} {op} {bound:?}) {{ {violation} }}"
+                        "if !({value} {op} {:?}) {{ {violation} }}",
+                        *bound as f32
+                    ));
+                } else {
+                    let wide = format!("float64({e})");
+                    out.push(format!(
+                        "if !({wide} {op} {bound:?}) {{ {violation} }}"
                     ));
                 }
             }
@@ -340,13 +352,32 @@ fn value(
     out: &mut Vec<String>,
     cx: &mut Context<'_>,
 ) -> bool {
-    let reads = render(
-        list,
-        (checks::kind_of(ty), item_of(ty)),
-        at,
-        out,
-        &mut cx.needs,
-    );
+    let reads = match ty {
+        // The checks apply to the value behind the pointer, when there is
+        // one.
+        TypeRef::Nullable(inner) | TypeRef::Boxed(inner) if !list.is_empty() => {
+            let deref = format!("(*{})", at.e);
+            let mut body = Vec::new();
+            render(
+                list,
+                (checks::kind_of(inner), item_of(inner)),
+                At { e: &deref, ..at },
+                &mut body,
+                &mut cx.needs,
+            );
+            if !body.is_empty() {
+                out.push(format!("if {} != nil {{ {} }}", at.e, body.join("; ")));
+            }
+            !body.is_empty()
+        }
+        _ => render(
+            list,
+            (checks::kind_of(ty), item_of(ty)),
+            at,
+            out,
+            &mut cx.needs,
+        ),
+    };
     let before = out.len();
     recurse(ty, at, 0, out, cx);
     reads || out.len() > before
@@ -357,17 +388,23 @@ fn value(
 fn branch(branch: &Branch, r: &str, cx: &mut Context<'_>) -> (Vec<String>, bool) {
     let list = checks::checks(&branch.ty, &branch.constraints);
     let mut body = Vec::new();
-    let reads = value(
-        &branch.ty,
-        &list,
-        At {
-            e: "x",
-            p: "pointer",
-            r,
-        },
-        &mut body,
-        cx,
-    );
+    let at = At {
+        e: "x",
+        p: "pointer",
+        r,
+    };
+    let reads = if (cx.loops)(&branch.ty) {
+        // Checks only: recursing would come back here.
+        render(
+            &list,
+            (checks::kind_of(&branch.ty), item_of(&branch.ty)),
+            at,
+            &mut body,
+            &mut cx.needs,
+        )
+    } else {
+        value(&branch.ty, &list, at, &mut body, cx)
+    };
     (body, reads)
 }
 
@@ -527,16 +564,27 @@ pub(crate) fn body(
             }
         }
         TypeKind::UnionOpen(u) => {
+            if def.nullable {
+                // A raw null is a value its schema allows.
+                out.push("if v.raw.Kind() == 'n' { return }".to_owned());
+            }
             out.push("certain, uncertain := 0, 0".to_owned());
             for (b, branch_view) in u.branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let (body, reads) = branch(b, "branch", cx);
+                // Decoding proves a match only when nothing the branch says
+                // goes unchecked.
+                let counter = if b.unchecked || (cx.loops)(&b.ty) {
+                    "uncertain"
+                } else {
+                    "certain"
+                };
                 if body.is_empty() {
-                    out.push(format!("if _, ok := v.{accessor}(); ok {{ certain++ }}"));
+                    out.push(format!("if _, ok := v.{accessor}(); ok {{ {counter}++ }}"));
                 } else {
                     let binding = if reads { "x" } else { "_" };
                     out.push(format!(
-                        "if {binding}, ok := v.{accessor}(); ok {{ branch := &ValidationReport{{}}; {}; if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ certain++ }} else {{ uncertain++ }} }} }}",
+                        "if {binding}, ok := v.{accessor}(); ok {{ branch := &ValidationReport{{}}; {}; if len(branch.Violations()) == 0 {{ if len(branch.Unchecked()) == 0 {{ {counter}++ }} else {{ uncertain++ }} }} }}",
                         body.join("; ")
                     ));
                 }
@@ -548,12 +596,23 @@ pub(crate) fn body(
             }
         }
         TypeKind::ComposedOpen(branches) => {
+            if def.nullable {
+                out.push("if v.raw.Kind() == 'n' { return }".to_owned());
+            }
             for (b, branch_view) in branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let message = lit(&format!(
                     "does not satisfy the allOf part read by {accessor}"
                 ));
-                let (body, reads) = branch(b, "r", cx);
+                let (mut body, reads) = branch(b, "r", cx);
+                if b.unchecked || (cx.loops)(&b.ty) {
+                    body.push(format!(
+                        "r.unevaluated(pointer, {})",
+                        lit(&format!(
+                            "allOf part read by {accessor}: it says more than is checked"
+                        ))
+                    ));
+                }
                 let part = if body.is_empty() {
                     format!("if _, ok := v.{accessor}(); !ok {{ r.violation(pointer, {message}) }}")
                 } else {

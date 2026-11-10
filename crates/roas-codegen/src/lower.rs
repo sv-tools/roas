@@ -285,7 +285,12 @@ impl<'a> Lowerer<'a> {
         // since the target's shape is not inspected here.
         let mut sibling_hint = hint.to_vec();
         sibling_hint.push("constraints".to_owned());
-        let projection = self.position(&Slot::Inline(Box::new(siblings.clone())), &sibling_hint);
+        // The siblings get an id of their own: hoisted under the reference's
+        // id, they would be overwritten by the intersection registered
+        // there, and the projection would name the intersection itself.
+        let mut own = siblings.clone();
+        own.id.pointer = crate::diagnostic::synthetic(&own.id.pointer, "siblings");
+        let projection = self.position(&Slot::Inline(Box::new(own)), &sibling_hint);
         self.warn(
             DiagnosticKind::OpenComposition { keyword: "$ref".to_owned() },
             id,
@@ -309,12 +314,14 @@ impl<'a> Lowerer<'a> {
                     ty: TypeRef::Named(target_id),
                     constraints: Default::default(),
                     object_only: false,
+                    unchecked: false,
                 },
                 Branch {
                     suggested_name: sibling_hint,
                     constraints: branch_constraints(&projection.ty, &siblings.constraints),
                     ty: projection.ty,
                     object_only: false,
+                    unchecked: false,
                 },
             ]),
             has_error: false,
@@ -546,6 +553,7 @@ impl<'a> Lowerer<'a> {
                     ty: TypeRef::Named(projection),
                     constraints: Default::default(),
                     object_only: true,
+                    unchecked: false,
                 }])
             }
             Kind::Object { .. } if named => TypeKind::Struct(self.object(schema, &name)),
@@ -704,6 +712,7 @@ impl<'a> Lowerer<'a> {
                 Branch {
                     suggested_name,
                     constraints: slot_constraints(slot, &ty),
+                    unchecked: slot_unchecked(slot),
                     ty,
                     object_only: false,
                 }
@@ -726,6 +735,7 @@ impl<'a> Lowerer<'a> {
                 Branch {
                     suggested_name: hint,
                     constraints: slot_constraints(slot, &ty),
+                    unchecked: slot_unchecked(slot),
                     ty,
                     object_only: false,
                 }
@@ -1252,6 +1262,25 @@ impl<'a> Lowerer<'a> {
         }
         self.ir.suppressed = suppressed;
     }
+}
+
+/// Whether an inline branch declares what nothing enforces, so decoding it
+/// proves no match.
+fn slot_unchecked(slot: &Slot) -> bool {
+    let Slot::Inline(schema) = slot else {
+        return false;
+    };
+    let numeric_enum = matches!(
+        &schema.kind,
+        Kind::Integer {
+            enum_values: Some(_),
+            ..
+        } | Kind::Number {
+            enum_values: Some(_),
+            ..
+        }
+    );
+    numeric_enum || schema.const_value.is_some() || !schema.unsupported.is_empty()
 }
 
 /// What an inline branch constrains that no named type carries for it.

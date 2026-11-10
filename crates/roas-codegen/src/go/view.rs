@@ -32,7 +32,8 @@ const BUILTIN_IMPORTS: &[(&str, &str)] = &[
 
 /// Lowercase names the templates declare, at package level or locally; an
 /// import used under one of them would not compile.
-const TEMPLATE_NAMES: &[&str] = &[
+/// The names generated validation adds, reserved only when it is on.
+const VALIDATION_NAMES: &[&str] = &[
     "certain",
     "uncertain",
     "branch",
@@ -44,6 +45,9 @@ const TEMPLATE_NAMES: &[&str] = &[
     "p",
     "x",
     "f",
+];
+
+const TEMPLATE_NAMES: &[&str] = &[
     "decodeOptions",
     "refuseNull",
     "readTag",
@@ -305,6 +309,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         // shadowed by it, or clash with it.
         for local in TEMPLATE_NAMES {
             used.insert(local, "a name the generated code declares");
+        }
+        if config.validation {
+            for local in VALIDATION_NAMES {
+                used.insert(local, "a name the generated validation declares");
+            }
         }
         for import in &builder.externs {
             if builtin.iter().any(|(path, _)| path == import) {
@@ -594,19 +603,29 @@ impl Builder<'_> {
             };
             let names = &self.names;
             let ir = self.ir;
-            let raw_holder = |ty: &TypeRef| match ty {
-                TypeRef::Named(id) => match ir.types.get(id).map(|d| &d.kind) {
-                    Some(TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_)) => {
-                        names.get(id).cloned()
+            // Through aliases, as `holds_null` sees them.
+            let raw_holder = |ty: &TypeRef| {
+                let mut id = ty.direct_named()?;
+                for _ in 0..=ir.types.len() {
+                    match &ir.types.get(id)?.kind {
+                        TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_) => {
+                            return names.get(id).cloned();
+                        }
+                        TypeKind::Alias(inner) | TypeKind::Newtype(inner) => {
+                            id = inner.direct_named()?
+                        }
+                        _ => return None,
                     }
-                    _ => None,
-                },
-                _ => None,
+                }
+                None
             };
+            let holder_id = def.id.clone();
+            let loops = |ty: &TypeRef| crate::checks::loops_back(ir, &holder_id, ty);
             let mut cx = super::validation::Context {
                 validates: &validates,
                 nil_able: &nil_able,
                 raw_holder: &raw_holder,
+                loops: &loops,
                 needs: self.needs,
             };
             view.validate = super::validation::body(def, &view, opted_out, &mut cx);

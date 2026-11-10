@@ -198,7 +198,13 @@ pub(crate) fn checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check> {
                 (&c.exclusive_maximum, true, false),
             ] {
                 let Some(n) = n else { continue };
-                let Some(bound) = n.as_f64() else { continue };
+                // A bound past every `f64` is kept as an infinity, which the
+                // backends decide statically rather than drop.
+                let bound = match n.as_f64() {
+                    Some(bound) => bound,
+                    None if n.to_string().starts_with('-') => f64::NEG_INFINITY,
+                    None => f64::INFINITY,
+                };
                 let literal = n.to_string();
                 out.push(if at_least {
                     Check::NumAtLeast {
@@ -310,6 +316,7 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
         (c.unique_items, "uniqueItems", array),
         (c.min_properties.is_some(), "minProperties", map),
         (c.max_properties.is_some(), "maxProperties", map),
+        (c.property_names, "propertyNames", map),
     ] {
         if present && !applies {
             out.push(keyword);
@@ -356,10 +363,52 @@ pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
                     warn(&def.id, format!("{}/{keyword}", def.id.pointer), keyword);
                 }
             }
+            TypeKind::UnionOpen(crate::ir::OpenUnion { branches, .. })
+            | TypeKind::ComposedOpen(branches) => {
+                for branch in branches {
+                    for keyword in unchecked_keywords(&branch.ty, &branch.constraints) {
+                        warn(&def.id, format!("{}/{keyword}", def.id.pointer), keyword);
+                    }
+                }
+            }
             _ => {}
         }
     }
     out
+}
+
+/// Whether validating `ty`, a branch of the raw holder `holder`, would
+/// come back to `holder` with the same raw value: a composition that
+/// refers to itself without consuming anything never finishes.
+pub(crate) fn loops_back(ir: &Ir, holder: &crate::diagnostic::SchemaId, ty: &TypeRef) -> bool {
+    fn raw_holder<'a>(ir: &'a Ir, ty: &'a TypeRef) -> Option<&'a crate::diagnostic::SchemaId> {
+        let mut id = ty.direct_named()?;
+        for _ in 0..=ir.types.len() {
+            match &ir.types.get(id)?.kind {
+                TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_) => return Some(id),
+                TypeKind::Alias(inner) | TypeKind::Newtype(inner) => id = inner.direct_named()?,
+                _ => return None,
+            }
+        }
+        None
+    }
+    let mut stack: Vec<&crate::diagnostic::SchemaId> = raw_holder(ir, ty).into_iter().collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = stack.pop() {
+        if id == holder {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        let branches = match &ir.types[id].kind {
+            TypeKind::UnionOpen(u) => &u.branches,
+            TypeKind::ComposedOpen(b) => b,
+            _ => continue,
+        };
+        stack.extend(branches.iter().filter_map(|b| raw_holder(ir, &b.ty)));
+    }
+    false
 }
 
 /// Every constraint keyword `c` declares.
@@ -415,7 +464,7 @@ fn parse_decimal(n: &Number) -> Option<Decimal> {
         None => (text, 0),
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((&mantissa, ""));
-    let exponent = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+    let exponent = exponent.saturating_sub(i64::try_from(fraction.len()).ok()?);
     let digits = format!("{whole}{fraction}")
         .trim_start_matches('0')
         .to_owned();
@@ -424,7 +473,7 @@ fn parse_decimal(n: &Number) -> Option<Decimal> {
     }
     // Trailing zeros move into the exponent, so `2.50` is `25e-1`.
     let trimmed = digits.trim_end_matches('0');
-    let exponent = exponent + (digits.len() - trimmed.len()) as i64;
+    let exponent = exponent.saturating_add((digits.len() - trimmed.len()) as i64);
     Some(Decimal {
         negative,
         digits: trimmed.to_owned(),
@@ -442,14 +491,14 @@ fn floor_ceil(n: &Number) -> (i128, i128) {
     }
     let len = d.digits.len() as i64;
     let (whole, fractional) = if d.exponent >= 0 {
-        if len + d.exponent > 30 {
+        if len.saturating_add(d.exponent) > 30 {
             let edge = if d.negative { -SATURATE } else { SATURATE };
             return (edge, edge);
         }
         let zeros = "0".repeat(d.exponent as usize);
         (format!("{}{zeros}", d.digits), false)
     } else {
-        let point = len + d.exponent;
+        let point = len.saturating_add(d.exponent);
         if point > 30 {
             let edge = if d.negative { -SATURATE } else { SATURATE };
             return (edge, edge);
@@ -558,5 +607,38 @@ mod tests {
         assert_eq!(divisor("0.5"), 1);
         assert_eq!(divisor("2.5"), 5);
         assert_eq!(divisor("0.03"), 3);
+    }
+
+    // Only an exact build keeps such literals as written.
+    #[cfg(feature = "exact-numbers")]
+    #[test]
+    fn exact_literals_are_read_as_written() {
+        assert_eq!(int_lower(&n("1e9223372036854775807"), false), SATURATE);
+        assert_eq!(int_upper(&n("-1e9223372036854775807"), false), -SATURATE);
+        assert_eq!(int_upper(&n("9007199254740993.5"), false), 9007199254740993);
+        let divisor = match &checks(
+            &TypeRef::Integer(IntWidth::Int64),
+            &Constraints {
+                multiple_of: Some(n("0.5000000000000000000001")),
+                ..Default::default()
+            },
+        )[0]
+        {
+            Check::IntMultipleOf { divisor, .. } => *divisor,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(divisor, 5000000000000000000001);
+        let bound = match &checks(
+            &TypeRef::Number(FloatWidth::Double),
+            &Constraints {
+                minimum: Some(n("1e400")),
+                ..Default::default()
+            },
+        )[0]
+        {
+            Check::NumAtLeast { bound, .. } => *bound,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(bound, f64::INFINITY);
     }
 }

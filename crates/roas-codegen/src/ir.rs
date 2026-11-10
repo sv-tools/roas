@@ -123,6 +123,10 @@ pub(crate) struct Branch {
     /// The projection applies only to objects: a typeless schema's object
     /// keywords constrain objects and say nothing about other values.
     pub object_only: bool,
+    /// The branch declares something neither its type nor a generated
+    /// check enforces (a numeric `enum`, a `const`, a keyword the generator
+    /// does not handle): decoding it is no proof that it matches.
+    pub unchecked: bool,
 }
 
 #[derive(Debug, Clone)]

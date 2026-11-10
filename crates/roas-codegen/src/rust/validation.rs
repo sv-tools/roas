@@ -20,7 +20,8 @@ struct At<'a> {
 /// `Err` decides the comparison statically, for a bound beyond the width.
 fn float_bound(bound: f64, width: FloatWidth) -> Result<String, f64> {
     match width {
-        FloatWidth::Double => Ok(format!("{bound:?}")),
+        FloatWidth::Double if bound.is_finite() => Ok(format!("{bound:?}")),
+        FloatWidth::Double => Err(bound),
         FloatWidth::Float => {
             let narrowed = bound as f32;
             if narrowed.is_finite() {
@@ -119,7 +120,12 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     Ok(bound) => out.push(format!(
                         "if !({value} {op} {bound}) {{ {violation}; }}"
                     )),
-                    // Beyond every value of the width: always or never met.
+                    // Past every float32 but not every f64: compared wide,
+                    // so a value decoded as an infinity is still caught.
+                    Err(bound) if bound.is_finite() => out.push(format!(
+                        "if !(f64::from(*{v}) {op} {bound:?}) {{ {violation}; }}"
+                    )),
+                    // Beyond every value: always or never met.
                     Err(bound) if (bound > 0.0) == at_least => out.push(format!("{violation};")),
                     Err(_) => {}
                 }
@@ -188,9 +194,13 @@ fn value(ty: &TypeRef, list: &[Check], at: At<'_>, out: &mut Vec<String>) -> boo
         TypeRef::Nullable(inner) => {
             let mut body = Vec::new();
             if value(inner, list, At { v: "v", ..at }, &mut body) {
+                // A scrutinee needs no parentheses, and rustc says so.
+                let scrutinee =
+                    at.v.strip_prefix('(')
+                        .and_then(|v| v.strip_suffix(')'))
+                        .unwrap_or(at.v);
                 out.push(format!(
-                    "if let Some(v) = {} {{ {} }}",
-                    at.v,
+                    "if let Some(v) = {scrutinee} {{ {} }}",
                     body.join(" ")
                 ));
             } else {
@@ -230,14 +240,23 @@ fn branch(
     (body, reads)
 }
 
+/// A holder whose schema allows `null` (`type: [..., "null"]`) carries it
+/// at its use sites, but decoded directly it holds a raw `null`, which is
+/// valid.
+const NULL_IS_VALID: &str = "if self.raw.get().trim() == \"null\" { return; }";
+
 /// The body of `validate_into` for one type, or `None` when it gets no
 /// implementation (a type alias shares its target's).
 pub(crate) fn body(
+    ir: &crate::ir::Ir,
     def: &TypeDef,
     view: &TypeView,
     generated: &dyn Fn(&TypeRef) -> bool,
     opted_out: bool,
 ) -> Option<Vec<String>> {
+    // A branch that comes back to this holder with the same raw value would
+    // never finish: it is decoded, not validated.
+    let progressing = |ty: &TypeRef| generated(ty) && !checks::loops_back(ir, &def.id, ty);
     if view.kind == "alias" {
         return None;
     }
@@ -391,25 +410,39 @@ pub(crate) fn body(
             }
         }
         TypeKind::UnionOpen(u) => {
+            if def.nullable {
+                out.push(NULL_IS_VALID.to_owned());
+            }
             let mut lines = Vec::new();
             let mut checked = false;
+            let mut counts_certain = false;
             for (b, branch_view) in u.branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
-                let (body, reads) = branch(b, generated, ("branch", "&mut branch"));
+                let (body, reads) = branch(b, &progressing, ("branch", "&mut branch"));
+                // Decoding proves a match only when nothing the branch says
+                // goes unchecked.
+                let sure = !b.unchecked && (!generated(&b.ty) || progressing(&b.ty));
+                let counter = if sure { "certain" } else { "uncertain" };
+                counts_certain |= sure;
                 if body.is_empty() {
+                    checked |= !sure;
                     lines.push(format!(
-                        "if self.{accessor}().is_some() {{ certain += 1; }}"
+                        "if self.{accessor}().is_some() {{ {counter} += 1; }}"
                     ));
                 } else {
                     checked = true;
                     let binding = if reads { "v" } else { "_" };
                     lines.push(format!(
-                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = ValidationReport::default(); {} if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ certain += 1; }} else {{ uncertain += 1; }} }} }}",
+                        "if let Some({binding}) = self.{accessor}() {{ let mut branch = ValidationReport::default(); {} if branch.violations().next().is_none() {{ if branch.unchecked().next().is_none() {{ {counter} += 1; }} else {{ uncertain += 1; }} }} }}",
                         body.join(" ")
                     ));
                 }
             }
-            out.push("let mut certain = 0usize;".to_owned());
+            out.push(if counts_certain {
+                "let mut certain = 0usize;".to_owned()
+            } else {
+                "let certain = 0usize;".to_owned()
+            });
             out.push(if checked {
                 "let mut uncertain = 0usize;".to_owned()
             } else {
@@ -423,13 +456,25 @@ pub(crate) fn body(
             }
         }
         TypeKind::ComposedOpen(branches) => {
+            if def.nullable {
+                out.push(NULL_IS_VALID.to_owned());
+            }
             for (b, branch_view) in branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
                 let message = format!(
                     "does not satisfy the allOf part read by {}",
                     accessor.trim_start_matches("as_")
                 );
-                let (body, reads) = branch(b, generated, ("report", "report"));
+                let (mut body, reads) = branch(b, &progressing, ("report", "report"));
+                if b.unchecked || (generated(&b.ty) && !progressing(&b.ty)) {
+                    body.push(format!(
+                        "report.unevaluated(pointer, {:?});",
+                        format!(
+                            "allOf part read by {}: it says more than is checked",
+                            accessor.trim_start_matches("as_")
+                        )
+                    ));
+                }
                 let part = if body.is_empty() {
                     format!(
                         "if self.{accessor}().is_none() {{ report.violation(pointer, {message:?}); }}"
