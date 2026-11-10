@@ -918,9 +918,10 @@ impl<'d> Run<'d> {
     /// Enter a call, `goto` or `retry` target after the workflows it
     /// depends on. Those run as the root's dependencies do: each once in a
     /// run, with the run's inputs, so one that already finished as a
-    /// dependency is not run again. One still running further up, however
-    /// it was entered — it is, directly or not, entering the target — can
-    /// never finish first, which is a `dependsOn` cycle.
+    /// dependency is not run again. One still to run with any instance
+    /// running further up — whatever its inputs, that instance is, directly
+    /// or not, entering the target — is a `dependsOn` cycle: a dependency
+    /// run is never started inside a running instance of itself.
     fn enter_after_dependencies(
         &mut self,
         doc: Doc,

@@ -179,6 +179,71 @@ fn a_workflow_level_action_applies_to_every_step() {
     assert_eq!(report.outcome, Outcome::Failed);
     assert_eq!(report.steps[0].action.as_deref(), Some("ended, failed"));
     assert_eq!(client.sent().len(), 1);
+
+    // So is one whose run with the run's own inputs would not have come
+    // back here: `a` was called with `mode: call`, and a dependency run of
+    // `a` would end at its first step, but no dependency run is started
+    // inside a running `a`.
+    let description = self::description(
+        json!([
+            { "workflowId": "w", "steps": [{ "stepId": "call", "workflowId": "a",
+                "parameters": [{ "name": "mode", "value": "call" }] }] },
+            { "workflowId": "a", "steps": [
+                { "stepId": "first", "operationId": "listPets",
+                    "onSuccess": [{ "name": "stop", "type": "end",
+                        "criteria": [{ "condition": "$inputs.mode != 'call'" }] }] },
+                { "stepId": "call", "workflowId": "b" }] },
+            { "workflowId": "b", "dependsOn": ["a"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] }
+        ]),
+        None,
+    );
+    let options = options().workflow("w").input("mode", "dependency");
+    let error = execute(
+        &description,
+        &options,
+        &mut Fake::new().reply(200, &json!([])),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, ExecutionError::Circular(id) if id == "a"),
+        "{error}"
+    );
+    let plan = roas_arazzo_executor::prepare(&description, &options).unwrap();
+    let failure = plan
+        .execute(&mut Fake::new().reply(200, &json!([])))
+        .unwrap_err();
+    assert_eq!(failure.error.to_string(), error.to_string());
+}
+
+#[test]
+fn a_dependency_that_already_finished_as_one_is_met_even_while_called_again() {
+    // `a` ran as `w`'s dependency (and stopped at its first step); `w` then
+    // calls `a`, which calls `b`, which depends on `a`: that dependency is
+    // met, so `b` runs inside the called `a` rather than being a cycle.
+    let description = description(
+        json!([
+            { "workflowId": "w", "dependsOn": ["a"], "steps": [{ "stepId": "call",
+                "workflowId": "a", "parameters": [{ "name": "mode", "value": "call" }] }] },
+            { "workflowId": "a", "steps": [
+                { "stepId": "first", "operationId": "listPets",
+                    "onSuccess": [{ "name": "stop", "type": "end",
+                        "criteria": [{ "condition": "$inputs.mode != 'call'" }] }] },
+                { "stepId": "call", "workflowId": "b" }] },
+            { "workflowId": "b", "dependsOn": ["a"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] }
+        ]),
+        None,
+    );
+    let options = options().workflow("w").input("mode", "dependency");
+    let replies = || (0..3).fold(Fake::new(), |client, _| client.reply(200, &json!([])));
+    let lazy = execute(&description, &options, &mut replies()).unwrap();
+    assert_eq!(
+        order(&lazy),
+        ["a.first", "a.first", "b.s", "a.call", "w.call"]
+    );
+    let plan = roas_arazzo_executor::prepare(&description, &options).unwrap();
+    assert_eq!(order(&plan.execute(&mut replies()).unwrap()), order(&lazy));
 }
 
 #[test]
