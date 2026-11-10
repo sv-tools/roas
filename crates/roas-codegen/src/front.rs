@@ -1028,14 +1028,16 @@ impl Translator<'_> {
 
 /// Split the model's catch-all into `x-` extensions, kept, and every
 /// other keyword, returned for reporting.
-/// The inline item or member-value schema's constraints. Not with
-/// `patternProperties`: `additionalProperties` then speaks only of the
-/// members no pattern matches, which the generated map does not separate.
+/// The inline item or member-value schema's constraints. Not beside
+/// `prefixItems` or `patternProperties`: `items` and `additionalProperties`
+/// then speak only of the items after the prefix, or the members no
+/// pattern matches, which the generated array or map does not separate.
 fn items(schema: &FrontSchema) -> Option<Items> {
     let (keyword, inner) = match &schema.kind {
+        // Beside `prefixItems`, `items` speaks only of the items after it.
         Kind::Array {
             items: Some(Slot::Inline(inner)),
-        } => ("items", inner),
+        } if !schema.unsupported.iter().any(|k| k == "prefixItems") => ("items", inner),
         Kind::Object {
             additional: Additional::Schema(Slot::Inline(inner)),
             ..

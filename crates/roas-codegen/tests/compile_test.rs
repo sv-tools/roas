@@ -567,6 +567,11 @@ fn validated_description() -> serde_json::Value {
                 "codes": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+$"}},
                 "odd": {"type": "array", "items": {"type": "string", "x-foo": 1, "if": {"type": "string"}, "then": true}}
             }},
+            "Pf": {"type": "object", "properties": {"p": {"type": "array", "prefixItems": [{"type": "string"}], "items": {"type": "string", "maxLength": 1}}}},
+            "Pu": {"oneOf": [
+                {"type": "array", "prefixItems": [{"type": "string"}], "items": {"type": "string", "maxLength": 1}},
+                {"type": "array", "items": {"type": "integer"}}
+            ]},
             "EachList": {"type": "array", "items": {"type": "string", "maxLength": 1}},
             "Rest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "number", "maximum": 5}},
             "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
@@ -901,6 +906,9 @@ fn main() {
     assert_eq!(report::<Each>(r#"{"odd":[]}"#), vec![]);
     assert_eq!(report::<Each>(r#"{"odd":["x","y"]}"#), vec![u("/odd/0"), u("/odd/1")]);
     assert_eq!(report::<EachList>(r#"["a","bc"]"#), vec![v("/1")]);
+    // Beside `prefixItems`, `items` is not applied to the prefix.
+    assert_eq!(report::<Pf>(r#"{"p":["abc"]}"#), vec![u("/p")]);
+    assert_eq!(report::<Pu>(r#"["abc"]"#), vec![u("")]);
     assert_eq!(report::<Rest>(r#"{"a":"x","b":3,"c":9}"#), vec![v("/c")]);
     assert_eq!(report::<Code>(r#""ABC""#), vec![v("")]);
     assert_eq!(report::<Coded>(r#""ab""#), vec![]);
@@ -1332,6 +1340,8 @@ func main() {
 	check(`{"odd":[]}`, report[api.Each](`{"odd":[]}`))
 	check(`{"odd":["x","y"]}`, report[api.Each](`{"odd":["x","y"]}`), u("/odd/0"), u("/odd/1"))
 	check(`["a","bc"]`, report[api.EachList](`["a","bc"]`), v("/1"))
+	check(`{"p":["abc"]}`, report[api.Pf](`{"p":["abc"]}`), u("/p"))
+	check(`["abc"]`, report[api.Pu](`["abc"]`), u(""))
 	check(`{"a":"x","b":3,"c":9}`, report[api.Rest](`{"a":"x","b":3,"c":9}`), v("/c"))
 	check(`"ABC"`, report[api.Code](`"ABC"`), v(""))
 	check(`"ab"`, report[api.Coded](`"ab"`))
