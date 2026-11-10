@@ -249,6 +249,25 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     });
                 }
             }
+            Check::Keys(list) => {
+                let mut body = Vec::new();
+                render(
+                    list,
+                    ValueKind::String,
+                    At {
+                        v: "k",
+                        p: "&p",
+                        r,
+                    },
+                    &mut body,
+                );
+                if !body.is_empty() {
+                    out.push(format!(
+                        "for k in {v}.keys() {{ let p = child_pointer({p}, k); {} }}",
+                        body.join(" ")
+                    ));
+                }
+            }
             Check::ItemsUnevaluated { keyword, reason } => out.push(format!(
                 "if !{v}.is_empty() {{ {r}.unevaluated({p}, {:?}); }}",
                 format!("{keyword} on the items: {reason}")
@@ -583,6 +602,47 @@ pub(crate) fn body(
                     Check::MaxProperties(n) => out.push(format!(
                         "if (members as u64) > {n} {{ report.violation(pointer, format!(\"has {{members}} members, more than maxProperties {n}\")); }}"
                     )),
+                    // Declared names are known now: only whether the member
+                    // is present is left to run time. The other members'
+                    // names are read from the catch-all.
+                    Check::Keys(names) => {
+                        for (field, field_view) in s.fields.iter().zip(&view.fields) {
+                            let pointer = format!("&child_pointer(pointer, {:?})", field.raw_name);
+                            let statement = match checks::name_verdict(&field.raw_name, names) {
+                                checks::Verdict::Pass => continue,
+                                checks::Verdict::Fail(message) => {
+                                    format!("report.violation({pointer}, {message:?});")
+                                }
+                                checks::Verdict::Unknown(message) => {
+                                    format!("report.unevaluated({pointer}, {message:?});")
+                                }
+                            };
+                            let statement = if field.required {
+                                statement
+                            } else {
+                                format!("if self.{}.is_some() {{ {statement} }}", field_view.name)
+                            };
+                            let gates = field_view.cfg.join(" ");
+                            out.push(
+                                format!("{gates} {{ {statement} }}").trim_start().to_owned(),
+                            );
+                        }
+                        if matches!(s.additional, Additional::CatchAll(_)) {
+                            let field = format!(
+                                "self.{}",
+                                view.fields.last().expect("the catch-all field").name
+                            );
+                            render(
+                                std::slice::from_ref(check),
+                                ValueKind::Map,
+                                At {
+                                    v: &field,
+                                    ..report
+                                },
+                                &mut out,
+                            );
+                        }
+                    }
                     other => {
                         render(
                             std::slice::from_ref(other),

@@ -573,6 +573,12 @@ fn validated_description() -> serde_json::Value {
                 {"type": "array", "items": {"type": "integer"}}
             ]},
             "GatedRest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "string", "maxLength": 1}},
+            "Names": {"type": "object", "propertyNames": {"type": "string", "pattern": "^[a-z]+$", "maxLength": 2},
+                "properties": {"ok": {"type": "string"}, "Bad": {"type": "string"}},
+                "additionalProperties": {"type": "string"}},
+            "NamesLook": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"pattern": "a(?=b)"}},
+            "NamesEnum": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"enum": ["a"]}},
+            "NamesTrue": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": true},
             "EachList": {"type": "array", "items": {"type": "string", "maxLength": 1}},
             "Rest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "number", "maximum": 5}},
             "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
@@ -956,13 +962,23 @@ fn main() {
     assert_eq!(report::<Fine>(r#"{"f":0.2}"#), vec![v("/f")]);
     // A null in an open holder is one of its values, and matches no branch.
     assert_eq!(report::<Fine>(r#"{"choice":null}"#), vec![v("/choice")]);
-    // Member names are not checked yet, and say so.
-    assert_eq!(report::<Named>(r#"{"abcd":1}"#), vec![u("")]);
+    // Member names are checked.
+    assert_eq!(report::<Named>(r#"{"abcd":1}"#), vec![v("/abcd")]);
+    assert_eq!(report::<Named>(r#"{"abc":1}"#), vec![]);
+    // Member names: declared ones decided when generating, the others read.
+    assert_eq!(report::<Names>(r#"{"ok":"x"}"#), vec![]);
+    assert_eq!(report::<Names>(r#"{"Bad":"x","ok":"y"}"#), vec![v("/Bad")]);
+    assert_eq!(report::<Names>(r#"{"zz":"x","Q":"y"}"#), vec![v("/Q")]);
+    assert_eq!(report::<NamesLook>(r#"{}"#), vec![]);
+    assert_eq!(report::<NamesLook>(r#"{"a":1}"#), vec![u("/a")]);
+    assert_eq!(report::<NamesEnum>(r#"{"a":1}"#), vec![u("")]);
+    assert_eq!(report::<NamesTrue>(r#"{"a":1}"#), vec![]);
     // Bounds beyond every value, and the one multiple of 2^63 an i64 holds.
     assert_eq!(report::<Edge>(r#"{"big":"x","wide":1.5,"many":[1],"m":-9223372036854775808}"#), vec![]);
     assert_eq!(report::<Edge>(r#"{"m":0}"#), vec![]);
     assert_eq!(report::<Edge>(r#"{"m":5}"#), vec![v("/m")]);
-    assert_eq!(report::<Closed>(r#"{"a":"x"}"#), vec![u("")]);
+    // A declared name within propertyNames, decided when generating.
+    assert_eq!(report::<Closed>(r#"{"a":"x"}"#), vec![]);
     // A type list's constraints apply to the member they fit.
     assert_eq!(report::<TypeList>(r#""ab""#), vec![]);
     assert_eq!(report::<TypeList>("7"), vec![]);
@@ -1369,11 +1385,19 @@ func main() {
 	check(`{"f":0.1}`, report[api.Fine](`{"f":0.1}`), u("/f"))
 	check(`{"f":0.2}`, report[api.Fine](`{"f":0.2}`), v("/f"))
 	check(`{"choice":null}`, report[api.Fine](`{"choice":null}`), v("/choice"))
-	check(`{"abcd":1}`, report[api.Named](`{"abcd":1}`), u(""))
+	check(`{"abcd":1}`, report[api.Named](`{"abcd":1}`), v("/abcd"))
+	check(`{"abc":1}`, report[api.Named](`{"abc":1}`))
+	check(`{"ok":"x"}`, report[api.Names](`{"ok":"x"}`))
+	check(`{"Bad":"x","ok":"y"}`, report[api.Names](`{"Bad":"x","ok":"y"}`), v("/Bad"))
+	check(`{"zz":"x","Q":"y"}`, report[api.Names](`{"zz":"x","Q":"y"}`), v("/Q"))
+	check(`{}`, report[api.NamesLook](`{}`))
+	check(`{"a":1}`, report[api.NamesLook](`{"a":1}`), u("/a"))
+	check(`{"a":1}`, report[api.NamesEnum](`{"a":1}`), u(""))
+	check(`{"a":1}`, report[api.NamesTrue](`{"a":1}`))
 	check(`edge`, report[api.Edge](`{"big":"x","wide":1.5,"many":[1],"m":-9223372036854775808}`))
 	check(`{"m":0}`, report[api.Edge](`{"m":0}`))
 	check(`{"m":5}`, report[api.Edge](`{"m":5}`), v("/m"))
-	check(`{"a":"x"}`, report[api.Closed](`{"a":"x"}`), u(""))
+	check(`{"a":"x"}`, report[api.Closed](`{"a":"x"}`))
 	check(`"ab"`, report[api.TypeList](`"ab"`))
 	check(`7`, report[api.TypeList](`7`))
 	check(`"abcdef"`, report[api.TypeList](`"abcdef"`), v(""))

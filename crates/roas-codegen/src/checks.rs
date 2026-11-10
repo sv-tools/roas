@@ -101,6 +101,10 @@ pub(crate) enum Check {
         presence: Vec<Check>,
         value: Vec<Check>,
     },
+    /// `propertyNames`: string checks on each member name of a map, or of
+    /// a struct's other members (its declared names are decided when
+    /// generating: see [`name_verdict`]).
+    Keys(Vec<Check>),
     /// What the items or members of a non-empty array or map declare that
     /// nothing checks on them.
     ItemsUnevaluated {
@@ -310,12 +314,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     .filter(|n| *n < u64::MAX)
                     .map(Check::MaxProperties),
             );
-            if c.property_names {
-                out.push(Check::Unevaluated {
-                    keyword: "propertyNames",
-                    reason: "member-name schemas are not checked yet".into(),
-                });
-            }
+            out.extend(names(c));
             out.extend(pattern_properties(c));
             out.extend(each(ty, c));
         }
@@ -351,12 +350,7 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
             .filter(|n| *n < u64::MAX)
             .map(Check::MaxProperties),
     );
-    if constraints.property_names {
-        out.push(Check::Unevaluated {
-            keyword: "propertyNames",
-            reason: "member-name schemas are not checked yet".into(),
-        });
-    }
+    out.extend(names(constraints));
     out.extend(pattern_properties(constraints));
     out
 }
@@ -377,6 +371,73 @@ pub(crate) fn each(ty: &TypeRef, c: &Constraints) -> Option<Check> {
         presence,
         value,
     })
+}
+
+/// `propertyNames`: checked on each member name when it says only what a
+/// string check covers, otherwise unevaluated.
+fn names(c: &Constraints) -> Option<Check> {
+    if !c.property_names {
+        return None;
+    }
+    match &c.names {
+        Some(names) => {
+            let list = value_checks(&TypeRef::String, names);
+            (!list.is_empty()).then_some(Check::Keys(list))
+        }
+        None => Some(Check::Unevaluated {
+            keyword: "propertyNames",
+            reason: "a member-name schema saying more than minLength, maxLength and pattern is not checked yet".into(),
+        }),
+    }
+}
+
+/// What the name checks say of a member name known when generating.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Verdict {
+    Pass,
+    Fail(String),
+    Unknown(String),
+}
+
+/// The `propertyNames` checks applied to a declared property's `name`.
+pub(crate) fn name_verdict(name: &str, list: &[Check]) -> Verdict {
+    let mut unknown = None;
+    for check in list {
+        let length = name.chars().count() as u64;
+        match check {
+            Check::MinLength(n) if length < *n => {
+                return Verdict::Fail(format!(
+                    "the name is shorter than propertyNames minLength {n}"
+                ));
+            }
+            Check::MaxLength(n) if length > *n => {
+                return Verdict::Fail(format!(
+                    "the name is longer than propertyNames maxLength {n}"
+                ));
+            }
+            Check::MinLength(_) | Check::MaxLength(_) => {}
+            Check::Pattern { regex, source } => match regex::Regex::new(regex) {
+                Ok(re) if re.is_match(name) => {}
+                Ok(_) => {
+                    return Verdict::Fail(format!(
+                        "the name does not match propertyNames pattern {source:?}"
+                    ));
+                }
+                Err(_) => {
+                    unknown.get_or_insert_with(|| {
+                        format!("propertyNames pattern {source:?}: too large to compile here")
+                    });
+                }
+            },
+            Check::Unevaluated { keyword, reason } => {
+                unknown.get_or_insert_with(|| format!("propertyNames {keyword}: {reason}"));
+            }
+            _ => {
+                unknown.get_or_insert_with(|| "propertyNames: not checked on this name".to_owned());
+            }
+        }
+    }
+    unknown.map_or(Verdict::Pass, Verdict::Unknown)
 }
 
 fn pattern_properties(c: &Constraints) -> Option<Check> {
@@ -896,10 +957,29 @@ pub(crate) fn diagnostics(
             }
             _ => {}
         }
-        // Inline items and member values, checked on each.
+        // A struct's checked `propertyNames`: its pattern is a string
+        // position. (Other positions' are found below.)
+        if matches!(def.kind, TypeKind::Struct(_))
+            && def.constraints.property_names
+            && let Some(names) = &def.constraints.names
+        {
+            positions.push((
+                format!("{}/propertyNames", def.id.pointer),
+                &TypeRef::String,
+                names,
+            ));
+        }
+        // Inline items and member values, checked on each, and a map's
+        // checked `propertyNames`.
         let mut i = 0;
         while i < positions.len() {
             let (pointer, ty, c) = positions[i].clone();
+            if c.property_names
+                && kind_of(ty) == ValueKind::Map
+                && let Some(names) = &c.names
+            {
+                positions.push((format!("{pointer}/propertyNames"), &TypeRef::String, names));
+            }
             if let (Some(items), TypeRef::Array(item) | TypeRef::Map(item)) = (&c.items, strip(ty))
             {
                 positions.push((
