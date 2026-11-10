@@ -374,6 +374,33 @@ pub(crate) fn shared_unsupported(branches: &[crate::ir::Branch]) -> Vec<Check> {
     }
 }
 
+/// The float32s nearest `bound` from below and above: the same one when
+/// `bound` is a float32.
+pub(crate) fn f32_neighbours(bound: f64) -> (f32, f32) {
+    let rounded = bound as f32;
+    let step = |f: f32, up: bool| {
+        let bits = f.to_bits();
+        let next = if (f >= 0.0) == up {
+            if f == 0.0 && !up {
+                0x8000_0001
+            } else {
+                bits + 1
+            }
+        } else if f == 0.0 {
+            1
+        } else {
+            bits - 1
+        };
+        let next = f32::from_bits(next);
+        if next.is_finite() { next } else { f }
+    };
+    match f64::from(rounded).partial_cmp(&bound) {
+        Some(std::cmp::Ordering::Less) => (rounded, step(rounded, true)),
+        Some(std::cmp::Ordering::Greater) => (step(rounded, false), rounded),
+        _ => (rounded, rounded),
+    }
+}
+
 /// Whether decoding a branch proves nothing: it declares what neither its
 /// type nor a generated check enforces.
 pub(crate) fn unsure(branch: &crate::ir::Branch) -> bool {

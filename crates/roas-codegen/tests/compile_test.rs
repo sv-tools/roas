@@ -12,7 +12,7 @@
 //! Set `ROAS_CODEGEN_SKIP_COMPILE=1` to skip both where no toolchain or
 //! registry is available.
 
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 use roas::validation::{IGNORE_UNUSED, Options};
 use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
@@ -645,7 +645,11 @@ fn validated_description() -> serde_json::Value {
             "ListIf": {"type": ["string", "integer", "null"], "if": {"type": "null"}, "then": false},
             "ScalarAlias": {"$ref": "#/components/schemas/Scalar"},
             "HoldsScalarAlias": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/ScalarAlias"}}},
-            "EnumIf": {"type": "string", "enum": ["a"], "if": {"const": "a"}, "then": false}
+            "EnumIf": {"type": "string", "enum": ["a"], "if": {"const": "a"}, "then": false},
+            "Mid2": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "minimum": 1.0000000596046448}}},
+            "DMin": {"type": "number", "minimum": 8.143539365241406e270},
+            "SibEnum": {"$ref": "#/components/schemas/MaybeText", "enum": ["a", "b"]},
+            "HoldsSibEnum": {"type": "object", "properties": {"e": {"$ref": "#/components/schemas/SibEnum"}}}
         }}
     })
 }
@@ -774,7 +778,7 @@ fn main() {
     assert_eq!(report::<Extended>(r#"{"q":"a","z":"bc"}"#), vec![v("/z")]);
     // serde_json reads an f32 past its range as an infinity; the bound,
     // past every f32 but not every f64, still catches it.
-    assert_eq!(report::<Tiny>(r#"{"f":1e39}"#), vec![u("/f")]);
+    assert!(serde_json::from_str::<Tiny>(r#"{"f":1e39}"#).is_err());
     assert_eq!(report::<Tiny>(r#"{"f":1.5}"#), vec![]);
     // A referenced numeric enum is unchecked too: no certain double match.
     assert_eq!(report::<PicksRef>("1"), vec![u("")]);
@@ -808,8 +812,8 @@ fn main() {
     assert_eq!(report::<EdgeBranch>(r#""a""#), vec![]);
     // serde_json reads a float past its range as an infinity, from some
     // literal on either side of the bound.
-    assert_eq!(report::<FInf>(r#"{"f":1e39}"#), vec![u("/f")]);
-    assert_eq!(report::<FInf>(r#"{"m":1e39}"#), vec![u("/m")]);
+    assert!(serde_json::from_str::<FInf>(r#"{"f":1e39}"#).is_err());
+    assert_eq!(report::<FInf>(r#"{"f":1e38}"#), vec![]);
     assert_eq!(report::<Mid>(r#"{"f":1.0000000596046448}"#), vec![u("/f")]);
     // An enum without null leaves null out of a type list.
     assert_eq!(report::<NoNullList>(r#""a""#), vec![]);
@@ -843,6 +847,12 @@ fn main() {
     assert_eq!(report::<ListIf>("null"), vec![u("")]);
     assert_eq!(report::<HoldsScalarAlias>(r#"{"n":null}"#), vec![u("/n")]);
     assert_eq!(report::<EnumIf>(r#""a""#), vec![u("")]);
+    // A float at either float around its bound may have come from either side.
+    assert_eq!(report::<Mid2>(r#"{"f":1.000000059604644775390624}"#), vec![u("/f")]);
+    // A double read exactly, as its bound was.
+    assert_eq!(report::<DMin>("81435393652414055e254"), vec![]);
+    // A null the siblings' enum leaves out is not passed.
+    assert!(!report::<HoldsSibEnum>(r#"{"e":null}"#).is_empty());
     println!("validation behaves");
 }
 "##;
@@ -1050,6 +1060,11 @@ func main() {
 	check(`null`, report[api.ListIf](`null`), u(""))
 	check(`{"n":null}`, report[api.HoldsScalarAlias](`{"n":null}`), u("/n"))
 	check(`"a"`, report[api.EnumIf](`"a"`), u(""))
+	check(`{"f":1.000000059604644775390624}`, report[api.Mid2](`{"f":1.000000059604644775390624}`), u("/f"))
+	check(`81435393652414055e254`, report[api.DMin](`81435393652414055e254`))
+	if got := report[api.HoldsSibEnum](`{"e":null}`); len(got) == 0 {
+		panic("null outside the siblings' enum passed")
+	}
 	fmt.Println("validation behaves")
 }
 "##;

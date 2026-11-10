@@ -201,7 +201,13 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         },
         RustDependency {
             name: "serde_json".into(),
-            features: vec!["raw_value".into()],
+            // Validation compares a decoded number with a bound read
+            // exactly: the decoder must read it exactly too.
+            features: if builder.config.validation {
+                vec!["raw_value".into(), "float_roundtrip".into()]
+            } else {
+                vec!["raw_value".into()]
+            },
         },
     ];
     for import in builder.externs.values() {

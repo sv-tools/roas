@@ -121,9 +121,19 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 // decided as far as an f64 holds it.)
                 let inexact = matches!(width, FloatWidth::Float);
                 match float_bound(*bound, width) {
-                    Ok(rounded) if inexact => out.push(format!(
-                        "if {value} == {rounded} {{ {r}.unevaluated({p}, \"{keyword} {literal}: the value rounds to the same float as the bound\"); }} else if !({value} {op} {rounded}) {{ {violation}; }}"
-                    )),
+                    // Either float32 around the bound may be where a
+                    // literal at the bound lands.
+                    Ok(_) if inexact => {
+                        let (below, above) = checks::f32_neighbours(*bound);
+                        let at = if below == above {
+                            format!("{value} == {below:?}_f32")
+                        } else {
+                            format!("{value} == {below:?}_f32 || {value} == {above:?}_f32")
+                        };
+                        out.push(format!(
+                            "if {at} {{ {r}.unevaluated({p}, \"{keyword} {literal}: the value rounds to the same float as the bound\"); }} else if !(f64::from({value}) {op} {bound:?}) {{ {violation}; }}"
+                        ))
+                    }
                     Ok(bound) => out.push(format!(
                         "if !({value} {op} {bound}) {{ {violation}; }}"
                     )),

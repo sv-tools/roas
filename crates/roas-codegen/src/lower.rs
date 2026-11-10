@@ -1200,7 +1200,7 @@ impl<'a> Lowerer<'a> {
                 self.warn(
                     DiagnosticKind::LossyNumber,
                     &schema.id,
-                    "`format: float` maps to a 32-bit float; a value past its range is read as an infinity in Rust and rejected at decode in Go".into(),
+                    "`format: float` maps to a 32-bit float; a value past its range is rejected at decode (read as an infinity in Rust without serde_json's `float_roundtrip`)".into(),
                 );
             }
         }
@@ -1370,13 +1370,37 @@ fn branch_constraints(
     }
 }
 
-/// Whether `$ref` siblings allow null: they say so, or say no `type`.
+/// Whether `$ref` siblings are known to allow null: they say so, or say
+/// no `type` and nothing else about it.
 fn admits_null(siblings: &FrontSchema) -> bool {
-    siblings.nullable
-        || matches!(
-            &siblings.kind,
-            Kind::Any | Kind::Object { typeless: true, .. }
-        )
+    // What the generator does not read may leave null out: unproven, the
+    // null is validated rather than passed.
+    if !siblings.unsupported.is_empty() {
+        return false;
+    }
+    // An `enum` or `const` names the values allowed, null among them or not.
+    let listed = match &siblings.kind {
+        Kind::String {
+            enum_values: Some(_),
+            ..
+        }
+        | Kind::Integer {
+            enum_values: Some(_),
+            ..
+        }
+        | Kind::Number {
+            enum_values: Some(_),
+            ..
+        } => Some(false),
+        _ => siblings.const_value.as_ref().map(Value::is_null),
+    };
+    listed.unwrap_or(
+        siblings.nullable
+            || matches!(
+                &siblings.kind,
+                Kind::Any | Kind::Object { typeless: true, .. }
+            ),
+    )
 }
 
 fn wrap_nullable(lowered: Lowered) -> TypeRef {

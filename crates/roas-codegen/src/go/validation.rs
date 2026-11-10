@@ -186,21 +186,19 @@ fn render(
                         out.push(violation);
                     }
                 } else if float && (*bound as f32).is_finite() {
-                    // The bound as float32 rounds it, exactly as Rust does;
-                    // left to Go's constant conversion a midpoint could
-                    // round the other way.
-                    // A float32 equal to the bound is ambiguous: literals
-                    // on either side of the bound decode to it. Go's
-                    // decoder rounds a literal to float32 once, and so does
-                    // a constant conversion of the bound's literal; clear of
-                    // the float32 range edge, where it would not compile.
-                    let rounded = if bound.abs() < 3.4e38 {
-                        format!("float32({literal})")
+                    // A float32 at the bound is ambiguous: literals on
+                    // either side of the bound decode to it. The bound
+                    // was read through an f64, so the decoder may round
+                    // its literal to either float32 around that f64.
+                    let (below, above) = checks::f32_neighbours(*bound);
+                    let at = if below == above {
+                        format!("{value} == {below:?}")
                     } else {
-                        format!("{:?}", *bound as f32)
+                        format!("({value} == {below:?} || {value} == {above:?})")
                     };
+                    let rounded = format!("{bound:?}");
                     out.push(format!(
-                        "if {value} == {rounded} {{ {r}.unevaluated({p}, {}) }} else if !({value} {op} {rounded}) {{ {violation} }}",
+                        "if {at} {{ {r}.unevaluated({p}, {}) }} else if !(float64({value}) {op} {rounded}) {{ {violation} }}",
                         lit(&format!("{keyword} {literal}: the value rounds to the same float as the bound"))
                     ));
                 } else {
