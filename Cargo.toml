@@ -44,7 +44,6 @@ syn = { version = "3", features = ["full", "parsing"] }
 # crates move in lockstep, and 0.146 is the newest that builds on Rust 1.95.
 oxc_regular_expression = "0.146"
 oxc_allocator = "0.146"
-regex-syntax = "0.8"
 tower = { version = "0.5", default-features = false }
 notify = "8.2"
 percent-encoding = "2.3.2"

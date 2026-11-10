@@ -758,14 +758,19 @@ fn a_pattern_is_translated_or_reported() {
         "Pet": {"type": "object", "properties": {
             "code": {"type": "string", "pattern": "^\\d+$"},
             "look": {"type": "string", "pattern": "a(?=b)"}
-        }}
+        }},
+        // Opted out: it reports nothing, so it is not warned about.
+        "Quiet": {"type": "string", "pattern": "\\bx"}
     });
     for language in [Target::Rust, Target::Go] {
-        let config = ConfigFile::from_toml("validation = true\n", Path::new("/"))
-            .unwrap()
-            .merge(target(language))
-            .build()
-            .unwrap();
+        let config = ConfigFile::from_toml(
+            "validation = true\n[types.Quiet]\nvalidation = false\n",
+            Path::new("/"),
+        )
+        .unwrap()
+        .merge(target(language))
+        .build()
+        .unwrap();
         let generation = generate(&document(components.clone()), &config).unwrap();
         let unvalidated: Vec<_> = generation
             .diagnostics

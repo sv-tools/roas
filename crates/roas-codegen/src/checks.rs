@@ -802,7 +802,13 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
 
 /// With validation on, a warning for every constraint no check covers, so
 /// nothing a schema says is dropped without a word.
-pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
+///
+/// `opted_out` says which types check nothing: an untranslatable pattern
+/// is reported as unevaluated only by a type that checks.
+pub(crate) fn diagnostics(
+    ir: &Ir,
+    opted_out: &dyn Fn(&crate::ir::TypeDef) -> bool,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let mut warn = |id: &crate::diagnostic::SchemaId, pointer: String, keyword: &str, message| {
         out.push(Diagnostic {
@@ -856,7 +862,8 @@ pub(crate) fn diagnostics(ir: &Ir) -> Vec<Diagnostic> {
                     ),
                 );
             }
-            if ty.direct_named().is_none()
+            if !opted_out(def)
+                && ty.direct_named().is_none()
                 && kind_of(ty) == ValueKind::String
                 && let Some(source) = &c.pattern
                 && let Err(reason) = crate::pattern::translate(source)

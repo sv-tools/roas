@@ -2996,7 +2996,7 @@ dependencies = [
  "minijinja",
  "oxc_allocator",
  "oxc_regular_expression",
- "regex-syntax",
+ "regex",
  "roas",
  "serde",
  "serde-saphyr",

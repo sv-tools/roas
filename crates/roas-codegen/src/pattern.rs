@@ -27,6 +27,11 @@ const LEGACY: &str =
 
 /// `pattern` as a regex both targets read alike, or why it cannot be one.
 pub(crate) fn translate(pattern: &str) -> Result<String, String> {
+    // oxc drops a trailing lone backslash in Unicode mode, where
+    // ECMAScript refuses the pattern.
+    if pattern.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1 {
+        return Err("not an ECMAScript regular expression: \\ at end of pattern".into());
+    }
     let allocator = Allocator::default();
     // Unicode mode, as JSON Schema recommends: an astral character is one
     // character, as it is to Rust and Go.
@@ -57,9 +62,10 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
         out: String::new(),
     };
     printer.disjunction(&ast.body)?;
-    // The printer's output is meant to compile; this is the proof.
-    regex_syntax::Parser::new()
-        .parse(&printer.out)
+    // The printer's output is meant to compile; this is the proof, with
+    // the limits the generated Rust code compiles it under. (Go's are
+    // looser, past the nesting budget above.)
+    regex::Regex::new(&printer.out)
         .map_err(|e| format!("its translation does not compile: {e}"))?;
     Ok(printer.out)
 }
@@ -456,6 +462,9 @@ mod tests {
             r"[\c_]",
             r"[\c]",
             r"[\c-x]",
+            "a\\",
+            r"^\d+$\",
+            r"^\S{1,1000}-\S{1,1000}-\S{1,1000}-\S{1,1000}-\S{1,1000}$",
             r"\-\400",
             r"\-[\400]",
             r"\-\1",
