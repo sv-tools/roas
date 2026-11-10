@@ -253,7 +253,19 @@ pub(crate) fn read_input_text(
     source: &InputSource,
     format: Option<InputFormat>,
 ) -> Result<(String, serde_json::Value, InputFormat)> {
-    let resolved = match source {
+    let resolved = resolve_input_format(source, format);
+    let raw = read_input_raw(source)?;
+    let value = parse_value(&raw, resolved == InputFormat::Yaml)?;
+    Ok((raw, value, resolved))
+}
+
+/// The format `source` is read as: `format` when given, else a file's
+/// extension (`.yaml`/`.yml` → YAML, otherwise JSON), and JSON for stdin.
+pub(crate) fn resolve_input_format(
+    source: &InputSource,
+    format: Option<InputFormat>,
+) -> InputFormat {
+    match source {
         InputSource::File(p) => format.unwrap_or_else(|| {
             if path_looks_like_yaml(p) {
                 InputFormat::Yaml
@@ -262,21 +274,23 @@ pub(crate) fn read_input_text(
             }
         }),
         InputSource::Stdin => format.unwrap_or(InputFormat::Json),
-    };
-    let raw = match source {
+    }
+}
+
+/// The text of `source`, unparsed.
+pub(crate) fn read_input_raw(source: &InputSource) -> Result<String> {
+    match source {
         InputSource::File(p) => {
-            fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?
+            fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))
         }
         InputSource::Stdin => {
             let mut raw = String::new();
             std::io::stdin()
                 .read_to_string(&mut raw)
                 .context("reading from stdin")?;
-            raw
+            Ok(raw)
         }
-    };
-    let value = parse_value(&raw, resolved == InputFormat::Yaml)?;
-    Ok((raw, value, resolved))
+    }
 }
 
 pub(crate) fn build_loader(kinds: &[LoaderKind]) -> Option<Loader> {
@@ -352,8 +366,8 @@ pub(crate) fn build_loader_with<W: ResourceFetcher + 'static>(
 ///
 /// Used by both `validate --print` (compact, pipeline-friendly) and
 /// `convert` (pretty, file-friendly).
-pub(crate) fn serialize_spec(
-    value: &serde_json::Value,
+pub(crate) fn serialize_spec<T: serde::Serialize>(
+    value: &T,
     format: InputFormat,
     pretty_json: bool,
 ) -> Result<String> {
