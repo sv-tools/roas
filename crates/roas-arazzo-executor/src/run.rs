@@ -1762,11 +1762,13 @@ fn body(step: &Step, scope: &Scope<'_>) -> Result<Option<Body>, ExecutionError> 
         None => Value::Null,
     };
     for replacement in &request_body.replacements {
-        let value = select::value_of(&replacement.value, scope)?;
+        // A language the engine cannot evaluate is refused first, as a
+        // selector's is.
         let language = match &replacement.target_selector_type {
             Some(type_) => select::kind_of(type_)?,
             None => select::Language::Pointer,
         };
+        let value = select::value_of(&replacement.value, scope)?;
         select::place(
             language,
             &replacement.target,

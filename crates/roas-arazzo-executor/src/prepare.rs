@@ -502,16 +502,6 @@ struct Compiler<'d> {
     operations: BTreeMap<Doc, crate::operation_index::Resolver<'d>>,
 }
 
-fn checked_selector_kind(kind: &roas_arazzo::v1_1::SelectorType) -> Result<Language, SelectError> {
-    if let roas_arazzo::v1_1::SelectorType::Expression(expression) = kind
-        && expression.type_ == ExpressionKind::Jsonpath
-        && expression.version != "rfc9535"
-    {
-        return Err(SelectError::Unsupported("non-RFC9535 JSONPath"));
-    }
-    select::kind_of(kind)
-}
-
 impl<'d> Compiler<'d> {
     fn description(&self) -> &'d Description {
         self.documents.get(self.current).description
@@ -772,7 +762,7 @@ impl<'d> Compiler<'d> {
                     let language = replacement
                         .target_selector_type
                         .as_ref()
-                        .map(checked_selector_kind)
+                        .map(select::kind_of)
                         .unwrap_or(Ok(Language::Pointer));
                     match language {
                         Ok(language) => {
@@ -1109,8 +1099,7 @@ impl<'d> Compiler<'d> {
                 self.expression(context, &site.field("context"), 0);
             }
             if let Some(CriterionType::Expression(expression)) = &criterion.type_
-                && expression.type_ == ExpressionKind::Jsonpath
-                && expression.version != "rfc9535"
+                && !select::jsonpath_version_supported(expression)
             {
                 self.error(
                     &site.field("type.version"),
@@ -1190,7 +1179,7 @@ impl<'d> Compiler<'d> {
             ValueOrSelector::Literal(value) => self.literal(value, site),
             ValueOrSelector::Selector(selector) => {
                 self.expression(&selector.context, &site.field("context"), 0);
-                match checked_selector_kind(&selector.type_) {
+                match select::kind_of(&selector.type_) {
                     Ok(language) => {
                         self.selector(language, &selector.selector, &site.field("selector"))
                     }

@@ -1294,3 +1294,119 @@ fn ambiguity_already_proven_is_said_before_a_missing_source() {
         "got: {error}"
     );
 }
+
+// ---- a lazy run checks the JSONPath version, as preparation does ----
+
+#[test]
+fn a_lazy_run_refuses_a_jsonpath_version_it_does_not_evaluate() {
+    let goessner = json!({ "type": "jsonpath", "version": "draft-goessner-dispatch-jsonpath-00" });
+    let refused = |steps: Value| {
+        let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
+        let error = execute(&one(steps), &options(), &mut client).unwrap_err();
+        assert!(error.to_string().contains("RFC9535"), "{error}");
+    };
+    // A criterion: not evaluated as RFC 9535 under another version's name.
+    refused(json!([{
+        "stepId": "a",
+        "operationId": "listPets",
+        "successCriteria": [{ "type": goessner, "context": "$response.body", "condition": "$.x" }]
+    }]));
+    // A selector in an output.
+    refused(json!([{
+        "stepId": "a",
+        "operationId": "listPets",
+        "outputs": { "x": { "type": goessner, "context": "$response.body", "selector": "$.x" } }
+    }]));
+    // A replacement's target.
+    refused(json!([{
+        "stepId": "a",
+        "operationId": "placeOrder",
+        "requestBody": { "payload": { "x": 0 }, "replacements": [
+            { "target": "$.x", "targetSelectorType": goessner, "value": 1 }
+        ] }
+    }]));
+    // Also from an output whose context names a step that never ran: an
+    // unsupported language is a fault in the description, whatever ran.
+    let mut description = one(json!([
+        { "stepId": "a", "operationId": "listPets", "successCriteria": [{ "condition": "$statusCode == 200" }] },
+        { "stepId": "b", "operationId": "placeOrder" }
+    ]));
+    description.workflows[0].outputs.insert(
+        "late".to_owned(),
+        serde_json::from_value(
+            json!({ "type": goessner, "context": "$steps.b.outputs.y", "selector": "$.x" }),
+        )
+        .expect("a selector"),
+    );
+    let mut client = Fake::new().reply(500, &json!({}));
+    let error = execute(&description, &options(), &mut client).unwrap_err();
+    assert!(error.to_string().contains("RFC9535"), "{error}");
+    // So is XPath there, which a stopped workflow used to skip.
+    let mut description = one(json!([
+        { "stepId": "a", "operationId": "listPets", "successCriteria": [{ "condition": "$statusCode == 200" }] },
+        { "stepId": "b", "operationId": "placeOrder" }
+    ]));
+    description.workflows[0].outputs.insert(
+        "late".to_owned(),
+        serde_json::from_value(
+            json!({ "type": "xpath", "context": "$steps.b.outputs.y", "selector": "/x" }),
+        )
+        .expect("a selector"),
+    );
+    let mut client = Fake::new().reply(500, &json!({}));
+    let error = execute(&description, &options(), &mut client).unwrap_err();
+    assert!(error.to_string().contains("XPath"), "{error}");
+    // A replacement's target language before its value: the value names
+    // an input that was never given.
+    refused(json!([{
+        "stepId": "a",
+        "operationId": "placeOrder",
+        "requestBody": { "payload": { "x": 0 }, "replacements": [
+            { "target": "$.x", "targetSelectorType": goessner, "value": "$inputs.missing" }
+        ] }
+    }]));
+    // RFC 9535 itself still runs.
+    let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
+    let steps = json!([{
+        "stepId": "a",
+        "operationId": "listPets",
+        "successCriteria": [{
+            "type": { "type": "jsonpath", "version": "rfc9535" },
+            "context": "$response.body",
+            "condition": "$.x"
+        }]
+    }]);
+    assert!(execute(&one(steps), &options(), &mut client).is_ok());
+}
+
+#[test]
+#[cfg(feature = "v1_0")]
+fn a_lazy_v1_0_run_refuses_the_goessner_draft_and_runs_a_jsonpath_without_a_version() {
+    let v1_0 = |criterion: Value| -> roas_arazzo::v1_0::Description {
+        serde_json::from_value(json!({
+            "arazzo": "1.0.1",
+            "info": { "title": "T", "version": "1.0.0" },
+            "sourceDescriptions": [
+                { "name": "petStore", "url": "https://api.example.com/openapi.json", "type": "openapi" }
+            ],
+            "workflows": [{ "workflowId": "w", "steps": [{
+                "stepId": "a", "operationId": "listPets", "successCriteria": [criterion]
+            }] }]
+        }))
+        .expect("a v1.0 description")
+    };
+    // The only JSONPath version v1.0 names is one this engine does not evaluate.
+    let description = v1_0(json!({
+        "type": "jsonpath", "version": "draft-goessner-dispatch-jsonpath-00",
+        "context": "$response.body", "condition": "$.x"
+    }));
+    let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
+    let error =
+        roas_arazzo_executor::execute_v1_0(&description, &options(), &mut client).unwrap_err();
+    assert!(error.to_string().contains("RFC9535"), "{error}");
+    // Without a version it is plain `jsonpath`, evaluated as RFC 9535.
+    let description =
+        v1_0(json!({ "type": "jsonpath", "context": "$response.body", "condition": "$.x" }));
+    let mut client = Fake::new().reply(200, &json!({ "x": 1 }));
+    assert!(roas_arazzo_executor::execute_v1_0(&description, &options(), &mut client).is_ok());
+}
