@@ -31,6 +31,8 @@ struct Limits {
     steps: usize,
     depth: usize,
     retries: u32,
+    /// How long the whole run may take; `None` is no limit.
+    time: Option<Duration>,
 }
 
 impl Default for Limits {
@@ -39,6 +41,7 @@ impl Default for Limits {
             steps: 1_000,
             depth: 8,
             retries: 10,
+            time: None,
         }
     }
 }
@@ -254,6 +257,20 @@ impl Options {
         self.limits.retries = retries;
         self
     }
+
+    /// The longest the whole run may take, from [`Run::start`] (or a
+    /// prepared plan's `execute`) to its report. No limit by default.
+    ///
+    /// Each request's [`HttpRequest::timeout`](crate::HttpRequest::timeout)
+    /// is cut to the time left, and a retry wait that would outlast it is
+    /// not taken: the run stops with [`ExecutionError::TimedOut`] instead.
+    /// A step that runs out of the run's time is not a failed step, so its
+    /// `onFailure` actions do not run.
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.limits.time = Some(timeout);
+        self
+    }
 }
 
 /// What the engine wants next.
@@ -453,6 +470,8 @@ pub struct Run<'d> {
     /// operation without a plan: each source is indexed once in a run, not
     /// once per request.
     resolvers: Vec<Option<crate::operation_index::Resolver<'d>>>,
+    /// When the run's [`Options::timeout`] runs out.
+    deadline: Option<Instant>,
 }
 
 /// The ambient scope of a document that has an entered workflow.
@@ -511,6 +530,12 @@ impl<'d> Run<'d> {
         prepared: Option<&'d crate::PreparedWorkflow<'d>>,
         root_inputs: Map<String, Value>,
     ) -> Result<Self, ExecutionError> {
+        // Started first, so the time spent ordering and checking inputs
+        // counts too.
+        let deadline = options
+            .limits
+            .time
+            .and_then(|time| Instant::now().checked_add(time));
         options.check_inputs()?;
         let wanted = match &options.workflow {
             Some(id) => description
@@ -566,6 +591,7 @@ impl<'d> Run<'d> {
             report: None,
             halted: false,
             input_schemas,
+            deadline,
         };
         run.enter(doc, first, initial_inputs, None)?;
         Ok(run)
@@ -625,13 +651,48 @@ impl<'d> Run<'d> {
         if self.halted {
             return Err(ExecutionError::Stopped);
         }
-        let result = self.advance_inner();
+        let result = self
+            .advance_inner()
+            .and_then(|progress| self.in_time(progress));
         if let Err(error) = &result
             && !matches!(error, ExecutionError::Awaiting { .. })
         {
             self.halted = true;
         }
         result
+    }
+
+    /// Fit what the run asks for into the time it has left.
+    fn in_time(&self, progress: Progress) -> Result<Progress, ExecutionError> {
+        let Some(deadline) = self.deadline else {
+            return Ok(progress);
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        match progress {
+            Progress::Done(_) => Ok(progress),
+            Progress::Wait(wait) if wait < left => Ok(Progress::Wait(wait)),
+            Progress::Send(mut request) if !left.is_zero() => {
+                request.timeout = Some(request.timeout.map_or(left, |own| own.min(left)));
+                Ok(Progress::Send(request))
+            }
+            Progress::Wait(_) | Progress::Send(_) => Err(self.timed_out()),
+        }
+    }
+
+    fn timed_out(&self) -> ExecutionError {
+        ExecutionError::TimedOut {
+            after: self.options.limits.time.unwrap_or_default(),
+        }
+    }
+
+    /// What a client failure stops the run with: [`ExecutionError::TimedOut`]
+    /// once the run's time is up — the request was cut to it — and
+    /// [`ExecutionError::Client`] otherwise.
+    pub(crate) fn client_failure(&self, error: crate::ClientError) -> ExecutionError {
+        match self.deadline {
+            Some(deadline) if Instant::now() >= deadline => self.timed_out(),
+            _ => error.into(),
+        }
     }
 
     fn advance_inner(&mut self) -> Result<Progress, ExecutionError> {
@@ -1614,6 +1675,7 @@ fn locate(documents: &Documents<'_>, doc: Doc, error: ExecutionError) -> Executi
         ExecutionError::Input(_)
         | ExecutionError::InDocument { .. }
         | ExecutionError::Limit { .. }
+        | ExecutionError::TimedOut { .. }
         | ExecutionError::Client(_)
         | ExecutionError::NotWaiting
         | ExecutionError::Awaiting { .. }

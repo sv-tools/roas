@@ -458,6 +458,11 @@ pub(crate) struct ArazzoRunArgs {
     #[arg(long, value_name = "N")]
     max_steps: Option<usize>,
 
+    /// Stop the run if it has not finished after this many milliseconds,
+    /// the unit of a step's `timeout`. No limit by default.
+    #[arg(long, value_name = "MS")]
+    timeout: Option<u64>,
+
     /// Do not print the report to stderr.
     #[arg(long)]
     quiet: bool,
@@ -877,6 +882,9 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
     }
     if let Some(max_steps) = args.max_steps {
         options = options.max_steps(max_steps);
+    }
+    if let Some(timeout) = args.timeout {
+        options = options.timeout(std::time::Duration::from_millis(timeout));
     }
     let (options, any, source_diagnostics) = sources(options, &description, value, &source, &args)?;
 
@@ -2181,6 +2189,7 @@ workflows:
             header: vec!["Authorization: Bearer abc".to_owned()],
             load: Vec::new(),
             max_steps: Some(20),
+            timeout: Some(60_000),
             quiet: false,
             ignore: Vec::new(),
             format: None,
@@ -3733,6 +3742,7 @@ workflows:
             header: args.header.clone(),
             load: args.load.clone(),
             max_steps: args.max_steps,
+            timeout: args.timeout,
             quiet: args.quiet,
             ignore: args.ignore.clone(),
             format: args.format,
@@ -4045,6 +4055,8 @@ workflows:
             "file",
             "--max-steps",
             "50",
+            "--timeout",
+            "1500",
             "--quiet",
             "--skip-input-validation",
             "--schema",
@@ -4065,6 +4077,7 @@ workflows:
                 assert_eq!(a.base_url, ["petStore=http://127.0.0.1:8080"]);
                 assert_eq!(a.header, ["Authorization: Bearer abc"]);
                 assert_eq!(a.max_steps, Some(50));
+                assert_eq!(a.timeout, Some(1500));
                 assert!(a.quiet);
                 assert!(a.skip_input_validation);
                 assert_eq!(a.schema, ["https://example.com/schema.json=./schema.json"]);
@@ -4115,6 +4128,7 @@ workflows:
             header: Vec::new(),
             load: Vec::new(),
             max_steps: None,
+            timeout: None,
             quiet: true,
             ignore: Vec::new(),
             format: None,

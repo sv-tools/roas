@@ -748,7 +748,7 @@ Each of these is reported where it is met, never passed over — a run should no
 
 ## Safety rails
 
-A description can loop — `goto` is a jump. `Options` caps the number of steps (1000), the depth of workflow calls (8) and the retries of one step (10); each raises `ExecutionError::Limit` rather than running forever.
+A description can loop — `goto` is a jump. `Options` caps the number of steps (1000), the depth of workflow calls (8) and the retries of one step (10); each raises `ExecutionError::Limit` rather than running forever. Time is not limited unless you ask: `Options::timeout` bounds the whole run. Each request's timeout is cut to the time left, a retry wait that would outlast it is not taken, and a client that gives up once the time is spent stops the run with `ExecutionError::TimedOut` and a partial report. Running out of time ends the run; it is not a failed step, so `onFailure` actions do not run.
 
 ## License
 

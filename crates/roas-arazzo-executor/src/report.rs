@@ -320,6 +320,13 @@ pub enum ExecutionError {
         /// What it was set to.
         at: usize,
     },
+    /// The run took longer than [`Options::timeout`](crate::Options::timeout)
+    /// allows.
+    #[error("the run did not finish within its time limit of {after:?}")]
+    TimedOut {
+        /// The limit it was given.
+        after: std::time::Duration,
+    },
     /// Something Arazzo allows that this crate does not execute.
     #[error("{0}")]
     Unsupported(String),
@@ -494,6 +501,13 @@ mod tests {
             }
             .to_string(),
             "the run stopped after reaching its step limit of 1000"
+        );
+        assert_eq!(
+            ExecutionError::TimedOut {
+                after: Duration::from_millis(1500)
+            }
+            .to_string(),
+            "the run did not finish within its time limit of 1.5s"
         );
     }
 }

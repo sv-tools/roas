@@ -184,7 +184,7 @@ pub(crate) fn drive<C: HttpClient + ?Sized>(
             Progress::Send(request) => {
                 let response = client
                     .send(&request)
-                    .map_err(|error| run.failure(error.into()))?;
+                    .map_err(|error| run.failure(run.client_failure(error)))?;
                 run.supply(response).map_err(|error| run.failure(error))?;
             }
             Progress::Wait(duration) => std::thread::sleep(duration),
@@ -238,7 +238,7 @@ pub(crate) async fn drive_async<C: AsyncHttpClient + ?Sized>(
                 let response = client
                     .send(&request)
                     .await
-                    .map_err(|error| run.failure(error.into()))?;
+                    .map_err(|error| run.failure(run.client_failure(error)))?;
                 run.supply(response).map_err(|error| run.failure(error))?;
             }
             Progress::Wait(duration) => client.sleep(duration).await,
