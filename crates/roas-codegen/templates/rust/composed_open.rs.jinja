@@ -8,13 +8,15 @@
     raw: Box<serde_json::value::RawValue>,
 }
 
-impl PartialEq for {{ t.name }} {
+{% for a in t.cfg %}{{ a }}
+{% endfor %}impl PartialEq for {{ t.name }} {
     fn eq(&self, other: &Self) -> bool {
         self.raw.get() == other.raw.get()
     }
 }
 
-impl {{ t.name }} {
+{% for a in t.cfg %}{{ a }}
+{% endfor %}impl {{ t.name }} {
     /// The value as it was received or built.
     pub fn raw(&self) -> &serde_json::value::RawValue {
         &self.raw

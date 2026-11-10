@@ -120,6 +120,92 @@ mod double_option {
     }
 }
 
+{% endif %}{% if support.string_only %}/// Hands a string enum's derived code the same deserializer, asked for a
+/// JSON string only: serde's derive would also read `{"a": null}` as `"a"`.
+/// Unused when every string enum is compiled out.
+#[allow(dead_code, non_camel_case_types)]
+struct roas_string_only<D>(D);
+
+impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for roas_string_only<D> {
+    type Error = D::Error;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
+        self.0.deserialize_any(visitor)
+    }
+
+    fn deserialize_enum<V: serde::de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, D::Error> {
+        self.0.deserialize_str(roas_string_only_variant(visitor))
+    }
+
+    fn is_human_readable(&self) -> bool {
+        self.0.is_human_readable()
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct identifier ignored_any
+    }
+}
+
+/// Reads the variant a JSON string names.
+#[allow(dead_code, non_camel_case_types)]
+struct roas_string_only_variant<V>(V);
+
+impl<'de, V: serde::de::Visitor<'de>> serde::de::Visitor<'de> for roas_string_only_variant<V> {
+    type Value = V::Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.0.expecting(formatter)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<V::Value, E> {
+        self.0.visit_enum(serde::de::value::StrDeserializer::new(value))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<V::Value, E> {
+        self.0.visit_enum(serde::de::value::StringDeserializer::new(value))
+    }
+}
+
+{% endif %}{% if support.object_only %}/// Hands a closed struct's derived code the same deserializer, asked for a
+/// JSON object only: serde's derive would also read a struct from an array.
+/// Unused when every closed struct is compiled out.
+#[allow(dead_code, non_camel_case_types)]
+struct roas_object_only<D>(D);
+
+impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for roas_object_only<D> {
+    type Error = D::Error;
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
+        self.0.deserialize_any(visitor)
+    }
+
+    fn deserialize_struct<V: serde::de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, D::Error> {
+        self.0.deserialize_map(visitor)
+    }
+
+    fn is_human_readable(&self) -> bool {
+        self.0.is_human_readable()
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map enum identifier ignored_any
+    }
+}
+
 {% endif %}{% if support.reject_null %}/// Optional but not nullable: an explicit `null` is rejected.
 mod reject_null {
     pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -140,6 +226,233 @@ mod require_present {
     {
         <Option<T> as serde::Deserialize>::deserialize(deserializer)
     }
+}
+
+{% endif %}{% if support.validation %}/// Whether `raw` has a number a generated type may fail to decode for its
+/// range rather than its value: a whole number from `int_limit` on, one
+/// past the 32-bit float range when `float32` holds, or one past `f64` —
+/// or nests deeper than the decoder reads.
+/// A union branch that fails to decode such a value proves no mismatch.
+#[allow(dead_code)]
+fn wide_number(raw: &str, int_limit: f64, float32: bool) -> bool {
+    let bytes = raw.as_bytes();
+    let (mut i, mut in_string, mut depth) = (0, false, 0usize);
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            match b {
+                // A lone surrogate escape is raw JSON serde_json captures
+                // but will not read as a string.
+                b'\\' if bytes.get(i + 1) == Some(&b'u')
+                    && bytes.get(i + 2).is_some_and(|c| c.eq_ignore_ascii_case(&b'd'))
+                    && bytes.get(i + 3).is_some_and(|c| matches!(c, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')) =>
+                {
+                    return true;
+                }
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+        } else if b == b'[' || b == b'{' {
+            // Nested past serde_json's limit, a branch fails to decode
+            // for the decoder, not the schema.
+            depth += 1;
+            if depth > 120 {
+                return true;
+            }
+        } else if b == b']' || b == b'}' {
+            depth = depth.saturating_sub(1);
+        } else if b == b'-' || b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                i += 1;
+            }
+            let f: f64 = raw[start..i].parse().unwrap_or(f64::INFINITY);
+            if !f.is_finite()
+                || (f.fract() == 0.0 && f.abs() >= int_limit)
+                || (float32 && f.abs() > f64::from(f32::MAX))
+            {
+                return true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// What [`Validate`] found: every constraint a value breaks, and every one
+/// it could not check. Findings collect rather than stop at the first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidationReport {
+    pub findings: Vec<Finding>,
+    /// How many generated types deep the walk is: a raw holder decodes
+    /// afresh, so nothing else bounds a recursive value.
+    depth: usize,
+    /// Bytes decoded for branches so far, against a budget: each branch
+    /// decodes its holder's raw value again, and nested unions would
+    /// otherwise multiply the work.
+    spent: usize,
+    /// The budget ran out: the rest went unchecked, and was reported so.
+    stopped: bool,
+}
+
+/// One finding, at an RFC 6901 JSON Pointer into the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub pointer: String,
+    pub kind: FindingKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingKind {
+    /// The value breaks a constraint.
+    Violation,
+    /// A constraint could not be checked; the message says which and why.
+    Unevaluated,
+}
+
+impl ValidationReport {
+    /// True only when nothing was found, so a constraint that could not be
+    /// checked is never mistaken for one that passed.
+    pub fn is_valid(&self) -> bool {
+        self.findings.is_empty()
+    }
+
+    pub fn violations(&self) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(|f| f.kind == FindingKind::Violation)
+    }
+
+    pub fn unchecked(&self) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(|f| f.kind == FindingKind::Unevaluated)
+    }
+
+    /// A report for one branch, as deep and as spent as this one. Once
+    /// the budget is spent, the branch goes unchecked and says so.
+    #[allow(dead_code)]
+    fn nested(&self, pointer: &str) -> Self {
+        let mut branch = Self { findings: Vec::new(), depth: self.depth, spent: self.spent, stopped: self.stopped };
+        if self.stopped {
+            branch.unevaluated(pointer, "too many branches to validate");
+        }
+        branch
+    }
+
+    /// Takes back what a branch spent; a branch that ran out stops this
+    /// report too, and says so here.
+    #[allow(dead_code)]
+    fn resume(&mut self, pointer: &str, branch: &Self) {
+        self.spent = branch.spent;
+        if branch.stopped && !self.stopped {
+            self.stopped = true;
+            self.unevaluated(pointer, "too many branches to validate");
+        }
+    }
+
+    /// Steps into a generated type, charging what its branches will decode
+    /// (`cost`, in bytes); past the depth limit or the budget, the rest is
+    /// reported unevaluated instead of walked.
+    #[allow(dead_code)]
+    fn enter(&mut self, pointer: &str, cost: usize) -> bool {
+        if self.stopped {
+            return false;
+        }
+        if self.depth >= 256 {
+            self.unevaluated(pointer, "nested too deep to validate");
+            return false;
+        }
+        self.spent = self.spent.saturating_add(cost);
+        if self.spent > 64 << 20 {
+            self.stopped = true;
+            self.unevaluated(pointer, "too many branches to validate");
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    #[allow(dead_code)]
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
+    // Unused when no type has a check of that kind.
+    #[allow(dead_code)]
+    fn violation(&mut self, pointer: &str, message: impl Into<String>) {
+        self.findings.push(Finding { pointer: pointer.to_owned(), kind: FindingKind::Violation, message: message.into() });
+    }
+
+    #[allow(dead_code)]
+    fn unevaluated(&mut self, pointer: &str, message: impl Into<String>) {
+        self.findings.push(Finding { pointer: pointer.to_owned(), kind: FindingKind::Unevaluated, message: message.into() });
+    }
+}
+
+/// Checks a value against the constraints its schema declares that its
+/// type cannot express.
+pub trait Validate {
+    fn validate(&self) -> ValidationReport {
+        let mut report = ValidationReport::default();
+        self.validate_into("", &mut report);
+        report
+    }
+
+    /// Adds the findings for this value, found at `pointer`, to `report`.
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport);
+
+    /// Adds the findings for a `null` of this type, held outside it as
+    /// `None`, found at `pointer`.
+    fn validate_null(_pointer: &str, _report: &mut ValidationReport)
+    where
+        Self: Sized,
+    {
+    }
+}
+
+impl<T: Validate> Validate for Vec<T> {
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
+        for (i, item) in self.iter().enumerate() {
+            item.validate_into(&child_pointer(pointer, &i.to_string()), report);
+        }
+    }
+}
+
+impl<T: Validate> Validate for Option<T> {
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
+        match self {
+            Some(value) => value.validate_into(pointer, report),
+            None => T::validate_null(pointer, report),
+        }
+    }
+}
+
+impl<T: Validate> Validate for Box<T> {
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
+        (**self).validate_into(pointer, report);
+    }
+
+    fn validate_null(pointer: &str, report: &mut ValidationReport) {
+        T::validate_null(pointer, report);
+    }
+}
+
+impl<T: Validate> Validate for std::collections::BTreeMap<String, T> {
+    fn validate_into(&self, pointer: &str, report: &mut ValidationReport) {
+        for (key, value) in self {
+            value.validate_into(&child_pointer(pointer, key), report);
+        }
+    }
+}
+
+/// `pointer` extended by one RFC 6901 reference token.
+fn child_pointer(pointer: &str, token: &str) -> String {
+    format!("{pointer}/{}", token.replace('~', "~0").replace('/', "~1"))
 }
 
 {% endif %}

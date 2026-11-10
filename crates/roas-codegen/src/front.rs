@@ -97,6 +97,14 @@ pub(crate) struct Constraints {
     pub property_names: bool,
     /// `patternProperties` patterns, in declaration order.
     pub pattern_properties: Vec<String>,
+    /// Keywords neither the type nor a generated check enforces: a numeric
+    /// `enum` and a `const` the type does not pin.
+    pub unenforced: Vec<&'static str>,
+    /// The inline `items` or `additionalProperties` schema says what no
+    /// generated type carries for it: it is named here.
+    pub inner_unchecked: Option<&'static str>,
+    /// The schema's keywords the generator does not handle at all.
+    pub unsupported: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +292,13 @@ pub(crate) struct Translator<'a> {
     pub raw: &'a Value,
     /// Maps a 3.2 pointer to the source document's pointer.
     pub source_pointer: fn(&str) -> String,
+    /// The source is OpenAPI 2 or 3.0, whose `nullable` admits null even
+    /// past an `enum`: those models cannot list null in one.
+    pub legacy_nullable: bool,
+    /// Validation is on: keywords the 2.0 / 3.0 model dropped are reported,
+    /// so the values it checks are not passed for what it never read.
+    /// Without validation they go unmentioned, as they always did.
+    pub report_lost: bool,
 }
 
 impl Translator<'_> {
@@ -356,6 +371,110 @@ impl Translator<'_> {
         }
     }
 
+    /// The keywords an OpenAPI 2.0 or 3.0 source wrote on this schema that
+    /// its model dropped on the way to 3.2: unread, they are reported as
+    /// unsupported rather than lost without a word.
+    fn lost_in_conversion(&self, schema: &Schema, pointer: &str) -> Vec<String> {
+        if !self.legacy_nullable || !self.report_lost {
+            return Vec::new();
+        }
+        let source = (self.source_pointer)(&source_of(pointer));
+        let Some(raw) = self.raw.pointer(&source).and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let converted = serde_json::to_value(schema).unwrap_or(Value::Null);
+        let kept = converted.as_object();
+        let has = |key: &str| kept.is_some_and(|k| k.contains_key(key));
+        raw.keys()
+            .filter(|key| {
+                let key = key.as_str();
+                // Rewritten rather than lost: `nullable` into the type
+                // list, `example` into `examples`, a boolean exclusive
+                // bound into a numeric one. A 2.0 `discriminator` name is
+                // dropped but asserts nothing; a `type` beside a
+                // composition is dropped, and lost unless the branches
+                // already say it.
+                let rewritten = match key {
+                    "nullable" | "x-nullable" | "example" | "discriminator" => true,
+                    "type" => self.type_implied(raw),
+                    "minimum" => has("exclusiveMinimum"),
+                    "maximum" => has("exclusiveMaximum"),
+                    // A boolean flag: `false` says what the inclusive bound
+                    // already does, and `true` without a bound nothing.
+                    "exclusiveMinimum" | "exclusiveMaximum" => raw[key].is_boolean(),
+                    // The model reads `default: null` as no default.
+                    "default" => raw[key].is_null(),
+                    _ => false,
+                };
+                // An annotation asserts nothing: dropped, it changes no
+                // instance's validity.
+                let annotation = key.starts_with("x-")
+                    || matches!(
+                        key,
+                        "title"
+                            | "description"
+                            | "deprecated"
+                            | "readOnly"
+                            | "writeOnly"
+                            | "default"
+                            | "examples"
+                            | "xml"
+                            | "externalDocs"
+                            | "$comment"
+                            | "$schema"
+                            | "$id"
+                            | "$anchor"
+                            | "$defs"
+                            | "definitions"
+                    );
+                !rewritten && !annotation && !has(key)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a legacy composition's `type` is already said by its
+    /// branches: by one of an `allOf`, by every one of an `anyOf` or a
+    /// `oneOf`, directly or through a local `$ref`.
+    fn type_implied(&self, raw: &serde_json::Map<String, Value>) -> bool {
+        let Some(want) = raw.get("type") else {
+            return true;
+        };
+        // A branch says the type only when it also leaves null out as the
+        // schema does.
+        // `nullable` in 3.0, `x-nullable` in 2.0.
+        let nullable = |v: &Value| {
+            ["nullable", "x-nullable"]
+                .iter()
+                .any(|k| v.get(k) == Some(&Value::Bool(true)))
+        };
+        let outer_nullable = ["nullable", "x-nullable"]
+            .iter()
+            .any(|k| raw.get(*k) == Some(&Value::Bool(true)));
+        let typed = |branch: &Value| {
+            let mut current = branch;
+            for _ in 0..16 {
+                if let Some(t) = current.get("type") {
+                    return t == want && (outer_nullable || !nullable(current));
+                }
+                match current
+                    .get("$ref")
+                    .and_then(Value::as_str)
+                    .and_then(|r| r.strip_prefix('#'))
+                    .and_then(|p| self.raw.pointer(p))
+                {
+                    Some(next) => current = next,
+                    None => return false,
+                }
+            }
+            false
+        };
+        let branches = |key: &str| raw.get(key).and_then(Value::as_array);
+        branches("allOf").is_some_and(|b| b.iter().any(typed))
+            || branches("anyOf").is_some_and(|b| b.iter().all(typed))
+            || branches("oneOf").is_some_and(|b| b.iter().all(typed))
+    }
+
     fn type_written(&self, pointer: &str) -> bool {
         let source = (self.source_pointer)(&source_of(pointer));
         self.raw
@@ -365,6 +484,45 @@ impl Translator<'_> {
     }
 
     fn schema(&self, schema: &Schema, pointer: String) -> FrontSchema {
+        let lost = self.lost_in_conversion(schema, &pointer);
+        let mut front = self.schema_kind(schema, pointer);
+        for keyword in lost {
+            if !front.unsupported.contains(&keyword) {
+                front.unsupported.push(keyword);
+            }
+        }
+        let numeric_enum = matches!(
+            &front.kind,
+            Kind::Integer {
+                enum_values: Some(_),
+                ..
+            } | Kind::Number {
+                enum_values: Some(_),
+                ..
+            }
+        );
+        // A required member with no property of its own lands in the
+        // catch-all, where decoding does not ask for it.
+        let undeclared = matches!(
+            &front.kind,
+            Kind::Object { properties, required, .. }
+                if required.iter().any(|r| !properties.contains_key(r))
+        );
+        for (present, keyword) in [
+            (numeric_enum, "enum"),
+            (front.const_value.is_some(), "const"),
+            (undeclared, "required"),
+        ] {
+            if present && !front.constraints.unenforced.contains(&keyword) {
+                front.constraints.unenforced.push(keyword);
+            }
+        }
+        front.constraints.inner_unchecked = inner_unchecked(&front);
+        front.constraints.unsupported = front.unsupported.clone();
+        front
+    }
+
+    fn schema_kind(&self, schema: &Schema, pointer: String) -> FrontSchema {
         match schema {
             Schema::Bool(true) | Schema::Empty(_) => self.leaf(pointer, Kind::Any),
             Schema::Bool(false) => self.leaf(pointer, Kind::Never),
@@ -469,24 +627,51 @@ impl Translator<'_> {
             .collect();
         let raw = serde_json::to_value(multi).unwrap_or(Value::Null);
         let object = raw.as_object().cloned().unwrap_or_default();
-        let read = |schema_type: &SchemaType, restrict: bool| -> Option<FrontSchema> {
+        let read_as = |schema_type: &SchemaType,
+                       restrict: bool,
+                       object: &serde_json::Map<String, Value>|
+         -> Member {
             let mut map = serde_json::Map::new();
             let applicable = keywords_for(schema_type);
-            for (key, value) in &object {
+            for (key, value) in object {
                 if key == "type" {
                     continue;
                 }
+                // `enum` and `const` assert on every member, whether its
+                // type's schema models them or not.
                 if restrict
                     && !applicable.contains(&key.as_str())
                     && !COMMON_KEYWORDS.contains(&key.as_str())
+                    && !matches!(key.as_str(), "enum" | "const")
                     && !key.starts_with("x-")
                 {
                     continue;
                 }
-                map.insert(key.clone(), value.clone());
+                // The values the list shares among its members: each
+                // member keeps those of its own type. An `enum` or `const`
+                // with none admits no value of this type.
+                let value = match (key.as_str(), value) {
+                    ("enum", Value::Array(values)) => {
+                        let own: Vec<Value> = values
+                            .iter()
+                            .filter(|v| fits(schema_type, v))
+                            .cloned()
+                            .collect();
+                        if own.is_empty() {
+                            return Member::Nothing;
+                        }
+                        Value::Array(own)
+                    }
+                    ("const", v) if !fits(schema_type, v) => return Member::Nothing,
+                    ("default", v) if !fits(schema_type, v) => continue,
+                    _ => value.clone(),
+                };
+                map.insert(key.clone(), value);
             }
             map.insert("type".to_owned(), Value::String(schema_type.to_string()));
-            let schema: Schema = serde_json::from_value(Value::Object(map)).ok()?;
+            let Ok(schema) = serde_json::from_value::<Schema>(Value::Object(map)) else {
+                return Member::Unread;
+            };
             // Several members are several schemas, each with an identity of
             // its own; a lone member is the schema itself.
             let at = if restrict {
@@ -499,17 +684,89 @@ impl Translator<'_> {
             if let Kind::Object { typeless, .. } = &mut member.kind {
                 *typeless = false;
             }
-            Some(member)
+            Member::Read(Box::new(member))
+        };
+        let read = |schema_type: &SchemaType, restrict: bool| -> Member {
+            match read_as(schema_type, restrict, &object) {
+                // A `format` another member type gives is an annotation
+                // for this one.
+                Member::Unread if object.contains_key("format") => {
+                    let mut without = object.clone();
+                    without.remove("format");
+                    read_as(schema_type, restrict, &without)
+                }
+                other => other,
+            }
+        };
+        // Only the list's null is left: read as `type: null`, so what else
+        // the list says still stands.
+        let null_admitted = nullable && (self.legacy_nullable || shared_admits_null(&object));
+        let null_only = || -> FrontSchema {
+            // The `enum` and `const` were found to admit null;
+            // what applies to other types does not apply here.
+            let null_keywords = keywords_for(&SchemaType::Null);
+            let only: serde_json::Map<String, Value> = object
+                .iter()
+                .filter(|(key, _)| {
+                    let key = key.as_str();
+                    let other_type = [
+                        SchemaType::String,
+                        SchemaType::Number,
+                        SchemaType::Integer,
+                        SchemaType::Object,
+                        SchemaType::Array,
+                        SchemaType::Boolean,
+                    ]
+                    .iter()
+                    .any(|t| keywords_for(t).contains(&key));
+                    !matches!(key, "enum" | "const")
+                        && (null_keywords.contains(&key) || !other_type)
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            match read_as(&SchemaType::Null, false, &only) {
+                Member::Read(member) => *member,
+                _ => self.leaf(pointer.clone(), Kind::Null),
+            }
         };
         let mut front = match members.as_slice() {
-            [] => self.leaf(pointer.clone(), Kind::Null),
-            [one] => read(one, false).unwrap_or_else(|| self.leaf(pointer.clone(), Kind::Any)),
+            [] if null_admitted => null_only(),
+            [] => self.leaf(pointer.clone(), Kind::Never),
+            [one] => match read(one, false) {
+                Member::Read(member) => *member,
+                Member::Nothing if null_admitted => null_only(),
+                Member::Nothing => self.leaf(pointer.clone(), Kind::Never),
+                // Not lost without a word: the schema is reported as
+                // one the generator does not handle.
+                Member::Unread => {
+                    let mut front = self.leaf(pointer.clone(), Kind::Any);
+                    front.unsupported.push("type".to_owned());
+                    front
+                }
+            },
             many => {
-                let branches = many
+                let branches: Vec<Slot> = many
                     .iter()
-                    .filter_map(|t| read(t, true))
-                    .map(|schema| Slot::Inline(Box::new(schema)))
+                    .filter_map(|t| match read(t, true) {
+                        Member::Read(member) => Some(member),
+                        Member::Nothing => None,
+                        // Kept as a branch that proves nothing, so a value
+                        // of its type is never taken to match no member.
+                        Member::Unread => {
+                            let mut member =
+                                self.leaf(synthetic(&pointer, &t.to_string()), Kind::Any);
+                            member.unsupported.push("type".to_owned());
+                            member.constraints.unsupported = member.unsupported.clone();
+                            Some(Box::new(member))
+                        }
+                    })
+                    .map(Slot::Inline)
                     .collect();
+                if branches.is_empty() && null_admitted {
+                    let mut front = null_only();
+                    front.nullable = true;
+                    return front;
+                }
                 let mut front = self.leaf(pointer.clone(), Kind::TypeUnion { branches });
                 // A keyword that applies to none of the member types is read
                 // by no branch; report it on the union rather than lose it.
@@ -536,7 +793,7 @@ impl Translator<'_> {
         if let Kind::Object { typeless, .. } = &mut front.kind {
             *typeless = false;
         }
-        front.nullable = nullable;
+        front.nullable = nullable && (self.legacy_nullable || shared_admits_null(&object));
         front
     }
 
@@ -762,6 +1019,64 @@ impl Translator<'_> {
 
 /// Split the model's catch-all into `x-` extensions, kept, and every
 /// other keyword, returned for reporting.
+/// The keyword whose inline schema says what no check carries: an inline
+/// item or member value has no generated type of its own to check it.
+fn inner_unchecked(schema: &FrontSchema) -> Option<&'static str> {
+    let (keyword, inner) = match &schema.kind {
+        Kind::Array {
+            items: Some(Slot::Inline(inner)),
+        } => ("items", inner),
+        Kind::Object {
+            additional: Additional::Schema(Slot::Inline(inner)),
+            ..
+        } => ("additionalProperties", inner),
+        _ => return None,
+    };
+    // Generated as a type of its own, it checks itself: the lowerer's own
+    // rule.
+    let named = crate::lower::Lowerer::needs_name(inner);
+    let says = !crate::checks::present_keywords(&inner.constraints).is_empty()
+        || !inner.unsupported.is_empty()
+        || inner.constraints.inner_unchecked.is_some();
+    (!named && says).then_some(keyword)
+}
+
+/// Whether a type list's shared `enum` and `const` allow null: without
+/// it, they leave it out whatever the list says.
+fn shared_admits_null(object: &serde_json::Map<String, Value>) -> bool {
+    let admits = |key: &str| match object.get(key) {
+        Some(Value::Array(values)) if key == "enum" => values.iter().any(Value::is_null),
+        Some(value) if key == "const" => value.is_null(),
+        _ => true,
+    };
+    admits("enum") && admits("const")
+}
+
+/// A member of a type list, read as a schema of its own.
+enum Member {
+    Read(Box<FrontSchema>),
+    /// Its `enum` or `const` admits no value of its type.
+    Nothing,
+    /// Its keywords do not make a schema of its type.
+    Unread,
+}
+
+/// Whether `value` is an instance of `schema_type`.
+fn fits(schema_type: &SchemaType, value: &Value) -> bool {
+    match schema_type {
+        SchemaType::String => value.is_string(),
+        SchemaType::Number => value.is_number(),
+        SchemaType::Integer => {
+            value.is_i64() || value.is_u64() || value.as_f64().is_some_and(|f| f.fract() == 0.0)
+        }
+        SchemaType::Object => value.is_object(),
+        SchemaType::Array => value.is_array(),
+        SchemaType::Boolean => value.is_boolean(),
+        SchemaType::Null => value.is_null(),
+        SchemaType::Custom(_) => true,
+    }
+}
+
 fn catch_all_keywords(
     extensions: &Option<BTreeMap<String, Value>>,
     keep: &mut BTreeMap<String, Value>,
@@ -813,6 +1128,8 @@ mod tests {
             uri: &uri,
             raw: &raw,
             source_pointer: |p| p.to_owned(),
+            legacy_nullable: false,
+            report_lost: false,
         };
         translator.translate(&spec)
     }

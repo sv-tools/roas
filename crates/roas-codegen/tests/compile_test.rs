@@ -12,6 +12,8 @@
 //! Set `ROAS_CODEGEN_SKIP_COMPILE=1` to skip both where no toolchain or
 //! registry is available.
 
+#![recursion_limit = "1024"]
+
 use roas::validation::{IGNORE_UNUSED, Options};
 use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
 use std::path::Path;
@@ -506,6 +508,907 @@ fn generated_go_compiles_and_behaves() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success() && stdout.contains("generated code behaves"),
+        "generated Go failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- {}\n{}",
+        generation.files[0].path.display(),
+        generation.files[0].contents
+    );
+    assert!(
+        vet.status.success(),
+        "go vet\n{}",
+        String::from_utf8_lossy(&vet.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A description with a constraint of every checked kind, for the
+/// validation tests of both languages.
+fn validated_description() -> serde_json::Value {
+    serde_json::json!({
+        "openapi": "3.2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "Pet": {
+                "type": "object", "required": ["name"], "minProperties": 2, "maxProperties": 4,
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 5},
+                    "age": {"type": "integer", "minimum": 0, "exclusiveMaximum": 30, "multipleOf": 2},
+                    "weight": {"type": "number", "minimum": 0.5, "exclusiveMaximum": 100},
+                    "ratio": {"type": "number", "multipleOf": 1},
+                    "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3, "uniqueItems": true},
+                    "code": {"type": "string", "pattern": "^a"},
+                    "owner": {"$ref": "#/components/schemas/Owner"},
+                    "friends": {"type": "array", "items": {"$ref": "#/components/schemas/Owner"}},
+                    "extra": {"type": "object", "additionalProperties": {"type": "integer"}, "maxProperties": 1}
+                }
+            },
+            "Owner": {"type": "object", "properties": {"nick": {"type": ["string", "null"], "maxLength": 3}}},
+            "Short": {"type": "string", "maxLength": 2},
+            "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
+            "Choice": {"oneOf": [{"$ref": "#/components/schemas/Short"}, {"$ref": "#/components/schemas/Owner"}]},
+            "Numeric": {"type": ["integer", "number"]},
+            "Shaped": {"properties": {"x": {"type": "string"}}},
+            "Inline": {"oneOf": [{"type": "string", "maxLength": 2}, {"type": "integer"}]},
+            "Letters": {"type": "string", "enum": ["a", "abcd"], "maxLength": 2},
+            "Fine": {"type": "object", "properties": {
+                "f": {"type": "number", "format": "float", "maximum": 0.1},
+                "choice": {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+            }},
+            "Named": {"type": "object", "additionalProperties": {"type": "integer"}, "propertyNames": {"maxLength": 3}},
+            "Edge": {"type": "object", "properties": {
+                "big": {"type": "string", "maxLength": 9223372036854775808u64, "minLength": 0},
+                "m": {"type": "integer", "multipleOf": 9223372036854775808u64},
+                "wide": {"type": "number", "format": "float", "maximum": 1e300, "minimum": -1e300},
+                "many": {"type": "array", "items": {"type": "integer"}, "maxItems": 18446744073709551615u64}
+            }},
+            "Closed": {"type": "object", "additionalProperties": false, "propertyNames": {"maxLength": 1}, "properties": {"a": {"type": "string"}}},
+            "TypeList": {"type": ["string", "integer"], "maxLength": 3, "minimum": 5},
+            "MaybeShort": {"oneOf": [{"type": ["string", "null"], "maxLength": 2}, {"type": "integer"}]},
+            "Picks": {"oneOf": [{"type": "integer", "enum": [1]}, {"type": "integer", "enum": [2]}]},
+            "Itself": {"anyOf": [{"$ref": "#/components/schemas/Itself"}, {"type": "string"}]},
+            "ChoiceAlias": {"$ref": "#/components/schemas/Choice"},
+            "Holds": {"type": "object", "properties": {"c": {"$ref": "#/components/schemas/ChoiceAlias"}}},
+            "OrNull": {"type": ["string", "integer", "null"], "maxLength": 1},
+            "Base": {"type": "object", "properties": {"q": {"type": "string"}}},
+            "Extended": {"$ref": "#/components/schemas/Base", "properties": {"z": {"type": "string", "maxLength": 1}}},
+            "Tiny": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "maximum": 3.5e38}}},
+            "One": {"type": "integer", "enum": [1]},
+            "Two": {"type": "integer", "enum": [2]},
+            "PicksRef": {"oneOf": [{"$ref": "#/components/schemas/One"}, {"$ref": "#/components/schemas/Two"}]},
+            "Old": {"type": "object", "properties": {"name": {"type": "string", "deprecated": true, "minLength": 1}}},
+            "MaybeText": {"type": ["string", "null"]},
+            "Both": {"$ref": "#/components/schemas/MaybeText", "type": "string"},
+            "Sib": {"$ref": "#/components/schemas/Short", "minLength": 2},
+            "SibC": {"$ref": "#/components/schemas/Short", "const": "zz"},
+            "Ni": {"type": "integer", "enum": [1, 2]},
+            "Pins": {"type": "object", "properties": {
+                "n": {"type": "integer", "enum": [1, 2]},
+                "k": {"type": "boolean", "const": true}
+            }},
+            "EnumO": {"type": ["string", "integer"], "enum": ["ab", 5]},
+            "Def": {"type": ["integer", "string"], "default": "x", "minimum": 1},
+            "EnumN": {"type": ["string", "null"], "enum": ["ab", "cde", null], "maxLength": 2},
+            "F32X": {"type": "number", "format": "float", "exclusiveMaximum": 1},
+            "HolderC": {"anyOf": [{"type": "string"}, {"type": "integer"}], "const": "only"},
+            "NullC": {"type": "object", "required": ["n"], "properties": {"n": {"const": 3}}},
+            "HoldsBoth": {"type": "object", "properties": {"b": {"$ref": "#/components/schemas/Both"}}},
+            "NullSib": {"$ref": "#/components/schemas/MaybeText", "type": ["string", "null"]},
+            "EdgeBranch": {"oneOf": [{"type": ["integer", "null"], "format": "int32", "minimum": -2147483648i64}, {"type": "string"}]},
+            "FInf": {"type": "object", "properties": {
+                "f": {"type": "number", "format": "float", "maximum": 1e40},
+                "m": {"type": "number", "format": "float", "multipleOf": 1}
+            }},
+            "Mid": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "maximum": 1.0000000596046448}}},
+            "NoNull": {"oneOf": [{"type": ["string", "null"], "enum": ["a"]}, {"type": "integer"}]},
+            "NoNullList": {"type": ["string", "boolean", "null"], "enum": ["a", true]},
+            "PartNull": {"allOf": [
+                {"type": ["string", "null"], "pattern": "^a", "if": {"type": "null"}, "then": false},
+                {"type": ["string", "null"]}
+            ]},
+            "Items": {"oneOf": [
+                {"type": "array", "items": {"type": "integer", "maximum": 3}},
+                {"type": "array", "items": {"type": "integer", "minimum": 10}}
+            ]},
+            "NullOnly": {"type": ["string", "null"], "enum": [null]},
+            "StrItems": {"oneOf": [
+                {"type": "array", "items": {"type": "string", "minLength": 2}},
+                {"type": "array", "items": {"type": "string", "maxLength": 1}}
+            ]},
+            "PatMap": {"oneOf": [
+                {"type": "object", "patternProperties": {"^a": {"type": "integer"}}},
+                {"type": "object", "patternProperties": {"^a": {"type": "string"}}}
+            ]},
+            "Scalar": {"const": 3},
+            "HoldsScalar": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/Scalar"}}},
+            "KLow": {"type": "object", "required": ["k"], "properties": {"k": {"type": "array", "items": {"type": "integer", "maximum": 3}}}},
+            "KHigh": {"type": "object", "required": ["k"], "properties": {"k": {"type": "array", "items": {"type": "integer", "minimum": 10}}}},
+            "PickK": {"oneOf": [{"$ref": "#/components/schemas/KLow"}, {"$ref": "#/components/schemas/KHigh"}]},
+            "KHas": {"type": "object", "required": ["k"], "properties": {"k": {"type": "array", "contains": {"type": "integer"}}}},
+            "KStr": {"type": "object", "required": ["k"], "properties": {"k": {"type": "array", "items": {"type": "string"}}}},
+            "PickC": {"oneOf": [{"$ref": "#/components/schemas/KHas"}, {"$ref": "#/components/schemas/KStr"}]},
+            "FmtList": {"type": ["string", "integer"], "format": "date-time"},
+            "EnumF": {"type": ["integer", "string"], "enum": [1.5, "a"]},
+            "ObjOrArr": {"oneOf": [
+                {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
+                {"type": "array", "items": {"type": "string"}}
+            ]},
+            "ClosedOrInt": {"anyOf": [{"$ref": "#/components/schemas/Closed"}, {"type": "integer"}]},
+            "RawMin": {"minProperties": 1},
+            "ReqOnly": {"type": "object", "required": ["k"]},
+            "ClosedAlias": {"$ref": "#/components/schemas/Closed"},
+            "AliasOrArr": {"oneOf": [
+                {"$ref": "#/components/schemas/ClosedAlias"},
+                {"type": "array", "items": {"type": "string"}}
+            ]},
+            "NIf": {"type": ["string", "null"], "if": {"type": "null"}, "then": false},
+            "HoldsNIf": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/NIf"}}},
+            "ListIf": {"type": ["string", "integer", "null"], "if": {"type": "null"}, "then": false},
+            "ScalarAlias": {"$ref": "#/components/schemas/Scalar"},
+            "HoldsScalarAlias": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/ScalarAlias"}}},
+            "EnumIf": {"type": "string", "enum": ["a"], "if": {"const": "a"}, "then": false},
+            "Mid2": {"type": "object", "properties": {"f": {"type": "number", "format": "float", "minimum": 1.0000000596046448}}},
+            "DMin": {"type": "number", "minimum": 8.143539365241406e270},
+            "SibEnum": {"$ref": "#/components/schemas/MaybeText", "enum": ["a", "b"]},
+            "HoldsSibEnum": {"type": "object", "properties": {"e": {"$ref": "#/components/schemas/SibEnum"}}},
+            "HoldsListIf": {"type": "object", "properties": {"value": {"$ref": "#/components/schemas/ListIf"}}},
+            "NIfOff": {"type": ["string", "null"], "if": {"type": "null"}, "then": false},
+            "HoldsNIfOff": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/NIfOff"}}},
+            "Dated": {"type": "object", "properties": {"d": {"type": "string", "format": "date", "minLength": 5}}},
+            "SmallMaps": {"type": "array", "items": {"additionalProperties": {"type": "string"}, "maxProperties": 2}},
+            "Money": {"type": "string", "maxLength": 3},
+            "Base2": {"type": "string", "maxLength": 2},
+            "ShortOff": {"type": "string", "maxLength": 1},
+            "LongOn": {"type": "string", "minLength": 2},
+            "OffOrOn": {"oneOf": [{"$ref": "#/components/schemas/ShortOff"}, {"$ref": "#/components/schemas/LongOn"}]},
+            "Currency": {"type": "string", "enum": ["USD", "EUR"]},
+            "HoldsCurrency": {"type": "object", "properties": {"c": {"$ref": "#/components/schemas/Currency"}}},
+            "Point": {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}}},
+            "Sub2": {"type": "object", "properties": {"x": false}},
+            "Sub3": {"type": "object", "properties": {"p": {"not": {}}}},
+            "HoldsSub3": {"type": "object", "properties": {"s3": {"$ref": "#/components/schemas/Sub3"}}},
+            "HoldsSub2": {"type": "object", "properties": {"s2": {"$ref": "#/components/schemas/Sub2"}}},
+            "Mixed": {"type": ["string", "integer"], "enum": ["a", 1]},
+            "Strict": {"type": "object", "required": ["a"]},
+            "HoldsMixed": {"type": "object", "properties": {
+                "m": {"$ref": "#/components/schemas/Mixed"},
+                "s": {"$ref": "#/components/schemas/Strict"}
+            }},
+            "HoldsPoint": {"type": "object", "properties": {"s": {"$ref": "#/components/schemas/Point"}}},
+            "GatedU": {"anyOf": [{"type": "string", "maxLength": 1}, {"type": "integer"}]},
+            "Gated2": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
+            "GatedField": {"type": "object", "minProperties": 1, "properties": {
+                "a": {"type": "string", "minLength": 1}, "b": {"type": "string"}
+            }},
+            "AllGated": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1}}},
+            "IntOrNum": {"oneOf": [{"type": "integer"}, {"type": "number"}]},
+            "DeepNode": {"anyOf": [{"type": "array", "items": {"$ref": "#/components/schemas/DeepNode"}}, {"type": "string"}]},
+            "ChainH": {"oneOf": [{"$ref": "#/components/schemas/ChainS"}, {"type": "string"}]},
+            "ChainS": {"type": "object", "additionalProperties": false, "properties": {
+                "s": {"$ref": "#/components/schemas/ChainS"},
+                "h": {"$ref": "#/components/schemas/ChainH"},
+                "n": {"type": "integer", "minimum": 0}
+            }},
+            "Twice": {"anyOf": [{"$ref": "#/components/schemas/TwiceP"}, {"$ref": "#/components/schemas/TwiceQ"}]},
+            "TwiceP": {"type": "object", "properties": {"h": {"$ref": "#/components/schemas/Twice"}}},
+            "TwiceQ": {"type": "object", "properties": {"h": {"$ref": "#/components/schemas/Twice"}}},
+            "EnumItems": {"oneOf": [
+                {"type": "array", "items": {"type": "string", "enum": ["a"]}},
+                {"type": "array", "items": {"type": "object"}}
+            ]},
+            "PatOrStr": {"anyOf": [
+                {"type": "object", "patternProperties": {"^x": {"type": "integer"}}, "additionalProperties": false},
+                {"type": "string"}
+            ]},
+            "Long3": {"type": "string", "minLength": 3},
+            "PatAdd": {"type": "object", "properties": {"k": {"type": "string"}},
+                "patternProperties": {"^x": {"type": "string"}},
+                "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
+            "PatMapAdd": {"type": "object",
+                "patternProperties": {"^x": {"type": "integer"}},
+                "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
+            "IntCatch": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "integer"}},
+            "ZooCat": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string", "const": "ZooCat"}}},
+            "ZooDog": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string", "enum": ["ZooDog"]}}},
+            "ZooAnimal": {"oneOf": [{"$ref": "#/components/schemas/ZooCat"}, {"$ref": "#/components/schemas/ZooDog"}],
+                "discriminator": {"propertyName": "kind"}},
+            "Zoo": {"type": "object", "properties": {"title": {"type": "string"}}, "additionalProperties": {"$ref": "#/components/schemas/ZooAnimal"}},
+            "ZooOrStr": {"oneOf": [{"$ref": "#/components/schemas/Zoo"}, {"type": "string"}]},
+            "IntCatchOrStr": {"oneOf": [{"$ref": "#/components/schemas/IntCatch"}, {"type": "string"}]},
+            "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
+            "StringOnly": {"type": "string", "enum": ["a", "b"]},
+            "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
+            "InlineItems": {"type": "array", "items": {"type": "string", "minLength": 2}},
+            "PadNode": {"anyOf": [{"$ref": "#/components/schemas/PadA"}, {"$ref": "#/components/schemas/PadB"}]},
+            "PadA": {"type": "object", "properties": {"next": {"$ref": "#/components/schemas/PadNode"}, "pad": {"type": "string"}}},
+            "PadB": {"type": "object", "properties": {"next": {"$ref": "#/components/schemas/PadNode"}, "pad": {"type": "string", "maxLength": 100000000}}},
+            "EnumOrObj": {"oneOf": [{"type": "string", "enum": ["a"]}, {"type": "object"}]},
+            "EmptyEnum": {"type": "string", "enum": [], "minLength": 1},
+            "IntOrStr": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+            "AllInt": {"allOf": [{"type": "integer"}, {"minimum": 0}]},
+            "ArrOrStr": {"oneOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "string"}]},
+            "ObjOrStr": {"oneOf": [{"type": "object", "properties": {"n": {"type": "integer"}}}, {"type": "string"}]},
+            "NullOnlyN": {"type": "null", "if": {}, "then": false},
+            "HoldsNullOnly": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/NullOnlyN"}}},
+            "Gated": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string", "maxLength": 1}}},
+            "NullType": {"type": ["null"], "if": {}, "then": false},
+            "WrapShort": {"type": "object", "required": ["s"], "properties": {"s": {"$ref": "#/components/schemas/ShortOff"}}},
+            "WrapLong": {"type": "object", "required": ["s"], "properties": {"s": {"$ref": "#/components/schemas/LongOn"}}},
+            "PickWrap": {"oneOf": [{"$ref": "#/components/schemas/WrapShort"}, {"$ref": "#/components/schemas/WrapLong"}]},
+            "F32Edge": {"type": "number", "format": "float", "exclusiveMaximum": 3.4028235677973366e38},
+            "AliasSub": {"$ref": "#/components/schemas/Base2"},
+            "HoldsAliasSub": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/AliasSub"}}},
+            "ListNullOnly": {"type": ["string", "integer", "null"], "enum": [null], "if": {}, "then": false},
+            "EnumObj": {"type": ["object", "string"], "enum": ["a", {"x": 1}]},
+            "NullIf": {"type": ["string", "null"], "enum": [null], "if": {}, "then": false},
+            "NIfAlias": {"$ref": "#/components/schemas/NIf"},
+            "HoldsNIfAlias": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/NIfAlias"}}},
+            "Monies": {"type": "array", "items": {"$ref": "#/components/schemas/Money"}},
+            "MoneyMap": {"type": "object", "properties": {"x": {"type": "string"}}, "additionalProperties": {"$ref": "#/components/schemas/Money"}},
+            "DateAlias": {"type": "string", "format": "date", "maxLength": 2},
+            "HoldsDate": {"type": "object", "properties": {"d": {"$ref": "#/components/schemas/DateAlias"}}},
+            "Node": {"type": "object", "additionalProperties": false, "properties": {
+                "next": {"$ref": "#/components/schemas/Node"}, "n": {"type": "integer"}
+            }},
+            "Leaf": {"type": "object", "additionalProperties": false, "properties": {"s": {"type": "string"}}},
+            "OldClosed": {"type": "object", "additionalProperties": false, "deprecated": true, "properties": {"a": {"type": "string"}}},
+            "Leaves": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Leaf"}},
+            "S": {"type": "object", "additionalProperties": false, "properties": {"x": {"type": "string"}}},
+            "D": {"type": "object", "additionalProperties": false, "properties": {"x": {"type": "string"}}},
+            "ListObj": {"type": ["string", "object", "null"], "properties": {"p": {"type": "string"}}, "if": {}, "then": {"type": "string"}},
+            "HoldsMoney": {"type": "object", "properties": {"m": {"$ref": "#/components/schemas/Money"}}},
+            "NestedClosed": {"oneOf": [
+                {"type": "array", "items": {"$ref": "#/components/schemas/Closed"}},
+                {"type": "array", "items": {"type": "array"}}
+            ]}
+        }}
+    })
+}
+
+fn validated_generation(target: Target) -> roas_codegen::Generation {
+    let bytes = serde_json::to_vec(&validated_description()).unwrap();
+    let doc =
+        SourceDocument::parse(Input::Json(bytes), Url::parse("file:///v.json").unwrap()).unwrap();
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
+    // One type opted out, and a format substituted by a plain string.
+    let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "substitutions": {
+            "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
+            "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
+            "AliasSub": {"rust": {"name": "String"}, "go": {"name": "string"}},
+            "Currency": {"rust": {"name": "String"}, "go": {"name": "string"}},
+            "Point": {"rust": {"name": "serde_json::Value"}, "go": {"name": "any"}},
+            "Sub2": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
+            "ipv4": {"rust": {"name": "std::net::Ipv4Addr"}, "go": {"name": "netip.Addr", "import": "net/netip"}},
+            "Sub3": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
+            "Mixed": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
+            "Strict": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}}
+        }
+    }))
+    .unwrap();
+    config.target = Some(target);
+    config.validation = Some(true);
+    let generation = generate(&doc, &config.build().unwrap()).expect("generates");
+    assert!(!generation.has_errors(), "{:?}", generation.diagnostics);
+    generation
+}
+
+const VALIDATE_MAIN: &str = r##"
+#[allow(dead_code)]
+mod types;
+use types::*;
+
+fn report<T: serde::de::DeserializeOwned + Validate>(json: &str) -> Vec<(String, FindingKind)> {
+    let value: T = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+    let mut found: Vec<_> = value.validate().findings.into_iter().map(|f| (f.pointer, f.kind)).collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
+fn v(pointer: &str) -> (String, FindingKind) {
+    (pointer.to_owned(), FindingKind::Violation)
+}
+
+fn u(pointer: &str) -> (String, FindingKind) {
+    (pointer.to_owned(), FindingKind::Unevaluated)
+}
+
+fn main() {
+    // Within every bound: nothing to report.
+    assert_eq!(report::<Pet>(r#"{"name":"rex","age":4,"tags":["a","b"]}"#), vec![]);
+    let pet: Pet = serde_json::from_str(r#"{"name":"rex","age":4}"#).unwrap();
+    assert!(pet.validate().is_valid());
+    // Lengths count characters, not bytes.
+    assert_eq!(report::<Pet>(r#"{"name":"ééééé","age":2}"#), vec![]);
+    assert_eq!(report::<Pet>(r#"{"name":"","age":2}"#), vec![v("/name")]);
+    assert_eq!(report::<Pet>(r#"{"name":"toolong","age":2}"#), vec![v("/name")]);
+    // Integers: bounds, exclusive bounds and multiples, exactly.
+    assert_eq!(report::<Pet>(r#"{"name":"a","age":-2}"#), vec![v("/age")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","age":30}"#), vec![v("/age")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","age":3}"#), vec![v("/age")]);
+    // Floats.
+    assert_eq!(report::<Pet>(r#"{"name":"a","weight":0.25}"#), vec![v("/weight")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","weight":100}"#), vec![v("/weight")]);
+    // A fraction is no multiple of a whole number; a whole float may have
+    // been rounded, so it is not decided.
+    assert_eq!(report::<Pet>(r#"{"name":"a","ratio":1.5}"#), vec![v("/ratio")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","ratio":2}"#), vec![u("/ratio")]);
+    // Arrays.
+    assert_eq!(report::<Pet>(r#"{"name":"a","tags":[]}"#), vec![v("/tags")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","tags":["a","b","c","d"]}"#), vec![v("/tags")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","tags":["a","b","a"]}"#), vec![v("/tags/2")]);
+    // Patterns are not checked yet, and say so.
+    assert_eq!(report::<Pet>(r#"{"name":"a","code":"b"}"#), vec![u("/code")]);
+    // Members: counted on the object, and on a map.
+    assert_eq!(report::<Pet>(r#"{"name":"a"}"#), vec![v("")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","age":2,"weight":1,"ratio":1.5,"tags":["x"]}"#), vec![v(""), v("/ratio")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","extra":{"x":1,"y":2}}"#), vec![v("/extra")]);
+    // Nested types report at their own pointer, nulls skipped.
+    assert_eq!(report::<Pet>(r#"{"name":"a","owner":{"nick":"long"}}"#), vec![v("/owner/nick")]);
+    assert_eq!(report::<Pet>(r#"{"name":"a","owner":{"nick":null}}"#), vec![]);
+    assert_eq!(
+        report::<Pet>(r#"{"name":"a","friends":[{"nick":"ok"},{"nick":"long"}]}"#),
+        vec![v("/friends/1/nick")]
+    );
+    // A component newtype checks itself, wherever it is used.
+    assert_eq!(report::<Shorts>(r#"["ab","abc"]"#), vec![v("/1")]);
+    // oneOf counts the branches that decode and validate.
+    assert_eq!(report::<Choice>(r#""ab""#), vec![]);
+    assert_eq!(report::<Choice>(r#""abc""#), vec![v("")]);
+    assert_eq!(report::<Choice>(r#"{"nick":"ok"}"#), vec![]);
+    // A type list accepts what any member does, overlaps included.
+    assert_eq!(report::<Numeric>("1"), vec![]);
+    assert_eq!(report::<Numeric>("1.5"), vec![]);
+    // A typeless schema's object keywords say nothing about non-objects.
+    assert_eq!(report::<Shaped>("42"), vec![]);
+    assert_eq!(report::<Shaped>(r#"{"x":1}"#), vec![v("")]);
+    // An inline branch keeps its constraints.
+    assert_eq!(report::<Inline>(r#""ab""#), vec![]);
+    assert_eq!(report::<Inline>(r#""abcd""#), vec![v("")]);
+    assert_eq!(report::<Inline>("5"), vec![]);
+    // Enum members still meet the other string constraints.
+    assert_eq!(report::<Letters>(r#""a""#), vec![]);
+    assert_eq!(report::<Letters>(r#""abcd""#), vec![v("")]);
+    // A float equal to its bound may have come from either side of it.
+    assert_eq!(report::<Fine>(r#"{"f":0.1}"#), vec![u("/f")]);
+    assert_eq!(report::<Fine>(r#"{"f":0.2}"#), vec![v("/f")]);
+    // A null in an open holder is one of its values, and matches no branch.
+    assert_eq!(report::<Fine>(r#"{"choice":null}"#), vec![v("/choice")]);
+    // Member names are not checked yet, and say so.
+    assert_eq!(report::<Named>(r#"{"abcd":1}"#), vec![u("")]);
+    // Bounds beyond every value, and the one multiple of 2^63 an i64 holds.
+    assert_eq!(report::<Edge>(r#"{"big":"x","wide":1.5,"many":[1],"m":-9223372036854775808}"#), vec![]);
+    assert_eq!(report::<Edge>(r#"{"m":0}"#), vec![]);
+    assert_eq!(report::<Edge>(r#"{"m":5}"#), vec![v("/m")]);
+    assert_eq!(report::<Closed>(r#"{"a":"x"}"#), vec![u("")]);
+    // A type list's constraints apply to the member they fit.
+    assert_eq!(report::<TypeList>(r#""ab""#), vec![]);
+    assert_eq!(report::<TypeList>("7"), vec![]);
+    assert_eq!(report::<TypeList>(r#""abcdef""#), vec![v("")]);
+    assert_eq!(report::<TypeList>("1"), vec![v("")]);
+    // A nullable inline branch: checked behind its null.
+    assert_eq!(report::<MaybeShort>(r#""ab""#), vec![]);
+    assert_eq!(report::<MaybeShort>(r#""abc""#), vec![v("")]);
+    assert_eq!(report::<MaybeShort>("null"), vec![]);
+    // Decoding proves no match where an enum goes unchecked.
+    assert_eq!(report::<Picks>("1"), vec![u("")]);
+    // A composition naming itself is decoded, not validated forever.
+    assert_eq!(report::<Itself>(r#""a""#), vec![]);
+    // A null through an alias of an open union is still checked.
+    assert_eq!(report::<Holds>(r#"{"c":null}"#), vec![v("/c")]);
+    // A type list with null holds a raw null validly.
+    assert_eq!(report::<OrNull>("null"), vec![]);
+    assert_eq!(report::<OrNull>(r#""ab""#), vec![v("")]);
+    // `$ref` with sibling properties: each part checked once, no loop.
+    assert_eq!(report::<Extended>(r#"{"q":"a","z":"b"}"#), vec![]);
+    assert_eq!(report::<Extended>(r#"{"q":"a","z":"bc"}"#), vec![v("/z")]);
+    // serde_json reads an f32 past its range as an infinity; the bound,
+    // past every f32 but not every f64, still catches it.
+    assert!(serde_json::from_str::<Tiny>(r#"{"f":1e39}"#).is_err());
+    assert_eq!(report::<Tiny>(r#"{"f":1.5}"#), vec![]);
+    // A referenced numeric enum is unchecked too: no certain double match.
+    assert_eq!(report::<PicksRef>("1"), vec![u("")]);
+    // A deprecated field is still checked, without a warning.
+    assert_eq!(report::<Old>(r#"{"name":""}"#), vec![v("/name")]);
+    // An intersection allows null only when every side does.
+    assert_eq!(report::<Both>(r#""a""#), vec![]);
+    assert!(report::<Both>("null").contains(&v("")));
+    // `$ref` siblings nothing checks prove no match.
+    assert_eq!(report::<Sib>(r#""a""#), vec![u("")]);
+    assert_eq!(report::<SibC>(r#""a""#), vec![u("")]);
+    // A numeric enum or a const is never taken as satisfied.
+    assert_eq!(report::<Ni>("3"), vec![u("")]);
+    assert_eq!(report::<Pins>(r#"{"n":3}"#), vec![u("/n")]);
+    assert_eq!(report::<Pins>(r#"{"k":false}"#), vec![u("/k")]);
+    // A type list's enum and default are split among its members.
+    assert_eq!(report::<EnumO>(r#""ab""#), vec![]);
+    assert_eq!(report::<EnumO>("5"), vec![u("")]);
+    assert_eq!(report::<Def>("5"), vec![]);
+    assert_eq!(report::<Def>("0"), vec![v("")]);
+    assert_eq!(report::<EnumN>(r#""cde""#), vec![v("")]);
+    assert_eq!(report::<F32X>("0.99999999"), vec![u("")]);
+    assert_eq!(report::<F32X>("0.5"), vec![]);
+    // A holder's own const, and a const on a present null.
+    assert_eq!(report::<HolderC>(r#""wrong""#), vec![u("")]);
+    assert_eq!(report::<NullC>(r#"{"n":null}"#), vec![u("/n")]);
+    // An intersection's null is checked behind a field, and allowed when
+    // both sides allow it.
+    assert!(report::<HoldsBoth>(r#"{"b":null}"#).contains(&v("/b")));
+    assert_eq!(report::<NullSib>("null"), vec![]);
+    assert_eq!(report::<EdgeBranch>(r#""a""#), vec![]);
+    // serde_json reads a float past its range as an infinity, from some
+    // literal on either side of the bound.
+    assert!(serde_json::from_str::<FInf>(r#"{"f":1e39}"#).is_err());
+    assert_eq!(report::<FInf>(r#"{"f":1e38}"#), vec![]);
+    assert_eq!(report::<Mid>(r#"{"f":1.0000000596046448}"#), vec![u("/f")]);
+    // An enum without null leaves null out of a type list.
+    assert_eq!(report::<NoNullList>(r#""a""#), vec![]);
+    assert_eq!(report::<NoNull>(r#""a""#), vec![]);
+    assert_eq!(report::<PartNull>("null"), vec![u("")]);
+    // Constraints on inline items prove no branch.
+    assert_eq!(report::<Items>("[1]"), vec![u("")]);
+    assert_eq!(report::<StrItems>(r#"["a"]"#), vec![u("")]);
+    // Member patterns are not checked yet, and say so.
+    assert_eq!(report::<PatMap>(r#"{"a":"x"}"#), vec![u("")]);
+    // A type list left with only its null.
+    assert_eq!(report::<NullOnly>("null"), vec![]);
+    // A present null reaches a JSON-value wrapper.
+    assert_eq!(report::<HoldsScalar>(r#"{"n":null}"#), vec![u("/n")]);
+    // What a branch's members leave unchecked proves no match.
+    assert_eq!(report::<PickK>(r#"{"k":[1]}"#), vec![u("")]);
+    assert_eq!(report::<PickC>(r#"{"k":["x"]}"#), vec![u("")]);
+    // A type-list member is never dropped.
+    assert_eq!(report::<FmtList>("5"), vec![]);
+    assert_eq!(report::<EnumF>(r#""a""#), vec![]);
+    // A struct is decoded from an object only.
+    assert_eq!(report::<ObjOrArr>(r#"["x"]"#), vec![]);
+    assert_eq!(report::<ClosedOrInt>("[]"), vec![v("")]);
+    assert_eq!(report::<AliasOrArr>(r#"["x"]"#), vec![]);
+    // Raw JSON is not checked against kind-specific keywords yet.
+    assert_eq!(report::<RawMin>("{}"), vec![u("")]);
+    // A required member decoding does not ask for.
+    assert_eq!(report::<ReqOnly>("{}"), vec![u("")]);
+    // A null held outside its type is checked for it.
+    assert_eq!(report::<HoldsNIf>(r#"{"v":null}"#), vec![u("/v")]);
+    assert_eq!(report::<ListIf>("null"), vec![u("")]);
+    assert_eq!(report::<HoldsScalarAlias>(r#"{"n":null}"#), vec![u("/n")]);
+    assert_eq!(report::<EnumIf>(r#""a""#), vec![u("")]);
+    // A float at either float around its bound may have come from either side.
+    assert_eq!(report::<Mid2>(r#"{"f":1.000000059604644775390624}"#), vec![u("/f")]);
+    // A double read exactly, as its bound was.
+    assert_eq!(report::<DMin>("81435393652414055e254"), vec![]);
+    // A null the siblings' enum leaves out is not passed.
+    assert!(!report::<HoldsSibEnum>(r#"{"e":null}"#).is_empty());
+    // A null held outside a type list is checked as the list would be.
+    assert_eq!(report::<HoldsListIf>(r#"{"value":null}"#), vec![u("/value")]);
+    // An opted-out type is not asked about its null.
+    assert_eq!(report::<HoldsNIfOff>(r#"{"v":null}"#), vec![]);
+    // A substituted type is not checked against what applies to it.
+    assert_eq!(report::<Dated>(r#"{"d":"x"}"#), vec![u("/d")]);
+    // A hoisted inline item checks itself.
+    assert_eq!(report::<SmallMaps>(r#"[{"k":"v"}]"#), vec![]);
+    assert_eq!(report::<SmallMaps>(r#"[{"a":"1","b":"2","c":"3"}]"#), vec![v("/0")]);
+    // A closed struct is read from an object only, wherever it is.
+    assert_eq!(report::<NestedClosed>(r#"[["x"]]"#), vec![]);
+    // A substituted component is not checked against what it declares.
+    assert_eq!(report::<HoldsMoney>(r#"{"m":"abcdef"}"#), vec![u("/m")]);
+    assert_eq!(report::<Monies>(r#"["abcdef"]"#), vec![u("")]);
+    assert_eq!(report::<Monies>("[]"), vec![]);
+    assert_eq!(report::<MoneyMap>(r#"{"k":"abcdef"}"#), vec![u("")]);
+    assert_eq!(report::<HoldsDate>(r#"{"d":"long"}"#), vec![u("/d")]);
+    // A closed struct keeps the decoder's depth limit, and decodes inside
+    // a flattened map.
+    let deep = |depth: usize| format!("{}{{}}{}", r#"{"next":"#.repeat(depth), "}".repeat(depth));
+    assert!(serde_json::from_str::<Node>(&deep(200)).is_err());
+    assert!(serde_json::from_str::<Node>(&deep(100_000)).is_err());
+    assert!(serde_json::from_str::<Node>(&deep(10)).is_ok());
+    assert_eq!(report::<Leaves>(r#"{"a":{"s":"b"}}"#), vec![]);
+    assert!(serde_json::from_str::<S>(r#"{"x":"y"}"#).is_ok() && serde_json::from_str::<D>("[]").is_err());
+    // A null held by a type list with a hoisted member keeps the shared keywords.
+    assert_eq!(report::<ListObj>("null"), vec![u("")]);
+    // A type list's enum asserts on its object member too.
+    assert_eq!(report::<EnumObj>(r#""a""#), vec![]);
+    assert_eq!(report::<EnumObj>(r#"{"x":2}"#), vec![u("")]);
+    // A list left with its null keeps what else it says.
+    assert_eq!(report::<NullIf>("null"), vec![u("")]);
+    assert_eq!(report::<ListNullOnly>("null"), vec![u("")]);
+    // An opted-out branch proves no match.
+    assert_eq!(report::<OffOrOn>(r#""abc""#), vec![u("")]);
+    // A literal at a bound past the float32 range decodes to the largest float32.
+    assert_eq!(report::<F32Edge>("3.4028235677973366e38"), vec![u("")]);
+    assert_eq!(report::<F32Edge>("1.5"), vec![]);
+    // A substituted enum is not checked against its members.
+    assert_eq!(report::<HoldsCurrency>(r#"{"c":"BAD"}"#), vec![u("/c")]);
+    // A list of only null keeps what else it says.
+    assert_eq!(report::<NullType>("null"), vec![u("")]);
+    // A substituted object is not checked against what its members declare.
+    assert_eq!(report::<HoldsPoint>(r#"{"s":{"n":-1}}"#), vec![u("/s")]);
+    assert_eq!(report::<HoldsSub2>(r#"{"s2":{"x":1}}"#), vec![u("/s2")]);
+    assert_eq!(report::<HoldsSub3>(r#"{"s3":{"p":1}}"#), vec![u("/s3")]);
+    // A field compiled out is neither read nor counted.
+    assert_eq!(report::<GatedField>(r#"{"b":"x"}"#), vec![]);
+    // A null-only reference keeps what it says.
+    assert_eq!(report::<HoldsNullOnly>(r#"{"n":null}"#), vec![u("/n")]);
+    assert_eq!(report::<HoldsNullOnly>("{}"), vec![]);
+    // A whole number past int64 may match the integer branch too.
+    assert_eq!(report::<IntOrNum>("9223372036854775808"), vec![u("")]);
+    // So is one past f64, or one nested anywhere in the branch.
+    assert_eq!(report::<IntOrStr>("1e400"), vec![u("")]);
+    assert!(report::<AllInt>("1e400").iter().all(|f| f.1 == FindingKind::Unevaluated));
+    assert_eq!(report::<ArrOrStr>("[1e19]"), vec![u("")]);
+    assert_eq!(report::<ObjOrStr>(r#"{"n":1e19}"#), vec![u("")]);
+    // A recursive holder is walked only so deep, then reported.
+    let deep = format!("{}\"x\"{}", "[".repeat(12_000), "]".repeat(12_000));
+    let node: DeepNode = serde_json::from_str(&deep).expect("decodes");
+    assert!(node.validate().unchecked().next().is_some());
+    // So is a chain of structs between holders, each decoded afresh.
+    let mut chain = String::new();
+    for _ in 0..130 {
+        chain.push_str(&r#"{"s":"#.repeat(120));
+        chain.push_str(r#"{"h":"#);
+    }
+    chain.push_str("\"x\"");
+    chain.push_str(&"}".repeat(130 * 121));
+    let h: ChainH = serde_json::from_str(&chain).expect("decodes");
+    assert!(h.validate().unchecked().next().is_some());
+    // Branches that each lead back to the holder: the work is bounded.
+    let twice = format!("{}{{}}{}", r#"{"h":"#.repeat(40), "}".repeat(40));
+    let started = std::time::Instant::now();
+    assert!(report::<Twice>(&twice).iter().any(|f| f.1 == FindingKind::Unevaluated));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    // A large value under nested holders: the work is bounded by bytes.
+    let padded = format!(
+        "{}{{\"pad\":\"{}\"}}{}",
+        r#"{"next":"#.repeat(30),
+        "x".repeat(1 << 20),
+        "}".repeat(30)
+    );
+    let started = std::time::Instant::now();
+    let _ = report::<PadNode>(&padded);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    // No items, nothing unchecked about them.
+    // Pattern members are not judged by `additionalProperties`.
+    assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![u("")]);
+    assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![u("")]);
+    // Rust cannot read an integer inside a flattened catch-all: undecided,
+    // not a miss.
+    assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![u("")]);
+    // A surrogate escape serde_json will not read as a string: undecided.
+    assert_eq!(report::<IntOrStr>(r#""\ud800""#), vec![u("")]);
+    assert_eq!(report::<ZooOrStr>(r#"{"a":{"kind":"ZooCat"}}"#), vec![u("")]);
+    // A substitution that fails to decode proves no mismatch.
+    assert_eq!(report::<Ip>(r#""x""#), vec![u("")]);
+    // Schemas named like the decoding helpers keep their names.
+    let _: ObjectOnly = serde_json::from_str(r#"{"s":"a"}"#).unwrap();
+    assert_eq!(report::<InlineItems>("[]"), vec![]);
+    assert_eq!(report::<InlineItems>(r#"["a"]"#), vec![u("")]);
+    // A string enum branch reads a JSON string only.
+    assert_eq!(report::<EnumOrObj>(r#"{"a":null}"#), vec![]);
+    assert_eq!(report::<EnumOrObj>(r#""a""#), vec![]);
+    assert_eq!(report::<EnumItems>(r#"[{"a":null}]"#), vec![]);
+    assert_eq!(report::<EnumItems>(r#"["a"]"#), vec![]);
+    // Members a pattern allows are not refused as unknown.
+    assert_eq!(report::<PatOrStr>(r#"{"x":1}"#), vec![u("")]);
+    // A branch that misses for its value is still a miss.
+    assert_eq!(report::<IntOrStr>("true"), vec![v("")]);
+    assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
+    // An opted-out type nested in a branch proves no match.
+    assert_eq!(report::<PickWrap>(r#"{"s":"ab"}"#), vec![u("")]);
+    // A substituted reference keeps what its target declares.
+    assert_eq!(report::<HoldsAliasSub>(r#"{"v":"long"}"#), vec![u("/v")]);
+    // An alias spelled as a newtype has its target's null.
+    assert_eq!(report::<HoldsNIfAlias>(r#"{"v":null}"#), vec![u("/v")]);
+    println!("validation behaves");
+}
+"##;
+
+#[test]
+fn generated_rust_validation_compiles_and_behaves() {
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() {
+        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
+        return;
+    }
+    let generation = validated_generation(Target::Rust);
+    let dir = std::env::temp_dir().join(format!("roas-codegen-validate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let deps: String = generation
+        .dependencies
+        .rust
+        .iter()
+        .map(|d| {
+            format!(
+                "{} = {{ version = \"1\", features = {:?} }}\n",
+                d.name, d.features
+            )
+        })
+        .collect();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n{deps}"),
+    )
+    .unwrap();
+    for file in &generation.files {
+        std::fs::write(dir.join("src").join(&file.path), &file.contents).unwrap();
+    }
+    std::fs::write(dir.join("src/main.rs"), VALIDATE_MAIN).unwrap();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["run", "--quiet"])
+        .current_dir(&dir)
+        .env("CARGO_TARGET_DIR", dir.join("target"))
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("validation behaves"),
+        "generated crate failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- types.rs\n{}",
+        generation.files[0].contents
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const GO_VALIDATE_MAIN: &str = r##"package main
+
+import (
+	"encoding/json/v2"
+	"fmt"
+	"reflect"
+	"sort"
+	"strings"
+
+	"generated/api"
+)
+
+type found struct {
+	Pointer string
+	Kind    api.FindingKind
+}
+
+func report[T api.Validator](js string) []found {
+	var value T
+	if err := json.Unmarshal([]byte(js), &value); err != nil {
+		panic(fmt.Sprintf("%s: %v", js, err))
+	}
+	out := []found{}
+	for _, f := range value.Validate().Findings {
+		out = append(out, found{f.Pointer, f.Kind})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pointer < out[j].Pointer })
+	return out
+}
+
+func v(p string) found { return found{p, api.Violation} }
+func u(p string) found { return found{p, api.Unevaluated} }
+
+func check(js string, got []found, want ...found) {
+	if want == nil {
+		want = []found{}
+	}
+	if !reflect.DeepEqual(got, want) {
+		panic(fmt.Sprintf("%s: got %v, want %v", js, got, want))
+	}
+}
+
+func main() {
+	type P = api.Pet
+	for _, c := range []struct {
+		js   string
+		want []found
+	}{
+		{`{"name":"rex","age":4,"tags":["a","b"]}`, nil},
+		{`{"name":"ééééé","age":2}`, nil},
+		{`{"name":"","age":2}`, []found{v("/name")}},
+		{`{"name":"toolong","age":2}`, []found{v("/name")}},
+		{`{"name":"a","age":-2}`, []found{v("/age")}},
+		{`{"name":"a","age":30}`, []found{v("/age")}},
+		{`{"name":"a","age":3}`, []found{v("/age")}},
+		{`{"name":"a","weight":0.25}`, []found{v("/weight")}},
+		{`{"name":"a","weight":100}`, []found{v("/weight")}},
+		{`{"name":"a","ratio":1.5}`, []found{v("/ratio")}},
+		{`{"name":"a","ratio":2}`, []found{u("/ratio")}},
+		{`{"name":"a","tags":[]}`, []found{v("/tags")}},
+		{`{"name":"a","tags":["a","b","c","d"]}`, []found{v("/tags")}},
+		{`{"name":"a","tags":["a","b","a"]}`, []found{v("/tags/2")}},
+		{`{"name":"a","code":"b"}`, []found{u("/code")}},
+		{`{"name":"a"}`, []found{v("")}},
+		{`{"name":"a","age":2,"weight":1,"ratio":1.5,"tags":["x"]}`, []found{v(""), v("/ratio")}},
+		{`{"name":"a","extra":{"x":1,"y":2}}`, []found{v("/extra")}},
+		{`{"name":"a","owner":{"nick":"long"}}`, []found{v("/owner/nick")}},
+		{`{"name":"a","owner":{"nick":null}}`, nil},
+		{`{"name":"a","friends":[{"nick":"ok"},{"nick":"long"}]}`, []found{v("/friends/1/nick")}},
+	} {
+		check(c.js, report[P](c.js), c.want...)
+	}
+	check(`["ab","abc"]`, report[api.Shorts](`["ab","abc"]`), v("/1"))
+	check(`"ab"`, report[api.Choice](`"ab"`))
+	check(`"abc"`, report[api.Choice](`"abc"`), v(""))
+	check(`{"nick":"ok"}`, report[api.Choice](`{"nick":"ok"}`))
+	check(`1`, report[api.Numeric](`1`))
+	check(`1.5`, report[api.Numeric](`1.5`))
+	check(`42`, report[api.Shaped](`42`))
+	check(`{"x":1}`, report[api.Shaped](`{"x":1}`), v(""))
+	check(`"ab"`, report[api.Inline](`"ab"`))
+	check(`"abcd"`, report[api.Inline](`"abcd"`), v(""))
+	check(`5`, report[api.Inline](`5`))
+	check(`"a"`, report[api.Letters](`"a"`))
+	check(`"abcd"`, report[api.Letters](`"abcd"`), v(""))
+	check(`{"f":0.1}`, report[api.Fine](`{"f":0.1}`), u("/f"))
+	check(`{"f":0.2}`, report[api.Fine](`{"f":0.2}`), v("/f"))
+	check(`{"choice":null}`, report[api.Fine](`{"choice":null}`), v("/choice"))
+	check(`{"abcd":1}`, report[api.Named](`{"abcd":1}`), u(""))
+	check(`edge`, report[api.Edge](`{"big":"x","wide":1.5,"many":[1],"m":-9223372036854775808}`))
+	check(`{"m":0}`, report[api.Edge](`{"m":0}`))
+	check(`{"m":5}`, report[api.Edge](`{"m":5}`), v("/m"))
+	check(`{"a":"x"}`, report[api.Closed](`{"a":"x"}`), u(""))
+	check(`"ab"`, report[api.TypeList](`"ab"`))
+	check(`7`, report[api.TypeList](`7`))
+	check(`"abcdef"`, report[api.TypeList](`"abcdef"`), v(""))
+	check(`1`, report[api.TypeList](`1`), v(""))
+	check(`"ab"`, report[api.MaybeShort](`"ab"`))
+	check(`"abc"`, report[api.MaybeShort](`"abc"`), v(""))
+	check(`null`, report[api.MaybeShort](`null`))
+	check(`1`, report[api.Picks](`1`), u(""))
+	check(`"a"`, report[api.Itself](`"a"`))
+	check(`{"c":null}`, report[api.Holds](`{"c":null}`), v("/c"))
+	check(`null`, report[api.OrNull](`null`))
+	check(`"ab"`, report[api.OrNull](`"ab"`), v(""))
+	check(`{"q":"a","z":"b"}`, report[api.Extended](`{"q":"a","z":"b"}`))
+	check(`{"q":"a","z":"bc"}`, report[api.Extended](`{"q":"a","z":"bc"}`), v("/z"))
+	check(`1`, report[api.PicksRef](`1`), u(""))
+	check(`{"name":""}`, report[api.Old](`{"name":""}`), v("/name"))
+	check(`"a"`, report[api.Both](`"a"`))
+	if got := report[api.Both](`null`); len(got) == 0 || got[0] != v("") {
+		panic(fmt.Sprintf("null intersection: got %v", got))
+	}
+	check(`"a"`, report[api.Sib](`"a"`), u(""))
+	check(`"a"`, report[api.SibC](`"a"`), u(""))
+	check(`3`, report[api.Ni](`3`), u(""))
+	check(`{"n":3}`, report[api.Pins](`{"n":3}`), u("/n"))
+	check(`{"k":false}`, report[api.Pins](`{"k":false}`), u("/k"))
+	check(`"ab"`, report[api.EnumO](`"ab"`))
+	check(`5`, report[api.EnumO](`5`), u(""))
+	check(`5`, report[api.Def](`5`))
+	check(`0`, report[api.Def](`0`), v(""))
+	check(`"cde"`, report[api.EnumN](`"cde"`), v(""))
+	check(`0.99999999`, report[api.F32X](`0.99999999`), u(""))
+	check(`0.5`, report[api.F32X](`0.5`))
+	check(`"wrong"`, report[api.HolderC](`"wrong"`), u(""))
+	check(`{"n":null}`, report[api.NullC](`{"n":null}`), u("/n"))
+	if got := report[api.HoldsBoth](`{"b":null}`); len(got) == 0 || got[0] != v("/b") {
+		panic(fmt.Sprintf("null intersection field: got %v", got))
+	}
+	check(`null`, report[api.NullSib](`null`))
+	check(`"a"`, report[api.EdgeBranch](`"a"`))
+	check(`{"f":1.0000000596046448}`, report[api.Mid](`{"f":1.0000000596046448}`), u("/f"))
+	check(`"a"`, report[api.NoNullList](`"a"`))
+	check(`null`, report[api.NoNullList](`null`), v(""))
+	check(`"a"`, report[api.NoNull](`"a"`))
+	check(`null`, report[api.NoNull](`null`), v(""))
+	check(`null`, report[api.PartNull](`null`), u(""))
+	check(`[1]`, report[api.Items](`[1]`), u(""))
+	check(`["a"]`, report[api.StrItems](`["a"]`), u(""))
+	check(`{"a":"x"}`, report[api.PatMap](`{"a":"x"}`), u(""))
+	check(`null`, report[api.NullOnly](`null`))
+	check(`{"n":null}`, report[api.HoldsScalar](`{"n":null}`), u("/n"))
+	check(`{"k":[1]}`, report[api.PickK](`{"k":[1]}`), u(""))
+	check(`{"k":["x"]}`, report[api.PickC](`{"k":["x"]}`), u(""))
+	check(`5`, report[api.FmtList](`5`))
+	check(`"a"`, report[api.EnumF](`"a"`))
+	check(`["x"]`, report[api.ObjOrArr](`["x"]`))
+	check(`[]`, report[api.ClosedOrInt](`[]`), v(""))
+	check(`["x"]`, report[api.AliasOrArr](`["x"]`))
+	check(`{}`, report[api.RawMin](`{}`), u(""))
+	check(`{}`, report[api.ReqOnly](`{}`), u(""))
+	check(`{"v":null}`, report[api.HoldsNIf](`{"v":null}`), u("/v"))
+	check(`null`, report[api.ListIf](`null`), u(""))
+	check(`{"n":null}`, report[api.HoldsScalarAlias](`{"n":null}`), u("/n"))
+	check(`"a"`, report[api.EnumIf](`"a"`), u(""))
+	check(`{"f":1.000000059604644775390624}`, report[api.Mid2](`{"f":1.000000059604644775390624}`), u("/f"))
+	check(`81435393652414055e254`, report[api.DMin](`81435393652414055e254`))
+	if got := report[api.HoldsSibEnum](`{"e":null}`); len(got) == 0 {
+		panic("null outside the siblings' enum passed")
+	}
+	check(`{"value":null}`, report[api.HoldsListIf](`{"value":null}`), u("/value"))
+	check(`{"v":null}`, report[api.HoldsNIfOff](`{"v":null}`))
+	check(`{"d":"x"}`, report[api.Dated](`{"d":"x"}`), u("/d"))
+	check(`[{"k":"v"}]`, report[api.SmallMaps](`[{"k":"v"}]`))
+	check(`[{"a":"1","b":"2","c":"3"}]`, report[api.SmallMaps](`[{"a":"1","b":"2","c":"3"}]`), v("/0"))
+	check(`[["x"]]`, report[api.NestedClosed](`[["x"]]`))
+	check(`{"m":"abcdef"}`, report[api.HoldsMoney](`{"m":"abcdef"}`), u("/m"))
+	check(`["abcdef"]`, report[api.Monies](`["abcdef"]`), u(""))
+	check(`[]`, report[api.Monies](`[]`))
+	check(`{"k":"abcdef"}`, report[api.MoneyMap](`{"k":"abcdef"}`), u(""))
+	check(`{"d":"long"}`, report[api.HoldsDate](`{"d":"long"}`), u("/d"))
+	check(`{"a":{"s":"b"}}`, report[api.Leaves](`{"a":{"s":"b"}}`))
+	check(`null`, report[api.ListObj](`null`), u(""))
+	check(`"a"`, report[api.EnumObj](`"a"`))
+	check(`{"x":2}`, report[api.EnumObj](`{"x":2}`), u(""))
+	check(`null`, report[api.NullIf](`null`), u(""))
+	check(`null`, report[api.ListNullOnly](`null`), u(""))
+	check(`"abc"`, report[api.OffOrOn](`"abc"`), u(""))
+	check(`3.4028235677973366e38`, report[api.F32Edge](`3.4028235677973366e38`), u(""))
+	check(`1.5`, report[api.F32Edge](`1.5`))
+	check(`{"c":"BAD"}`, report[api.HoldsCurrency](`{"c":"BAD"}`), u("/c"))
+	check(`null`, report[api.NullType](`null`), u(""))
+	check(`{"s":"ab"}`, report[api.PickWrap](`{"s":"ab"}`), u(""))
+	check(`{"b":"x"}`, report[api.GatedField](`{"b":"x"}`))
+	check(`{"n":null}`, report[api.HoldsNullOnly](`{"n":null}`), u("/n"))
+	check(`{}`, report[api.HoldsNullOnly](`{}`))
+	check(`9223372036854775808`, report[api.IntOrNum](`9223372036854775808`), u(""))
+	check(`1e400`, report[api.IntOrStr](`1e400`), u(""))
+	check(`[1e19]`, report[api.ArrOrStr](`[1e19]`), u(""))
+	check(`{"n":1e19}`, report[api.ObjOrStr](`{"n":1e19}`), u(""))
+	check(`true`, report[api.IntOrStr](`true`), v(""))
+	if got := report[api.DeepNode](strings.Repeat("[", 2000) + `"x"` + strings.Repeat("]", 2000)); len(got) == 0 {
+		panic("a deep recursive holder passed unwalked")
+	}
+	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
+	check(`[{"a":null}]`, report[api.EnumItems](`[{"a":null}]`))
+	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`), u(""))
+	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
+	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
+	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
+	check(`"x"`, report[api.Ip](`"x"`), u(""))
+	check(`[]`, report[api.InlineItems](`[]`))
+	check(`["a"]`, report[api.InlineItems](`["a"]`), u(""))
+	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)
+	_ = report[api.PadNode](padded)
+	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`), u(""))
+	twice := strings.Repeat(`{"h":`, 40) + `{}` + strings.Repeat("}", 40)
+	if got := report[api.Twice](twice); len(got) == 0 {
+		panic("doubling branches passed unchecked")
+	}
+	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
+	check(`{"s3":{"p":1}}`, report[api.HoldsSub3](`{"s3":{"p":1}}`), u("/s3"))
+	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
+	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))
+	check(`{"v":null}`, report[api.HoldsNIfAlias](`{"v":null}`), u("/v"))
+	fmt.Println("validation behaves")
+}
+"##;
+
+#[test]
+fn generated_go_validation_compiles_and_behaves() {
+    let required = std::env::var_os("ROAS_CODEGEN_REQUIRE_GO").is_some();
+    if std::env::var_os("ROAS_CODEGEN_SKIP_COMPILE").is_some() && !required {
+        eprintln!("skipped: ROAS_CODEGEN_SKIP_COMPILE is set");
+        return;
+    }
+    if let Err(reason) = go_toolchain() {
+        assert!(!required, "ROAS_CODEGEN_REQUIRE_GO is set: {reason}");
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let generation = validated_generation(Target::Go);
+    let dir = std::env::temp_dir().join(format!("roas-codegen-go-validate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("api")).unwrap();
+    std::fs::write(dir.join("go.mod"), "module generated\n\ngo 1.27\n").unwrap();
+    for file in &generation.files {
+        std::fs::write(dir.join("api").join(&file.path), &file.contents).unwrap();
+    }
+    std::fs::write(dir.join("main.go"), GO_VALIDATE_MAIN).unwrap();
+    let output = Command::new("go")
+        .args(["run", "."])
+        .current_dir(&dir)
+        .env("GOTOOLCHAIN", "local")
+        .env("GOWORK", "off")
+        .output()
+        .expect("go runs");
+    let vet = Command::new("go")
+        .args(["vet", "./..."])
+        .current_dir(&dir)
+        .env("GOTOOLCHAIN", "local")
+        .env("GOWORK", "off")
+        .output()
+        .expect("go vet runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("validation behaves"),
         "generated Go failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}\n--- {}\n{}",
         generation.files[0].path.display(),
         generation.files[0].contents

@@ -1,0 +1,18 @@
+{% block validate %}
+// Validate checks a {{ t.name }} against the constraints its schema declares
+// that its type cannot express.
+func (v {{ t.name }}) Validate() *ValidationReport {
+	r := &ValidationReport{}
+	v.validateInto("", r)
+	return r
+}
+
+func (v {{ t.name }}) validateInto(pointer string, r *ValidationReport) {
+{% for line in t.validate %}	{{ line }}
+{% endfor %}}
+{% if t.validate_null %}
+// validateNull checks a null held outside a {{ t.name }}, as a nil.
+func (v {{ t.name }}) validateNull(pointer string, r *ValidationReport) {
+{% for line in t.validate_null %}	{{ line }}
+{% endfor %}}
+{% endif %}{% endblock %}

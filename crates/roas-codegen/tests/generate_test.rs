@@ -323,12 +323,6 @@ fn generated_rust_is_a_module_not_a_crate() {
 }
 
 #[test]
-fn settings_this_release_cannot_honour_are_refused() {
-    let error = generate(&document(pet()), &rust_config("validation = true\n")).unwrap_err();
-    assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
-}
-
-#[test]
 fn the_edition_must_be_a_rust_edition_and_is_recorded_with_the_target() {
     let error = generate(
         &document(pet()),
@@ -712,5 +706,219 @@ fn a_module_named_like_a_crate_a_substitution_names_is_refused() {
     assert!(
         matches!(&error, GenerateError::Config(m) if m.contains("imports or names")),
         "{error}"
+    );
+}
+
+#[test]
+fn validation_reports_what_it_cannot_check_and_types_can_opt_out() {
+    let components = serde_json::json!({
+        "Pet": {"type": "object", "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "tags": {"type": "array", "items": {"type": "string", "maxLength": 3}}
+        }},
+        "Quiet": {"type": "object", "properties": {"name": {"type": "string", "minLength": 1}}}
+    });
+    let config = ConfigFile::from_toml(
+        "validation = true\n[types.Quiet]\nvalidation = false\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Rust))
+    .build()
+    .unwrap();
+    let generation = generate(&document(components), &config).unwrap();
+    let unvalidated: Vec<_> = generation
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.kind {
+            DiagnosticKind::Unvalidated { keyword } => Some((keyword.as_str(), d.pointer.as_str())),
+            _ => None,
+        })
+        .collect();
+    // An inline item constraint has no type to carry it.
+    assert!(
+        unvalidated.contains(&("maxLength", "/components/schemas/Pet/properties/tags/items")),
+        "{unvalidated:?}"
+    );
+    let code = &generation.files[0].contents;
+    assert!(code.contains("impl Validate for Pet {"), "{code}");
+    // Opted out: an implementation, so holders still compile, with no checks.
+    assert!(
+        code.contains("impl Validate for Quiet {\n    fn validate_into(&self, _pointer: &str, _report: &mut ValidationReport) {}"),
+        "{code}"
+    );
+    // Off by default: none of it.
+    let plain = generate(&document(pet()), &rust_config("")).unwrap();
+    assert!(!plain.files[0].contents.contains("Validate"));
+}
+
+#[test]
+fn an_opt_out_on_an_alias_is_refused_rather_than_ignored() {
+    let components = serde_json::json!({
+        "Short": {"type": "string", "maxLength": 2},
+        "Quiet": {"$ref": "#/components/schemas/Short"}
+    });
+    let config = ConfigFile::from_toml(
+        "validation = true\n[types.Quiet]\nvalidation = false\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Rust))
+    .build()
+    .unwrap();
+    let error = generate(&document(components), &config).unwrap_err();
+    assert!(
+        matches!(&error, GenerateError::Config(m) if m.contains("alias")),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_type_list_whose_enum_fits_no_member_admits_nothing() {
+    // `enum: [1]` fits neither `string` nor `null`: no value is valid.
+    let components = serde_json::json!({
+        "NoValue": {"type": ["string", "null"], "enum": [1]},
+        "OnlyNull": {"type": ["string", "null"], "enum": [null]}
+    });
+    let generation = generate(&document(components), &rust_config("")).expect("generates");
+    let errors: Vec<&str> = generation
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(errors, ["/components/schemas/NoValue"]);
+}
+
+#[test]
+fn a_3_0_nullable_enum_still_admits_null() {
+    // 3.0 cannot list null in an `enum`; its `nullable` is what admits it.
+    let raw = serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "Ns": {"type": "string", "nullable": true, "enum": ["a", "bb"]},
+            "H": {"type": "object", "required": ["ns"], "properties": {
+                "ns": {"$ref": "#/components/schemas/Ns"}
+            }}
+        }}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let generation = generate(&doc, &rust_config("")).expect("generates");
+    let code = &generation.files[0].contents;
+    assert!(code.contains("pub ns: Option<Ns>"), "{code}");
+}
+
+#[test]
+fn keywords_a_3_0_model_drops_are_reported() {
+    // 3.0's model keeps no `maxLength` beside a composition: reported as
+    // unsupported, so validation does not pass a value it never checked.
+    let raw = serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "N": {"type": "string", "maxLength": 3},
+            "Ao": {"allOf": [{"$ref": "#/components/schemas/N"}], "maxLength": 2},
+            "An": {"anyOf": [{"type": "string"}, {"type": "integer"}], "maxLength": 2},
+            "Obj": {"type": "object", "properties": {"y": {"type": "string"}}},
+            "Typed": {"type": "object", "allOf": [{"properties": {"x": {"type": "string"}}}]},
+            "Implied": {"type": "object", "allOf": [
+                {"$ref": "#/components/schemas/Obj"},
+                {"properties": {"x": {"type": "string"}}}
+            ]},
+            "Inclusive": {"type": "integer", "minimum": 1, "exclusiveMinimum": false},
+            "InclusiveMax": {"type": "number", "maximum": 5, "exclusiveMaximum": false},
+            "NoBound": {"type": "integer", "exclusiveMinimum": true},
+            "NullDefault": {"type": "string", "nullable": true, "default": null},
+            "Documented": {"allOf": [{"type": "string"}], "description": "a string", "title": "S"},
+            "Pinned": {"type": "integer", "const": 5},
+            "NullPart": {"type": "string", "allOf": [{"type": "string", "nullable": true}]}
+        }}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let generation = generate(&doc, &rust_config("validation = true\n")).expect("generates");
+    let mut lost: Vec<(&str, &str)> = generation
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.kind {
+            DiagnosticKind::UnsupportedKeyword { keyword } => {
+                Some((d.pointer.as_str(), keyword.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    lost.sort();
+    assert_eq!(
+        lost,
+        [
+            ("/components/schemas/An", "maxLength"),
+            ("/components/schemas/Ao", "maxLength"),
+            ("/components/schemas/NullPart", "type"),
+            ("/components/schemas/Pinned", "const"),
+            ("/components/schemas/Typed", "type")
+        ]
+    );
+}
+
+#[test]
+fn a_2_0_type_beside_an_x_nullable_branch_is_reported() {
+    // The branch admits null through `x-nullable`; the dropped `type` does
+    // not, so it is not implied.
+    let raw = serde_json::json!({
+        "swagger": "2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "definitions": {
+            "A": {"type": "object", "x-nullable": true, "properties": {"n": {"type": "string"}}},
+            "O": {"type": "object", "allOf": [{"$ref": "#/definitions/A"}]}
+        }
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let generation = generate(&doc, &rust_config("validation = true\n")).expect("generates");
+    assert!(
+        generation.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "type"
+        ) && d.pointer.ends_with("/O")),
+        "{:?}",
+        generation.diagnostics
+    );
+}
+
+#[test]
+fn keywords_a_3_0_model_drops_go_unmentioned_without_validation() {
+    // As before validation existed: `--strict` keeps passing.
+    let raw = serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "Base": {"type": "object", "properties": {"a": {"type": "string"}}},
+            "S": {"allOf": [{"$ref": "#/components/schemas/Base"}], "maxProperties": 3}
+        }}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let generation = generate(&doc, &rust_config("")).expect("generates");
+    assert!(
+        !generation
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::UnsupportedKeyword { .. })),
+        "{:?}",
+        generation.diagnostics
     );
 }

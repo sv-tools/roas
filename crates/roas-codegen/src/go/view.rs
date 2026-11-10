@@ -32,6 +32,23 @@ const BUILTIN_IMPORTS: &[(&str, &str)] = &[
 
 /// Lowercase names the templates declare, at package level or locally; an
 /// import used under one of them would not compile.
+/// The names generated validation adds, reserved only when it is on.
+const VALIDATION_NAMES: &[&str] = &[
+    "certain",
+    "uncertain",
+    "branch",
+    "repeated",
+    "childPointer",
+    "wideNumber",
+    "members",
+    "seen",
+    "item",
+    "p",
+    "x",
+    "f",
+    "zero",
+];
+
 const TEMPLATE_NAMES: &[&str] = &[
     "decodeOptions",
     "refuseNull",
@@ -90,6 +107,8 @@ pub(crate) struct SupportView {
     /// Substituted types that hold null themselves: decoded without the
     /// generated rules, null included.
     pub isolated: Vec<String>,
+    /// Generated validation is on: the report types and `Validator`.
+    pub validation: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +184,11 @@ pub(crate) struct TypeView {
     pub marshal: bool,
     /// The raw constructor of a composed holder.
     pub from_raw: String,
+    /// The statements of `validateInto`, with validation on; `None` for
+    /// no methods of its own (an alias).
+    pub validate: Option<Vec<String>>,
+    /// The statements of `validateNull`; empty for none.
+    pub validate_null: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,6 +229,8 @@ pub(crate) struct Built {
 }
 
 struct Builder<'a> {
+    /// Imports the validation checks need.
+    needs: super::validation::Needs,
     ir: &'a Ir,
     config: &'a Config,
     names: BTreeMap<SchemaId, String>,
@@ -234,6 +260,7 @@ fn package_of(import: &str) -> &str {
 
 pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, GenerateError> {
     let mut builder = Builder {
+        needs: Default::default(),
         ir,
         config,
         names: BTreeMap::new(),
@@ -270,8 +297,16 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     let mut dependencies = Vec::new();
     if !types.is_empty() {
         let mut builtin = BUILTIN_IMPORTS.to_vec();
-        if builder.support.sorted_keys {
+        if builder.support.sorted_keys || builder.needs.sorted {
             builtin.extend([("maps", "maps"), ("slices", "slices")]);
+        } else if builder.needs.slices {
+            builtin.push(("slices", "slices"));
+        }
+        if builder.needs.math {
+            builtin.push(("math", "math"));
+        }
+        if builder.needs.utf8 {
+            builtin.push(("unicode/utf8", "utf8"));
         }
         imports.extend(builtin.iter().map(|(path, _)| quote(path)));
         let mut used: BTreeMap<&str, &str> =
@@ -280,6 +315,11 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         // shadowed by it, or clash with it.
         for local in TEMPLATE_NAMES {
             used.insert(local, "a name the generated code declares");
+        }
+        if config.validation {
+            for local in VALIDATION_NAMES {
+                used.insert(local, "a name the generated validation declares");
+            }
         }
         for import in &builder.externs {
             if builtin.iter().any(|(path, _)| path == import) {
@@ -324,6 +364,18 @@ impl Builder<'_> {
         // The helpers every file may declare.
         for reserved in ["Nullable", "Int64", "Int32", "Null"] {
             self.package_names.reserve(reserved);
+        }
+        if self.config.validation {
+            for reserved in [
+                "ValidationReport",
+                "Finding",
+                "FindingKind",
+                "Violation",
+                "Unevaluated",
+                "Validator",
+            ] {
+                self.package_names.reserve(reserved);
+            }
         }
         for id in &self.ir.order {
             let def = &self.ir.types[id];
@@ -539,9 +591,91 @@ impl Builder<'_> {
             extra_name: String::new(),
             marshal: false,
             from_raw: String::new(),
+            validate: None,
+            validate_null: Vec::new(),
         };
         if !self.fill_kind(def, &mut view)? {
             return Ok(None);
+        }
+        if self.config.validation {
+            self.support.validation = true;
+            // The validation support's number scan uses `math`.
+            self.needs.math = true;
+            let opted_out = self.type_config(def).and_then(|t| t.validation) == Some(false);
+            let validates = |ty: &TypeRef| self.validates(ty);
+            let nil_able = |ty: &TypeRef| match ty {
+                TypeRef::Named(id) => matches!(
+                    self.alias_target(id),
+                    Some(TypeRef::Boxed(_) | TypeRef::Nullable(_))
+                ),
+                _ => false,
+            };
+            let names = &self.names;
+            let ir = self.ir;
+            // Through aliases, as `holds_null` sees them.
+            let raw_holder = |ty: &TypeRef| {
+                let mut id = ty.direct_named()?;
+                for _ in 0..=ir.types.len() {
+                    match &ir.types.get(id)?.kind {
+                        // A JSON-value wrapper holds `null` itself.
+                        TypeKind::Newtype(TypeRef::Any) => {
+                            let name = names.get(id)?;
+                            return Some(format!("{name}(jsontext.Value(\"null\"))"));
+                        }
+                        TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_) => {
+                            let name = names.get(id)?;
+                            return Some(format!("{name}{{raw: jsontext.Value(\"null\")}}"));
+                        }
+                        TypeKind::Alias(inner) | TypeKind::Newtype(inner) => {
+                            id = inner.direct_named()?
+                        }
+                        _ => return None,
+                    }
+                }
+                None
+            };
+            let holder_id = def.id.clone();
+            let loops = |ty: &TypeRef| crate::checks::loops_back(ir, &holder_id, ty);
+            // Through aliases, which share their target's methods.
+            let null_name = |ty: &TypeRef| {
+                let mut id = ty.direct_named()?;
+                for _ in 0..=ir.types.len() {
+                    let def = ir.types.get(id)?;
+                    match &def.kind {
+                        TypeKind::Alias(inner) => id = inner.direct_named()?,
+                        // An opted-out type has no `validateNull`.
+                        _ if !crate::checks::has_null_hook(def)
+                            || self.type_config(def).and_then(|t| t.validation) == Some(false) =>
+                        {
+                            return None;
+                        }
+                        _ => return names.get(&def.id).cloned(),
+                    }
+                }
+                None
+            };
+            let mut cx = super::validation::Context {
+                validates: &validates,
+                nil_able: &nil_able,
+                raw_holder: &raw_holder,
+                loops: &loops,
+                null_name: &null_name,
+                // A newtype over a substitution is an alias in Go, with no
+                // validator of its own.
+                extern_checks: &|ty: &TypeRef| {
+                    crate::checks::extern_checks(ir, ty, !self.validates(ty))
+                },
+                ir,
+                needs: self.needs,
+            };
+            view.validate = super::validation::body(def, &view, opted_out, &mut cx);
+            if view.validate.is_some() && !opted_out {
+                view.validate_null = super::validation::null_body(def, &view.name, &mut cx);
+            }
+            if opted_out && view.validate.is_none() {
+                return Err(opt_out_on_alias(def));
+            }
+            self.needs = cx.needs;
         }
         Ok(Some(view))
     }
@@ -556,6 +690,9 @@ impl Builder<'_> {
                 let mut fields = Allocator::default();
                 // The methods a generated struct has.
                 fields.reserve("UnmarshalJSONFrom");
+                if self.config.validation {
+                    fields.reserve("Validate");
+                }
                 fields.reserve("MarshalJSONTo");
                 let mut required_count = 0;
                 for field in &s.fields {
@@ -698,6 +835,9 @@ impl Builder<'_> {
                 for reserved in ["Tag", "Value", "MarshalJSONTo", "UnmarshalJSONFrom"] {
                     methods.reserve(reserved);
                 }
+                if self.config.validation {
+                    methods.reserve("Validate");
+                }
                 for variant in &u.variants {
                     let base = exported(&variant.suggested_name);
                     let accessor = methods.allocate(format!("As{base}"));
@@ -776,6 +916,44 @@ impl Builder<'_> {
 
     /// Whether the type is a substitution, directly or through aliases and
     /// newtypes over one (emitted as aliases).
+    /// The type a named type is a Go alias of, if it is emitted as one:
+    /// it then has no methods of its own.
+    fn alias_target(&self, id: &SchemaId) -> Option<&TypeRef> {
+        match &self.ir.types.get(id)?.kind {
+            TypeKind::Alias(inner) => Some(inner),
+            TypeKind::Newtype(inner)
+                if matches!(inner, TypeRef::Boxed(_) | TypeRef::Nullable(_))
+                    || self.substituted(inner) =>
+            {
+                Some(inner)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `ty` holds a generated type with a `validateInto` of its own,
+    /// seen through the aliases Go emits.
+    fn validates(&self, ty: &TypeRef) -> bool {
+        let mut ids = Vec::new();
+        ty.named(&mut ids);
+        ids.iter().any(|id| self.validates_named(id, 0))
+    }
+
+    fn validates_named(&self, id: &SchemaId, depth: usize) -> bool {
+        if depth > self.ir.types.len()
+            || !self.names.contains_key(id)
+            || matches!(self.ir.types[id].kind, TypeKind::Extern)
+        {
+            return false;
+        }
+        match self.alias_target(id) {
+            Some(inner) => inner
+                .direct_named()
+                .is_some_and(|target| self.validates_named(target, depth + 1)),
+            None => true,
+        }
+    }
+
     fn substituted(&self, ty: &TypeRef) -> bool {
         let mut ty = ty;
         for _ in 0..=self.ir.types.len() {
@@ -812,6 +990,9 @@ impl Builder<'_> {
         for reserved in ["Raw", "MarshalJSONTo", "UnmarshalJSONFrom"] {
             methods.reserve(reserved);
         }
+        if self.config.validation {
+            methods.reserve("Validate");
+        }
         let mut out = Vec::new();
         for branch in branches {
             let base = exported(&branch.suggested_name);
@@ -832,6 +1013,15 @@ fn null_holding_spelling(spelled: &str) -> bool {
         || spelled == "jsontext.Value"
         || spelled == "any"
         || spelled.starts_with("interface")
+}
+
+/// A type that is an alias shares its target's validation, so a per-type
+/// opt-out on it cannot be honoured: said rather than ignored.
+pub(crate) fn opt_out_on_alias(def: &TypeDef) -> GenerateError {
+    let name = def.component.as_deref().unwrap_or_default();
+    GenerateError::Config(format!(
+        "`types.{name}.validation = false` cannot apply: `{name}` is an alias, which validates as the type it names; opt that type out instead"
+    ))
 }
 
 /// The value type a pointer or a container already gives indirection to.

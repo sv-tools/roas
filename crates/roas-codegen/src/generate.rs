@@ -296,11 +296,6 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
     }
     // Settings the configuration accepts but this release cannot honour
     // are refused, never silently ignored.
-    if config.validation {
-        return Err(GenerateError::Unsupported(
-            "`validation = true` (generated validation)".into(),
-        ));
-    }
     match config.target {
         Target::Rust => check_rust(config)?,
         Target::Go => check_go(config)?,
@@ -338,6 +333,8 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
         uri: document.uri(),
         raw: document.raw(),
         source_pointer,
+        legacy_nullable: matches!(document.version(), SourceVersion::V2 | SourceVersion::V3_0),
+        report_lost: config.validation,
     }
     .translate(document.spec());
     let mut ir = lower::lower(&front, config);
@@ -378,6 +375,9 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
         ir.suppressed = suppressed;
     }
     diagnostics.append(&mut ir.diagnostics);
+    if config.validation {
+        diagnostics.extend(crate::checks::diagnostics(&ir));
+    }
 
     Ok(Prepared {
         ir: Some(ir),

@@ -32,6 +32,7 @@
 //! # Ok(()) }
 //! ```
 
+mod checks;
 mod config;
 mod diagnostic;
 mod front;

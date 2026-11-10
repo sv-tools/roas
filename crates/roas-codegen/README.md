@@ -51,6 +51,7 @@ Pet:
 ```rust
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(remote = "Self")]
 pub struct Pet {
     /// `minLength`: 1.
     pub name: String,
@@ -61,6 +62,7 @@ pub struct Pet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub enum PetStatus {
     #[serde(rename = "available")]
     Available,
@@ -72,6 +74,7 @@ pub enum PetStatus {
 The decisions behind that, each one the generated code enforces rather than merely represents:
 
 - **Nullability is two axes.** `required` and nullable are independent, so there are four cases, and plain `Option<T>` enforces none of them: serde accepts `null` into any `Option` and treats a missing member as `None`. Each case gets the helper that rejects the state the schema forbids — `reject_null`, `require_present`, `double_option` — so `{}` and `{"tag": null}` stay distinct on the way in and the way out.
+- **Closed objects read objects only.** serde's derive also reads a struct from a JSON array, field by field; a closed struct has no catch-all to stop that. Its derived code is made inherent (`remote = "Self"`), and the `Serialize` / `Deserialize` impls beside it delegate to that code, handing it the same deserializer asked for a map — so anything but an object is refused, and the decoder's depth limit still holds. A string enum is read the same way, asked for a string: serde's derive would otherwise also read `{"available": null}` as `available`.
 - **Integers read the token.** JSON Schema's `integer` accepts `1.0` and `1e0` and rejects `1.5`; both languages' stock decoders disagree. Generated `Int64` / `Int32` newtypes decode from the raw token exactly, which is why the output depends on `serde_json` with `raw_value` and why the generated types are JSON-only: deserialize them from text or a reader, not through `serde_json::from_value`.
 - **Unions are never first-match-wins.** A `oneOf` becomes a tagged enum only when the discriminator provably selects the branch validation would: every branch is a component object that requires the discriminator property and pins it with `const` or a single-value `enum`. Otherwise, and for every `anyOf`, the value is kept raw with a typed accessor per branch. An `allOf` flattens into one struct only when every branch is an object with disjoint, self-declared properties; otherwise it too is a raw holder with a projection per part.
 - **Cycles are boxed, lists are not.** A field holding its own type directly gets a `Box`; through a `Vec` or a map it does not need one.
@@ -147,6 +150,19 @@ Types and fields are addressed by the names in the description, never by the gen
 
 Generated Rust is validated with `syn` before it is returned and formatted with `rustfmt` when one is on the path. `rustfmt` always runs with an empty configuration, so a `rustfmt.toml` nearby never changes the output; when it cannot run, the output is unformatted and a warning says so.
 
+## Generated validation
+
+Off by default. `validation = true` (or `roas openapi generate --validate`) gives every generated type a `validate()` — the `Validate` trait in Rust, the `Validator` interface in Go — that checks the constraints its type cannot express: `minLength` / `maxLength` (in characters), `minimum` / `maximum` and their exclusive forms, `multipleOf`, `minItems` / `maxItems` / `uniqueItems`, and `minProperties` / `maxProperties`. What the type does express — presence, nullability, string enum membership, unknown members, integers — is the decoder's job and is not re-checked. Nested types are validated in place, and `oneOf` / `anyOf` / `allOf` holders count the branches that decode and validate, which the raw JSON they keep makes possible.
+
+```rust
+let report = pet.validate();
+for finding in report.violations() {
+    eprintln!("{}: {}", finding.pointer, finding.message); // "/name: is 0 characters long, shorter than minLength 1"
+}
+```
+
+Findings collect rather than stop at the first, each at an RFC 6901 JSON Pointer into the value, and are of two kinds. A **violation** is a constraint the value breaks. An **unevaluated** finding is one the generated code could not decide, and says why; `is_valid()` / `IsValid()` is true only when there are neither, so an unchecked constraint is never mistaken for a passing one. Integers are compared exactly against each bound and `multipleOf` as the description states it; a fractional bound or multiple is exact only as far as the description was read exactly (JSON with the `exact-numbers` feature), and otherwise as far as an `f64` holds it. A `float` (f32) value at either float32 around its bound is unevaluated against that bound: literals on either side of the bound decode to it. A decoded float has lost its literal, so `multipleOf` on a `number` decides only a fraction against a whole multiple and is otherwise unevaluated, and equal floats under `uniqueItems` are unevaluated too. `pattern`, `propertyNames`, `patternProperties`, a numeric `enum`, a `const` the type does not pin, a `required` member with no property of its own, and keywords such as `minLength` on a schema with no `type` (held as raw JSON) or on a substituted type (reported where it is held, or by the non-empty array or map holding it) are reported as unevaluated until they are checked, and so is a keyword the generator does not handle at all, which is also warned about at generation time — including, for an OpenAPI 2.0 or 3.0 source, a keyword its model drops on the way to 3.2 (`maxLength` beside an `allOf`, say). A constraint on an inline array item or map value has no generated type to carry it: it is warned about at generation time and the array or map reports it as unevaluated; give that schema a name of its own to have it checked. The walk is bounded: it goes at most 256 generated types deep, and the `oneOf` / `anyOf` / `allOf` branches it tries for one value decode at most 64 MiB between them (each try counted as at least 640 bytes) — an open holder decodes each branch afresh from its raw value, and nested unions would otherwise multiply the work — and past either limit the rest is reported as unevaluated. `types.<Name>.validation = false` opts one type out: it still implements `validate`, with no checks, so the types holding it compile unchanged. The generated Rust code then also needs serde_json's `float_roundtrip` feature, listed with its dependencies, so a number is decoded as exactly as its bound was read.
+
 ## Templates
 
 Every file is rendered through [minijinja](https://docs.rs/minijinja) templates, embedded in the crate. `template_dir` in the configuration (or `--template-dir`) points at a directory of your own, which overrides them by name: `rust/struct.rs.jinja`, `go/field.go.jinja` and so on, with the same paths as [`templates/`](templates). The directory holds a `roas-templates.toml` declaring the contract it was written against:
@@ -179,10 +195,13 @@ The defaults include one another by plain name, so an override of an included te
 | `go/union_open.go.jinja`, `go/composed_open.go.jinja` | `doc`, `accessors`, `trailing` |
 | `go/alias.go.jinja` | `doc`, `trailing` |
 | `go/field.go.jinja` | `doc`, `decl` |
+| `rust/validate.rs.jinja`, `go/validate.go.jinja` (with validation on) | `validate` |
+| `rust/object_only.rs.jinja` (a closed struct) | `object_only` |
+| `rust/string_only.rs.jinja` (a string enum) | `string_only` |
 
 The generated-code marker is written first in every file by the renderer, whatever the templates do, and a `header` override with `{{ super() }}` keeps the configuration's `header` rather than replacing it.
 
-Templates lay out what the backend decided; they never decide a type. The context is a view model in which every type is already spelled for the target, every name is final and every literal quoted: a file with `template_api`, `source`, `header`, `imports`, `extra_imports`, `support` and `types`, each type with its `kind` (`struct`, `enum`, `union_tagged`, `union_open`, `composed_open`, `newtype`, `alias`), `name`, `raw_name`, `doc` and the parts its kind has (`fields`, `variants`, `branches`, `inner`, `tag`). Inside a type template the type is `t`; inside a field or variant template the member is `f` or `v`. `--print-context` prints the exact context for a description, which is the reference; `template_context` returns it from the library. The backend-owned parts — Rust's serde attributes, Go's `json` struct tag — arrive already in the context, so an override that replaces a field's `attrs` or `decl` should keep them, or it changes the wire format. The output is still checked — with `syn` for Rust, `gofmt` for Go — and when a template produces code that does not parse, `render` (or `--dump-rendered DIR`) gives the text before the check, to see what the template wrote.
+Templates lay out what the backend decided; they never decide a type. The context is a view model in which every type is already spelled for the target, every name is final and every literal quoted: a file with `template_api`, `source`, `header`, `imports`, `extra_imports`, `support` and `types`, each type with its `kind` (`struct`, `enum`, `union_tagged`, `union_open`, `composed_open`, `newtype`, `alias`), `name`, `raw_name`, `doc` and the parts its kind has (`fields`, `variants`, `branches`, `inner`, `tag`). Inside a type template the type is `t`; inside a field or variant template the member is `f` or `v`. `--print-context` prints the exact context for a description, which is the reference; `template_context` returns it from the library. The backend-owned parts — Rust's serde attributes, Go's `json` struct tag — arrive already in the context, so an override that replaces a field's `attrs` or `decl` should keep them, or it changes the wire format. The same holds for a type's `derives` and `attrs`: a closed struct and a string enum carry `#[serde(remote = "Self")]` and derive `Serialize` / `Deserialize`, which the impls in `rust/object_only.rs.jinja` / `rust/string_only.rs.jinja` delegate to — an override that drops them leaves those impls calling themselves, and a `rust/module.rs.jinja` body must keep including those two templates. The output is still checked — with `syn` for Rust, `gofmt` for Go — and when a template produces code that does not parse, `render` (or `--dump-rendered DIR`) gives the text before the check, to see what the template wrote.
 
 ## Input and fidelity
 

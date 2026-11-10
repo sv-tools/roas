@@ -72,10 +72,99 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     }
     lowerer.mark_cycles();
     lowerer.suppress();
+    lowerer.mark_opted_out_branches();
     lowerer.ir
 }
 
 impl<'a> Lowerer<'a> {
+    /// A branch that holds an opted-out type anywhere inside proves no
+    /// match: that type checks nothing, so decoding it says too little.
+    fn mark_opted_out_branches(&mut self) {
+        let opted: BTreeSet<SchemaId> = self
+            .ir
+            .types
+            .values()
+            .filter(|def| {
+                def.component.as_ref().is_some_and(|name| {
+                    self.config.types.get(name).and_then(|t| t.validation) == Some(false)
+                })
+            })
+            .map(|def| def.id.clone())
+            .collect();
+        if opted.is_empty() {
+            return;
+        }
+        fn reaches(
+            ir: &Ir,
+            opted: &BTreeSet<SchemaId>,
+            ty: &TypeRef,
+            seen: &mut BTreeSet<SchemaId>,
+        ) -> bool {
+            match ty {
+                TypeRef::Boxed(inner)
+                | TypeRef::Nullable(inner)
+                | TypeRef::Array(inner)
+                | TypeRef::Map(inner) => reaches(ir, opted, inner, seen),
+                TypeRef::Named(id) => {
+                    if opted.contains(id) {
+                        return true;
+                    }
+                    if !seen.insert(id.clone()) {
+                        return false;
+                    }
+                    let Some(def) = ir.types.get(id) else {
+                        return false;
+                    };
+                    let mut inner: Vec<&TypeRef> = Vec::new();
+                    match &def.kind {
+                        TypeKind::Struct(s) => {
+                            inner.extend(s.fields.iter().map(|f| &f.ty));
+                            if let Additional::CatchAll(ty) = &s.additional {
+                                inner.push(ty);
+                            }
+                        }
+                        TypeKind::Newtype(ty) | TypeKind::Alias(ty) => inner.push(ty),
+                        TypeKind::UnionTagged(u) => inner.extend(u.variants.iter().map(|v| &v.ty)),
+                        TypeKind::UnionOpen(OpenUnion { branches, .. })
+                        | TypeKind::ComposedOpen(branches) => {
+                            inner.extend(branches.iter().map(|b| &b.ty))
+                        }
+                        TypeKind::StringEnum(_) | TypeKind::Extern => {}
+                    }
+                    inner.into_iter().any(|ty| reaches(ir, opted, ty, seen))
+                }
+                _ => false,
+            }
+        }
+        let marks: Vec<(SchemaId, usize)> = self
+            .ir
+            .types
+            .values()
+            .flat_map(|def| {
+                let branches: &[Branch] = match &def.kind {
+                    TypeKind::UnionOpen(OpenUnion { branches, .. })
+                    | TypeKind::ComposedOpen(branches) => branches,
+                    _ => &[],
+                };
+                branches
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| reaches(&self.ir, &opted, &b.ty, &mut BTreeSet::new()))
+                    .map(|(i, _)| (def.id.clone(), i))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (id, i) in marks {
+            if let Some(def) = self.ir.types.get_mut(&id) {
+                match &mut def.kind {
+                    TypeKind::UnionOpen(OpenUnion { branches, .. })
+                    | TypeKind::ComposedOpen(branches) => branches[i].unchecked = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn diagnose(
         &mut self,
         severity: Severity,
@@ -110,6 +199,26 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// With validation on, constraints on an inline array item or map value
+    /// have no named type to carry them, so no check: say so.
+    fn inline_constraints(&mut self, slot: &Slot, lowered: &Lowered, position: &str) {
+        let Slot::Inline(schema) = slot else {
+            return;
+        };
+        if !self.config.validation || lowered.ty.direct_named().is_some() {
+            return;
+        }
+        for keyword in crate::checks::present_keywords(&schema.constraints) {
+            self.warn(
+                DiagnosticKind::Unvalidated {
+                    keyword: keyword.to_owned(),
+                },
+                &schema.id,
+                format!("`{keyword}` on inline {position} is not checked by generated validation yet; give the schema a name of its own to have it checked"),
+            );
+        }
+    }
+
     fn warn(&mut self, kind: DiagnosticKind, at: &SchemaId, message: String) {
         self.diagnose(Severity::Warning, kind, at, None, message);
     }
@@ -127,9 +236,17 @@ impl<'a> Lowerer<'a> {
     fn component(&mut self, name: &str, slot: &Slot) {
         let id = slot.id().clone();
         if self.config.substitutions.contains_key(name) {
-            let (title, description) = match slot {
-                Slot::Inline(schema) => (schema.title.clone(), schema.description.clone()),
-                Slot::Ref { description, .. } => (None, description.clone()),
+            // The constraints are kept so validation can say they go
+            // unchecked on the user's type.
+            let (title, description, constraints) = match slot {
+                Slot::Inline(schema) => (
+                    schema.title.clone(),
+                    schema.description.clone(),
+                    self.substituted_constraints(schema),
+                ),
+                Slot::Ref { description, .. } => {
+                    (None, description.clone(), self.referenced_constraints(slot))
+                }
             };
             self.register(TypeDef {
                 id,
@@ -139,7 +256,7 @@ impl<'a> Lowerer<'a> {
                 description,
                 deprecated: false,
                 nullable: false,
-                constraints: Default::default(),
+                constraints,
                 extensions: BTreeMap::new(),
                 kind: TypeKind::Extern,
                 has_error: false,
@@ -265,7 +382,19 @@ impl<'a> Lowerer<'a> {
         // since the target's shape is not inspected here.
         let mut sibling_hint = hint.to_vec();
         sibling_hint.push("constraints".to_owned());
-        let projection = self.position(&Slot::Inline(Box::new(siblings.clone())), &sibling_hint);
+        // The siblings get an id of their own: hoisted under the reference's
+        // id, they would be overwritten by the intersection registered
+        // there, and the projection would name the intersection itself.
+        let mut own = siblings.clone();
+        own.id.pointer = crate::diagnostic::synthetic(&own.id.pointer, "siblings");
+        let projection = self.position(&Slot::Inline(Box::new(own)), &sibling_hint);
+        // Null is one of the intersection's values only when both sides
+        // allow it; a side without a `type` says nothing about null.
+        let nullable = nullable && admits_null(siblings);
+        let target_ty = wrap_nullable(Lowered {
+            ty: TypeRef::Named(target_id),
+            nullable: self.component_nullable(target),
+        });
         self.warn(
             DiagnosticKind::OpenComposition { keyword: "$ref".to_owned() },
             id,
@@ -280,28 +409,208 @@ impl<'a> Lowerer<'a> {
             title: siblings.title.clone(),
             description: siblings.description.clone(),
             deprecated: siblings.deprecated,
-            nullable: nullable || siblings.nullable,
-            constraints: siblings.constraints.clone(),
+            nullable,
+            // The sibling branch reports what goes unchecked, once.
+            constraints: crate::front::Constraints {
+                unenforced: Vec::new(),
+                unsupported: Vec::new(),
+                ..siblings.constraints.clone()
+            },
             extensions: siblings.extensions.clone(),
             kind: TypeKind::ComposedOpen(vec![
                 Branch {
                     suggested_name: target_hint,
-                    ty: TypeRef::Named(target_id),
+                    ty: target_ty,
+                    constraints: Default::default(),
+                    object_only: false,
+                    unchecked: false,
                 },
                 Branch {
                     suggested_name: sibling_hint,
-                    ty: projection.ty,
+                    constraints: branch_constraints(&projection.ty, &siblings.constraints),
+                    ty: wrap_nullable(projection),
+                    object_only: false,
+                    unchecked: schema_unchecked(siblings),
                 },
             ]),
             has_error: false,
         });
         Lowered {
             ty: TypeRef::Named(id.clone()),
-            nullable: nullable || siblings.nullable,
+            nullable,
         }
     }
 
     /// Whether a component permits `null`, following bare references.
+    /// Whether a branch declares what nothing enforces, so decoding it
+    /// proves no match. A reference is followed: the component's own type
+    /// does not enforce a numeric `enum` or a `const` either.
+    fn slot_unchecked(&self, slot: &Slot) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut current = slot;
+        loop {
+            let schema = match current {
+                Slot::Inline(schema) => schema,
+                Slot::Ref {
+                    target: RefTarget::Component(name),
+                    siblings,
+                    ..
+                } => {
+                    if siblings.as_ref().is_some_and(|s| schema_unchecked(s)) {
+                        return true;
+                    }
+                    // An opted-out type checks nothing: decoding it proves
+                    // no match.
+                    if self.config.types.get(name).and_then(|t| t.validation) == Some(false) {
+                        return true;
+                    }
+                    if !seen.insert(name.clone()) {
+                        return false;
+                    }
+                    match self.front.components.get(name) {
+                        Some(next) => {
+                            current = next;
+                            continue;
+                        }
+                        None => return false,
+                    }
+                }
+                Slot::Ref { .. } => return false,
+            };
+            return schema_unchecked(schema);
+        }
+    }
+
+    /// What a substituted schema declares, its string `enum` (or `const`
+    /// pin) included: the kind that carried it is replaced by the user's
+    /// type. So is what its members, items and branches declare, which
+    /// is marked as one unchecked whole.
+    fn substituted_constraints(&self, schema: &FrontSchema) -> crate::front::Constraints {
+        let mut c = schema.constraints.clone();
+        let string_enum = matches!(
+            &schema.kind,
+            Kind::String {
+                enum_values: Some(_),
+                ..
+            }
+        );
+        if string_enum && !c.unenforced.contains(&"enum") {
+            c.unenforced.push("enum");
+        }
+        if self.asserts_inside(schema, &mut BTreeSet::new()) {
+            c.unsupported
+                .push("the substituted schema's members".to_owned());
+        }
+        c
+    }
+
+    /// Whether anything inside `schema` — a member, an item, a value, a
+    /// branch, through references — asserts what decoding does not.
+    fn asserts_inside(&self, schema: &FrontSchema, seen: &mut BTreeSet<String>) -> bool {
+        let slots: Vec<&Slot> = match &schema.kind {
+            Kind::Array { items } => items.iter().collect(),
+            Kind::Object {
+                properties,
+                required,
+                additional,
+                ..
+            } => {
+                // Which members must be present, or may not, is the
+                // object's own assertion.
+                if !required.is_empty() || matches!(additional, FrontAdditional::Denied) {
+                    return true;
+                }
+                let mut out: Vec<&Slot> = properties.values().collect();
+                if let FrontAdditional::Schema(slot) = additional {
+                    out.push(slot);
+                }
+                out
+            }
+            Kind::AllOf { branches }
+            | Kind::AnyOf { branches }
+            | Kind::OneOf { branches, .. }
+            | Kind::TypeUnion { branches } => branches.iter().collect(),
+            _ => Vec::new(),
+        };
+        slots.into_iter().any(|slot| self.slot_asserts(slot, seen))
+    }
+
+    /// Whether a slot, followed through references, asserts what decoding
+    /// does not, itself or anywhere inside.
+    fn slot_asserts(&self, slot: &Slot, seen: &mut BTreeSet<String>) -> bool {
+        match slot {
+            Slot::Inline(inner) => {
+                !crate::checks::present_keywords(&inner.constraints).is_empty()
+                    || !inner.unsupported.is_empty()
+                    || matches!(
+                        &inner.kind,
+                        Kind::String {
+                            enum_values: Some(_),
+                            ..
+                        } | Kind::Never
+                            | Kind::Not
+                    )
+                    || self.asserts_inside(inner, seen)
+            }
+            Slot::Ref {
+                target: RefTarget::Component(name),
+                siblings,
+                ..
+            } => {
+                if siblings.is_some() {
+                    return true;
+                }
+                if !seen.insert(name.clone()) {
+                    return false;
+                }
+                self.front
+                    .components
+                    .get(name)
+                    .is_some_and(|next| self.slot_asserts(next, seen))
+            }
+            Slot::Ref { .. } => false,
+        }
+    }
+
+    /// The constraints a reference stands for, through a chain of
+    /// references; siblings that assert are kept as unsupported, since
+    /// they are not merged.
+    fn referenced_constraints(&self, slot: &Slot) -> crate::front::Constraints {
+        let mut seen = BTreeSet::new();
+        let mut current = slot;
+        let mut extra = Vec::new();
+        loop {
+            match current {
+                Slot::Inline(schema) => {
+                    let mut c = self.substituted_constraints(schema);
+                    for keyword in extra {
+                        if !c.unsupported.contains(&keyword) {
+                            c.unsupported.push(keyword);
+                        }
+                    }
+                    return c;
+                }
+                Slot::Ref {
+                    target: RefTarget::Component(name),
+                    siblings,
+                    ..
+                } => {
+                    if siblings.is_some() {
+                        extra.push("$ref siblings".to_owned());
+                    }
+                    if !seen.insert(name.clone()) {
+                        return Default::default();
+                    }
+                    match self.front.components.get(name) {
+                        Some(next) => current = next,
+                        None => return Default::default(),
+                    }
+                }
+                Slot::Ref { .. } => return Default::default(),
+            }
+        }
+    }
+
     fn component_nullable(&self, target: &RefTarget) -> bool {
         let mut seen = BTreeSet::new();
         let mut current = target;
@@ -317,10 +626,9 @@ impl<'a> Lowerer<'a> {
                 Some(Slot::Ref {
                     target, siblings, ..
                 }) => {
-                    if let Some(siblings) = siblings
-                        && siblings.nullable
-                    {
-                        return true;
+                    // An intersection: null only when both sides allow it.
+                    if siblings.as_ref().is_some_and(|s| !admits_null(s)) {
+                        return false;
                     }
                     current = target;
                 }
@@ -331,7 +639,7 @@ impl<'a> Lowerer<'a> {
 
     /// Whether a schema is generated as a type of its own rather than
     /// spelled in place.
-    fn needs_name(schema: &FrontSchema) -> bool {
+    pub(crate) fn needs_name(schema: &FrontSchema) -> bool {
         match &schema.kind {
             Kind::String {
                 enum_values: Some(_),
@@ -424,7 +732,11 @@ impl<'a> Lowerer<'a> {
                 let mut item_hint = hint.to_vec();
                 item_hint.push("item".to_owned());
                 let item = match items {
-                    Some(slot) => self.position(slot, &item_hint),
+                    Some(slot) => {
+                        let item = self.position(slot, &item_hint);
+                        self.inline_constraints(slot, &item, "items");
+                        item
+                    }
                     None => Lowered {
                         ty: TypeRef::Any,
                         nullable: false,
@@ -446,10 +758,18 @@ impl<'a> Lowerer<'a> {
                 } else if properties.is_empty() && required.is_empty() && !*typeless {
                     match additional {
                         FrontAdditional::Any => TypeRef::Map(Box::new(TypeRef::Any)),
+                        // Pattern members are not the other members the
+                        // value schema speaks of.
+                        FrontAdditional::Schema(_)
+                            if !schema.constraints.pattern_properties.is_empty() =>
+                        {
+                            TypeRef::Map(Box::new(TypeRef::Any))
+                        }
                         FrontAdditional::Schema(slot) => {
                             let mut value_hint = hint.to_vec();
                             value_hint.push("value".to_owned());
                             let value = self.position(slot, &value_hint);
+                            self.inline_constraints(slot, &value, "additionalProperties");
                             TypeRef::Map(Box::new(wrap_nullable(value)))
                         }
                         FrontAdditional::Denied => return self.hoist_lowered(schema, hint),
@@ -515,6 +835,9 @@ impl<'a> Lowerer<'a> {
                 TypeKind::ComposedOpen(vec![Branch {
                     suggested_name: object_hint,
                     ty: TypeRef::Named(projection),
+                    constraints: Default::default(),
+                    object_only: true,
+                    unchecked: false,
                 }])
             }
             Kind::Object { .. } if named => TypeKind::Struct(self.object(schema, &name)),
@@ -531,9 +854,11 @@ impl<'a> Lowerer<'a> {
                 branches: self.branches(branches, &name, "variant"),
                 exclusive: false,
             }),
+            // `type: [integer, number]` accepts what any member accepts,
+            // overlaps included: it is `anyOf`, not `oneOf`.
             Kind::TypeUnion { branches } => TypeKind::UnionOpen(OpenUnion {
                 branches: self.type_branches(branches, &name),
-                exclusive: true,
+                exclusive: false,
             }),
             _ => {
                 // A scalar, array, map or any reaches here only as a
@@ -559,7 +884,12 @@ impl<'a> Lowerer<'a> {
             description: None,
             deprecated: false,
             nullable: false,
-            constraints: schema.constraints.clone(),
+            // The holder reports what goes unchecked, for every value.
+            constraints: crate::front::Constraints {
+                unenforced: Vec::new(),
+                unsupported: Vec::new(),
+                ..schema.constraints.clone()
+            },
             extensions: BTreeMap::new(),
             kind: TypeKind::Extern,
             has_error: false,
@@ -638,12 +968,22 @@ impl<'a> Lowerer<'a> {
             );
         }
         let additional = match additional {
+            // Members the patterns allow are not unknown: refusing them
+            // would refuse valid values. They land in the catch-all.
+            // Nor are they the other members `additionalProperties` speaks
+            // of: typed by it, they would be refused or misjudged.
+            FrontAdditional::Denied | FrontAdditional::Schema(_)
+                if !schema.constraints.pattern_properties.is_empty() =>
+            {
+                Additional::CatchAll(TypeRef::Any)
+            }
             FrontAdditional::Denied => Additional::Denied,
             FrontAdditional::Any => Additional::CatchAll(TypeRef::Any),
             FrontAdditional::Schema(slot) => {
                 let mut hint = name.to_vec();
                 hint.push("value".to_owned());
                 let value = self.position(slot, &hint);
+                self.inline_constraints(slot, &value, "additionalProperties");
                 Additional::CatchAll(wrap_nullable(value))
             }
         };
@@ -666,9 +1006,13 @@ impl<'a> Lowerer<'a> {
                 hint.push(format!("{word} {}", i + 1));
                 let suggested_name = self.branch_name(slot, &hint);
                 let lowered = self.position(slot, &hint);
+                let ty = wrap_nullable(lowered);
                 Branch {
                     suggested_name,
-                    ty: wrap_nullable(lowered),
+                    constraints: slot_constraints(slot, &ty),
+                    unchecked: self.slot_unchecked(slot),
+                    ty,
+                    object_only: false,
                 }
             })
             .collect()
@@ -685,9 +1029,13 @@ impl<'a> Lowerer<'a> {
                 let mut hint = name.to_vec();
                 hint.push(word.to_owned());
                 let lowered = self.position(slot, &hint);
+                let ty = wrap_nullable(lowered);
                 Branch {
                     suggested_name: hint,
-                    ty: wrap_nullable(lowered),
+                    constraints: slot_constraints(slot, &ty),
+                    unchecked: self.slot_unchecked(slot),
+                    ty,
+                    object_only: false,
                 }
             })
             .collect()
@@ -953,7 +1301,11 @@ impl<'a> Lowerer<'a> {
             self.warn(
                 DiagnosticKind::UnsupportedKeyword { keyword: keyword.clone() },
                 &schema.id,
-                format!("`{keyword}` is not handled by the generator; it is neither represented in the type nor validated"),
+                if self.config.validation {
+                    format!("`{keyword}` is not handled by the generator; it is not represented in the type, and generated validation reports it as unevaluated")
+                } else {
+                    format!("`{keyword}` is not handled by the generator; it is neither represented in the type nor validated")
+                },
             );
         }
         if schema.const_value.is_some() && !self.const_is_tag(schema) {
@@ -1081,6 +1433,29 @@ impl<'a> Lowerer<'a> {
                     DiagnosticKind::LossyNumber,
                     &schema.id,
                     "`integer` is unbounded in JSON Schema, or bounded beyond the mapped fixed-width integer; values outside that range are rejected at decode".into(),
+                );
+            }
+        }
+        // Said only where validation hears it: a new warning would fail a
+        // `--strict` generation that passed before.
+        if let Kind::Number {
+            width: Some(FloatWidth::Float),
+            ..
+        } = &schema.kind
+            && self.config.validation
+        {
+            let within = |n: &Option<serde_json::Number>| {
+                n.as_ref()
+                    .and_then(serde_json::Number::as_f64)
+                    .is_some_and(|v| v.abs() <= f64::from(f32::MAX))
+            };
+            let below = within(&c.minimum) || within(&c.exclusive_minimum);
+            let above = within(&c.maximum) || within(&c.exclusive_maximum);
+            if !(below && above) {
+                self.warn(
+                    DiagnosticKind::LossyNumber,
+                    &schema.id,
+                    "`format: float` maps to a 32-bit float; a value past its range is rejected at decode (read as an infinity in Rust without serde_json's `float_roundtrip`)".into(),
                 );
             }
         }
@@ -1214,6 +1589,75 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+/// A schema saying what neither its type nor a generated check enforces.
+fn schema_unchecked(schema: &FrontSchema) -> bool {
+    let numeric_enum = matches!(
+        &schema.kind,
+        Kind::Integer {
+            enum_values: Some(_),
+            ..
+        } | Kind::Number {
+            enum_values: Some(_),
+            ..
+        }
+    );
+    numeric_enum || schema.const_value.is_some() || !schema.unsupported.is_empty()
+}
+
+/// What an inline branch constrains that no named type carries for it.
+fn slot_constraints(slot: &Slot, ty: &TypeRef) -> crate::front::Constraints {
+    match slot {
+        Slot::Inline(schema) => branch_constraints(ty, &schema.constraints),
+        Slot::Ref { .. } => Default::default(),
+    }
+}
+
+/// A named type checks its own constraints; anything else keeps them on
+/// the branch.
+fn branch_constraints(
+    ty: &TypeRef,
+    constraints: &crate::front::Constraints,
+) -> crate::front::Constraints {
+    if ty.direct_named().is_some() {
+        Default::default()
+    } else {
+        constraints.clone()
+    }
+}
+
+/// Whether `$ref` siblings are known to allow null: they say so, or say
+/// no `type` and nothing else about it.
+fn admits_null(siblings: &FrontSchema) -> bool {
+    // What the generator does not read may leave null out: unproven, the
+    // null is validated rather than passed.
+    if !siblings.unsupported.is_empty() {
+        return false;
+    }
+    // An `enum` or `const` names the values allowed, null among them or not.
+    let listed = match &siblings.kind {
+        Kind::String {
+            enum_values: Some(_),
+            ..
+        }
+        | Kind::Integer {
+            enum_values: Some(_),
+            ..
+        }
+        | Kind::Number {
+            enum_values: Some(_),
+            ..
+        } => Some(false),
+        _ => siblings.const_value.as_ref().map(Value::is_null),
+    };
+    listed.unwrap_or(
+        siblings.nullable
+            || matches!(
+                &siblings.kind,
+                Kind::Any | Kind::Object { typeless: true, .. }
+            ),
+    )
+}
+
 fn wrap_nullable(lowered: Lowered) -> TypeRef {
     if lowered.nullable {
         TypeRef::Nullable(Box::new(lowered.ty))
@@ -1321,6 +1765,8 @@ mod tests {
             uri: &uri,
             raw: &raw,
             source_pointer: |p| p.to_owned(),
+            legacy_nullable: false,
+            report_lost: false,
         }
         .translate(&spec);
         let config = ConfigFile {
@@ -1586,7 +2032,18 @@ mod tests {
             "Some": {"anyOf": [{"type": "string"}, {"type": "boolean"}]}
         }));
         assert!(
-            matches!(&def(&ir, "/components/schemas/Either").kind, TypeKind::UnionOpen(u) if u.exclusive && u.branches.len() == 2)
+            matches!(&def(&ir, "/components/schemas/Either").kind, TypeKind::UnionOpen(u) if !u.exclusive && u.branches.len() == 2)
+        );
+        // A type list accepts what any member does; each member keeps the
+        // constraints that apply to it, for validation.
+        let TypeKind::UnionOpen(either) = &def(&ir, "/components/schemas/Either").kind else {
+            unreachable!()
+        };
+        assert!(
+            either
+                .branches
+                .iter()
+                .any(|b| b.constraints.minimum.is_some())
         );
         assert!(
             matches!(&def(&ir, "/components/schemas/Some").kind, TypeKind::UnionOpen(u) if !u.exclusive && u.branches.len() == 2)
@@ -1610,6 +2067,8 @@ mod tests {
             uri: &uri,
             raw: &raw,
             source_pointer: |p| p.to_owned(),
+            legacy_nullable: false,
+            report_lost: false,
         }
         .translate(&spec);
         let config = ConfigFile::from_toml(

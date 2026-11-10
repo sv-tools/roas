@@ -7,7 +7,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::generate::GenerateError;
 use crate::ir::{Additional, Ir, TypeDef, TypeKind, TypeRef};
-use crate::rust::attrs::{check_container_attrs, check_field_attrs};
+use crate::rust::attrs::{cfg_gates, check_container_attrs, check_field_attrs};
 use crate::rust::naming::{Allocator, legal, pascal, snake};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -20,6 +20,12 @@ pub(crate) struct SupportView {
     pub int64: bool,
     pub int32: bool,
     pub raw_holder: bool,
+    /// A closed struct reads through `ObjectOnly`.
+    pub object_only: bool,
+    /// A string enum reads through `StringOnly`.
+    pub string_only: bool,
+    /// Generated validation is on: the report types and `Validate`.
+    pub validation: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -29,6 +35,10 @@ pub(crate) struct FieldView {
     pub ty: String,
     pub doc: Vec<String>,
     pub attrs: Vec<String>,
+    /// The field's conditional-compilation gates, which the validation
+    /// reading it repeats.
+    #[serde(skip)]
+    pub cfg: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +80,20 @@ pub(crate) struct TypeView {
     pub tag: String,
     /// `oneOf` rather than `anyOf`, for an open union's documentation.
     pub exclusive: bool,
+    /// The statements of `Validate::validate_into`, with validation on;
+    /// `None` for no implementation (an alias shares its target's).
+    pub validate: Option<Vec<String>>,
+    /// The statements of `Validate::validate_null`; empty for none.
+    pub validate_null: Vec<String>,
+    /// A struct read from a JSON object only: serde's derive would also
+    /// read it from an array, so it decodes through a guard.
+    pub object_only: bool,
+    /// A string enum read from a JSON string only: serde's derive would
+    /// also read `{"a": null}` as `"a"`.
+    pub string_only: bool,
+    /// The type's conditional-compilation gates (`#[cfg(...)]` among its
+    /// configured attributes), repeated on every impl generated beside it.
+    pub cfg: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,7 +215,13 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         },
         RustDependency {
             name: "serde_json".into(),
-            features: vec!["raw_value".into()],
+            // Validation compares a decoded number with a bound read
+            // exactly: the decoder must read it exactly too.
+            features: if builder.config.validation {
+                vec!["raw_value".into(), "float_roundtrip".into()]
+            } else {
+                vec!["raw_value".into()]
+            },
         },
     ];
     for import in builder.externs.values() {
@@ -286,6 +316,18 @@ impl Builder<'_> {
             "integer_token",
         ] {
             allocator.reserve(reserved);
+        }
+        if self.config.validation {
+            for reserved in [
+                "Validate",
+                "ValidationReport",
+                "Finding",
+                "FindingKind",
+                "child_pointer",
+                "wide_number",
+            ] {
+                allocator.reserve(reserved);
+            }
         }
         for id in &self.ir.order {
             let def = &self.ir.types[id];
@@ -499,6 +541,7 @@ impl Builder<'_> {
         check_container_attrs(&user_attrs, &raw_name)?;
         attrs.extend(user_attrs);
         attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
+        let cfg = cfg_gates(&attrs, &raw_name)?;
         let mut derives: Vec<String> = ["Debug", "Clone", "PartialEq"]
             .iter()
             .map(|s| (*s).to_owned())
@@ -517,10 +560,37 @@ impl Builder<'_> {
             inner: String::new(),
             tag: String::new(),
             exclusive: false,
+            validate: None,
+            validate_null: Vec::new(),
+            object_only: false,
+            string_only: false,
+            cfg,
         };
         let result = self.fill_kind(def, &mut view)?;
         if !result {
             return Ok(None);
+        }
+        if self.config.validation {
+            self.support.validation = true;
+            let opted_out = self.type_config(def).and_then(|t| t.validation) == Some(false);
+            let emitted = |id: &SchemaId| self.names.contains_key(id);
+            let generated = |ty: &TypeRef| crate::checks::validates(self.ir, &emitted, ty);
+            view.validate = super::validation::body(self.ir, def, &view, &generated, opted_out);
+            if view.validate.is_some() && !opted_out {
+                view.validate_null = super::validation::null_body(def);
+                // An alias spelled as a newtype has its target's null.
+                if let TypeKind::Alias(inner) = &def.kind
+                    && generated(inner)
+                {
+                    view.validate_null = vec![format!(
+                        "<{} as Validate>::validate_null(pointer, report);",
+                        view.inner
+                    )];
+                }
+            }
+            if opted_out && view.validate.is_none() {
+                return Err(crate::go::view::opt_out_on_alias(def));
+            }
         }
         let mut seen = std::collections::BTreeSet::new();
         view.derives.retain(|d| seen.insert(d.clone()));
@@ -590,7 +660,9 @@ impl Builder<'_> {
                     let mut at = def.id.clone();
                     at.pointer = format!("{}/properties/{}", def.id.pointer, field.raw_name);
                     attrs.extend(self.codegen_attrs(&field.extensions, &at, true));
+                    let cfg = cfg_gates(&attrs, &format!("{}.{}", view.raw_name, field.raw_name))?;
                     view.fields.push(FieldView {
+                        cfg,
                         name,
                         raw_name: field.raw_name.clone(),
                         ty,
@@ -605,8 +677,14 @@ impl Builder<'_> {
                     });
                 }
                 match &s.additional {
+                    // With no catch-all to flatten, serde's derive reads a
+                    // sequence too: the derived code becomes inherent and a
+                    // guard decodes an object only.
                     Additional::Denied => {
-                        view.attrs.push("#[serde(deny_unknown_fields)]".to_owned())
+                        view.attrs.push("#[serde(deny_unknown_fields)]".to_owned());
+                        view.attrs.push("#[serde(remote = \"Self\")]".to_owned());
+                        view.object_only = true;
+                        self.support.object_only = true;
                     }
                     Additional::CatchAll(ty) => {
                         let inner = self.spell(ty)?;
@@ -617,12 +695,19 @@ impl Builder<'_> {
                             ty: format!("std::collections::BTreeMap<String, {inner}>"),
                             doc: vec!["Members not named above.".to_owned()],
                             attrs: vec!["#[serde(flatten)]".to_owned()],
+                            cfg: Vec::new(),
                         });
                     }
                 }
             }
             TypeKind::StringEnum(values) => {
                 view.kind = "enum";
+                // serde's derive also reads a single-member object as a
+                // variant: the derived code becomes inherent and a guard
+                // reads a JSON string only.
+                view.attrs.push("#[serde(remote = \"Self\")]".to_owned());
+                view.string_only = true;
+                self.support.string_only = true;
                 view.derives.extend([
                     "Eq".to_owned(),
                     "Hash".to_owned(),
