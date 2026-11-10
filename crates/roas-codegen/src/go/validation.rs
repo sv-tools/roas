@@ -204,6 +204,16 @@ fn render(
                         "if {at} {{ {r}.unevaluated({p}, {}) }} else if !(float64({value}) {op} {rounded}) {{ {violation} }}",
                         lit(&format!("{keyword} {literal}: the value rounds to the same float as the bound"))
                     ));
+                } else if float {
+                    // Past every float32: a literal at or past the bound
+                    // decodes to the largest one, which is ambiguous.
+                    needs.math = true;
+                    let edge = if *bound > 0.0 { "math.MaxFloat32" } else { "-math.MaxFloat32" };
+                    let wide = format!("float64({e})");
+                    out.push(format!(
+                        "if {wide} == {edge} {{ {r}.unevaluated({p}, {}) }} else if !({wide} {op} {bound:?}) {{ {violation} }}",
+                        lit(&format!("{keyword} {literal}: the value is at the edge of the float range"))
+                    ));
                 } else {
                     let wide = format!("float64({e})");
                     out.push(format!(

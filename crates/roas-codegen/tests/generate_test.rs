@@ -831,7 +831,10 @@ fn keywords_a_3_0_model_drops_are_reported() {
                 {"$ref": "#/components/schemas/Obj"},
                 {"properties": {"x": {"type": "string"}}}
             ]},
-            "Inclusive": {"type": "integer", "minimum": 1, "exclusiveMinimum": false}
+            "Inclusive": {"type": "integer", "minimum": 1, "exclusiveMinimum": false},
+            "InclusiveMax": {"type": "number", "maximum": 5, "exclusiveMaximum": false},
+            "NoBound": {"type": "integer", "exclusiveMinimum": true},
+            "NullDefault": {"type": "string", "nullable": true, "default": null}
         }}
     });
     let bytes = serde_json::to_vec(&raw).unwrap();

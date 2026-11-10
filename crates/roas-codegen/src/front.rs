@@ -395,8 +395,11 @@ impl Translator<'_> {
                     "type" => self.type_implied(raw),
                     "minimum" => has("exclusiveMinimum"),
                     "maximum" => has("exclusiveMaximum"),
-                    // `false` says what the inclusive bound already does.
-                    "exclusiveMinimum" | "exclusiveMaximum" => raw[key] == Value::Bool(false),
+                    // A boolean flag: `false` says what the inclusive bound
+                    // already does, and `true` without a bound nothing.
+                    "exclusiveMinimum" | "exclusiveMaximum" => raw[key].is_boolean(),
+                    // The model reads `default: null` as no default.
+                    "default" => raw[key].is_null(),
                     _ => false,
                 };
                 !rewritten && !has(key)

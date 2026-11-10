@@ -142,9 +142,14 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                     // Past every float32 but not every f64: an infinity
                     // came from some literal past the float range, on
                     // either side of the bound.
-                    Err(bound) if bound.is_finite() => out.push(format!(
-                        "if {v}.is_infinite() {{ {r}.unevaluated({p}, \"{keyword} {literal}: the value is past the float range\"); }} else if !(f64::from(*{v}) {op} {bound:?}) {{ {violation}; }}"
-                    )),
+                    // The largest float32 is where a literal at or past the
+                    // bound lands: ambiguous too.
+                    Err(bound) if bound.is_finite() => {
+                        let edge = if bound > 0.0 { "f32::MAX" } else { "f32::MIN" };
+                        out.push(format!(
+                            "if {v}.is_infinite() || *{v} == {edge} {{ {r}.unevaluated({p}, \"{keyword} {literal}: the value is at the edge of the float range\"); }} else if !(f64::from(*{v}) {op} {bound:?}) {{ {violation}; }}"
+                        ))
+                    }
                     // Beyond every value: always or never met.
                     Err(bound) if (bound > 0.0) == at_least => out.push(format!("{violation};")),
                     Err(_) => {}

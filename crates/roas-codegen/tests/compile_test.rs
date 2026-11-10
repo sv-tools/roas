@@ -657,6 +657,10 @@ fn validated_description() -> serde_json::Value {
             "SmallMaps": {"type": "array", "items": {"additionalProperties": {"type": "string"}, "maxProperties": 2}},
             "Money": {"type": "string", "maxLength": 3},
             "Base2": {"type": "string", "maxLength": 2},
+            "ShortOff": {"type": "string", "maxLength": 1},
+            "LongOn": {"type": "string", "minLength": 2},
+            "OffOrOn": {"oneOf": [{"$ref": "#/components/schemas/ShortOff"}, {"$ref": "#/components/schemas/LongOn"}]},
+            "F32Edge": {"type": "number", "format": "float", "exclusiveMaximum": 3.4028235677973366e38},
             "AliasSub": {"$ref": "#/components/schemas/Base2"},
             "HoldsAliasSub": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/AliasSub"}}},
             "ListNullOnly": {"type": ["string", "integer", "null"], "enum": [null], "if": {}, "then": false},
@@ -693,7 +697,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -927,6 +931,11 @@ fn main() {
     // A list left with its null keeps what else it says.
     assert_eq!(report::<NullIf>("null"), vec![u("")]);
     assert_eq!(report::<ListNullOnly>("null"), vec![u("")]);
+    // An opted-out branch proves no match.
+    assert_eq!(report::<OffOrOn>(r#""abc""#), vec![u("")]);
+    // A literal at a bound past the float32 range decodes to the largest float32.
+    assert_eq!(report::<F32Edge>("3.4028235677973366e38"), vec![u("")]);
+    assert_eq!(report::<F32Edge>("1.5"), vec![]);
     // A substituted reference keeps what its target declares.
     assert_eq!(report::<HoldsAliasSub>(r#"{"v":"long"}"#), vec![u("/v")]);
     // An alias spelled as a newtype has its target's null.
@@ -1160,6 +1169,9 @@ func main() {
 	check(`{"x":2}`, report[api.EnumObj](`{"x":2}`), u(""))
 	check(`null`, report[api.NullIf](`null`), u(""))
 	check(`null`, report[api.ListNullOnly](`null`), u(""))
+	check(`"abc"`, report[api.OffOrOn](`"abc"`), u(""))
+	check(`3.4028235677973366e38`, report[api.F32Edge](`3.4028235677973366e38`), u(""))
+	check(`1.5`, report[api.F32Edge](`1.5`))
 	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))
 	check(`{"v":null}`, report[api.HoldsNIfAlias](`{"v":null}`), u("/v"))
 	fmt.Println("validation behaves")

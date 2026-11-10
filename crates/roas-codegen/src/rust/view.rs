@@ -302,9 +302,14 @@ impl Builder<'_> {
             "reject_null",
             "require_present",
             "integer_token",
-            "ObjectOnly",
         ] {
             allocator.reserve(reserved);
+        }
+        // Declared only for a closed struct.
+        if self.ir.types.values().any(|d| {
+            matches!(&d.kind, TypeKind::Struct(s) if matches!(s.additional, Additional::Denied))
+        }) {
+            allocator.reserve("ObjectOnly");
         }
         if self.config.validation {
             for reserved in [

@@ -370,6 +370,11 @@ impl<'a> Lowerer<'a> {
                     if siblings.as_ref().is_some_and(|s| schema_unchecked(s)) {
                         return true;
                     }
+                    // An opted-out type checks nothing: decoding it proves
+                    // no match.
+                    if self.config.types.get(name).and_then(|t| t.validation) == Some(false) {
+                        return true;
+                    }
                     if !seen.insert(name.clone()) {
                         return false;
                     }
