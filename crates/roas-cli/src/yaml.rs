@@ -1,7 +1,10 @@
 //! The one place the CLI reads and writes YAML, so every subcommand reads a
 //! document the same way the fetchers and `roas-codegen` do.
 
-use serde_json::Value;
+use serde::ser::Error as _;
+use serde::{Serialize, Serializer};
+use serde_json::{Number, Value};
+use std::sync::OnceLock;
 
 /// Read `raw` as YAML.
 ///
@@ -54,10 +57,144 @@ pub(crate) fn from_str(raw: &str) -> Result<Value, serde_saphyr::Error> {
 /// Write `value` as YAML. Strings that a YAML 1.1 reader would take for
 /// something else (`"3.1.0"`, `"n"`, `"yes"`) are quoted, and the
 /// document ends with a newline.
-pub(crate) fn to_string<T: serde::Serialize>(
+///
+/// Each number is written as a plain YAML number, also when
+/// `serde_json/arbitrary_precision` is on (the `exact-numbers` feature),
+/// under which a `Value` number would otherwise serialize as a
+/// `$serde_json::private::Number` mapping. An integer within 128 bits is
+/// written exactly; any other number goes through an `f64`, as it does
+/// without the feature, and one whose value that would change
+/// (`1e400`, `0.1000000000000000000001`, an integer past 128 bits) is an
+/// error rather than silently rounded.
+pub(crate) fn to_string(value: &Value) -> Result<String, serde_saphyr::SerializeError> {
+    serde_saphyr::to_string(&PlainNumbers(value))
+}
+
+/// Write a typed `value` as YAML, with the quoting of [`to_string`]. Only
+/// for types that hold no `serde_json::Value`, whose numbers would be
+/// written as mappings under `arbitrary_precision`; a document goes
+/// through [`to_string`].
+pub(crate) fn typed_to_string<T: Serialize>(
     value: &T,
 ) -> Result<String, serde_saphyr::SerializeError> {
     serde_saphyr::to_string(value)
+}
+
+/// A `Value` whose numbers serialize as numbers, never as the private
+/// mapping `arbitrary_precision` uses to carry a number's literal.
+struct PlainNumbers<'a>(&'a Value);
+
+impl Serialize for PlainNumbers<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Value::Number(number) => serialize_number(number, serializer),
+            Value::Array(items) => serializer.collect_seq(items.iter().map(PlainNumbers)),
+            Value::Object(members) => serializer.collect_map(
+                members
+                    .iter()
+                    .map(|(name, member)| (name, PlainNumbers(member))),
+            ),
+            other => other.serialize(serializer),
+        }
+    }
+}
+
+fn serialize_number<S: Serializer>(number: &Number, serializer: S) -> Result<S::Ok, S::Error> {
+    if let Some(n) = number.as_u64() {
+        return serializer.serialize_u64(n);
+    }
+    if let Some(n) = number.as_i64() {
+        // Only the literal `-0` kept by `arbitrary_precision` lands here as
+        // zero; without the feature it is read as `-0.0`, so write that.
+        if n == 0 {
+            return serializer.serialize_f64(-0.0);
+        }
+        return serializer.serialize_i64(n);
+    }
+    // Without `arbitrary_precision` every other number is an `f64`
+    // already, and is written as it always was.
+    if !keeps_literals()
+        && let Some(n) = number.as_f64()
+    {
+        return serializer.serialize_f64(n);
+    }
+    // Only a kept literal can be an integer outside `i64`/`u64`.
+    let literal = number.to_string();
+    if let Ok(n) = literal.parse::<u128>() {
+        return serializer.serialize_u128(n);
+    }
+    if let Ok(n) = literal.parse::<i128>() {
+        return serializer.serialize_i128(n);
+    }
+    // Anything else is written as an `f64`, but only when the text the
+    // YAML writer gives that `f64` has the literal's value: YAML output
+    // cannot carry a literal as written.
+    if let Some(n) = number.as_f64() {
+        let written = serde_saphyr::to_string(&n).map_err(S::Error::custom)?;
+        if let (Some(written), Some(kept)) = (decimal(written.trim_end()), decimal(&literal))
+            && written == kept
+        {
+            return serializer.serialize_f64(n);
+        }
+    }
+    Err(S::Error::custom(format!(
+        "the number {literal} cannot be written as a YAML number without \
+         changing its value; write the output as JSON instead"
+    )))
+}
+
+/// Whether `serde_json` keeps each number's literal (`arbitrary_precision`,
+/// turned on by the `exact-numbers` feature or by any other crate in the
+/// build).
+fn keeps_literals() -> bool {
+    static KEEPS: OnceLock<bool> = OnceLock::new();
+    *KEEPS.get_or_init(|| {
+        serde_json::from_str::<Number>("1.10").is_ok_and(|number| number.to_string() == "1.10")
+    })
+}
+
+/// A decimal literal's value as its sign, significant digits and power of
+/// ten (`-1.50e2` is `(true, "15", 1)`), so two spellings of one value
+/// compare equal. Zero has no sign; `None` for anything else, including
+/// a power of ten past `i64`.
+fn decimal(literal: &str) -> Option<(bool, String, i64)> {
+    let (negative, rest) = match literal.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, literal),
+    };
+    let (mantissa, exponent) = match rest.find(['e', 'E']) {
+        Some(at) => (&rest[..at], &rest[at + 1..]),
+        None => (rest, "0"),
+    };
+    let exponent_digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+    if exponent_digits.is_empty() || !exponent_digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !whole
+        .bytes()
+        .chain(fraction.bytes())
+        .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    let digits = digits.trim_start_matches('0');
+    let trimmed = digits.trim_end_matches('0');
+    if trimmed.is_empty() {
+        // Zero, whatever the power of ten.
+        return Some((false, String::new(), 0));
+    }
+    let power = exponent
+        .trim_start_matches('+')
+        .parse::<i64>()
+        .ok()?
+        .checked_sub(i64::try_from(fraction.len()).ok()?)?
+        .checked_add(i64::try_from(digits.len() - trimmed.len()).ok()?)?;
+    Some((negative, trimmed.to_owned(), power))
 }
 
 #[cfg(test)]
@@ -67,6 +204,134 @@ mod tests {
 
     fn parse(yaml: &str) -> Result<Value, String> {
         from_str(yaml).map_err(|e| e.to_string())
+    }
+
+    fn write(json: &str) -> String {
+        to_string(&serde_json::from_str(json).unwrap()).unwrap()
+    }
+
+    /// Without `arbitrary_precision` a `Value` number serializes natively;
+    /// with it, as a `$serde_json::private::Number` mapping, which the
+    /// writer must not let through.
+    #[test]
+    fn yaml_numbers_are_written_as_numbers() {
+        let json = r#"[7, -7, 1.5, 1e2, [0, {"x": -0.25}]]"#;
+        let yaml = write(json);
+        assert_eq!(yaml, "- 7\n- -7\n- 1.5\n- 100.0\n- - 0\n  - x: -0.25\n");
+        // What is written reads back as the same numbers.
+        assert_eq!(
+            from_str(&yaml).unwrap(),
+            json!([7, -7, 1.5, 100.0, [0, { "x": -0.25 }]])
+        );
+    }
+
+    /// An integer past `u64` keeps every digit only when the literal is
+    /// kept; otherwise it was rounded to an `f64` when read.
+    #[test]
+    fn yaml_wide_integers_are_written_exactly_when_kept() {
+        let yaml = write(
+            r#"{"big": 123456789012345678901234567890, "neg": -123456789012345678901234567890}"#,
+        );
+        assert!(!yaml.contains("serde_json"), "{yaml}");
+        if keeps_literals() {
+            assert_eq!(
+                yaml,
+                "big: 123456789012345678901234567890\nneg: -123456789012345678901234567890\n"
+            );
+        }
+        // Each side of the `u64`, `i64` and 128-bit boundaries, and `-0`,
+        // which both builds write as `-0.0`.
+        let bounds = write(
+            "[18446744073709551615, -9223372036854775808, 0, -0, -0.0, \
+             340282366920938463463374607431768211455, \
+             -170141183460469231731687303715884105728]",
+        );
+        assert!(
+            bounds.starts_with(
+                "- 18446744073709551615\n- -9223372036854775808\n- 0\n- -0.0\n- -0.0\n"
+            ),
+            "{bounds}"
+        );
+        if keeps_literals() {
+            assert_eq!(
+                write("[18446744073709551616, -9223372036854775809]"),
+                "- 18446744073709551616\n- -9223372036854775809\n"
+            );
+            assert!(
+                bounds.ends_with(
+                    "- 340282366920938463463374607431768211455\n\
+                     - -170141183460469231731687303715884105728\n"
+                ),
+                "{bounds}"
+            );
+        }
+    }
+
+    /// A number an `f64` would change is refused rather than rounded; one
+    /// it keeps is written, however it was spelled.
+    #[test]
+    fn yaml_number_an_f64_would_change_is_an_error() {
+        // Without kept literals none of these can be read as written.
+        if !keeps_literals() {
+            return;
+        }
+        for literal in [
+            "1e400",
+            "0.1000000000000000000001",
+            "9007199254740993.5",
+            "340282366920938463463374607431768211457",
+            "-170141183460469231731687303715884105729",
+            // The YAML writer spells the `f64` both read as `…0.2`.
+            "1000000000000000.3",
+            "1658206780088562.3",
+            "1.1e-9223372036854775808",
+        ] {
+            let value: Value = serde_json::from_str(&format!("[{literal}]")).unwrap();
+            let err = to_string(&value).unwrap_err().to_string();
+            assert!(
+                err.contains("without changing its value"),
+                "{literal}: {err}"
+            );
+        }
+        assert_eq!(
+            write(
+                "[1.50, 1E2, 0.1, -0.0, 2.5e-3, 1000000000000000.2, 1658206780088562.2, 0e99999999999999999999]"
+            ),
+            "- 1.5\n- 100.0\n- 0.1\n- -0.0\n- 0.0025\n- 1000000000000000.2\n- 1658206780088562.2\n- 0.0\n"
+        );
+    }
+
+    /// Without kept literals every number is an `f64` already, written as
+    /// before, however the writer spells it.
+    #[test]
+    fn yaml_numbers_without_kept_literals_are_never_refused() {
+        // Another crate in the build can turn `arbitrary_precision` on.
+        if keeps_literals() {
+            return;
+        }
+        assert_eq!(
+            write("[1000000000000000.3, 0.1000000000000000000001, 1658206780088562.3]"),
+            "- 1000000000000000.2\n- 0.1\n- 1658206780088562.2\n"
+        );
+    }
+
+    #[test]
+    fn decimal_compares_values_not_spellings() {
+        assert_eq!(decimal("-1.50e2"), Some((true, "15".to_owned(), 1)));
+        assert_eq!(decimal("150"), decimal("1.5E2"));
+        assert_eq!(decimal("0.0025"), decimal("25e-4"));
+        assert_eq!(decimal("-0.0"), decimal("0"));
+        assert_ne!(decimal("0.1"), decimal("0.1000000000000000000001"));
+        assert_eq!(decimal("1x"), None);
+        assert_eq!(decimal("1e"), None);
+        assert_eq!(decimal("1.1e-9223372036854775808"), None);
+        assert_eq!(decimal("1e+2"), decimal("100"));
+        assert_eq!(decimal("0e99999999999999999999"), decimal("0"));
+        assert_eq!(decimal("1e99999999999999999999"), None);
+        assert_eq!(decimal("1e+"), None);
+        for empty in ["", ".", "-", "e5", "-."] {
+            assert_eq!(decimal(empty), None, "{empty}");
+        }
     }
 
     /// Each scalar whose meaning depends on the YAML options, next to what
