@@ -8,13 +8,22 @@
 		if err := refuseNull(d, {{ t | tojson }}); err != errors.ErrUnsupported {
 			return err
 		}
-		return json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))
+		return json.UnmarshalDecode(d, v, noUnmarshalers)
 	}),
 {% endfor %}{% for t in support.isolated %}	json.UnmarshalFromFunc(func(d *jsontext.Decoder, v *{{ t }}) error {
-		return json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))
+		return json.UnmarshalDecode(d, v, noUnmarshalers)
 	}),
 {% endfor %}))
 {% else %}var decodeOptions = json.JoinOptions()
+{% endif %}{% if support.refuse_null_isolated or support.isolated %}
+// noUnmarshalers drops every unmarshaler for a substituted type. It holds
+// one for a type that never occurs: json/v2 dereferences the nil set
+// json.WithUnmarshalers(nil) would store when it decodes into an any.
+var noUnmarshalers = json.WithUnmarshalers(json.UnmarshalFromFunc(func(*jsontext.Decoder, *isolatedNone) error {
+	return errors.ErrUnsupported
+}))
+
+type isolatedNone struct{}
 {% endif %}
 func refuseNull(d *jsontext.Decoder, typ string) error {
 	if d.PeekKind() == 'n' {

@@ -55,6 +55,8 @@ const VALIDATION_NAMES: &[&str] = &[
 
 const TEMPLATE_NAMES: &[&str] = &[
     "decodeOptions",
+    "noUnmarshalers",
+    "isolatedNone",
     "refuseNull",
     "readTag",
     "integerToken",

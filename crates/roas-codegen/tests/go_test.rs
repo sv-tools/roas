@@ -557,7 +557,7 @@ fn a_substitution_decodes_by_its_own_rules() {
     let code = generation.unwrap().files.remove(0).contents;
     let squeezed = squeezed(&code);
     assert!(
-        squeezed.contains("return json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))"),
+        squeezed.contains("return json.UnmarshalDecode(d, v, noUnmarshalers)"),
         "{squeezed}"
     );
     if let Some(Err(error)) = vet(&code, "isolated") {
@@ -578,7 +578,7 @@ fn a_pointer_substitution_is_isolated_but_takes_null() {
     let code = generation.unwrap().files.remove(0).contents;
     let squeezed = squeezed(&code);
     assert!(
-        squeezed.contains("json.UnmarshalFromFunc(func(d *jsontext.Decoder, v **url.URL) error {\nreturn json.UnmarshalDecode(d, v, json.WithUnmarshalers(nil))"),
+        squeezed.contains("json.UnmarshalFromFunc(func(d *jsontext.Decoder, v **url.URL) error {\nreturn json.UnmarshalDecode(d, v, noUnmarshalers)"),
         "{squeezed}"
     );
     if let Some(Err(error)) = vet(&code, "pointer") {
