@@ -245,6 +245,7 @@ fn value(ty: &TypeRef, list: &[Check], at: At<'_>, out: &mut Vec<String>) -> boo
 /// into the report `r` (passed on as `arg`). Empty when the branch is
 /// only decoded.
 fn branch(
+    ir: &crate::ir::Ir,
     branch: &Branch,
     generated: &dyn Fn(&TypeRef) -> bool,
     (r, arg): (&str, &str),
@@ -262,7 +263,8 @@ fn branch(
         },
         &mut body,
     );
-    let list = checks::value_checks(&branch.ty, &branch.constraints);
+    let mut list = checks::value_checks(&branch.ty, &branch.constraints);
+    list.extend(checks::extern_checks(ir, &branch.ty));
     let mut reads = value(
         &branch.ty,
         &list,
@@ -349,7 +351,8 @@ pub(crate) fn body(
             let mut present = Vec::new();
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
-                let list = checks::value_checks(&field.ty, &field.constraints);
+                let mut list = checks::value_checks(&field.ty, &field.constraints);
+                list.extend(checks::extern_checks(ir, &field.ty));
                 let recurse = generated(&field.ty);
                 present.push(if field.required {
                     "1".to_owned()
@@ -526,7 +529,7 @@ pub(crate) fn body(
             let mut counts_certain = false;
             for (b, branch_view) in u.branches.iter().zip(&view.branches) {
                 let accessor = &branch_view.accessor;
-                let (body, reads) = branch(b, &progressing, ("branch", "&mut branch"));
+                let (body, reads) = branch(ir, b, &progressing, ("branch", "&mut branch"));
                 // Decoding proves a match only when nothing the branch says
                 // goes unchecked.
                 let sure = !checks::unsure(b) && (!generated(&b.ty) || progressing(&b.ty));
@@ -572,7 +575,7 @@ pub(crate) fn body(
                     "does not satisfy the allOf part read by {}",
                     accessor.trim_start_matches("as_")
                 );
-                let (mut body, reads) = branch(b, &progressing, ("report", "report"));
+                let (mut body, reads) = branch(ir, b, &progressing, ("report", "report"));
                 if checks::part_unsure(b) || (generated(&b.ty) && !progressing(&b.ty)) {
                     body.push(format!(
                         "report.unevaluated(pointer, {:?});",
@@ -609,7 +612,8 @@ pub(crate) fn body(
                 report,
                 &mut out,
             );
-            let list = checks::value_checks(inner, &def.constraints);
+            let mut list = checks::value_checks(inner, &def.constraints);
+            list.extend(checks::extern_checks(ir, inner));
             let _ = value(
                 inner,
                 &list,

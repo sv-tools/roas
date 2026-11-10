@@ -147,9 +147,15 @@ impl<'a> Lowerer<'a> {
     fn component(&mut self, name: &str, slot: &Slot) {
         let id = slot.id().clone();
         if self.config.substitutions.contains_key(name) {
-            let (title, description) = match slot {
-                Slot::Inline(schema) => (schema.title.clone(), schema.description.clone()),
-                Slot::Ref { description, .. } => (None, description.clone()),
+            // The constraints are kept so validation can say they go
+            // unchecked on the user's type.
+            let (title, description, constraints) = match slot {
+                Slot::Inline(schema) => (
+                    schema.title.clone(),
+                    schema.description.clone(),
+                    schema.constraints.clone(),
+                ),
+                Slot::Ref { description, .. } => (None, description.clone(), Default::default()),
             };
             self.register(TypeDef {
                 id,
@@ -159,7 +165,7 @@ impl<'a> Lowerer<'a> {
                 description,
                 deprecated: false,
                 nullable: false,
-                constraints: Default::default(),
+                constraints,
                 extensions: BTreeMap::new(),
                 kind: TypeKind::Extern,
                 has_error: false,
@@ -1510,6 +1516,7 @@ mod tests {
             uri: &uri,
             raw: &raw,
             source_pointer: |p| p.to_owned(),
+            legacy_nullable: false,
         }
         .translate(&spec);
         let config = ConfigFile {
@@ -1810,6 +1817,7 @@ mod tests {
             uri: &uri,
             raw: &raw,
             source_pointer: |p| p.to_owned(),
+            legacy_nullable: false,
         }
         .translate(&spec);
         let config = ConfigFile::from_toml(

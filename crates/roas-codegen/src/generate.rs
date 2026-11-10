@@ -333,6 +333,7 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
         uri: document.uri(),
         raw: document.raw(),
         source_pointer,
+        legacy_nullable: matches!(document.version(), SourceVersion::V2 | SourceVersion::V3_0),
     }
     .translate(document.spec());
     let mut ir = lower::lower(&front, config);

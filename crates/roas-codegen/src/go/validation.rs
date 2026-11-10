@@ -31,6 +31,8 @@ pub(crate) struct Context<'a> {
     pub loops: &'a dyn Fn(&TypeRef) -> bool,
     /// The Go name of a named type with a `validateNull`, through aliases.
     pub null_name: &'a dyn Fn(&TypeRef) -> Option<String>,
+    /// What a substituted component declares, at a position holding it.
+    pub extern_checks: &'a dyn Fn(&TypeRef) -> Vec<Check>,
     pub needs: Needs,
 }
 
@@ -455,7 +457,8 @@ fn branch(branch: &Branch, r: &str, cx: &mut Context<'_>) -> (Vec<String>, bool)
         &mut body,
         &mut cx.needs,
     );
-    let list = checks::value_checks(&branch.ty, &branch.constraints);
+    let mut list = checks::value_checks(&branch.ty, &branch.constraints);
+    list.extend((cx.extern_checks)(&branch.ty));
     let reads = if (cx.loops)(&branch.ty) {
         // Checks only: recursing would come back here.
         render(
@@ -510,7 +513,8 @@ pub(crate) fn body(
             let mut members = Vec::new();
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
-                let list = checks::value_checks(&field.ty, &field.constraints);
+                let mut list = checks::value_checks(&field.ty, &field.constraints);
+                list.extend((cx.extern_checks)(&field.ty));
                 let in_nullable = field_view.ty.starts_with("Nullable[");
                 let presence = match (field.required, in_nullable) {
                     (true, _) => None,
@@ -761,7 +765,8 @@ pub(crate) fn body(
                 &mut out,
                 &mut cx.needs,
             );
-            let list = checks::value_checks(inner, &def.constraints);
+            let mut list = checks::value_checks(inner, &def.constraints);
+            list.extend((cx.extern_checks)(inner));
             render(
                 &list,
                 (checks::kind_of(inner), item_of(inner)),

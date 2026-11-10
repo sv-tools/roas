@@ -376,6 +376,40 @@ pub(crate) fn null_raw(def: &crate::ir::TypeDef) -> bool {
     def.nullable && matches!(def.kind, TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_))
 }
 
+/// What a substituted component declares, at a position holding it: the
+/// user's type is not checked against it.
+pub(crate) fn extern_checks(ir: &crate::ir::Ir, ty: &TypeRef) -> Vec<Check> {
+    let Some(mut id) = ty.direct_named() else {
+        return Vec::new();
+    };
+    for _ in 0..=ir.types.len() {
+        let Some(def) = ir.types.get(id) else {
+            return Vec::new();
+        };
+        match &def.kind {
+            TypeKind::Alias(inner) => match inner.direct_named() {
+                Some(next) => id = next,
+                None => return Vec::new(),
+            },
+            TypeKind::Extern => {
+                let c = &def.constraints;
+                let mut out = unenforced(c);
+                out.extend(
+                    declared_keywords(c)
+                        .into_iter()
+                        .map(|keyword| Check::Unevaluated {
+                            keyword,
+                            reason: "a substituted type is not checked against it".into(),
+                        }),
+                );
+                return out;
+            }
+            _ => return Vec::new(),
+        }
+    }
+    Vec::new()
+}
+
 /// Whether `def` has a null hook: a `validate_null` of its own.
 pub(crate) fn has_null_hook(def: &crate::ir::TypeDef) -> bool {
     null_raw(def) || !null_checks(def).is_empty()

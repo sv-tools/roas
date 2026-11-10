@@ -789,3 +789,26 @@ fn a_type_list_whose_enum_fits_no_member_admits_nothing() {
         .collect();
     assert_eq!(errors, ["/components/schemas/NoValue"]);
 }
+
+#[test]
+fn a_3_0_nullable_enum_still_admits_null() {
+    // 3.0 cannot list null in an `enum`; its `nullable` is what admits it.
+    let raw = serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "Ns": {"type": "string", "nullable": true, "enum": ["a", "bb"]},
+            "H": {"type": "object", "required": ["ns"], "properties": {
+                "ns": {"$ref": "#/components/schemas/Ns"}
+            }}
+        }}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let generation = generate(&doc, &rust_config("")).expect("generates");
+    let code = &generation.files[0].contents;
+    assert!(code.contains("pub ns: Option<Ns>"), "{code}");
+}

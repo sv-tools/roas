@@ -655,6 +655,8 @@ fn validated_description() -> serde_json::Value {
             "HoldsNIfOff": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/NIfOff"}}},
             "Dated": {"type": "object", "properties": {"d": {"type": "string", "format": "date", "minLength": 5}}},
             "SmallMaps": {"type": "array", "items": {"additionalProperties": {"type": "string"}, "maxProperties": 2}},
+            "Money": {"type": "string", "maxLength": 3},
+            "HoldsMoney": {"type": "object", "properties": {"m": {"$ref": "#/components/schemas/Money"}}},
             "NestedClosed": {"oneOf": [
                 {"type": "array", "items": {"$ref": "#/components/schemas/Closed"}},
                 {"type": "array", "items": {"type": "array"}}
@@ -671,7 +673,10 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
         "types": {"NIfOff": {"validation": false}},
-        "substitutions": {"date": {"rust": {"name": "String"}, "go": {"name": "string"}}}
+        "substitutions": {
+            "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
+            "Money": {"rust": {"name": "String"}, "go": {"name": "string"}}
+        }
     }))
     .unwrap();
     config.target = Some(target);
@@ -878,6 +883,8 @@ fn main() {
     assert_eq!(report::<SmallMaps>(r#"[{"a":"1","b":"2","c":"3"}]"#), vec![v("/0")]);
     // A closed struct is read from an object only, wherever it is.
     assert_eq!(report::<NestedClosed>(r#"[["x"]]"#), vec![]);
+    // A substituted component is not checked against what it declares.
+    assert_eq!(report::<HoldsMoney>(r#"{"m":"abcdef"}"#), vec![u("/m")]);
     println!("validation behaves");
 }
 "##;
@@ -1096,6 +1103,7 @@ func main() {
 	check(`[{"k":"v"}]`, report[api.SmallMaps](`[{"k":"v"}]`))
 	check(`[{"a":"1","b":"2","c":"3"}]`, report[api.SmallMaps](`[{"a":"1","b":"2","c":"3"}]`), v("/0"))
 	check(`[["x"]]`, report[api.NestedClosed](`[["x"]]`))
+	check(`{"m":"abcdef"}`, report[api.HoldsMoney](`{"m":"abcdef"}`), u("/m"))
 	fmt.Println("validation behaves")
 }
 "##;

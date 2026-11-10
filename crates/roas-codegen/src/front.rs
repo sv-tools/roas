@@ -292,6 +292,9 @@ pub(crate) struct Translator<'a> {
     pub raw: &'a Value,
     /// Maps a 3.2 pointer to the source document's pointer.
     pub source_pointer: fn(&str) -> String,
+    /// The source is OpenAPI 2 or 3.0, whose `nullable` admits null even
+    /// past an `enum`: those models cannot list null in one.
+    pub legacy_nullable: bool,
 }
 
 impl Translator<'_> {
@@ -583,7 +586,9 @@ impl Translator<'_> {
             [one] => match read(one, false) {
                 Member::Read(member) => *member,
                 // Only the list's null is left, if it has one.
-                Member::Nothing if nullable && shared_admits_null(&object) => {
+                Member::Nothing
+                    if nullable && (self.legacy_nullable || shared_admits_null(&object)) =>
+                {
                     self.leaf(pointer.clone(), Kind::Null)
                 }
                 Member::Nothing => self.leaf(pointer.clone(), Kind::Never),
@@ -639,7 +644,7 @@ impl Translator<'_> {
         if let Kind::Object { typeless, .. } = &mut front.kind {
             *typeless = false;
         }
-        front.nullable = nullable && shared_admits_null(&object);
+        front.nullable = nullable && (self.legacy_nullable || shared_admits_null(&object));
         front
     }
 
@@ -974,6 +979,7 @@ mod tests {
             uri: &uri,
             raw: &raw,
             source_pointer: |p| p.to_owned(),
+            legacy_nullable: false,
         };
         translator.translate(&spec)
     }
