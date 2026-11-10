@@ -523,9 +523,12 @@ impl Translator<'_> {
                 if key == "type" {
                     continue;
                 }
+                // `enum` and `const` assert on every member, whether its
+                // type's schema models them or not.
                 if restrict
                     && !applicable.contains(&key.as_str())
                     && !COMMON_KEYWORDS.contains(&key.as_str())
+                    && !matches!(key.as_str(), "enum" | "const")
                     && !key.starts_with("x-")
                 {
                     continue;
@@ -586,10 +589,37 @@ impl Translator<'_> {
             [one] => match read(one, false) {
                 Member::Read(member) => *member,
                 // Only the list's null is left, if it has one.
+                // Only the list's null is left: read as `type: null`, so
+                // what else the list says still stands.
                 Member::Nothing
                     if nullable && (self.legacy_nullable || shared_admits_null(&object)) =>
                 {
-                    self.leaf(pointer.clone(), Kind::Null)
+                    // The `enum` and `const` were found to admit null;
+                    // what applies to other types does not apply here.
+                    let null_keywords = keywords_for(&SchemaType::Null);
+                    let only: serde_json::Map<String, Value> = object
+                        .iter()
+                        .filter(|(key, _)| {
+                            let key = key.as_str();
+                            let other_type = [
+                                SchemaType::String,
+                                SchemaType::Number,
+                                SchemaType::Integer,
+                                SchemaType::Object,
+                                SchemaType::Array,
+                                SchemaType::Boolean,
+                            ]
+                            .iter()
+                            .any(|t| keywords_for(t).contains(&key));
+                            !matches!(key, "enum" | "const")
+                                && (null_keywords.contains(&key) || !other_type)
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    match read_as(&SchemaType::Null, false, &only) {
+                        Member::Read(member) => *member,
+                        _ => self.leaf(pointer.clone(), Kind::Null),
+                    }
                 }
                 Member::Nothing => self.leaf(pointer.clone(), Kind::Never),
                 // Not lost without a word: the schema is reported as

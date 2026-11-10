@@ -388,59 +388,69 @@ pub(crate) fn null_raw(def: &crate::ir::TypeDef) -> bool {
 /// `wrappers` counts a newtype over a substitution too, for a backend that
 /// spells it as an alias with no validator of its own. Inside an array or
 /// map the items are not checked either, which a non-empty one reports.
-pub(crate) fn extern_checks(ir: &crate::ir::Ir, ty: &TypeRef, wrappers: bool) -> Vec<Check> {
+pub(crate) fn extern_checks(ir: &crate::ir::Ir, ty: &TypeRef, wrappers: bool) -> Externs {
     if let TypeRef::Array(inner) | TypeRef::Map(inner) = strip(ty) {
-        return extern_checks(ir, inner, wrappers)
+        let inner = extern_checks(ir, inner, wrappers);
+        let value = inner
+            .presence
             .into_iter()
+            .chain(inner.value)
             .map(|check| match check {
                 Check::Unevaluated { keyword, reason }
                 | Check::ItemsUnevaluated { keyword, reason } => {
                     Check::ItemsUnevaluated { keyword, reason }
                 }
+                Check::Unsupported(keywords) => Check::ItemsUnevaluated {
+                    keyword: "unhandled keywords",
+                    reason: format!("{} are not handled by the generator", keywords.join(", ")),
+                },
                 other => other,
             })
             .collect();
+        return Externs {
+            presence: Vec::new(),
+            value,
+        };
     }
+    let declared = |c: &Constraints| -> Externs {
+        Externs {
+            presence: unenforced(c),
+            value: declared_keywords(c)
+                .into_iter()
+                .map(|keyword| Check::Unevaluated {
+                    keyword,
+                    reason: "a substituted type is not checked against it".into(),
+                })
+                .collect(),
+        }
+    };
     let Some(mut id) = ty.direct_named() else {
-        return Vec::new();
+        return Externs::default();
     };
     for _ in 0..=ir.types.len() {
         let Some(def) = ir.types.get(id) else {
-            return Vec::new();
+            return Externs::default();
         };
         match &def.kind {
             TypeKind::Alias(inner) => match inner.direct_named() {
                 Some(next) => id = next,
-                None => return Vec::new(),
+                None => return Externs::default(),
             },
-            TypeKind::Newtype(TypeRef::Extern(_)) if wrappers => {
-                let c = &def.constraints;
-                return declared_keywords(c)
-                    .into_iter()
-                    .map(|keyword| Check::Unevaluated {
-                        keyword,
-                        reason: "a substituted type is not checked against it".into(),
-                    })
-                    .chain(unenforced(c))
-                    .collect();
-            }
-            TypeKind::Extern => {
-                let c = &def.constraints;
-                let mut out = unenforced(c);
-                out.extend(
-                    declared_keywords(c)
-                        .into_iter()
-                        .map(|keyword| Check::Unevaluated {
-                            keyword,
-                            reason: "a substituted type is not checked against it".into(),
-                        }),
-                );
-                return out;
-            }
-            _ => return Vec::new(),
+            TypeKind::Newtype(TypeRef::Extern(_)) if wrappers => return declared(&def.constraints),
+            TypeKind::Extern => return declared(&def.constraints),
+            _ => return Externs::default(),
         }
     }
-    Vec::new()
+    Externs::default()
+}
+
+/// What a substituted type declares, split as everything else is: what
+/// applies to any value present, `null` included, and what applies to a
+/// non-null value.
+#[derive(Default)]
+pub(crate) struct Externs {
+    pub presence: Vec<Check>,
+    pub value: Vec<Check>,
 }
 
 /// Whether `def` has a null hook: a `validate_null` of its own.

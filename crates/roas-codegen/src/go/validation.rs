@@ -32,7 +32,7 @@ pub(crate) struct Context<'a> {
     /// The Go name of a named type with a `validateNull`, through aliases.
     pub null_name: &'a dyn Fn(&TypeRef) -> Option<String>,
     /// What a substituted component declares, at a position holding it.
-    pub extern_checks: &'a dyn Fn(&TypeRef) -> Vec<Check>,
+    pub extern_checks: &'a dyn Fn(&TypeRef) -> checks::Externs,
     pub ir: &'a crate::ir::Ir,
     pub needs: Needs,
 }
@@ -456,14 +456,18 @@ fn branch(branch: &Branch, r: &str, cx: &mut Context<'_>) -> (Vec<String>, bool)
     // What applies to null as much as to a value is checked outside the
     // null guard.
     render(
-        &checks::presence_checks(&branch.ty, &branch.constraints),
+        &[
+            checks::presence_checks(&branch.ty, &branch.constraints),
+            (cx.extern_checks)(&branch.ty).presence,
+        ]
+        .concat(),
         (ValueKind::Other, None),
         at,
         &mut body,
         &mut cx.needs,
     );
     let mut list = checks::value_checks(&branch.ty, &branch.constraints);
-    list.extend((cx.extern_checks)(&branch.ty));
+    list.extend((cx.extern_checks)(&branch.ty).value);
     let reads = if (cx.loops)(&branch.ty) {
         // Checks only: recursing would come back here.
         render(
@@ -519,7 +523,7 @@ pub(crate) fn body(
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
                 let mut list = checks::value_checks(&field.ty, &field.constraints);
-                list.extend((cx.extern_checks)(&field.ty));
+                list.extend((cx.extern_checks)(&field.ty).value);
                 let in_nullable = field_view.ty.starts_with("Nullable[");
                 let presence = match (field.required, in_nullable) {
                     (true, _) => None,
@@ -533,7 +537,11 @@ pub(crate) fn body(
                 // What applies to a present null as much as to a value.
                 let mut always = Vec::new();
                 render(
-                    &checks::presence_checks(&field.ty, &field.constraints),
+                    &[
+                        checks::presence_checks(&field.ty, &field.constraints),
+                        (cx.extern_checks)(&field.ty).presence,
+                    ]
+                    .concat(),
                     (ValueKind::Other, None),
                     At {
                         e: "x",
@@ -628,7 +636,7 @@ pub(crate) fn body(
                     cx,
                 );
                 render(
-                    &(cx.extern_checks)(&TypeRef::Map(Box::new(ty.clone()))),
+                    &(cx.extern_checks)(&TypeRef::Map(Box::new(ty.clone()))).value,
                     (ValueKind::Other, None),
                     At { e: &map, ..own },
                     &mut out,
@@ -681,6 +689,24 @@ pub(crate) fn body(
             for (variant, variant_view) in u.variants.iter().zip(&view.variants) {
                 let mut body = Vec::new();
                 recurse(&variant.ty, At { e: "x", ..own }, 0, &mut body, cx);
+                // A substituted variant is not checked against what it
+                // declares.
+                let ext = (cx.extern_checks)(&variant.ty);
+                let mut unchecked = Vec::new();
+                render(
+                    &[ext.presence, ext.value].concat(),
+                    (ValueKind::Other, None),
+                    At { e: "x", ..own },
+                    &mut unchecked,
+                    &mut cx.needs,
+                );
+                if !unchecked.is_empty() {
+                    out.push(format!(
+                        "if _, ok := v.{}(); ok {{ {} }}",
+                        variant_view.accessor,
+                        unchecked.join("; ")
+                    ));
+                }
                 if !body.is_empty() {
                     out.push(format!(
                         "if x, ok := v.{}(); ok {{ {} }}",
@@ -771,14 +797,18 @@ pub(crate) fn body(
             // A defined type does not inherit its underlying type's
             // methods: recursion goes through a conversion.
             render(
-                &checks::presence_checks(inner, &def.constraints),
+                &[
+                    checks::presence_checks(inner, &def.constraints),
+                    (cx.extern_checks)(inner).presence,
+                ]
+                .concat(),
                 (ValueKind::Other, None),
                 own,
                 &mut out,
                 &mut cx.needs,
             );
             let mut list = checks::value_checks(inner, &def.constraints);
-            list.extend((cx.extern_checks)(inner));
+            list.extend((cx.extern_checks)(inner).value);
             render(
                 &list,
                 (checks::kind_of(inner), item_of(inner)),

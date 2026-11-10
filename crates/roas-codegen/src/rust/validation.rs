@@ -256,9 +256,14 @@ fn branch(
 ) -> (Vec<String>, bool) {
     // What applies to null as much as to a value is checked outside the
     // null guard.
+    let ext = checks::extern_checks(ir, &branch.ty, false);
     let mut body = Vec::new();
     render(
-        &checks::presence_checks(&branch.ty, &branch.constraints),
+        &[
+            checks::presence_checks(&branch.ty, &branch.constraints),
+            ext.presence,
+        ]
+        .concat(),
         ValueKind::Other,
         At {
             v: "(&v)",
@@ -268,7 +273,7 @@ fn branch(
         &mut body,
     );
     let mut list = checks::value_checks(&branch.ty, &branch.constraints);
-    list.extend(checks::extern_checks(ir, &branch.ty, false));
+    list.extend(ext.value);
     let mut reads = value(
         &branch.ty,
         &list,
@@ -356,7 +361,8 @@ pub(crate) fn body(
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
                 let mut list = checks::value_checks(&field.ty, &field.constraints);
-                list.extend(checks::extern_checks(ir, &field.ty, false));
+                let ext = checks::extern_checks(ir, &field.ty, false);
+                list.extend(ext.value);
                 let recurse = generated(&field.ty);
                 present.push(if field.required {
                     "1".to_owned()
@@ -366,7 +372,11 @@ pub(crate) fn body(
                 // What applies to a present null as much as to a value.
                 let mut always = Vec::new();
                 render(
-                    &checks::presence_checks(&field.ty, &field.constraints),
+                    &[
+                        checks::presence_checks(&field.ty, &field.constraints),
+                        ext.presence,
+                    ]
+                    .concat(),
                     ValueKind::Other,
                     At {
                         v: "v",
@@ -432,7 +442,7 @@ pub(crate) fn body(
                 }
                 let field = format!("self.{name}");
                 render(
-                    &checks::extern_checks(ir, &TypeRef::Map(Box::new(ty.clone())), false),
+                    &checks::extern_checks(ir, &TypeRef::Map(Box::new(ty.clone())), false).value,
                     ValueKind::Other,
                     At {
                         v: &field,
@@ -508,12 +518,29 @@ pub(crate) fn body(
                 .zip(&view.variants)
                 .map(|(variant, variant_view)| {
                     if generated(&variant.ty) {
-                        format!(
+                        return format!(
                             "Self::{}(v) => v.validate_into(pointer, report),",
                             variant_view.name
-                        )
-                    } else {
+                        );
+                    }
+                    // A substituted variant is not checked against what
+                    // it declares.
+                    let ext = checks::extern_checks(ir, &variant.ty, false);
+                    let mut body = Vec::new();
+                    render(
+                        &[ext.presence, ext.value].concat(),
+                        ValueKind::Other,
+                        At {
+                            v: "_v",
+                            p: "pointer",
+                            r: "report",
+                        },
+                        &mut body,
+                    );
+                    if body.is_empty() {
                         format!("Self::{}(_) => {{}}", variant_view.name)
+                    } else {
+                        format!("Self::{}(_) => {{ {} }}", variant_view.name, body.join(" "))
                     }
                 })
                 .collect();
@@ -621,14 +648,19 @@ pub(crate) fn body(
             }
         }
         TypeKind::Newtype(inner) | TypeKind::Alias(inner) => {
+            let ext = checks::extern_checks(ir, inner, false);
             render(
-                &checks::presence_checks(inner, &def.constraints),
+                &[
+                    checks::presence_checks(inner, &def.constraints),
+                    ext.presence,
+                ]
+                .concat(),
                 ValueKind::Other,
                 report,
                 &mut out,
             );
             let mut list = checks::value_checks(inner, &def.constraints);
-            list.extend(checks::extern_checks(ir, inner, false));
+            list.extend(ext.value);
             let _ = value(
                 inner,
                 &list,

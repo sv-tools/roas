@@ -563,6 +563,15 @@ impl Builder<'_> {
             view.validate = super::validation::body(self.ir, def, &view, &generated, opted_out);
             if view.validate.is_some() && !opted_out {
                 view.validate_null = super::validation::null_body(def);
+                // An alias spelled as a newtype has its target's null.
+                if let TypeKind::Alias(inner) = &def.kind
+                    && generated(inner)
+                {
+                    view.validate_null = vec![format!(
+                        "<{} as Validate>::validate_null(pointer, report);",
+                        view.inner
+                    )];
+                }
             }
             if opted_out && view.validate.is_none() {
                 return Err(crate::go::view::opt_out_on_alias(def));

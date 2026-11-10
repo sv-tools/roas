@@ -656,6 +656,10 @@ fn validated_description() -> serde_json::Value {
             "Dated": {"type": "object", "properties": {"d": {"type": "string", "format": "date", "minLength": 5}}},
             "SmallMaps": {"type": "array", "items": {"additionalProperties": {"type": "string"}, "maxProperties": 2}},
             "Money": {"type": "string", "maxLength": 3},
+            "EnumObj": {"type": ["object", "string"], "enum": ["a", {"x": 1}]},
+            "NullIf": {"type": ["string", "null"], "enum": [null], "if": {}, "then": false},
+            "NIfAlias": {"$ref": "#/components/schemas/NIf"},
+            "HoldsNIfAlias": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/NIfAlias"}}},
             "Monies": {"type": "array", "items": {"$ref": "#/components/schemas/Money"}},
             "MoneyMap": {"type": "object", "properties": {"x": {"type": "string"}}, "additionalProperties": {"$ref": "#/components/schemas/Money"}},
             "DateAlias": {"type": "string", "format": "date", "maxLength": 2},
@@ -684,7 +688,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}},
+        "types": {"NIfOff": {"validation": false}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}}
@@ -911,6 +915,13 @@ fn main() {
     assert!(serde_json::from_str::<S>(r#"{"x":"y"}"#).is_ok() && serde_json::from_str::<D>("[]").is_err());
     // A null held by a type list with a hoisted member keeps the shared keywords.
     assert_eq!(report::<ListObj>("null"), vec![u("")]);
+    // A type list's enum asserts on its object member too.
+    assert_eq!(report::<EnumObj>(r#""a""#), vec![]);
+    assert_eq!(report::<EnumObj>(r#"{"x":2}"#), vec![u("")]);
+    // A list left with its null keeps what else it says.
+    assert_eq!(report::<NullIf>("null"), vec![u("")]);
+    // An alias spelled as a newtype has its target's null.
+    assert_eq!(report::<HoldsNIfAlias>(r#"{"v":null}"#), vec![u("/v")]);
     println!("validation behaves");
 }
 "##;
@@ -1136,6 +1147,10 @@ func main() {
 	check(`{"d":"long"}`, report[api.HoldsDate](`{"d":"long"}`), u("/d"))
 	check(`{"a":{"s":"b"}}`, report[api.Leaves](`{"a":{"s":"b"}}`))
 	check(`null`, report[api.ListObj](`null`), u(""))
+	check(`"a"`, report[api.EnumObj](`"a"`))
+	check(`{"x":2}`, report[api.EnumObj](`{"x":2}`), u(""))
+	check(`null`, report[api.NullIf](`null`), u(""))
+	check(`{"v":null}`, report[api.HoldsNIfAlias](`{"v":null}`), u("/v"))
 	fmt.Println("validation behaves")
 }
 "##;
