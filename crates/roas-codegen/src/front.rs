@@ -367,6 +367,40 @@ impl Translator<'_> {
         }
     }
 
+    /// The keywords an OpenAPI 2.0 or 3.0 source wrote on this schema that
+    /// its model dropped on the way to 3.2: unread, they are reported as
+    /// unsupported rather than lost without a word.
+    fn lost_in_conversion(&self, schema: &Schema, pointer: &str) -> Vec<String> {
+        if !self.legacy_nullable {
+            return Vec::new();
+        }
+        let source = (self.source_pointer)(&source_of(pointer));
+        let Some(raw) = self.raw.pointer(&source).and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let converted = serde_json::to_value(schema).unwrap_or(Value::Null);
+        let kept = converted.as_object();
+        let has = |key: &str| kept.is_some_and(|k| k.contains_key(key));
+        raw.keys()
+            .filter(|key| {
+                let key = key.as_str();
+                // Rewritten rather than lost: `nullable` into the type
+                // list, `example` into `examples`, a boolean exclusive
+                // bound into a numeric one. A `type` beside a composition
+                // and a 2.0 `discriminator` name are dropped, but say
+                // nothing the generated type or the branches do not.
+                let rewritten = match key {
+                    "nullable" | "x-nullable" | "example" | "type" | "discriminator" => true,
+                    "minimum" => has("exclusiveMinimum"),
+                    "maximum" => has("exclusiveMaximum"),
+                    _ => false,
+                };
+                !rewritten && !has(key)
+            })
+            .cloned()
+            .collect()
+    }
+
     fn type_written(&self, pointer: &str) -> bool {
         let source = (self.source_pointer)(&source_of(pointer));
         self.raw
@@ -376,7 +410,13 @@ impl Translator<'_> {
     }
 
     fn schema(&self, schema: &Schema, pointer: String) -> FrontSchema {
+        let lost = self.lost_in_conversion(schema, &pointer);
         let mut front = self.schema_kind(schema, pointer);
+        for keyword in lost {
+            if !front.unsupported.contains(&keyword) {
+                front.unsupported.push(keyword);
+            }
+        }
         let numeric_enum = matches!(
             &front.kind,
             Kind::Integer {

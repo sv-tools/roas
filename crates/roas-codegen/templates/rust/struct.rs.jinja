@@ -3,17 +3,4 @@
 {% endblock %}{% block attrs %}{% for a in t.attrs %}{{ a }}
 {% endfor %}{% endblock %}pub struct {{ t.name }} {
 {% block fields %}{% for f in t.fields %}{% include "rust/field.rs.jinja" %}{% endfor %}{% endblock %}}
-{% if t.object_only %}{% block object_only %}
-impl serde::Serialize for {{ t.name }} {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        Self::serialize(self, serializer)
-    }
-}
-
-// Read from a JSON object only: serde's derive would take an array too.
-impl<'de> serde::Deserialize<'de> for {{ t.name }} {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::deserialize(ObjectOnly(deserializer))
-    }
-}
-{% endblock %}{% endif %}{% block trailing %}{% endblock %}
+{% block trailing %}{% endblock %}

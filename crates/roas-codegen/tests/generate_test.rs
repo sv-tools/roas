@@ -812,3 +812,42 @@ fn a_3_0_nullable_enum_still_admits_null() {
     let code = &generation.files[0].contents;
     assert!(code.contains("pub ns: Option<Ns>"), "{code}");
 }
+
+#[test]
+fn keywords_a_3_0_model_drops_are_reported() {
+    // 3.0's model keeps no `maxLength` beside a composition: reported as
+    // unsupported, so validation does not pass a value it never checked.
+    let raw = serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "N": {"type": "string", "maxLength": 3},
+            "Ao": {"allOf": [{"$ref": "#/components/schemas/N"}], "maxLength": 2},
+            "An": {"anyOf": [{"type": "string"}, {"type": "integer"}], "maxLength": 2}
+        }}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let generation = generate(&doc, &rust_config("")).expect("generates");
+    let mut lost: Vec<(&str, &str)> = generation
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.kind {
+            DiagnosticKind::UnsupportedKeyword { keyword } => {
+                Some((d.pointer.as_str(), keyword.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    lost.sort();
+    assert_eq!(
+        lost,
+        [
+            ("/components/schemas/An", "maxLength"),
+            ("/components/schemas/Ao", "maxLength")
+        ]
+    );
+}

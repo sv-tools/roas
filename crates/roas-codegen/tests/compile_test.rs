@@ -668,6 +668,7 @@ fn validated_description() -> serde_json::Value {
                 "next": {"$ref": "#/components/schemas/Node"}, "n": {"type": "integer"}
             }},
             "Leaf": {"type": "object", "additionalProperties": false, "properties": {"s": {"type": "string"}}},
+            "OldClosed": {"type": "object", "additionalProperties": false, "deprecated": true, "properties": {"a": {"type": "string"}}},
             "Leaves": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Leaf"}},
             "S": {"type": "object", "additionalProperties": false, "properties": {"x": {"type": "string"}}},
             "D": {"type": "object", "additionalProperties": false, "properties": {"x": {"type": "string"}}},
