@@ -14,7 +14,7 @@ impl serde::Serialize for {{ t.name }} {
 {% endfor %}#[allow(deprecated)]
 impl<'de> serde::Deserialize<'de> for {{ t.name }} {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::deserialize(ObjectOnly(deserializer))
+        Self::deserialize(roas_object_only(deserializer))
     }
 }
 {% endblock %}

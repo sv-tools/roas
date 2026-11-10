@@ -317,22 +317,6 @@ impl Builder<'_> {
         ] {
             allocator.reserve(reserved);
         }
-        // Declared only for a string enum.
-        if self
-            .ir
-            .types
-            .values()
-            .any(|d| matches!(d.kind, TypeKind::StringEnum(_)))
-        {
-            allocator.reserve("StringOnly");
-            allocator.reserve("StringOnlyVariant");
-        }
-        // Declared only for a closed struct.
-        if self.ir.types.values().any(|d| {
-            matches!(&d.kind, TypeKind::Struct(s) if matches!(s.additional, Additional::Denied))
-        }) {
-            allocator.reserve("ObjectOnly");
-        }
         if self.config.validation {
             for reserved in [
                 "Validate",

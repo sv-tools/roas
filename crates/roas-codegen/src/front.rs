@@ -295,6 +295,10 @@ pub(crate) struct Translator<'a> {
     /// The source is OpenAPI 2 or 3.0, whose `nullable` admits null even
     /// past an `enum`: those models cannot list null in one.
     pub legacy_nullable: bool,
+    /// Validation is on: keywords the 2.0 / 3.0 model dropped are reported,
+    /// so the values it checks are not passed for what it never read.
+    /// Without validation they go unmentioned, as they always did.
+    pub report_lost: bool,
 }
 
 impl Translator<'_> {
@@ -371,7 +375,7 @@ impl Translator<'_> {
     /// its model dropped on the way to 3.2: unread, they are reported as
     /// unsupported rather than lost without a word.
     fn lost_in_conversion(&self, schema: &Schema, pointer: &str) -> Vec<String> {
-        if !self.legacy_nullable {
+        if !self.legacy_nullable || !self.report_lost {
             return Vec::new();
         }
         let source = (self.source_pointer)(&source_of(pointer));
@@ -1125,6 +1129,7 @@ mod tests {
             raw: &raw,
             source_pointer: |p| p.to_owned(),
             legacy_nullable: false,
+            report_lost: false,
         };
         translator.translate(&spec)
     }

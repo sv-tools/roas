@@ -674,6 +674,7 @@ fn validated_description() -> serde_json::Value {
                 "s": {"$ref": "#/components/schemas/Strict"}
             }},
             "HoldsPoint": {"type": "object", "properties": {"s": {"$ref": "#/components/schemas/Point"}}},
+            "GatedU": {"anyOf": [{"type": "string", "maxLength": 1}, {"type": "integer"}]},
             "Gated2": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
             "GatedField": {"type": "object", "minProperties": 1, "properties": {
                 "a": {"type": "string", "minLength": 1}, "b": {"type": "string"}
@@ -713,6 +714,9 @@ fn validated_description() -> serde_json::Value {
             "Zoo": {"type": "object", "properties": {"title": {"type": "string"}}, "additionalProperties": {"$ref": "#/components/schemas/ZooAnimal"}},
             "ZooOrStr": {"oneOf": [{"$ref": "#/components/schemas/Zoo"}, {"type": "string"}]},
             "IntCatchOrStr": {"oneOf": [{"$ref": "#/components/schemas/IntCatch"}, {"type": "string"}]},
+            "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
+            "StringOnly": {"type": "string", "enum": ["a", "b"]},
+            "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
             "InlineItems": {"type": "array", "items": {"type": "string", "minLength": 2}},
             "PadNode": {"anyOf": [{"$ref": "#/components/schemas/PadA"}, {"$ref": "#/components/schemas/PadB"}]},
             "PadA": {"type": "object", "properties": {"next": {"$ref": "#/components/schemas/PadNode"}, "pad": {"type": "string"}}},
@@ -767,7 +771,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -775,6 +779,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
             "Currency": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Point": {"rust": {"name": "serde_json::Value"}, "go": {"name": "any"}},
             "Sub2": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
+            "ipv4": {"rust": {"name": "std::net::Ipv4Addr"}, "go": {"name": "netip.Addr", "import": "net/netip"}},
             "Sub3": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
             "Mixed": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
             "Strict": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}}
@@ -1071,6 +1076,10 @@ fn main() {
     // A surrogate escape serde_json will not read as a string: undecided.
     assert_eq!(report::<IntOrStr>(r#""\ud800""#), vec![u("")]);
     assert_eq!(report::<ZooOrStr>(r#"{"a":{"kind":"ZooCat"}}"#), vec![u("")]);
+    // A substitution that fails to decode proves no mismatch.
+    assert_eq!(report::<Ip>(r#""x""#), vec![u("")]);
+    // Schemas named like the decoding helpers keep their names.
+    let _: ObjectOnly = serde_json::from_str(r#"{"s":"a"}"#).unwrap();
     assert_eq!(report::<InlineItems>("[]"), vec![]);
     assert_eq!(report::<InlineItems>(r#"["a"]"#), vec![u("")]);
     // A string enum branch reads a JSON string only.
@@ -1342,6 +1351,7 @@ func main() {
 	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
 	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
 	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
+	check(`"x"`, report[api.Ip](`"x"`), u(""))
 	check(`[]`, report[api.InlineItems](`[]`))
 	check(`["a"]`, report[api.InlineItems](`["a"]`), u(""))
 	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)

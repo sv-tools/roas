@@ -844,7 +844,7 @@ fn keywords_a_3_0_model_drops_are_reported() {
     let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
         .expect("parses");
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
-    let generation = generate(&doc, &rust_config("")).expect("generates");
+    let generation = generate(&doc, &rust_config("validation = true\n")).expect("generates");
     let mut lost: Vec<(&str, &str)> = generation
         .diagnostics
         .iter()
@@ -885,12 +885,39 @@ fn a_2_0_type_beside_an_x_nullable_branch_is_reported() {
     let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
         .expect("parses");
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
-    let generation = generate(&doc, &rust_config("")).expect("generates");
+    let generation = generate(&doc, &rust_config("validation = true\n")).expect("generates");
     assert!(
         generation.diagnostics.iter().any(|d| matches!(
             &d.kind,
             DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "type"
         ) && d.pointer.ends_with("/O")),
+        "{:?}",
+        generation.diagnostics
+    );
+}
+
+#[test]
+fn keywords_a_3_0_model_drops_go_unmentioned_without_validation() {
+    // As before validation existed: `--strict` keeps passing.
+    let raw = serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "Base": {"type": "object", "properties": {"a": {"type": "string"}}},
+            "S": {"allOf": [{"$ref": "#/components/schemas/Base"}], "maxProperties": 3}
+        }}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let generation = generate(&doc, &rust_config("")).expect("generates");
+    assert!(
+        !generation
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::UnsupportedKeyword { .. })),
         "{:?}",
         generation.diagnostics
     );

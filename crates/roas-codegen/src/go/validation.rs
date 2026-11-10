@@ -777,7 +777,13 @@ pub(crate) fn body(
                 };
                 // A number past what the branch's type holds fails to decode
                 // for the representation: no proof it matches no branch.
-                let beyond = format!(" else if {wide} {{ uncertain++ }}");
+                // A substitution's decoding is the user's: its failure is
+                // no proof either.
+                let beyond = if checks::reaches_extern(cx.ir, &b.ty) {
+                    " else { uncertain++ }".to_owned()
+                } else {
+                    format!(" else if {wide} {{ uncertain++ }}")
+                };
                 if body.is_empty() {
                     out.push(format!(
                         "if _, ok := v.{accessor}(); ok {{ {counter}++ }}{beyond}"
@@ -816,8 +822,13 @@ pub(crate) fn body(
                 }
                 // A number past what the part's type holds fails to decode for
                 // the representation: undecided, not a miss.
+                let fragile = if checks::reaches_extern(cx.ir, &b.ty) {
+                    "true"
+                } else {
+                    wide.as_str()
+                };
                 let miss = format!(
-                    "if {wide} {{ r.unevaluated(pointer, {}) }} else {{ r.violation(pointer, {message}) }}",
+                    "if {fragile} {{ r.unevaluated(pointer, {}) }} else {{ r.violation(pointer, {message}) }}",
                     lit(&format!(
                         "allOf part read by {accessor}: a number in the value is past what its type holds"
                     ))

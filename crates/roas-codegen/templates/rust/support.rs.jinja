@@ -123,10 +123,10 @@ mod double_option {
 {% endif %}{% if support.string_only %}/// Hands a string enum's derived code the same deserializer, asked for a
 /// JSON string only: serde's derive would also read `{"a": null}` as `"a"`.
 /// Unused when every string enum is compiled out.
-#[allow(dead_code)]
-struct StringOnly<D>(D);
+#[allow(dead_code, non_camel_case_types)]
+struct roas_string_only<D>(D);
 
-impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for StringOnly<D> {
+impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for roas_string_only<D> {
     type Error = D::Error;
 
     fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
@@ -139,7 +139,7 @@ impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for StringOnly<D
         _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, D::Error> {
-        self.0.deserialize_str(StringOnlyVariant(visitor))
+        self.0.deserialize_str(roas_string_only_variant(visitor))
     }
 
     fn is_human_readable(&self) -> bool {
@@ -154,10 +154,10 @@ impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for StringOnly<D
 }
 
 /// Reads the variant a JSON string names.
-#[allow(dead_code)]
-struct StringOnlyVariant<V>(V);
+#[allow(dead_code, non_camel_case_types)]
+struct roas_string_only_variant<V>(V);
 
-impl<'de, V: serde::de::Visitor<'de>> serde::de::Visitor<'de> for StringOnlyVariant<V> {
+impl<'de, V: serde::de::Visitor<'de>> serde::de::Visitor<'de> for roas_string_only_variant<V> {
     type Value = V::Value;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -176,10 +176,10 @@ impl<'de, V: serde::de::Visitor<'de>> serde::de::Visitor<'de> for StringOnlyVari
 {% endif %}{% if support.object_only %}/// Hands a closed struct's derived code the same deserializer, asked for a
 /// JSON object only: serde's derive would also read a struct from an array.
 /// Unused when every closed struct is compiled out.
-#[allow(dead_code)]
-struct ObjectOnly<D>(D);
+#[allow(dead_code, non_camel_case_types)]
+struct roas_object_only<D>(D);
 
-impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for ObjectOnly<D> {
+impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for roas_object_only<D> {
     type Error = D::Error;
 
     fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {

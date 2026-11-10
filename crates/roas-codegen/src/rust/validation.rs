@@ -631,11 +631,12 @@ pub(crate) fn body(
                 // A number past what the branch's type holds fails to decode
                 // for the representation: no proof it matches no branch.
                 checked = true;
-                let beyond = if checks::flatten_fragile(ir, &b.ty) {
-                    " else { uncertain += 1; }".to_owned()
-                } else {
-                    format!(" else if {wide} {{ uncertain += 1; }}")
-                };
+                let beyond =
+                    if checks::flatten_fragile(ir, &b.ty) || checks::reaches_extern(ir, &b.ty) {
+                        " else { uncertain += 1; }".to_owned()
+                    } else {
+                        format!(" else if {wide} {{ uncertain += 1; }}")
+                    };
                 if body.is_empty() {
                     checked |= !sure;
                     lines.push(format!(
@@ -689,11 +690,12 @@ pub(crate) fn body(
                 }
                 // A number past what the part's type holds fails to decode for
                 // the representation: undecided, not a miss.
-                let fragile = if checks::flatten_fragile(ir, &b.ty) {
-                    "true"
-                } else {
-                    wide.as_str()
-                };
+                let fragile =
+                    if checks::flatten_fragile(ir, &b.ty) || checks::reaches_extern(ir, &b.ty) {
+                        "true"
+                    } else {
+                        wide.as_str()
+                    };
                 let miss = format!(
                     "if {fragile} {{ report.unevaluated(pointer, {:?}); }} else {{ report.violation(pointer, {message:?}); }}",
                     format!(

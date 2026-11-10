@@ -603,6 +603,45 @@ pub(crate) fn number_range(ir: &crate::ir::Ir, tys: &[&TypeRef]) -> (Option<&'st
     (limit, float32)
 }
 
+/// Whether `ty` reaches a substituted type, whose decoding is the user's:
+/// a failure says nothing about the schema.
+pub(crate) fn reaches_extern(ir: &crate::ir::Ir, ty: &TypeRef) -> bool {
+    fn walk(
+        ir: &crate::ir::Ir,
+        ty: &TypeRef,
+        seen: &mut std::collections::BTreeSet<crate::diagnostic::SchemaId>,
+    ) -> bool {
+        match ty {
+            TypeRef::Extern(_) => true,
+            TypeRef::Boxed(inner)
+            | TypeRef::Nullable(inner)
+            | TypeRef::Array(inner)
+            | TypeRef::Map(inner) => walk(ir, inner, seen),
+            TypeRef::Named(id) => {
+                if !seen.insert(id.clone()) {
+                    return false;
+                }
+                match ir.types.get(id).map(|d| &d.kind) {
+                    Some(TypeKind::Extern) => true,
+                    Some(TypeKind::Struct(s)) => {
+                        s.fields.iter().any(|f| walk(ir, &f.ty, seen))
+                            || matches!(&s.additional, crate::ir::Additional::CatchAll(t) if walk(ir, t, seen))
+                    }
+                    Some(TypeKind::Newtype(t) | TypeKind::Alias(t)) => walk(ir, t, seen),
+                    Some(TypeKind::UnionTagged(u)) => {
+                        u.variants.iter().any(|v| walk(ir, &v.ty, seen))
+                    }
+                    // A raw holder decodes anything: its branches are
+                    // judged inside it.
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+    walk(ir, ty, &mut Default::default())
+}
+
 /// Whether decoding `ty` in Rust may fail for the decoder rather than the
 /// value: a flattened catch-all buffers its members, and an integer or a
 /// raw holder inside one needs the raw token it no longer has.
