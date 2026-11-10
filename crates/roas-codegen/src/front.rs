@@ -552,6 +552,8 @@ impl Translator<'_> {
             [] => self.leaf(pointer.clone(), Kind::Null),
             [one] => match read(one, false) {
                 Member::Read(member) => *member,
+                // Only the list's null is left, if it has one.
+                Member::Nothing if nullable => self.leaf(pointer.clone(), Kind::Null),
                 Member::Nothing => self.leaf(pointer.clone(), Kind::Never),
                 // Not lost without a word: the schema is reported as
                 // one the generator does not handle.

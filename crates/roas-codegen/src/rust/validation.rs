@@ -234,8 +234,20 @@ fn branch(
     generated: &dyn Fn(&TypeRef) -> bool,
     (r, arg): (&str, &str),
 ) -> (Vec<String>, bool) {
-    let list = checks::checks(&branch.ty, &branch.constraints);
+    // What applies to null as much as to a value is checked outside the
+    // null guard.
     let mut body = Vec::new();
+    render(
+        &checks::presence_checks(&branch.ty, &branch.constraints),
+        ValueKind::Other,
+        At {
+            v: "(&v)",
+            p: "pointer",
+            r,
+        },
+        &mut body,
+    );
+    let list = checks::value_checks(&branch.ty, &branch.constraints);
     let mut reads = value(
         &branch.ty,
         &list,

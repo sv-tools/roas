@@ -396,13 +396,22 @@ fn value(
 /// The checks and recursion on one branch's decoded value `x`, into the
 /// report `r`, and whether they read `x`.
 fn branch(branch: &Branch, r: &str, cx: &mut Context<'_>) -> (Vec<String>, bool) {
-    let list = checks::checks(&branch.ty, &branch.constraints);
     let mut body = Vec::new();
     let at = At {
         e: "x",
         p: "pointer",
         r,
     };
+    // What applies to null as much as to a value is checked outside the
+    // null guard.
+    render(
+        &checks::presence_checks(&branch.ty, &branch.constraints),
+        (ValueKind::Other, None),
+        at,
+        &mut body,
+        &mut cx.needs,
+    );
+    let list = checks::value_checks(&branch.ty, &branch.constraints);
     let reads = if (cx.loops)(&branch.ty) {
         // Checks only: recursing would come back here.
         render(

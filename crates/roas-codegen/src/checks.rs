@@ -275,6 +275,7 @@ pub(crate) fn value_checks(ty: &TypeRef, constraints: &Constraints) -> Vec<Check
                     reason: "member-name schemas are not checked yet".into(),
                 });
             }
+            out.extend(pattern_properties(c));
         }
         ValueKind::Other => {}
     }
@@ -302,7 +303,15 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
             reason: "member-name schemas are not checked yet".into(),
         });
     }
+    out.extend(pattern_properties(constraints));
     out
+}
+
+fn pattern_properties(c: &Constraints) -> Option<Check> {
+    (!c.pattern_properties.is_empty()).then(|| Check::Unevaluated {
+        keyword: "patternProperties",
+        reason: "member patterns are not checked yet".into(),
+    })
 }
 
 /// Whether decoding a branch proves nothing: it declares what neither its
@@ -362,6 +371,7 @@ pub(crate) fn unchecked_keywords(ty: &TypeRef, c: &Constraints) -> Vec<&'static 
         (c.min_properties.is_some(), "minProperties", map),
         (c.max_properties.is_some(), "maxProperties", map),
         (c.property_names, "propertyNames", map),
+        (!c.pattern_properties.is_empty(), "patternProperties", map),
     ] {
         if present && !applies {
             out.push(keyword);
@@ -473,6 +483,7 @@ pub(crate) fn present_keywords(c: &Constraints) -> Vec<&'static str> {
         (c.min_properties.is_some(), "minProperties"),
         (c.max_properties.is_some(), "maxProperties"),
         (c.property_names, "propertyNames"),
+        (!c.pattern_properties.is_empty(), "patternProperties"),
     ]
     .into_iter()
     .filter_map(|(present, keyword)| present.then_some(keyword))

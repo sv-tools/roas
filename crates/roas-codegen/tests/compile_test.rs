@@ -608,6 +608,15 @@ fn validated_description() -> serde_json::Value {
             "Items": {"oneOf": [
                 {"type": "array", "items": {"type": "integer", "maximum": 3}},
                 {"type": "array", "items": {"type": "integer", "minimum": 10}}
+            ]},
+            "NullOnly": {"type": ["string", "null"], "enum": [null]},
+            "StrItems": {"oneOf": [
+                {"type": "array", "items": {"type": "string", "minLength": 2}},
+                {"type": "array", "items": {"type": "string", "maxLength": 1}}
+            ]},
+            "PatMap": {"oneOf": [
+                {"type": "object", "patternProperties": {"^a": {"type": "integer"}}},
+                {"type": "object", "patternProperties": {"^a": {"type": "string"}}}
             ]}
         }}
     })
@@ -780,6 +789,11 @@ fn main() {
     assert_eq!(report::<PartNull>("null"), vec![u("")]);
     // Constraints on inline items prove no branch.
     assert_eq!(report::<Items>("[1]"), vec![u("")]);
+    assert_eq!(report::<StrItems>(r#"["a"]"#), vec![u("")]);
+    // Member patterns are not checked yet, and say so.
+    assert_eq!(report::<PatMap>(r#"{"a":"x"}"#), vec![u("")]);
+    // A type list left with only its null.
+    assert_eq!(report::<NullOnly>("null"), vec![]);
     println!("validation behaves");
 }
 "##;
@@ -970,6 +984,9 @@ func main() {
 	check(`null`, report[api.NoNull](`null`), v(""))
 	check(`null`, report[api.PartNull](`null`), u(""))
 	check(`[1]`, report[api.Items](`[1]`), u(""))
+	check(`["a"]`, report[api.StrItems](`["a"]`), u(""))
+	check(`{"a":"x"}`, report[api.PatMap](`{"a":"x"}`), u(""))
+	check(`null`, report[api.NullOnly](`null`))
 	fmt.Println("validation behaves")
 }
 "##;
