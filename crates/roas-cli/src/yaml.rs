@@ -60,9 +60,11 @@ pub(crate) fn from_str(raw: &str) -> Result<Value, serde_saphyr::Error> {
 /// Each number is written as a plain YAML number, also when
 /// `serde_json/arbitrary_precision` is on (the `exact-numbers` feature),
 /// under which a `Value` number would otherwise serialize as a
-/// `$serde_json::private::Number` mapping. An integer is written exactly;
-/// any other number goes through an `f64`, as it does without the feature,
-/// and one no `f64` can hold (`1e400`) is an error.
+/// `$serde_json::private::Number` mapping. An integer within 128 bits is
+/// written exactly; any other number goes through an `f64`, as it does
+/// without the feature, and one whose value that would change
+/// (`1e400`, `0.1000000000000000000001`, an integer past 128 bits) is an
+/// error rather than silently rounded.
 pub(crate) fn to_string(value: &Value) -> Result<String, serde_saphyr::SerializeError> {
     serde_saphyr::to_string(&PlainNumbers(value))
 }
@@ -101,6 +103,11 @@ fn serialize_number<S: Serializer>(number: &Number, serializer: S) -> Result<S::
         return serializer.serialize_u64(n);
     }
     if let Some(n) = number.as_i64() {
+        // Only the literal `-0` kept by `arbitrary_precision` lands here as
+        // zero; without the feature it is read as `-0.0`, so write that.
+        if n == 0 {
+            return serializer.serialize_f64(-0.0);
+        }
         return serializer.serialize_i64(n);
     }
     // Only a literal kept by `arbitrary_precision` can be an integer
@@ -112,12 +119,45 @@ fn serialize_number<S: Serializer>(number: &Number, serializer: S) -> Result<S::
     if let Ok(n) = literal.parse::<i128>() {
         return serializer.serialize_i128(n);
     }
+    // Anything else is written as an `f64`, but only when that keeps the
+    // number's value: YAML output cannot carry a literal as written.
     match number.as_f64() {
-        Some(n) => serializer.serialize_f64(n),
-        None => Err(S::Error::custom(format!(
-            "the number {literal} is out of range for YAML output"
+        Some(n) if decimal(&n.to_string()) == decimal(&literal) => serializer.serialize_f64(n),
+        _ => Err(S::Error::custom(format!(
+            "the number {literal} cannot be written as a YAML number without \
+             changing its value; write JSON instead"
         ))),
     }
+}
+
+/// A decimal literal's value as its sign, significant digits and power of
+/// ten (`-1.50e2` is `(true, "15", 1)`), so two spellings of one value
+/// compare equal. Zero has no sign.
+fn decimal(literal: &str) -> Option<(bool, String, i64)> {
+    let (negative, rest) = match literal.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, literal),
+    };
+    let (mantissa, exponent) = match rest.find(['e', 'E']) {
+        Some(at) => (&rest[..at], rest[at + 1..].parse::<i64>().ok()?),
+        None => (rest, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if !whole
+        .bytes()
+        .chain(fraction.bytes())
+        .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    let digits = digits.trim_start_matches('0');
+    let trimmed = digits.trim_end_matches('0');
+    if trimmed.is_empty() {
+        return Some((false, String::new(), 0));
+    }
+    let power = exponent - fraction.len() as i64 + (digits.len() - trimmed.len()) as i64;
+    Some((negative, trimmed.to_owned(), power))
 }
 
 #[cfg(test)]
@@ -162,14 +202,68 @@ mod tests {
                 "big: 123456789012345678901234567890\nneg: -123456789012345678901234567890\n"
             );
         }
+        // Each side of the `u64`, `i64` and 128-bit boundaries, and `-0`,
+        // which both builds write as `-0.0`.
+        let bounds = write(
+            "[18446744073709551615, -9223372036854775808, 0, -0, -0.0, \
+             340282366920938463463374607431768211455, \
+             -170141183460469231731687303715884105728]",
+        );
+        assert!(
+            bounds.starts_with(
+                "- 18446744073709551615\n- -9223372036854775808\n- 0\n- -0.0\n- -0.0\n"
+            ),
+            "{bounds}"
+        );
+        if cfg!(feature = "exact-numbers") {
+            assert_eq!(
+                write("[18446744073709551616, -9223372036854775809]"),
+                "- 18446744073709551616\n- -9223372036854775809\n"
+            );
+            assert!(
+                bounds.ends_with(
+                    "- 340282366920938463463374607431768211455\n\
+                     - -170141183460469231731687303715884105728\n"
+                ),
+                "{bounds}"
+            );
+        }
     }
 
+    /// A number an `f64` would change is refused rather than rounded; one
+    /// it keeps is written, however it was spelled.
     #[cfg(feature = "exact-numbers")]
     #[test]
-    fn yaml_number_no_f64_holds_is_an_error() {
-        let value: Value = serde_json::from_str(r#"{"n": 1e400}"#).unwrap();
-        let err = to_string(&value).unwrap_err().to_string();
-        assert!(err.contains("is out of range for YAML output"), "{err}");
+    fn yaml_number_an_f64_would_change_is_an_error() {
+        for literal in [
+            "1e400",
+            "0.1000000000000000000001",
+            "9007199254740993.5",
+            "340282366920938463463374607431768211457",
+            "-170141183460469231731687303715884105729",
+        ] {
+            let value: Value = serde_json::from_str(&format!("[{literal}]")).unwrap();
+            let err = to_string(&value).unwrap_err().to_string();
+            assert!(
+                err.contains("without changing its value"),
+                "{literal}: {err}"
+            );
+        }
+        assert_eq!(
+            write("[1.50, 1E2, 0.1, -0.0, 2.5e-3]"),
+            "- 1.5\n- 100.0\n- 0.1\n- -0.0\n- 0.0025\n"
+        );
+    }
+
+    #[test]
+    fn decimal_compares_values_not_spellings() {
+        assert_eq!(decimal("-1.50e2"), Some((true, "15".to_owned(), 1)));
+        assert_eq!(decimal("150"), decimal("1.5E2"));
+        assert_eq!(decimal("0.0025"), decimal("25e-4"));
+        assert_eq!(decimal("-0.0"), decimal("0"));
+        assert_ne!(decimal("0.1"), decimal("0.1000000000000000000001"));
+        assert_eq!(decimal("1x"), None);
+        assert_eq!(decimal("1e"), None);
     }
 
     /// Each scalar whose meaning depends on the YAML options, next to what
