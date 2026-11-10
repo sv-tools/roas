@@ -2,8 +2,9 @@
 //!
 //! Per [Criterion Object](https://spec.openapis.org/arazzo/v1.1.0.html#criterion-object):
 //! `simple` conditions are a small expression language of their own,
-//! `regex` and `jsonpath` apply to the data the criterion's `context`
-//! names, and `xpath` is not supported here.
+//! `regex`, `jsonpath` and `jsonpointer` apply to the data the
+//! criterion's `context` names, and so does `xpath` with the `xpath`
+//! feature; without it XPath is refused.
 //!
 //! The `simple` language is parsed rather than pattern-matched:
 //! comparisons of literals and runtime expressions, joined by `&&` and
@@ -79,7 +80,8 @@ pub enum CriterionError {
     /// A typed criterion arrived without the `context` it needs.
     #[error("a `{0}` criterion needs a `context`")]
     MissingContext(&'static str),
-    /// A language or version this crate does not evaluate: XPath, or
+    /// A language or version this crate does not evaluate: XPath without
+    /// the `xpath` feature, an XPath version Arazzo does not name, or
     /// JSONPath other than RFC 9535.
     #[error("{0} criteria are not supported by this executor")]
     Unsupported(&'static str),
@@ -114,13 +116,14 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
             selects(Language::Path, &written()?, &context("jsonpath")?, scope)
         }
         Some(CriterionType::Simple(CriterionKind::Xpath)) => {
-            Err(CriterionError::Unsupported("XPath"))
+            xpath(None, || Ok((written()?, context("xpath")?)))
         }
-        // Evaluated as RFC 9535, so no other version is pretended to be.
+        // Evaluated as RFC 9535 and the XPath versions Arazzo names, so
+        // no other version is pretended to be.
         Some(CriterionType::Expression(expression))
-            if !crate::select::jsonpath_version_supported(expression) =>
+            if let Some(unsupported) = crate::select::unsupported_version(expression) =>
         {
-            Err(CriterionError::Unsupported("non-RFC9535 JSONPath"))
+            Err(CriterionError::Unsupported(unsupported))
         }
         Some(CriterionType::Expression(expression)) => match expression.type_ {
             ExpressionKind::Jsonpath => {
@@ -132,9 +135,33 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
                 &context("jsonpointer")?,
                 scope,
             ),
-            ExpressionKind::Xpath => Err(CriterionError::Unsupported("XPath")),
+            ExpressionKind::Xpath => xpath(Some(&expression.version), || {
+                Ok((written()?, context("xpath")?))
+            }),
         },
     }
+}
+
+/// An XPath condition holds by its effective boolean value. Its text and
+/// context are only worked out when there is an engine to give them to.
+/// An unknown version is refused before it gets here; no version is
+/// XPath 3.1.
+#[cfg(feature = "xpath")]
+fn xpath(
+    version: Option<&str>,
+    operands: impl FnOnce() -> Result<(String, Value), CriterionError>,
+) -> Result<bool, CriterionError> {
+    let version = select::xpath_version(version).unwrap_or_default();
+    let (condition, context) = operands()?;
+    Ok(crate::xpath::passes(&condition, version, &context)?)
+}
+
+#[cfg(not(feature = "xpath"))]
+fn xpath(
+    _: Option<&str>,
+    _: impl FnOnce() -> Result<(String, Value), CriterionError>,
+) -> Result<bool, CriterionError> {
+    Err(CriterionError::Unsupported("XPath"))
 }
 
 /// Whether the expression picks anything out of the context.
@@ -1019,6 +1046,7 @@ mod tests {
         assert_eq!(typed(ExpressionKind::Jsonpath, "$.id"), Ok(true));
         assert_eq!(typed(ExpressionKind::Jsonpointer, "/id"), Ok(true));
         assert_eq!(typed(ExpressionKind::Jsonpointer, "/nope"), Ok(false));
+        #[cfg(not(feature = "xpath"))]
         assert_eq!(
             typed(ExpressionKind::Xpath, "/id"),
             Err(CriterionError::Unsupported("XPath"))
@@ -1041,6 +1069,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "xpath"))]
     #[test]
     fn xpath_says_it_is_not_supported() {
         let fixture = Fixture::default();
@@ -1054,6 +1083,63 @@ mod tests {
                 &fixture.scope()
             ),
             Err(CriterionError::Unsupported("XPath"))
+        );
+    }
+
+    #[cfg(feature = "xpath")]
+    #[test]
+    fn xpath_holds_by_its_effective_boolean_value() {
+        let fixture = Fixture {
+            inputs: json!({ "xml": "<o><n>3</n></o>", "name": "n", "none": null }),
+            ..Fixture::default()
+        };
+        let check = |condition, context, type_| {
+            passes(
+                &criterion(condition, context, Some(type_)),
+                &fixture.scope(),
+            )
+        };
+        let simple = || CriterionType::Simple(CriterionKind::Xpath);
+        let typed = |version: &str| {
+            CriterionType::Expression(ExpressionType {
+                type_: ExpressionKind::Xpath,
+                version: version.to_owned(),
+                extensions: None,
+            })
+        };
+        assert_eq!(check("/o/n = 3", Some("$inputs.xml"), simple()), Ok(true));
+        assert_eq!(check("/o/m", Some("$inputs.xml"), simple()), Ok(false));
+        // The condition is filled in before it is evaluated.
+        assert_eq!(
+            check("/o/{$inputs.name}", Some("$inputs.xml"), typed("xpath-30")),
+            Ok(true)
+        );
+        // A null context fails; a missing one is an error.
+        assert_eq!(check("true()", Some("$inputs.none"), simple()), Ok(false));
+        assert_eq!(
+            check("true()", None, simple()),
+            Err(CriterionError::MissingContext("xpath"))
+        );
+        assert!(matches!(
+            check("/o/[", Some("$inputs.xml"), simple()),
+            Err(CriterionError::Select(SelectError::Malformed { .. }))
+        ));
+        assert_eq!(
+            check("'3' + 4 = 7", Some("$inputs.xml"), typed("xpath-10")),
+            Ok(true)
+        );
+        assert_eq!(
+            check("true()", Some("$inputs.xml"), typed("xpath-40")),
+            Err(CriterionError::Unsupported("unknown XPath version"))
+        );
+        // XPath's own braces, written with a space, are not interpolated.
+        assert_eq!(
+            check(
+                "let $x := 2 return array{ $x }(1) = 2",
+                Some("$inputs.xml"),
+                simple()
+            ),
+            Ok(true)
         );
     }
 

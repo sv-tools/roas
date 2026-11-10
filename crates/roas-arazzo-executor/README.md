@@ -336,7 +336,8 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 - **Steps** that name an operation by `operationId` (bare, or `$sourceDescriptions.<name>.<id>`) or by `operationPath`, and steps that call another `workflowId` — of the same document, or of an external Arazzo document as `$sourceDescriptions.<name>.<workflowId>` (the `source-graph` feature).
 - **Parameters** in `path`, `query`, `querystring`, `header` and `cookie`, from the workflow and the step, with `$components.parameters` references and their `value` overrides.
 - **Request bodies**, with runtime expressions anywhere inside the payload and `replacements` by JSON Pointer or JSONPath.
-- **Criteria** — `simple` conditions (comparisons, `!`, `&&`, `||`, parentheses, property access and indexing), `regex`, `jsonpath`, and v1.1 `jsonpointer` expression-type criteria (an extension). Pattern conditions interpolate `{$expressions}` before evaluation; simple conditions parse runtime expressions directly. A `jsonpath` condition passes on a non-empty nodelist, whatever the node holds.
+- **Criteria** — `simple` conditions (comparisons, `!`, `&&`, `||`, parentheses, property access and indexing), `regex`, `jsonpath`, `xpath` (the `xpath` feature), and v1.1 `jsonpointer` expression-type criteria (an extension). Pattern conditions interpolate `{$expressions}` before evaluation; simple conditions parse runtime expressions directly. A `jsonpath` condition passes on a non-empty nodelist, whatever the node holds.
+- **Response bodies** — a JSON body is parsed; any other non-empty UTF-8 body is its text, a string (without a leading byte-order mark), so `$response.body` names an XML or plain-text body too. An empty body, or one in another encoding, is no body: it is not decoded lossily, which would change the data criteria and selectors judge.
 - **Actions** — `end`, `goto` a step or a workflow, and `retry`, which honours `retryAfter`, defaults to a single attempt when `retryLimit` is absent, may send the run through another step or workflow before trying again, and gives way to the next failure action once its limit is spent.
 - **Outputs** at step and workflow level, including [`Selector`](https://spec.openapis.org/arazzo/v1.1.0.html#selector-object)s, readable by later steps as `$steps.<id>.outputs.<name>`.
 - **Runtime expressions** — `$url`, `$method`, `$statusCode`, `$request.*`, `$response.*`, `$inputs`, `$outputs`, `$steps`, `$workflows.<id>.inputs` / `.outputs`, `$sourceDescriptions`, `$components`, and `$self`.
@@ -346,9 +347,26 @@ A step that calls a workflow is a step like any other: what it called becomes it
 
 Both Arazzo versions: v1.1 directly, and v1.0 through `execute_v1_0` (the `v1_0` feature), which upconverts first so there is one interpreter.
 
+### XPath
+
+With the `xpath` feature, XPath criteria and selectors are evaluated by [`oxixml-xpath`](https://crates.io/crates/oxixml-xpath), as the version they name: `xpath-10`, `xpath-20`, `xpath-30` or `xpath-31`, and plain `xpath` as XPath 3.1. Each version is its own language, so `let` does not compile as XPath 2.0 and `'3' + 4` is `7` in XPath 1.0 but a type error later. It is off by default. The context must name XML text — a response body that is not JSON is one. Unprefixed names match no namespace, and no prefix is bound, so a document with a default namespace is read with wildcards such as `/*:order/*:total` or braced URIs such as `/Q{urn:x}order`.
+
+A response body is untrusted, so the engine runs under limits:
+
+- Every compile and evaluation runs on a thread of its own with a 16 MiB stack, which the engine is told it has: a recursion that would overflow it stops with `XPDY0130` instead of aborting the process. An evaluation that runs past 2 seconds stops with `XPDY0130` too. The engine checks that deadline between steps and calls, so parsing and a single built-in run to completion.
+- A context is refused before it is parsed when it is larger than 4 MiB, holds a document type declaration (its internal entities would expand into a far larger document; no external entity is ever read either way), nests elements more than 1,024 deep, has an element with more than 1,024 attributes, or binds more than 1,000,000 namespaces across its elements (each element counts every prefix in scope on it besides `xml`, because the engine gives each its own node).
+- An expression that calls or names `fn:parse-xml`, `fn:parse-xml-fragment`, `fn:json-to-xml`, `fn:parse-json`, `fn:function-lookup`, a fold (`fn:fold-left`, `fn:fold-right`, `array:fold-left`, `array:fold-right`) or a regular-expression function (`fn:matches`, `fn:replace`, `fn:tokenize`, `fn:analyze-string`) is refused as unsupported before it is compiled. Text parsed into XML would escape the limits on a context; the engine clones and drops nested maps and arrays recursively, beyond the stack it measures, and `fn:parse-json` or a fold can nest them as deep as a response says; and a regular expression runs to completion past the deadline. Match with an Arazzo `regex` criterion instead. `fn:doc`, `fn:unparsed-text` and `fn:collection` find nothing, and `fn:environment-variable` sees no variables.
+
+- A criterion holds by the expression's effective boolean value: a non-empty node sequence, `true`, a non-zero number or a non-empty string. A null context fails it. A context that is not XML, a sequence with no effective boolean value (`(1, 2)`) or a dynamic error fails it with a diagnostic, like any other criterion evaluation error.
+- A selector's result becomes JSON item by item: a node is its string value, a boolean stays a boolean, a number is a JSON number when JSON can write it (`NaN`, `INF`, and an integer or decimal JSON cannot hold exactly, stay strings), a whole number is written as an integer (`number(/id)` over `<id>7</id>` is `7`, not `7.0`), and any other value is its string value. A function, map or array item has no JSON value, and selecting one is an error. One item is the value, several are an array of them, and none is `SelectError::Empty`.
+- Any version Arazzo does not name is refused. A payload replacement whose `targetSelectorType` is XPath is refused too, because the engine does not write into XML.
+- Preparation compiles constant expressions as their version, so a syntax error is reported before anything is sent. An expression with `{$...}` in it is compiled once it is filled in.
+- As in every typed criterion, `{$` always starts an interpolated runtime expression. XPath 3.1 braces that begin with a variable, such as `array{$x}` or `map{$k: 1}`, are written with a space: `array{ $x }`.
+- A panic inside the engine is caught, and the expression is refused as unsupported, which is terminal like any other unsupported capability. The panic hook still prints its message, and a binary built with `panic = "abort"` still aborts.
+
 ## Support matrix
 
-Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (AsyncAPI steps, XPath) is an error where it is met, never skipped; `x-` extensions of Arazzo objects are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
+Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-arazzo) parses, the source registry and preparation resolve references, `roas-arazzo`'s `Validate` and checked preparation (`prepare`) validate, and a run executes. A capability marked *Not run* (AsyncAPI steps, XPath without its feature) is an error where it is met, never skipped; `x-` extensions of Arazzo objects are ignored. A check named in the validation column is made by `prepare`, and the lazy `execute` / `Run::start` path makes only some of them: it does not see unknown members at all.
 
 | Feature | Parsing | Reference resolution | Validation | Execution |
 | --- | --- | --- | --- | --- |
@@ -364,7 +382,7 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | `regex` criteria | Typed criterion types | — | Constant patterns compiled | Evaluated |
 | JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run refuses any other version when it reaches it |
 | JSON Pointer selectors and criteria (v1.1) | Typed | — | Constant pointers' syntax checked | Evaluated; the criterion type is an extension |
-| XPath criteria and selectors | Typed | — | Preparation error | Not run |
+| XPath criteria and selectors | Typed | — | With the `xpath` feature: constant expressions compiled as their version, unknown versions, refused functions and XPath replacement targets refused; without it, a preparation error | With the `xpath` feature, evaluated as XPath 1.0 to 3.1 over XML text ([details](#xpath)); without it, not run |
 | Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
 | `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time; no parallel scheduling; a call, `goto` or `retry` target's dependencies run first, each once in a run, with the run's inputs |
 
@@ -518,7 +536,7 @@ The CLI now opts in by default, so previously skipped document defects can cause
 earlier, nonzero exit instead of a recovered success.
 
 Input-schema compilation is optional; see the input-validation policy below.
-Preparation does not add XPath or AsyncAPI execution.
+Preparation does not add XPath or AsyncAPI execution; XPath runs only with the `xpath` feature.
 Source identity loading is opt-in and occurs before preparation;
 referenced OpenAPI resolution uses the already-supplied document graph.
 JSONPath execution supports `rfc9535`, not the alternate Goessner draft: preparation
@@ -626,7 +644,7 @@ whereas a missing context value retains its expression error. A JSONPath node
 containing null selected from a non-null document still counts as a match.
 The JSON Pointer criterion extension retains its node-existence behavior.
 
-Unsupported XPath/AsyncAPI capabilities remain terminal errors, not false
+Unsupported XPath/AsyncAPI capabilities (XPath without its feature, XPath versions Arazzo does not name, XPath replacement targets, XPath functions the executor refuses) remain terminal errors, not false
 conditions silently skipped in favor of another action. Preparation-time syntax
 errors also remain terminal. Runtime failures outside criteria (including output,
 parameter, operation, action-reference, client, and limit errors) retain their
@@ -714,12 +732,16 @@ selector or replacement target (preparation reports a criterion's version as
 criteria that name the Goessner draft, the only JSONPath version v1.0 allows; a
 v1.0 `jsonpath` criterion with no version still runs.
 
+### XPath and response bodies
+
+A response body that is not JSON used to leave `$response.body` empty, so naming it failed with a missing-body error. It is now the body's text, as a string, when the body is UTF-8. This applies with or without the `xpath` feature: a criterion such as `$response.body == 'pong'` can now pass, and an output of `$response.body` now holds the text instead of failing. An empty body still has no `$response.body`. `SelectError` gains an `Evaluation` variant for an expression that is valid but cannot be evaluated against its data; matches already need a fallback arm. Criteria that read such a body now judge its text rather than failing for want of a body: a JSONPath or JSON Pointer criterion over it matches nothing except `$` or the empty pointer, which match the whole string and pass, and a simple condition such as `$response.body != null` passes. `$response.body#/id` now reports that the value has no `/id`.
+
 ## What it does not run
 
 Each of these is reported where it is met, never passed over — a run should not look successful because something was skipped.
 
 - **AsyncAPI steps** (`channelPath` / `action` / `correlationId`): they need a broker client, not an HTTP one.
-- **XPath** criteria and selectors: JSON Pointer and JSONPath are supported.
+- **XPath** criteria and selectors without the `xpath` feature; with it, versions Arazzo does not name, XPath payload replacement targets, and the functions listed under [XPath](#xpath).
 - **Parallel execution**: `dependsOn` orders steps and workflows; they still run one at a time.
 
 ## Safety rails

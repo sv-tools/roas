@@ -46,9 +46,11 @@
 //! ## What it does not do yet
 //!
 //! AsyncAPI steps (`channelPath` / `action`), XPath criteria and
-//! selectors, and parallel `dependsOn`
-//! execution. Unsupported execution capabilities are reported when reached, or
-//! statically by preparation. The optional `input-validation` feature supports
+//! selectors without the `xpath` feature (and, with it, XPath versions
+//! Arazzo does not name, XPath payload replacement targets, and the XPath
+//! functions it refuses), and parallel `dependsOn`
+//! execution. Unsupported execution capabilities are reported when
+//! reached, or statically by preparation. The optional `input-validation` feature supports
 //! offline JSON Schema 2020-12 when [`Options::input_validation`] enables it.
 //! Plans compile schemas; each run validates its actual bound inputs at entry.
 //! The [README's support matrix](https://crates.io/crates/roas-arazzo-executor#support-matrix)
@@ -87,6 +89,8 @@ pub mod testing;
 
 #[cfg(feature = "reqwest")]
 mod client;
+#[cfg(feature = "xpath")]
+mod xpath;
 
 pub use criterion::CriterionError;
 pub use expression::ExpressionError;

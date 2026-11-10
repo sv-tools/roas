@@ -723,7 +723,7 @@ impl<'d> Run<'d> {
         };
         let elapsed = pending.started.elapsed();
         let status = response.status;
-        pending.exchange.response_body = response.body_as_json();
+        pending.exchange.response_body = response.body_value();
         pending.exchange.response = Some(response);
 
         if self.frames.last().is_none() {
@@ -1894,7 +1894,7 @@ fn body(step: &Step, scope: &Scope<'_>) -> Result<Option<Body>, ExecutionError> 
         // A language the engine cannot evaluate is refused first, as a
         // selector's is.
         let language = match &replacement.target_selector_type {
-            Some(type_) => select::kind_of(type_)?,
+            Some(type_) => select::target_kind_of(type_)?,
             None => select::Language::Pointer,
         };
         let value = select::value_of(&replacement.value, scope)?;
