@@ -14,6 +14,8 @@ pub(crate) struct Needs {
     pub math: bool,
     /// Map keys walked in order: `maps` and `slices`.
     pub sorted: bool,
+    /// Floats sorted: `slices`.
+    pub slices: bool,
     /// A raw holder is built from `null`: `jsontext`.
     pub jsontext: bool,
 }
@@ -259,9 +261,14 @@ fn render(
                     "{{ seen := map[{key}]bool{{}}; for i, item := range {e} {{ if seen[item] {{ {r}.violation(childPointer({p}, fmt.Sprint(i)), \"repeats an earlier item; uniqueItems is true\") }}; seen[item] = true }} }}"
                 ));
             }
-            Check::UniqueItems(Unique::Float) => out.push(format!(
-                "{{ repeated := false; for i := range {e} {{ for j := 0; j < i; j++ {{ if {e}[i] == {e}[j] {{ repeated = true }} }} }}; if repeated {{ {r}.unevaluated({p}, \"uniqueItems: equal floats may come from different numbers\") }} }}"
-            )),
+            Check::UniqueItems(Unique::Float) => {
+                // Sorted, equal floats sit side by side: linearithmic, not
+                // quadratic.
+                needs.slices = true;
+                out.push(format!(
+                    "{{ sorted := make([]float64, 0, len({e})); for _, x := range {e} {{ sorted = append(sorted, float64(x)) }}; slices.Sort(sorted); for i := 1; i < len(sorted); i++ {{ if sorted[i] == sorted[i-1] {{ {r}.unevaluated({p}, \"uniqueItems: equal floats may come from different numbers\"); break }} }} }}"
+                ))
+            }
             Check::UniqueItems(Unique::Unknown) => out.push(format!(
                 "if len({e}) > 1 {{ {r}.unevaluated({p}, \"uniqueItems: items of this type are not compared yet\") }}"
             )),
@@ -657,7 +664,11 @@ pub(crate) fn body(
                     cx,
                 );
                 render(
-                    &(cx.extern_checks)(&TypeRef::Map(Box::new(ty.clone()))).value,
+                    &(cx.extern_checks)(&TypeRef::Map(Box::new(ty.clone())))
+                        .value
+                        .into_iter()
+                        .chain(checks::inner_unchecked(&def.constraints))
+                        .collect::<Vec<_>>(),
                     (ValueKind::Other, None),
                     At { e: &map, ..own },
                     &mut out,
@@ -872,7 +883,12 @@ pub(crate) fn body(
             _ => 0,
         };
         let mut wrapped = vec![
-            format!("if !r.enter(pointer, {branches}) {{ return }}"),
+            if branches == 0 {
+                "if !r.enter(pointer, 0) { return }".to_owned()
+            } else {
+                // Each branch decodes the whole raw value again.
+                format!("if !r.enter(pointer, {branches}*max(len(v.raw), 640)) {{ return }}")
+            },
             "defer func() { r.depth-- }()".to_owned(),
         ];
         wrapped.extend(out);

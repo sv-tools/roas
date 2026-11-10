@@ -303,8 +303,9 @@ type ValidationReport struct {
 	// depth counts the generated types the walk is inside: a raw holder
 	// decodes afresh, so nothing else bounds a recursive value.
 	depth int
-	// spent counts the branches tried, against a budget: nested unions
-	// would otherwise multiply the work.
+	// spent counts the bytes decoded for branches, against a budget: each
+	// branch decodes its holder's raw value again, and nested unions would
+	// otherwise multiply the work.
 	spent int
 	// stopped: the budget ran out, and the rest went unchecked.
 	stopped bool
@@ -330,10 +331,10 @@ func (r *ValidationReport) resume(pointer string, branch *ValidationReport) {
 	}
 }
 
-// enter steps into a generated type (branches it is about to try); past
-// the depth limit or the budget, the rest is reported unevaluated
-// instead of walked.
-func (r *ValidationReport) enter(pointer string, branches int) bool {
+// enter steps into a generated type, charging what its branches will
+// decode (cost, in bytes); past the depth limit or the budget, the rest is
+// reported unevaluated instead of walked.
+func (r *ValidationReport) enter(pointer string, cost int) bool {
 	if r.stopped {
 		return false
 	}
@@ -341,8 +342,8 @@ func (r *ValidationReport) enter(pointer string, branches int) bool {
 		r.unevaluated(pointer, "nested too deep to validate")
 		return false
 	}
-	r.spent += branches
-	if r.spent > 100000 {
+	r.spent += cost
+	if r.spent > 64<<20 {
 		r.stopped = true
 		r.unevaluated(pointer, "too many branches to validate")
 		return false

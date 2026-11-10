@@ -299,6 +299,8 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         let mut builtin = BUILTIN_IMPORTS.to_vec();
         if builder.support.sorted_keys || builder.needs.sorted {
             builtin.extend([("maps", "maps"), ("slices", "slices")]);
+        } else if builder.needs.slices {
+            builtin.push(("slices", "slices"));
         }
         if builder.needs.math {
             builtin.push(("math", "math"));

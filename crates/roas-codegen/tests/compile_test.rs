@@ -698,6 +698,10 @@ fn validated_description() -> serde_json::Value {
                 {"type": "object", "patternProperties": {"^x": {"type": "integer"}}, "additionalProperties": false},
                 {"type": "string"}
             ]},
+            "InlineItems": {"type": "array", "items": {"type": "string", "minLength": 2}},
+            "PadNode": {"anyOf": [{"$ref": "#/components/schemas/PadA"}, {"$ref": "#/components/schemas/PadB"}]},
+            "PadA": {"type": "object", "properties": {"next": {"$ref": "#/components/schemas/PadNode"}, "pad": {"type": "string"}}},
+            "PadB": {"type": "object", "properties": {"next": {"$ref": "#/components/schemas/PadNode"}, "pad": {"type": "string", "maxLength": 100000000}}},
             "EnumOrObj": {"oneOf": [{"type": "string", "enum": ["a"]}, {"type": "object"}]},
             "EmptyEnum": {"type": "string", "enum": [], "minLength": 1},
             "IntOrStr": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
@@ -1032,6 +1036,19 @@ fn main() {
     let started = std::time::Instant::now();
     assert!(report::<Twice>(&twice).iter().any(|f| f.1 == FindingKind::Unevaluated));
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    // A large value under nested holders: the work is bounded by bytes.
+    let padded = format!(
+        "{}{{\"pad\":\"{}\"}}{}",
+        r#"{"next":"#.repeat(30),
+        "x".repeat(1 << 20),
+        "}".repeat(30)
+    );
+    let started = std::time::Instant::now();
+    let _ = report::<PadNode>(&padded);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    // No items, nothing unchecked about them.
+    assert_eq!(report::<InlineItems>("[]"), vec![]);
+    assert_eq!(report::<InlineItems>(r#"["a"]"#), vec![u("")]);
     // A string enum branch reads a JSON string only.
     assert_eq!(report::<EnumOrObj>(r#"{"a":null}"#), vec![]);
     assert_eq!(report::<EnumOrObj>(r#""a""#), vec![]);
@@ -1297,6 +1314,10 @@ func main() {
 	}
 	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
 	check(`[{"a":null}]`, report[api.EnumItems](`[{"a":null}]`))
+	check(`[]`, report[api.InlineItems](`[]`))
+	check(`["a"]`, report[api.InlineItems](`["a"]`), u(""))
+	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)
+	_ = report[api.PadNode](padded)
 	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`), u(""))
 	twice := strings.Repeat(`{"h":`, 40) + `{}` + strings.Repeat("}", 40)
 	if got := report[api.Twice](twice); len(got) == 0 {

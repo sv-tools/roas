@@ -286,7 +286,8 @@ pub struct ValidationReport {
     /// How many generated types deep the walk is: a raw holder decodes
     /// afresh, so nothing else bounds a recursive value.
     depth: usize,
-    /// Branches tried so far, against a budget: nested unions would
+    /// Bytes decoded for branches so far, against a budget: each branch
+    /// decodes its holder's raw value again, and nested unions would
     /// otherwise multiply the work.
     spent: usize,
     /// The budget ran out: the rest went unchecked, and was reported so.
@@ -346,11 +347,11 @@ impl ValidationReport {
         }
     }
 
-    /// Steps into a generated type (`branches` it is about to try); past
-    /// the depth limit or the budget, the rest is reported unevaluated
-    /// instead of walked.
+    /// Steps into a generated type, charging what its branches will decode
+    /// (`cost`, in bytes); past the depth limit or the budget, the rest is
+    /// reported unevaluated instead of walked.
     #[allow(dead_code)]
-    fn enter(&mut self, pointer: &str, branches: usize) -> bool {
+    fn enter(&mut self, pointer: &str, cost: usize) -> bool {
         if self.stopped {
             return false;
         }
@@ -358,8 +359,8 @@ impl ValidationReport {
             self.unevaluated(pointer, "nested too deep to validate");
             return false;
         }
-        self.spent += branches;
-        if self.spent > 100_000 {
+        self.spent = self.spent.saturating_add(cost);
+        if self.spent > 64 << 20 {
             self.stopped = true;
             self.unevaluated(pointer, "too many branches to validate");
             return false;

@@ -340,12 +340,13 @@ pub(crate) fn object_checks(constraints: &Constraints) -> Vec<Check> {
         });
     }
     out.extend(pattern_properties(constraints));
-    out.extend(inner_unchecked(constraints));
     out
 }
 
-fn inner_unchecked(c: &Constraints) -> Option<Check> {
-    c.inner_unchecked.map(|keyword| Check::Unevaluated {
+/// What inline items or member values declare, unchecked: reported only
+/// when there is an item or a member to say it of.
+pub(crate) fn inner_unchecked(c: &Constraints) -> Option<Check> {
+    c.inner_unchecked.map(|keyword| Check::ItemsUnevaluated {
         keyword,
         reason: format!("constraints on inline `{keyword}` are not checked yet"),
     })

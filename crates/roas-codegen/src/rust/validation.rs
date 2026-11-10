@@ -180,7 +180,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 "{{ let mut seen = std::collections::BTreeSet::new(); for (i, item) in {v}.iter().enumerate() {{ if !seen.insert(item) {{ {r}.violation(&child_pointer({p}, &i.to_string()), \"repeats an earlier item; uniqueItems is true\"); }} }} }}"
             )),
             Check::UniqueItems(Unique::Float) => out.push(format!(
-                "if {v}.iter().enumerate().any(|(i, a)| {v}[..i].contains(a)) {{ {r}.unevaluated({p}, \"uniqueItems: equal floats may come from different numbers\"); }}"
+                "{{ let mut sorted: Vec<f64> = {v}.iter().map(|x| f64::from(*x)).collect(); sorted.sort_by(f64::total_cmp); if sorted.windows(2).any(|w| w[0] == w[1]) {{ {r}.unevaluated({p}, \"uniqueItems: equal floats may come from different numbers\"); }} }}"
             )),
             Check::UniqueItems(Unique::Unknown) => out.push(format!(
                 "if {v}.len() > 1 {{ {r}.unevaluated({p}, \"uniqueItems: items of this type are not compared yet\"); }}"
@@ -476,7 +476,11 @@ pub(crate) fn body(
                 }
                 let field = format!("self.{name}");
                 render(
-                    &checks::extern_checks(ir, &TypeRef::Map(Box::new(ty.clone())), false).value,
+                    &checks::extern_checks(ir, &TypeRef::Map(Box::new(ty.clone())), false)
+                        .value
+                        .into_iter()
+                        .chain(checks::inner_unchecked(&def.constraints))
+                        .collect::<Vec<_>>(),
                     ValueKind::Other,
                     At {
                         v: &field,
@@ -745,7 +749,14 @@ pub(crate) fn body(
             _ => 0,
         };
         let mut wrapped = vec![
-            format!("if !report.enter(pointer, {branches}) {{ return; }}"),
+            if branches == 0 {
+                "if !report.enter(pointer, 0) { return; }".to_owned()
+            } else {
+                // Each branch decodes the whole raw value again.
+                format!(
+                    "if !report.enter(pointer, {branches} * self.raw.get().len().max(640)) {{ return; }}"
+                )
+            },
             "let run = |report: &mut ValidationReport| {".to_owned(),
         ];
         wrapped.extend(out);
