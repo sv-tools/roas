@@ -70,9 +70,7 @@ pub struct Diagnostic {
     /// its name for a finding about the name, or the nearest enclosing
     /// object for a field that is missing. A name an alias brings into the
     /// object (an alias key, a `<<` merge, a replayed `*name`) is placed at
-    /// that `*name`, where the object can be edited; the anchor's name is
-    /// what [`SourceMap::locate_key`] gives, as `roas arazzo validate`
-    /// reports it.
+    /// that `*name`, as [`SourceMap::locate_key`] places it.
     pub range: Option<SourceRange>,
     /// What is wrong.
     pub message: String,
@@ -748,7 +746,7 @@ impl Checks<'_> {
     fn push(&mut self, severity: Severity, path: String, key: bool, message: String) {
         let range = self.map.and_then(|map| {
             if key {
-                map.locate_written_key(&path)
+                map.locate_key(&path)
             } else {
                 nearest(map, &path)
             }

@@ -1667,6 +1667,36 @@ workflows:
     }
 
     #[test]
+    fn an_unknown_member_a_merge_brings_in_is_located_at_the_merge() {
+        // At the `*name` in `info`, not at the anchor on line 1.
+        for (anchor, written, at) in [
+            ("x-e: &e {summery: S}", "  <<: *e", "line 6, column 7"),
+            ("x-e: &e {summery: S}", "  <<: [*e]", "line 6, column 8"),
+            ("x-k: &k summery", "  *k : S", "line 6, column 3"),
+        ] {
+            let text = format!(
+                "{anchor}\n{}",
+                LOCATED.replace(
+                    "  version: \"1.0.0\"\n",
+                    &format!("  version: \"1.0.0\"\n{written}\n")
+                )
+            );
+            let file = TempFile::text("merged.yaml", &text);
+            let read = read_arazzo_as(&InputSource::File(file.0.clone()), None, true).unwrap();
+            let unknown = read
+                .detected
+                .unknown_members(read.value.as_ref().unwrap())
+                .unwrap();
+            let warnings = unknown_warnings(read.source_map().as_ref(), &unknown);
+            assert_eq!(warnings.len(), 1, "{written}: {warnings:?}");
+            assert!(
+                warnings[0].starts_with(&format!("warning: #.info.summery at {at}: ")),
+                "{written}: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_members_are_located_warnings() {
         // `aRetry` sorts before `timeoutMs` but is written after it.
         let text = format!(
