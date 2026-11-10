@@ -676,6 +676,7 @@ fn validated_description() -> serde_json::Value {
             "GatedField": {"type": "object", "minProperties": 1, "properties": {
                 "a": {"type": "string", "minLength": 1}, "b": {"type": "string"}
             }},
+            "AllGated": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1}}},
             "NullOnlyN": {"type": "null", "if": {}, "then": false},
             "HoldsNullOnly": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/NullOnlyN"}}},
             "Gated": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string", "maxLength": 1}}},
@@ -720,7 +721,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -975,6 +976,7 @@ fn main() {
     assert_eq!(report::<GatedField>(r#"{"b":"x"}"#), vec![]);
     // A null-only reference keeps what it says.
     assert_eq!(report::<HoldsNullOnly>(r#"{"n":null}"#), vec![u("/n")]);
+    assert_eq!(report::<HoldsNullOnly>("{}"), vec![]);
     assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
     // An opted-out type nested in a branch proves no match.
     assert_eq!(report::<PickWrap>(r#"{"s":"ab"}"#), vec![u("")]);
@@ -1219,6 +1221,7 @@ func main() {
 	check(`{"s":"ab"}`, report[api.PickWrap](`{"s":"ab"}`), u(""))
 	check(`{"b":"x"}`, report[api.GatedField](`{"b":"x"}`))
 	check(`{"n":null}`, report[api.HoldsNullOnly](`{"n":null}`), u("/n"))
+	check(`{}`, report[api.HoldsNullOnly](`{}`))
 	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
 	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
 	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))

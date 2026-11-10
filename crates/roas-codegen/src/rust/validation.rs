@@ -304,6 +304,11 @@ const NULL_IS_VALID: &str = "if self.raw.get().trim() == \"null\" { return; }";
 /// The body of `validate_null` for one type: empty when a `null` of it
 /// has nothing to check.
 pub(crate) fn null_body(def: &TypeDef) -> Vec<String> {
+    // A `None` of a non-nullable type is an absent member, not a null: a
+    // present null of a null-only type is decoded into it.
+    if !def.nullable {
+        return Vec::new();
+    }
     if checks::null_raw(def) {
         return vec![
             "Self { raw: serde_json::value::RawValue::from_string(\"null\".to_owned()).expect(\"null is JSON\") }.validate_into(pointer, report);".to_owned(),
@@ -440,7 +445,11 @@ pub(crate) fn body(
                 if recurse {
                     block.push(format!("self.{name}.validate_into(&p, report);"));
                 }
-                // A field compiled out is not read either.
+                // A field compiled out is not read either; with every one
+                // out, the parameters would go unused.
+                if !gates.is_empty() && !out.iter().any(|l| l.starts_with("let _ = (pointer")) {
+                    out.insert(0, "let _ = (pointer, &report);".to_owned());
+                }
                 out.push(
                     format!("{gates} {{ {} }}", block.join(" "))
                         .trim_start()

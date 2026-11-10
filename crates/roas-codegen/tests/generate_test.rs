@@ -835,7 +835,8 @@ fn keywords_a_3_0_model_drops_are_reported() {
             "InclusiveMax": {"type": "number", "maximum": 5, "exclusiveMaximum": false},
             "NoBound": {"type": "integer", "exclusiveMinimum": true},
             "NullDefault": {"type": "string", "nullable": true, "default": null},
-            "Documented": {"allOf": [{"type": "string"}], "description": "a string", "title": "S"}
+            "Documented": {"allOf": [{"type": "string"}], "description": "a string", "title": "S"},
+            "Pinned": {"type": "integer", "const": 5}
         }}
     });
     let bytes = serde_json::to_vec(&raw).unwrap();
@@ -859,6 +860,7 @@ fn keywords_a_3_0_model_drops_are_reported() {
         [
             ("/components/schemas/An", "maxLength"),
             ("/components/schemas/Ao", "maxLength"),
+            ("/components/schemas/Pinned", "const"),
             ("/components/schemas/Typed", "type")
         ]
     );

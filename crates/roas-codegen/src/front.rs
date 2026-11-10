@@ -405,9 +405,24 @@ impl Translator<'_> {
                 // An annotation asserts nothing: dropped, it changes no
                 // instance's validity.
                 let annotation = key.starts_with("x-")
-                    || (COMMON_KEYWORDS.contains(&key) && key != "type")
-                    || SILENT_KEYWORDS.contains(&key)
-                    || matches!(key, "default" | "examples" | "$id" | "$anchor" | "$defs");
+                    || matches!(
+                        key,
+                        "title"
+                            | "description"
+                            | "deprecated"
+                            | "readOnly"
+                            | "writeOnly"
+                            | "default"
+                            | "examples"
+                            | "xml"
+                            | "externalDocs"
+                            | "$comment"
+                            | "$schema"
+                            | "$id"
+                            | "$anchor"
+                            | "$defs"
+                            | "definitions"
+                    );
                 !rewritten && !annotation && !has(key)
             })
             .cloned()
