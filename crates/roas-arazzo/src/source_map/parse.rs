@@ -241,10 +241,8 @@ fn node(text: &str, spanned: Spanned<Raw>, replayed: bool, memo: &mut Memo) -> (
                         (
                             Key {
                                 name,
-                                start: key_start,
-                                end: key_end,
-                                written: written.0,
-                                written_end: written.1,
+                                start: written.0,
+                                end: written.1,
                             },
                             value,
                         )
@@ -1216,6 +1214,27 @@ workflows:
         let text = "x: &v 1\nk1:\n  <<: &a1\n    m:\n      j: *v\n  k8: *a1\n";
         let m = SourceMap::parse(text).unwrap().locate("#.k1.m").unwrap();
         assert_eq!((m.start.offset, m.end.offset), (35, 40));
+    }
+
+    /// A name an alias brings into an object is located at that `*name`,
+    /// where the object can be edited, not at the anchor.
+    #[test]
+    fn a_key_an_alias_brings_in_is_located_at_the_alias() {
+        let text =
+            "a: &k t\nx-m: &m {u: 1}\no: &o {v: 1}\nobj:\n  *k : 1\n  <<: *m\n  w: 2\nr: *o\n";
+        let map = SourceMap::parse(text).unwrap();
+        let at = |path: &str| {
+            let range = map.locate_key(path).unwrap();
+            (range.start.line, range.start.column, range.end.column)
+        };
+        // An alias key, a merged member, a member of a replayed object.
+        assert_eq!(at("#.obj.t"), (5, 3, 5));
+        assert_eq!(at("#.obj.u"), (6, 7, 9));
+        assert_eq!(at("#.r.v"), (8, 4, 6));
+        // A name written out, and the anchors' own, where they are.
+        assert_eq!(at("#.obj.w"), (7, 3, 4));
+        assert_eq!(at("#.x-m.u"), (2, 10, 11));
+        assert_eq!(at("#.o.v"), (3, 8, 9));
     }
 
     /// An inline merge's members are written where they are: they are

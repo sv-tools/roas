@@ -298,16 +298,11 @@ enum Kind {
 #[cfg_attr(not(feature = "source-map"), allow(dead_code))]
 struct Key {
     name: String,
-    start: usize,
-    end: usize,
     /// Where the member is written in its mapping: the key, or, for an
     /// alias key, a member merged in or one of a replayed alias, the
-    /// `*name` that brings it there, while `start` is at the anchor.
-    #[cfg_attr(not(feature = "editor"), allow(dead_code))]
-    written: usize,
-    /// Where `written` ends: the key's end, or the `*name`'s.
-    #[cfg_attr(not(feature = "editor"), allow(dead_code))]
-    written_end: usize,
+    /// `*name` that brings it there, not the anchor.
+    start: usize,
+    end: usize,
 }
 
 impl fmt::Debug for SourceMap {
@@ -339,23 +334,15 @@ impl SourceMap {
         Some(self.range(node.start, node.end))
     }
 
-    /// The member name `path` ends in; `None` for the document itself and
-    /// for array items.
+    /// The member name `path` ends in, where it is written in its object:
+    /// the name, or, for a name an alias brings in — an alias key
+    /// (`*k : v`), a member merged with `<<: *a`, a member of a replayed
+    /// `*o` — that `*name`, where the object can be edited, rather than
+    /// the anchor. `None` for the document itself and for array items.
     pub fn locate_key(&self, path: &str) -> Option<SourceRange> {
         let (_, key) = self.resolve(path)?;
         let key = key?;
         Some(self.range(key.start, key.end))
-    }
-
-    /// Where the member name `path` ends in is written in its object: the
-    /// name, or, for an alias key, a member merged in with `<<` or one of
-    /// a replayed alias, the `*name` that brings it there rather than the
-    /// anchor [`SourceMap::locate_key`] gives.
-    #[cfg(feature = "editor")]
-    pub(crate) fn locate_written_key(&self, path: &str) -> Option<SourceRange> {
-        let (_, key) = self.resolve(path)?;
-        let key = key?;
-        Some(self.range(key.written, key.written_end))
     }
 
     /// `offset` bytes into the decoded string at `path`, in the original
@@ -430,8 +417,8 @@ impl SourceMap {
                             // A merge's members come after the map's own,
                             // whatever the text order: take the later.
                             match seen {
-                                Some(first) => return Some(key.written.max(first)),
-                                None => seen = Some(key.written),
+                                Some(first) => return Some(key.start.max(first)),
+                                None => seen = Some(key.start),
                             }
                         }
                     }
@@ -589,8 +576,6 @@ mod tests {
             name: name.into(),
             start,
             end: start + name.len(),
-            written: start,
-            written_end: start + name.len(),
         }
     }
 

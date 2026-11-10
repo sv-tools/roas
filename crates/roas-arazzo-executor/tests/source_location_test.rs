@@ -199,6 +199,28 @@ fn a_finding_about_a_members_name_is_placed_at_the_name() {
 }
 
 #[test]
+fn an_unknown_member_a_merge_brings_in_is_located_at_the_merge() {
+    let text = format!(
+        "x-e: &e {{timeoutMs: 5}}\n{}",
+        TEXT.replace(
+            "        operationId: check\n",
+            "        operationId: check\n        <<: *e\n",
+        )
+    );
+    let value: serde_json::Value = serde_saphyr::from_str(&text).unwrap();
+    let description: Description = serde_json::from_value(value.clone()).unwrap();
+    let unknown = description.unknown_members(&value).unwrap();
+    let options = options()
+        .source_map(SourceMap::parse(text.clone()).unwrap())
+        .unknown_members(unknown);
+    let found = prepare(&description, &options).unwrap_err().diagnostics;
+    let member = find(&found, "#.workflows[0].steps[0].timeoutMs");
+    // At the `*e` in the step, not at the anchor on line 1.
+    let span = member.span.expect("the name is located");
+    assert_eq!((span.start.line, span.start.column), (15, 13));
+}
+
+#[test]
 fn an_unknown_member_is_an_error_located_at_its_name() {
     let text = TEXT.replace(
         "        operationId: check\n",
