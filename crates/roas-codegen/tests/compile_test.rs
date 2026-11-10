@@ -12,7 +12,7 @@
 //! Set `ROAS_CODEGEN_SKIP_COMPILE=1` to skip both where no toolchain or
 //! registry is available.
 
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 
 use roas::validation::{IGNORE_UNUSED, Options};
 use roas_codegen::{ConfigFile, Input, SourceDocument, Target, generate, validate};
@@ -706,6 +706,12 @@ fn validated_description() -> serde_json::Value {
                 "patternProperties": {"^x": {"type": "integer"}},
                 "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
             "IntCatch": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "integer"}},
+            "ZooCat": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string", "const": "ZooCat"}}},
+            "ZooDog": {"type": "object", "required": ["kind"], "properties": {"kind": {"type": "string", "enum": ["ZooDog"]}}},
+            "ZooAnimal": {"oneOf": [{"$ref": "#/components/schemas/ZooCat"}, {"$ref": "#/components/schemas/ZooDog"}],
+                "discriminator": {"propertyName": "kind"}},
+            "Zoo": {"type": "object", "properties": {"title": {"type": "string"}}, "additionalProperties": {"$ref": "#/components/schemas/ZooAnimal"}},
+            "ZooOrStr": {"oneOf": [{"$ref": "#/components/schemas/Zoo"}, {"type": "string"}]},
             "IntCatchOrStr": {"oneOf": [{"$ref": "#/components/schemas/IntCatch"}, {"type": "string"}]},
             "InlineItems": {"type": "array", "items": {"type": "string", "minLength": 2}},
             "PadNode": {"anyOf": [{"$ref": "#/components/schemas/PadA"}, {"$ref": "#/components/schemas/PadB"}]},
@@ -1062,6 +1068,7 @@ fn main() {
     // Rust cannot read an integer inside a flattened catch-all: undecided,
     // not a miss.
     assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![u("")]);
+    assert_eq!(report::<ZooOrStr>(r#"{"a":{"kind":"ZooCat"}}"#), vec![u("")]);
     assert_eq!(report::<InlineItems>("[]"), vec![]);
     assert_eq!(report::<InlineItems>(r#"["a"]"#), vec![u("")]);
     // A string enum branch reads a JSON string only.
@@ -1332,6 +1339,7 @@ func main() {
 	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`), u(""))
 	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
 	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
+	check(`{"a":{"kind":"ZooCat"}}`, report[api.ZooOrStr](`{"a":{"kind":"ZooCat"}}`))
 	check(`[]`, report[api.InlineItems](`[]`))
 	check(`["a"]`, report[api.InlineItems](`["a"]`), u(""))
 	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)

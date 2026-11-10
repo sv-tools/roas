@@ -623,15 +623,17 @@ pub(crate) fn flatten_fragile(ir: &crate::ir::Ir, ty: &TypeRef) -> bool {
                     return false;
                 }
                 match ir.types.get(id).map(|d| &d.kind) {
-                    Some(TypeKind::UnionOpen(_) | TypeKind::ComposedOpen(_)) => true,
+                    // A tagged union reads its tag from the raw value too.
+                    Some(
+                        TypeKind::UnionOpen(_)
+                        | TypeKind::ComposedOpen(_)
+                        | TypeKind::UnionTagged(_),
+                    ) => true,
                     Some(TypeKind::Struct(s)) => {
                         s.fields.iter().any(|f| needs_token(ir, &f.ty, seen))
                             || matches!(&s.additional, crate::ir::Additional::CatchAll(t) if needs_token(ir, t, seen))
                     }
                     Some(TypeKind::Newtype(t) | TypeKind::Alias(t)) => needs_token(ir, t, seen),
-                    Some(TypeKind::UnionTagged(u)) => {
-                        u.variants.iter().any(|v| needs_token(ir, &v.ty, seen))
-                    }
                     _ => false,
                 }
             }
