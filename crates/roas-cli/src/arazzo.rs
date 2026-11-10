@@ -593,8 +593,9 @@ fn check_report(document: &Document) -> CheckReport<'_> {
     }
 }
 
-// Typed rather than a `serde_json::Value`, so the coordinates stay plain
-// integers in YAML when `serde_json/arbitrary_precision` is on.
+// Typed rather than a `serde_json::Value`, so the members keep the order
+// the README documents. It holds no `Value`, as `yaml::typed_to_string`
+// requires.
 #[derive(serde::Serialize)]
 struct CheckReport<'a> {
     arazzo: Option<&'a str>,
