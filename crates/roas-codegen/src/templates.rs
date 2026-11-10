@@ -102,6 +102,11 @@ fn walk(dir: &Path, prefix: &str, out: &mut BTreeMap<String, String>) -> Result<
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let name = entry.file_name();
+        // Hidden entries are editors' and tools' (an Emacs lock is a
+        // dangling `.#name.jinja` link), never templates.
+        if name.as_encoded_bytes().first() == Some(&b'.') {
+            continue;
+        }
         let Some(name) = name.to_str() else {
             return Err(error(format!(
                 "{} is not a UTF-8 name",
@@ -109,9 +114,26 @@ fn walk(dir: &Path, prefix: &str, out: &mut BTreeMap<String, String>) -> Result<
             )));
         };
         let path = format!("{prefix}{name}");
-        let kind = std::fs::metadata(entry.path())
-            .map_err(|e| error(format!("cannot read {}: {e}", entry.path().display())))?;
+        let link = entry
+            .file_type()
+            .map_err(|e| error(format!("cannot read {}: {e}", entry.path().display())))?
+            .is_symlink();
+        let kind = match std::fs::metadata(entry.path()) {
+            Ok(kind) => kind,
+            // A link to nothing holds no template.
+            Err(_) if link => continue,
+            Err(e) => {
+                return Err(error(format!(
+                    "cannot read {}: {e}",
+                    entry.path().display()
+                )));
+            }
+        };
         if kind.is_dir() {
+            // A linked directory is not followed: it could lead back up.
+            if link {
+                continue;
+            }
             if path == "builtin" {
                 return Err(error(format!(
                     "{} is reserved: `builtin/` always names the embedded defaults",

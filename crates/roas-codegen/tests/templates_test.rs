@@ -369,3 +369,25 @@ fn a_go_imports_override_applies_with_no_generated_imports() {
         plain.files[0].contents
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn hidden_entries_and_odd_links_are_not_templates() {
+    let dir = Dir::new(
+        "links",
+        &[
+            MANIFEST,
+            (
+                "rust/module.rs.jinja",
+                "{% extends \"builtin/rust/module.rs.jinja\" %}{% block footer %}// linked\n{% endblock %}",
+            ),
+        ],
+    );
+    let rust = dir.0.join("rust");
+    // An Emacs lock, a link back up, and a linked template that counts.
+    std::os::unix::fs::symlink("user@host.1:2", rust.join(".#struct.rs.jinja")).unwrap();
+    std::os::unix::fs::symlink("..", rust.join("up")).unwrap();
+    std::os::unix::fs::symlink("nowhere", rust.join("gone.jinja")).unwrap();
+    let generation = generate(&document(), &config(Target::Rust, Some(&dir.0))).unwrap();
+    assert!(generation.files[0].contents.ends_with("// linked\n"));
+}
