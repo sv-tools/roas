@@ -171,6 +171,9 @@ fn decimal(literal: &str) -> Option<(bool, String, i64)> {
         return None;
     }
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
     if !whole
         .bytes()
         .chain(fraction.bytes())
@@ -230,7 +233,7 @@ mod tests {
             r#"{"big": 123456789012345678901234567890, "neg": -123456789012345678901234567890}"#,
         );
         assert!(!yaml.contains("serde_json"), "{yaml}");
-        if cfg!(feature = "exact-numbers") {
+        if keeps_literals() {
             assert_eq!(
                 yaml,
                 "big: 123456789012345678901234567890\nneg: -123456789012345678901234567890\n"
@@ -249,7 +252,7 @@ mod tests {
             ),
             "{bounds}"
         );
-        if cfg!(feature = "exact-numbers") {
+        if keeps_literals() {
             assert_eq!(
                 write("[18446744073709551616, -9223372036854775809]"),
                 "- 18446744073709551616\n- -9223372036854775809\n"
@@ -266,9 +269,12 @@ mod tests {
 
     /// A number an `f64` would change is refused rather than rounded; one
     /// it keeps is written, however it was spelled.
-    #[cfg(feature = "exact-numbers")]
     #[test]
     fn yaml_number_an_f64_would_change_is_an_error() {
+        // Without kept literals none of these can be read as written.
+        if !keeps_literals() {
+            return;
+        }
         for literal in [
             "1e400",
             "0.1000000000000000000001",
@@ -297,10 +303,12 @@ mod tests {
 
     /// Without kept literals every number is an `f64` already, written as
     /// before, however the writer spells it.
-    #[cfg(not(feature = "exact-numbers"))]
     #[test]
     fn yaml_numbers_without_kept_literals_are_never_refused() {
-        assert!(!keeps_literals());
+        // Another crate in the build can turn `arbitrary_precision` on.
+        if keeps_literals() {
+            return;
+        }
         assert_eq!(
             write("[1000000000000000.3, 0.1000000000000000000001, 1658206780088562.3]"),
             "- 1000000000000000.2\n- 0.1\n- 1658206780088562.2\n"
@@ -321,6 +329,9 @@ mod tests {
         assert_eq!(decimal("0e99999999999999999999"), decimal("0"));
         assert_eq!(decimal("1e99999999999999999999"), None);
         assert_eq!(decimal("1e+"), None);
+        for empty in ["", ".", "-", "e5", "-."] {
+            assert_eq!(decimal(empty), None, "{empty}");
+        }
     }
 
     /// Each scalar whose meaning depends on the YAML options, next to what
