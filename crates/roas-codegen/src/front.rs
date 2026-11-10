@@ -694,7 +694,8 @@ impl Translator<'_> {
             }
         };
         let mut front = match members.as_slice() {
-            [] => self.leaf(pointer.clone(), Kind::Null),
+            [] if null_admitted => null_only(),
+            [] => self.leaf(pointer.clone(), Kind::Never),
             [one] => match read(one, false) {
                 Member::Read(member) => *member,
                 Member::Nothing if null_admitted => null_only(),

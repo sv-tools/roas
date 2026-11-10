@@ -660,6 +660,12 @@ fn validated_description() -> serde_json::Value {
             "ShortOff": {"type": "string", "maxLength": 1},
             "LongOn": {"type": "string", "minLength": 2},
             "OffOrOn": {"oneOf": [{"$ref": "#/components/schemas/ShortOff"}, {"$ref": "#/components/schemas/LongOn"}]},
+            "Currency": {"type": "string", "enum": ["USD", "EUR"]},
+            "HoldsCurrency": {"type": "object", "properties": {"c": {"$ref": "#/components/schemas/Currency"}}},
+            "NullType": {"type": ["null"], "if": {}, "then": false},
+            "WrapShort": {"type": "object", "required": ["s"], "properties": {"s": {"$ref": "#/components/schemas/ShortOff"}}},
+            "WrapLong": {"type": "object", "required": ["s"], "properties": {"s": {"$ref": "#/components/schemas/LongOn"}}},
+            "PickWrap": {"oneOf": [{"$ref": "#/components/schemas/WrapShort"}, {"$ref": "#/components/schemas/WrapLong"}]},
             "F32Edge": {"type": "number", "format": "float", "exclusiveMaximum": 3.4028235677973366e38},
             "AliasSub": {"$ref": "#/components/schemas/Base2"},
             "HoldsAliasSub": {"type": "object", "properties": {"v": {"$ref": "#/components/schemas/AliasSub"}}},
@@ -701,7 +707,8 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
-            "AliasSub": {"rust": {"name": "String"}, "go": {"name": "string"}}
+            "AliasSub": {"rust": {"name": "String"}, "go": {"name": "string"}},
+            "Currency": {"rust": {"name": "String"}, "go": {"name": "string"}}
         }
     }))
     .unwrap();
@@ -936,6 +943,12 @@ fn main() {
     // A literal at a bound past the float32 range decodes to the largest float32.
     assert_eq!(report::<F32Edge>("3.4028235677973366e38"), vec![u("")]);
     assert_eq!(report::<F32Edge>("1.5"), vec![]);
+    // A substituted enum is not checked against its members.
+    assert_eq!(report::<HoldsCurrency>(r#"{"c":"BAD"}"#), vec![u("/c")]);
+    // A list of only null keeps what else it says.
+    assert_eq!(report::<NullType>("null"), vec![u("")]);
+    // An opted-out type nested in a branch proves no match.
+    assert_eq!(report::<PickWrap>(r#"{"s":"ab"}"#), vec![u("")]);
     // A substituted reference keeps what its target declares.
     assert_eq!(report::<HoldsAliasSub>(r#"{"v":"long"}"#), vec![u("/v")]);
     // An alias spelled as a newtype has its target's null.
@@ -1172,6 +1185,9 @@ func main() {
 	check(`"abc"`, report[api.OffOrOn](`"abc"`), u(""))
 	check(`3.4028235677973366e38`, report[api.F32Edge](`3.4028235677973366e38`), u(""))
 	check(`1.5`, report[api.F32Edge](`1.5`))
+	check(`{"c":"BAD"}`, report[api.HoldsCurrency](`{"c":"BAD"}`), u("/c"))
+	check(`null`, report[api.NullType](`null`), u(""))
+	check(`{"s":"ab"}`, report[api.PickWrap](`{"s":"ab"}`), u(""))
 	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))
 	check(`{"v":null}`, report[api.HoldsNIfAlias](`{"v":null}`), u("/v"))
 	fmt.Println("validation behaves")

@@ -534,7 +534,7 @@ pub(crate) fn unenforced(c: &Constraints) -> Vec<Check> {
         .map(|&keyword| Check::Unevaluated {
             keyword,
             reason: match keyword {
-                "enum" => "numeric enums are not checked yet".into(),
+                "enum" => "this enum is not checked yet".into(),
                 "required" => {
                     "a required member with no property of its own is not checked yet".into()
                 }

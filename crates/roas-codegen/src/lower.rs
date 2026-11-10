@@ -72,10 +72,99 @@ pub(crate) fn lower(front: &Front, config: &Config) -> Ir {
     }
     lowerer.mark_cycles();
     lowerer.suppress();
+    lowerer.mark_opted_out_branches();
     lowerer.ir
 }
 
 impl<'a> Lowerer<'a> {
+    /// A branch that holds an opted-out type anywhere inside proves no
+    /// match: that type checks nothing, so decoding it says too little.
+    fn mark_opted_out_branches(&mut self) {
+        let opted: BTreeSet<SchemaId> = self
+            .ir
+            .types
+            .values()
+            .filter(|def| {
+                def.component.as_ref().is_some_and(|name| {
+                    self.config.types.get(name).and_then(|t| t.validation) == Some(false)
+                })
+            })
+            .map(|def| def.id.clone())
+            .collect();
+        if opted.is_empty() {
+            return;
+        }
+        fn reaches(
+            ir: &Ir,
+            opted: &BTreeSet<SchemaId>,
+            ty: &TypeRef,
+            seen: &mut BTreeSet<SchemaId>,
+        ) -> bool {
+            match ty {
+                TypeRef::Boxed(inner)
+                | TypeRef::Nullable(inner)
+                | TypeRef::Array(inner)
+                | TypeRef::Map(inner) => reaches(ir, opted, inner, seen),
+                TypeRef::Named(id) => {
+                    if opted.contains(id) {
+                        return true;
+                    }
+                    if !seen.insert(id.clone()) {
+                        return false;
+                    }
+                    let Some(def) = ir.types.get(id) else {
+                        return false;
+                    };
+                    let mut inner: Vec<&TypeRef> = Vec::new();
+                    match &def.kind {
+                        TypeKind::Struct(s) => {
+                            inner.extend(s.fields.iter().map(|f| &f.ty));
+                            if let Additional::CatchAll(ty) = &s.additional {
+                                inner.push(ty);
+                            }
+                        }
+                        TypeKind::Newtype(ty) | TypeKind::Alias(ty) => inner.push(ty),
+                        TypeKind::UnionTagged(u) => inner.extend(u.variants.iter().map(|v| &v.ty)),
+                        TypeKind::UnionOpen(OpenUnion { branches, .. })
+                        | TypeKind::ComposedOpen(branches) => {
+                            inner.extend(branches.iter().map(|b| &b.ty))
+                        }
+                        TypeKind::StringEnum(_) | TypeKind::Extern => {}
+                    }
+                    inner.into_iter().any(|ty| reaches(ir, opted, ty, seen))
+                }
+                _ => false,
+            }
+        }
+        let marks: Vec<(SchemaId, usize)> = self
+            .ir
+            .types
+            .values()
+            .flat_map(|def| {
+                let branches: &[Branch] = match &def.kind {
+                    TypeKind::UnionOpen(OpenUnion { branches, .. })
+                    | TypeKind::ComposedOpen(branches) => branches,
+                    _ => &[],
+                };
+                branches
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| reaches(&self.ir, &opted, &b.ty, &mut BTreeSet::new()))
+                    .map(|(i, _)| (def.id.clone(), i))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (id, i) in marks {
+            if let Some(def) = self.ir.types.get_mut(&id) {
+                match &mut def.kind {
+                    TypeKind::UnionOpen(OpenUnion { branches, .. })
+                    | TypeKind::ComposedOpen(branches) => branches[i].unchecked = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn diagnose(
         &mut self,
         severity: Severity,
@@ -153,7 +242,7 @@ impl<'a> Lowerer<'a> {
                 Slot::Inline(schema) => (
                     schema.title.clone(),
                     schema.description.clone(),
-                    schema.constraints.clone(),
+                    substituted_constraints(schema),
                 ),
                 Slot::Ref { description, .. } => {
                     (None, description.clone(), self.referenced_constraints(slot))
@@ -402,7 +491,7 @@ impl<'a> Lowerer<'a> {
         loop {
             match current {
                 Slot::Inline(schema) => {
-                    let mut c = schema.constraints.clone();
+                    let mut c = substituted_constraints(schema);
                     for keyword in extra {
                         if !c.unsupported.contains(&keyword) {
                             c.unsupported.push(keyword);
@@ -1420,6 +1509,23 @@ fn branch_constraints(
     } else {
         constraints.clone()
     }
+}
+
+/// What a substituted schema declares, its string `enum` (or `const`
+/// pin) included: the kind that carried it is replaced by the user's type.
+fn substituted_constraints(schema: &FrontSchema) -> crate::front::Constraints {
+    let mut c = schema.constraints.clone();
+    if matches!(
+        &schema.kind,
+        Kind::String {
+            enum_values: Some(_),
+            ..
+        }
+    ) && !c.unenforced.contains(&"enum")
+    {
+        c.unenforced.push("enum");
+    }
+    c
 }
 
 /// Whether `$ref` siblings are known to allow null: they say so, or say
