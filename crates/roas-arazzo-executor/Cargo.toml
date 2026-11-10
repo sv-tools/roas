@@ -28,6 +28,9 @@ v1_0 = ["roas-arazzo/v1_0"]
 reqwest = ["dep:reqwest", "dep:tokio"]
 # Complete source registries and graph loading through caller-configured roas loaders.
 source-graph = ["dep:roas", "dep:roas-asyncapi", "roas-arazzo/v1_0"]
+# XPath 1.0-3.1 criteria and selectors over XML bodies, evaluated with
+# oxixml-xpath. Without this they are refused as unsupported.
+xpath = ["dep:oxixml-infoset", "dep:oxixml-xpath"]
 
 [dependencies]
 enumset.workspace = true
@@ -38,6 +41,8 @@ roas-arazzo = { version = "0.3.1", path = "../roas-arazzo", features = ["v1_1"] 
 regex.workspace = true
 reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["time"] }
+oxixml-infoset = { workspace = true, optional = true }
+oxixml-xpath = { workspace = true, optional = true }
 serde_json.workspace = true
 serde_json_path.workspace = true
 thiserror.workspace = true

@@ -757,7 +757,7 @@ impl<'d> Compiler<'d> {
                     let language = replacement
                         .target_selector_type
                         .as_ref()
-                        .map(select::kind_of)
+                        .map(select::target_kind_of)
                         .unwrap_or(Ok(Language::Pointer));
                     match language {
                         Ok(language) => {
@@ -1093,17 +1093,19 @@ impl<'d> Compiler<'d> {
             if let Some(context) = &criterion.context {
                 self.expression(context, &site.field("context"), 0);
             }
-            if let Some(CriterionType::Expression(expression)) = &criterion.type_
-                && !select::jsonpath_version_supported(expression)
-            {
-                self.error(
-                    &site.field("type.version"),
-                    ExecutionError::Unsupported(format!(
-                        "JSONPath version `{}` is not supported; the executor implements rfc9535",
-                        expression.version
-                    )),
-                );
-            }
+            #[cfg_attr(not(feature = "xpath"), allow(unused_variables))]
+            let refused = match &criterion.type_ {
+                Some(CriterionType::Expression(expression))
+                    if select::unsupported_version(expression).is_some() =>
+                {
+                    self.error(
+                        &site.field("type.version"),
+                        ExecutionError::Unsupported(select::version_message(expression)),
+                    );
+                    true
+                }
+                _ => false,
+            };
             let condition_site = site.field("condition");
             match criterion.type_.as_ref() {
                 None | Some(CriterionType::Simple(CriterionKind::Simple)) => {
@@ -1157,11 +1159,29 @@ impl<'d> Compiler<'d> {
                         }) if !dynamic => {
                             self.selector(Language::Pointer, &criterion.condition, &condition_site)
                         }
+                        #[cfg(not(feature = "xpath"))]
                         CriterionType::Simple(CriterionKind::Xpath)
                         | CriterionType::Expression(roas_arazzo::v1_1::ExpressionType {
                             type_: ExpressionKind::Xpath,
                             ..
                         }) => self.error(&site.field("type"), CriterionError::Unsupported("XPath")),
+                        // A refused version is reported above.
+                        #[cfg(feature = "xpath")]
+                        CriterionType::Simple(CriterionKind::Xpath)
+                        | CriterionType::Expression(roas_arazzo::v1_1::ExpressionType {
+                            type_: ExpressionKind::Xpath,
+                            ..
+                        }) if !dynamic && !refused => {
+                            let version = match &criterion.type_ {
+                                Some(CriterionType::Expression(expression)) => {
+                                    Some(expression.version.as_str())
+                                }
+                                _ => None,
+                            };
+                            if let Ok(language) = select::xpath(version) {
+                                self.selector(language, &criterion.condition, &condition_site);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1347,6 +1367,12 @@ impl<'d> Compiler<'d> {
                     || pointer.ends_with('~');
                 if (!pointer.is_empty() && !pointer.starts_with('/')) || bad_escape {
                     self.error(site, SelectError::Malformed { selector: text.into(), kind: "JSON Pointer", message: "expected an empty pointer or slash-delimited tokens with only ~0/~1 escapes".into() });
+                }
+            }
+            #[cfg(feature = "xpath")]
+            Language::Xpath(version) => {
+                if let Err(error) = crate::xpath::compile(text, version) {
+                    self.error(site, error);
                 }
             }
         }

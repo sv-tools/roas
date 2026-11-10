@@ -5,8 +5,9 @@
 //! expression that picks from it. Both end up here, as does the
 //! `target` of a payload replacement.
 //!
-//! JSON Pointer and JSONPath are supported; XPath is not, and says so
-//! rather than quietly selecting nothing.
+//! JSON Pointer and JSONPath are supported, and XPath with the `xpath`
+//! feature; without it XPath says so rather than quietly selecting
+//! nothing.
 
 use crate::expression::{self, ExpressionError, Scope};
 use roas_arazzo::v1_1::{ExpressionKind, Selector, SelectorKind, SelectorType, ValueOrSelector};
@@ -37,6 +38,7 @@ use serde_json_path::JsonPath;
 ///         SelectError::Expression(_)
 ///         | SelectError::Malformed { .. }
 ///         | SelectError::Empty { .. }
+///         | SelectError::Evaluation { .. }
 ///         | SelectError::Unsupported(_) => {}
 ///     }
 /// }
@@ -65,9 +67,21 @@ pub enum SelectError {
         /// The runtime expression naming what it applied to.
         context: String,
     },
-    /// A language or version this crate does not evaluate — XPath, or
-    /// JSONPath other than RFC 9535: no engine here, and pretending
-    /// otherwise would be worse.
+    /// The expression is valid but could not be evaluated against its
+    /// data — an XPath context that is not XML, or an XPath dynamic error.
+    #[error("`{selector}` could not be evaluated as {kind}: {message}")]
+    Evaluation {
+        /// The expression as written.
+        selector: String,
+        /// The language it was read as.
+        kind: &'static str,
+        /// What went wrong.
+        message: String,
+    },
+    /// A language or version this crate does not evaluate — XPath
+    /// without the `xpath` feature, an XPath version Arazzo does not name
+    /// or a function the executor refuses, or JSONPath other than
+    /// RFC 9535: no engine here, and pretending otherwise would be worse.
     #[error("{0} expressions are not supported by this executor")]
     Unsupported(&'static str),
 }
@@ -129,31 +143,97 @@ pub(crate) fn select(selector: &Selector, scope: &Scope<'_>) -> Result<Value, Se
 pub(crate) enum Language {
     Pointer,
     Path,
+    /// XPath, as the version it is evaluated as.
+    #[cfg(feature = "xpath")]
+    Xpath(oxixml_xpath::XPathVersion),
 }
 
 /// Read a `SelectorType` as a language this crate can apply.
 pub(crate) fn kind_of(type_: &SelectorType) -> Result<Language, SelectError> {
     if let SelectorType::Expression(expression) = type_
-        && !jsonpath_version_supported(expression)
+        && let Some(unsupported) = unsupported_version(expression)
     {
-        return Err(SelectError::Unsupported("non-RFC9535 JSONPath"));
+        return Err(SelectError::Unsupported(unsupported));
     }
     match type_ {
         SelectorType::Simple(SelectorKind::Jsonpointer) => Ok(Language::Pointer),
         SelectorType::Simple(SelectorKind::Jsonpath) => Ok(Language::Path),
-        SelectorType::Simple(SelectorKind::Xpath) => Err(SelectError::Unsupported("XPath")),
+        SelectorType::Simple(SelectorKind::Xpath) => xpath(None),
         SelectorType::Expression(expression) => match expression.type_ {
             ExpressionKind::Jsonpointer => Ok(Language::Pointer),
             ExpressionKind::Jsonpath => Ok(Language::Path),
-            ExpressionKind::Xpath => Err(SelectError::Unsupported("XPath")),
+            ExpressionKind::Xpath => xpath(Some(&expression.version)),
         },
     }
 }
 
-/// Whether the engine evaluates what an expression type names: any
-/// language but JSONPath, and JSONPath only as RFC 9535.
-pub(crate) fn jsonpath_version_supported(expression: &roas_arazzo::v1_1::ExpressionType) -> bool {
-    expression.type_ != ExpressionKind::Jsonpath || expression.version == "rfc9535"
+/// Read a payload replacement's `targetSelectorType`. Writing into an
+/// XML payload is not something the engine does, so XPath is refused
+/// here even when it can be evaluated.
+pub(crate) fn target_kind_of(type_: &SelectorType) -> Result<Language, SelectError> {
+    match kind_of(type_)? {
+        #[cfg(feature = "xpath")]
+        Language::Xpath(_) => Err(SelectError::Unsupported("XPath payload replacement target")),
+        language => Ok(language),
+    }
+}
+
+/// XPath as the version an expression type names; plain `xpath` is
+/// XPath 3.1, as the specification has it.
+#[cfg_attr(not(feature = "xpath"), allow(unused_variables))]
+pub(crate) fn xpath(version: Option<&str>) -> Result<Language, SelectError> {
+    #[cfg(feature = "xpath")]
+    return xpath_version(version)
+        .map(Language::Xpath)
+        .ok_or(SelectError::Unsupported(UNKNOWN_XPATH));
+    #[cfg(not(feature = "xpath"))]
+    Err(SelectError::Unsupported("XPath"))
+}
+
+/// The XPath version an Arazzo version string names, if any.
+#[cfg(feature = "xpath")]
+pub(crate) fn xpath_version(version: Option<&str>) -> Option<oxixml_xpath::XPathVersion> {
+    use oxixml_xpath::XPathVersion;
+    match version {
+        Some("xpath-10") => Some(XPathVersion::XPath10),
+        Some("xpath-20") => Some(XPathVersion::XPath20),
+        Some("xpath-30") => Some(XPathVersion::XPath30),
+        None | Some("xpath-31") => Some(XPathVersion::XPath31),
+        Some(_) => None,
+    }
+}
+
+#[cfg(feature = "xpath")]
+const UNKNOWN_XPATH: &str = "unknown XPath version";
+
+/// What an expression type names that the engine does not evaluate, if
+/// anything: JSONPath other than RFC 9535, and — when XPath is evaluated
+/// at all — an XPath version other than `xpath-10` to `xpath-31`.
+pub(crate) fn unsupported_version(
+    expression: &roas_arazzo::v1_1::ExpressionType,
+) -> Option<&'static str> {
+    match expression.type_ {
+        ExpressionKind::Jsonpath if expression.version != "rfc9535" => Some("non-RFC9535 JSONPath"),
+        #[cfg(feature = "xpath")]
+        ExpressionKind::Xpath if xpath_version(Some(&expression.version)).is_none() => {
+            Some(UNKNOWN_XPATH)
+        }
+        _ => None,
+    }
+}
+
+/// What preparation says about a version [`unsupported_version`] refuses.
+pub(crate) fn version_message(expression: &roas_arazzo::v1_1::ExpressionType) -> String {
+    match expression.type_ {
+        ExpressionKind::Xpath => format!(
+            "XPath version `{}` is not supported; the executor implements xpath-10, xpath-20, xpath-30 and xpath-31",
+            expression.version
+        ),
+        _ => format!(
+            "JSONPath version `{}` is not supported; the executor implements rfc9535",
+            expression.version
+        ),
+    }
 }
 
 /// Apply `selector` to `data`. `None` when it picked nothing.
@@ -190,6 +270,8 @@ pub(crate) fn apply(
                 )),
             })
         }
+        #[cfg(feature = "xpath")]
+        Language::Xpath(version) => crate::xpath::select(selector, version, data),
     }
 }
 
@@ -232,6 +314,9 @@ pub(crate) fn place(
                 .map(|location| location.to_json_pointer())
                 .ok_or_else(|| format!("`{target}` matches nothing in the payload"))?
         }
+        // Refused by `target_kind_of` before it gets here.
+        #[cfg(feature = "xpath")]
+        Language::Xpath(_) => return Err(format!("`{target}` is an XPath target")),
     };
     if let Some(slot) = data.pointer_mut(&pointer) {
         *slot = value;
@@ -393,6 +478,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "xpath"))]
     #[test]
     fn xpath_says_it_is_not_supported() {
         assert_eq!(
@@ -436,9 +522,90 @@ mod tests {
             kind_of(&typed(ExpressionKind::Jsonpath)),
             Ok(Language::Path)
         );
+        #[cfg(not(feature = "xpath"))]
         assert_eq!(
             kind_of(&typed(ExpressionKind::Xpath)),
             Err(SelectError::Unsupported("XPath"))
+        );
+    }
+
+    #[cfg(feature = "xpath")]
+    #[test]
+    fn xpath_selects_from_xml_text_as_the_version_it_names() {
+        use oxixml_xpath::XPathVersion;
+        use roas_arazzo::v1_1::ExpressionType;
+        let typed = |version: &str| {
+            SelectorType::Expression(ExpressionType {
+                type_: ExpressionKind::Xpath,
+                version: version.to_owned(),
+                extensions: None,
+            })
+        };
+        assert_eq!(
+            kind_of(&SelectorType::Simple(SelectorKind::Xpath)),
+            Ok(Language::Xpath(XPathVersion::XPath31))
+        );
+        for (version, evaluated) in [
+            ("xpath-10", XPathVersion::XPath10),
+            ("xpath-20", XPathVersion::XPath20),
+            ("xpath-30", XPathVersion::XPath30),
+            ("xpath-31", XPathVersion::XPath31),
+        ] {
+            assert_eq!(kind_of(&typed(version)), Ok(Language::Xpath(evaluated)));
+        }
+        assert_eq!(
+            kind_of(&typed("xpath-40")),
+            Err(SelectError::Unsupported("unknown XPath version"))
+        );
+        // A payload is never written to through XPath.
+        assert_eq!(
+            target_kind_of(&SelectorType::Simple(SelectorKind::Xpath)),
+            Err(SelectError::Unsupported("XPath payload replacement target"))
+        );
+        assert_eq!(
+            target_kind_of(&SelectorType::Simple(SelectorKind::Jsonpath)),
+            Ok(Language::Path)
+        );
+        let mut payload = json!({});
+        assert!(
+            place(
+                Language::Xpath(XPathVersion::XPath31),
+                "/x",
+                &mut payload,
+                json!(1),
+                None
+            )
+            .is_err()
+        );
+        assert_eq!(
+            apply(
+                Language::Xpath(XPathVersion::XPath10),
+                "/a/b",
+                &json!("<a><b>1</b></a>"),
+                None
+            ),
+            Ok(Some(json!("1")))
+        );
+        let fixture = Fixture {
+            inputs: json!("<a><b>1</b><b>2</b></a>"),
+            ..Fixture::default()
+        };
+        assert_eq!(
+            select(
+                &selector("$inputs", "/a/b", SelectorKind::Xpath),
+                &fixture.scope()
+            ),
+            Ok(json!(["1", "2"]))
+        );
+        assert_eq!(
+            select(
+                &selector("$inputs", "/a/c", SelectorKind::Xpath),
+                &fixture.scope()
+            ),
+            Err(SelectError::Empty {
+                selector: "/a/c".into(),
+                context: "$inputs".into()
+            })
         );
     }
 

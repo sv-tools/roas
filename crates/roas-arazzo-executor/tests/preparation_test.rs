@@ -320,13 +320,25 @@ fn checked_capabilities_and_reference_errors_are_located_on_skipped_branches() {
             json!({ "condition": "$components.parameters.typo" }),
             "component",
         ),
+        #[cfg(not(feature = "xpath"))]
         (
             json!({ "type": "xpath", "context": "$response.body", "condition": "true()" }),
             "XPath",
         ),
+        #[cfg(not(feature = "xpath"))]
         (
             json!({ "type": { "type": "xpath", "version": "xpath-31" }, "context": "$response.body", "condition": "true()" }),
             "XPath",
+        ),
+        #[cfg(feature = "xpath")]
+        (
+            json!({ "type": "xpath", "context": "$response.body", "condition": "/x/[" }),
+            "XPath expression",
+        ),
+        #[cfg(feature = "xpath")]
+        (
+            json!({ "type": { "type": "xpath", "version": "xpath-40" }, "context": "$response.body", "condition": "true()" }),
+            "XPath version `xpath-40`",
         ),
         (
             json!({ "type": { "type": "jsonpath", "version": "rfc9535" }, "context": "$response.body", "condition": "$[" }),
@@ -598,7 +610,14 @@ fn root_and_nested_dependencies_share_fresh_inputs() {
 #[test]
 fn selector_and_replacement_capabilities_and_syntax_are_checked() {
     for selector in [
+        #[cfg(not(feature = "xpath"))]
         json!({ "type": "xpath", "context": "$response.body", "selector": "/x" }),
+        #[cfg(feature = "xpath")]
+        json!({ "type": "xpath", "context": "$response.body", "selector": "/x/[" }),
+        #[cfg(feature = "xpath")]
+        json!({ "type": { "type": "xpath", "version": "xpath-40" }, "context": "$response.body", "selector": "/x" }),
+        #[cfg(feature = "xpath")]
+        json!({ "type": { "type": "xpath", "version": "xpath-10" }, "context": "$response.body", "selector": "1 to 3" }),
         json!({ "type": "jsonpath", "context": "$response.body", "selector": "$[" }),
         json!({ "type": "jsonpointer", "context": "$response.body", "selector": "invalid" }),
         json!({ "type": { "type": "jsonpath", "version": "draft-goessner-dispatch-jsonpath-00" }, "context": "$response.body", "selector": "$.x" }),
