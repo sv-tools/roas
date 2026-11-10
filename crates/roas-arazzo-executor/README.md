@@ -356,7 +356,7 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>` | Syntax and references checked, with byte offsets | Evaluated, except `$message` (AsyncAPI) |
 | `simple` conditions | Strings | — | Parsed under the [condition profile](#condition-profile) | Evaluated, short-circuiting |
 | `regex` criteria | Typed criterion types | — | Constant patterns compiled | Evaluated |
-| JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run does not check the version |
+| JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run refuses any other version when it reaches it |
 | JSON Pointer selectors and criteria (v1.1) | Typed | — | Constant pointers' syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | Preparation error | Not run |
 | Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
@@ -515,7 +515,8 @@ Input-schema compilation is optional; see the input-validation policy below.
 Preparation does not add XPath or AsyncAPI execution.
 Source identity loading is opt-in and occurs before preparation;
 referenced OpenAPI resolution uses the already-supplied document graph.
-Checked JSONPath execution supports `rfc9535`, not the alternate Goessner draft.
+JSONPath execution supports `rfc9535`, not the alternate Goessner draft: preparation
+refuses another version up front, and a lazy run refuses it when it reaches it.
 Entry-workflow dependencies are supported; calls/recovery transfers to workflows
 with their own `dependsOn` are rejected because the engine does not yet schedule
 those nested dependencies. Preparation rejects them before any request; a lazy

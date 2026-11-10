@@ -115,6 +115,10 @@ pub(crate) fn passes(criterion: &Criterion, scope: &Scope<'_>) -> Result<bool, C
         Some(CriterionType::Simple(CriterionKind::Xpath)) => {
             Err(CriterionError::Unsupported("XPath"))
         }
+        // Evaluated as RFC 9535, so no other version is pretended to be.
+        Some(CriterionType::Expression(expression)) if !crate::select::is_rfc9535(expression) => {
+            Err(CriterionError::Unsupported("non-RFC9535 JSONPath"))
+        }
         Some(CriterionType::Expression(expression)) => match expression.type_ {
             ExpressionKind::Jsonpath => {
                 selects(Language::Path, &written()?, &context("jsonpath")?, scope)
@@ -1002,7 +1006,7 @@ mod tests {
                     Some("$response.body"),
                     Some(CriterionType::Expression(ExpressionType {
                         type_: kind,
-                        version: String::new(),
+                        version: "rfc9535".to_owned(),
                         extensions: None,
                     })),
                 ),
@@ -1015,6 +1019,22 @@ mod tests {
         assert_eq!(
             typed(ExpressionKind::Xpath, "/id"),
             Err(CriterionError::Unsupported("XPath"))
+        );
+        // Any other JSONPath version is refused, prepared or not.
+        assert_eq!(
+            passes(
+                &criterion(
+                    "$.id",
+                    Some("$response.body"),
+                    Some(CriterionType::Expression(ExpressionType {
+                        type_: ExpressionKind::Jsonpath,
+                        version: "draft-goessner-dispatch-jsonpath-00".to_owned(),
+                        extensions: None,
+                    })),
+                ),
+                &fixture.scope(),
+            ),
+            Err(CriterionError::Unsupported("non-RFC9535 JSONPath"))
         );
     }
 
