@@ -758,6 +758,13 @@ impl<'a> Lowerer<'a> {
                 } else if properties.is_empty() && required.is_empty() && !*typeless {
                     match additional {
                         FrontAdditional::Any => TypeRef::Map(Box::new(TypeRef::Any)),
+                        // Pattern members are not the other members the
+                        // value schema speaks of.
+                        FrontAdditional::Schema(_)
+                            if !schema.constraints.pattern_properties.is_empty() =>
+                        {
+                            TypeRef::Map(Box::new(TypeRef::Any))
+                        }
                         FrontAdditional::Schema(slot) => {
                             let mut value_hint = hint.to_vec();
                             value_hint.push("value".to_owned());
@@ -963,7 +970,11 @@ impl<'a> Lowerer<'a> {
         let additional = match additional {
             // Members the patterns allow are not unknown: refusing them
             // would refuse valid values. They land in the catch-all.
-            FrontAdditional::Denied if !schema.constraints.pattern_properties.is_empty() => {
+            // Nor are they the other members `additionalProperties` speaks
+            // of: typed by it, they would be refused or misjudged.
+            FrontAdditional::Denied | FrontAdditional::Schema(_)
+                if !schema.constraints.pattern_properties.is_empty() =>
+            {
                 Additional::CatchAll(TypeRef::Any)
             }
             FrontAdditional::Denied => Additional::Denied,

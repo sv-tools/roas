@@ -698,6 +698,15 @@ fn validated_description() -> serde_json::Value {
                 {"type": "object", "patternProperties": {"^x": {"type": "integer"}}, "additionalProperties": false},
                 {"type": "string"}
             ]},
+            "Long3": {"type": "string", "minLength": 3},
+            "PatAdd": {"type": "object", "properties": {"k": {"type": "string"}},
+                "patternProperties": {"^x": {"type": "string"}},
+                "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
+            "PatMapAdd": {"type": "object",
+                "patternProperties": {"^x": {"type": "integer"}},
+                "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
+            "IntCatch": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "integer"}},
+            "IntCatchOrStr": {"oneOf": [{"$ref": "#/components/schemas/IntCatch"}, {"type": "string"}]},
             "InlineItems": {"type": "array", "items": {"type": "string", "minLength": 2}},
             "PadNode": {"anyOf": [{"$ref": "#/components/schemas/PadA"}, {"$ref": "#/components/schemas/PadB"}]},
             "PadA": {"type": "object", "properties": {"next": {"$ref": "#/components/schemas/PadNode"}, "pad": {"type": "string"}}},
@@ -1047,6 +1056,12 @@ fn main() {
     let _ = report::<PadNode>(&padded);
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
     // No items, nothing unchecked about them.
+    // Pattern members are not judged by `additionalProperties`.
+    assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![u("")]);
+    assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![u("")]);
+    // Rust cannot read an integer inside a flattened catch-all: undecided,
+    // not a miss.
+    assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![u("")]);
     assert_eq!(report::<InlineItems>("[]"), vec![]);
     assert_eq!(report::<InlineItems>(r#"["a"]"#), vec![u("")]);
     // A string enum branch reads a JSON string only.
@@ -1314,6 +1329,9 @@ func main() {
 	}
 	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
 	check(`[{"a":null}]`, report[api.EnumItems](`[{"a":null}]`))
+	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`), u(""))
+	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
+	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
 	check(`[]`, report[api.InlineItems](`[]`))
 	check(`["a"]`, report[api.InlineItems](`["a"]`), u(""))
 	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)
