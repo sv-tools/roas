@@ -30,11 +30,11 @@ pub enum SourceVersion {
     OpenApi3_1,
     /// OpenAPI 3.2.
     OpenApi3_2,
-    /// AsyncAPI 2.6; loading only, not broker execution.
+    /// AsyncAPI 2.6; steps run through a message client.
     AsyncApi2_6,
-    /// AsyncAPI 3.0; loading only, not broker execution.
+    /// AsyncAPI 3.0; steps run through a message client.
     AsyncApi3_0,
-    /// AsyncAPI 3.1; loading only, not broker execution.
+    /// AsyncAPI 3.1; steps run through a message client.
     AsyncApi3_1,
 }
 

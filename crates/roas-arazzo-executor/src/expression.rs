@@ -28,6 +28,16 @@ pub(crate) struct Exchange {
     pub body: Option<Value>,
     pub response: Option<HttpResponse>,
     pub response_body: Option<Value>,
+    /// For an AsyncAPI step, the message it sent or received; `None` for
+    /// a receive that timed out, and for an HTTP step.
+    pub message: Option<Message>,
+}
+
+/// A message, as `$message` reads it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Message {
+    pub headers: Vec<(String, String)>,
+    pub payload: Option<Value>,
 }
 
 /// What a workflow that has finished was given and produced.
@@ -153,7 +163,7 @@ pub enum ExpressionError {
         what: String,
     },
     /// The expression belongs to a part of Arazzo this crate does not
-    /// execute.
+    /// execute. No longer raised: `$message` is read on AsyncAPI steps.
     #[error("`{0}` belongs to an AsyncAPI step, which this crate does not execute")]
     Unsupported(String),
 }
@@ -311,7 +321,14 @@ pub(crate) fn evaluate_parsed(
                 within(exchange, rest, expression)?
             }
         }
-        Root::Message => return Err(ExpressionError::Unsupported(expression.to_owned())),
+        Root::Message => {
+            let exchange = scope
+                .here
+                .ok_or_else(|| missing(expression, "the current step, which has no message yet"))?;
+            let mut whole = vec!["message"];
+            whole.extend_from_slice(rest);
+            within(exchange, &whole, expression)?
+        }
         // The rest read the step being evaluated. A name that is none of
         // them is not an expression at all, which is worth saying before
         // asking whether the step has sent anything.
@@ -381,7 +398,23 @@ fn within(exchange: &Exchange, parts: &[&str], expression: &str) -> Result<Value
                 other => Err(ExpressionError::Unknown(format!("$response.{other}"))),
             }
         }
-        "message" => Err(ExpressionError::Unsupported(expression.to_owned())),
+        "message" => {
+            let message = exchange.message.as_ref().ok_or_else(|| {
+                missing(
+                    expression,
+                    "a message, which this step has not sent or received",
+                )
+            })?;
+            let (what, rest) = split_first(rest, expression, "a message part")?;
+            match what {
+                "header" => header(&message.headers, rest, expression),
+                "payload" => message
+                    .payload
+                    .clone()
+                    .ok_or_else(|| missing(expression, "a payload, which this message has none")),
+                other => Err(ExpressionError::Unknown(format!("$message.{other}"))),
+            }
+        }
         other => Err(ExpressionError::Unknown(format!("${other}"))),
     }
 }
@@ -622,6 +655,7 @@ pub(crate) mod tests {
                 body: br#"{"id":7,"tags":["cat"]}"#.to_vec(),
             }),
             response_body: Some(json!({ "id": 7, "tags": ["cat"] })),
+            message: None,
         }
     }
 
@@ -859,7 +893,7 @@ pub(crate) mod tests {
         );
         assert!(matches!(
             eval("$message.payload", &fixture),
-            Err(ExpressionError::Unsupported(_))
+            Err(ExpressionError::Missing { .. })
         ));
     }
 

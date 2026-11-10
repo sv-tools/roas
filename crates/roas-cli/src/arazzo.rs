@@ -907,6 +907,14 @@ fn run_arazzo_run(args: ArazzoRunArgs) -> Result<()> {
         }
     };
     let plan = prepare(&description, &options).map_err(|error| explain(anyhow!(error)))?;
+    // Refused before anything is sent: the CLI has no message client, and
+    // the steps before an AsyncAPI one would otherwise already have run.
+    if plan.uses_messages() {
+        bail!(
+            "the workflow has AsyncAPI steps, which `arazzo run` cannot carry out: it has \
+             no message client — run it from code with `execute_with_messages`"
+        );
+    }
     // Preparation failures carry these diagnostics in the returned error.
     // Once preparation succeeds, emit optional warnings here, exactly once.
     if !args.quiet {
@@ -2210,6 +2218,39 @@ workflows:
                 }]}]
             }),
         )
+    }
+
+    #[test]
+    fn run_refuses_asyncapi_steps_before_sending_anything() {
+        let (_, openapi) = runnable();
+        let events = TempFile::write(
+            "events.json",
+            &json!({ "asyncapi": "3.0.0", "info": { "title": "E", "version": "1" },
+                     "channels": { "pets": { "address": "pets" } } }),
+        );
+        let description = TempFile::write(
+            "async-run.json",
+            &json!({
+                "arazzo": "1.1.0", "info": { "title": "T", "version": "1" },
+                "sourceDescriptions": [
+                    { "name": "petStore", "url": "https://example.com/api.json", "type": "openapi" },
+                    { "name": "events", "url": "https://example.com/events.json", "type": "asyncapi" }
+                ],
+                "workflows": [{ "workflowId": "buyPet", "steps": [
+                    { "stepId": "findPet", "operationId": "$sourceDescriptions.petStore.getPetById",
+                      "parameters": [{ "name": "petId", "in": "path", "value": "$inputs.petId" }] },
+                    { "stepId": "watch", "channelPath": "$sourceDescriptions.events#/channels/pets",
+                      "action": "receive" }
+                ] }]
+            }),
+        );
+        // Nothing listens there: had the first step been sent, the error
+        // would be a connection failure.
+        let mut args = run_args(&description, &openapi, "http://127.0.0.1:1");
+        args.source.push(format!("events={}", events.0.display()));
+        args.quiet = true;
+        let error = run_arazzo_run(args).unwrap_err();
+        assert!(error.to_string().contains("AsyncAPI steps"), "{error:#}");
     }
 
     #[test]

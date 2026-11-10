@@ -309,7 +309,7 @@ fn checked_capabilities_and_reference_errors_are_located_on_skipped_branches() {
     let cases = [
         (
             json!({ "condition": "true || $message.payload.id" }),
-            "AsyncAPI",
+            "can read",
         ),
         (
             json!({ "condition": "$sourceDescriptions.typo.url" }),

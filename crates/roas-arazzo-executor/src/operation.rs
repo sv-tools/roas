@@ -127,7 +127,8 @@ pub enum OperationError {
     /// Nothing named a server, so there is nowhere to send the request.
     #[error("no server URL for operation `{0}` — pass a base URL for its source description")]
     NoServer(String),
-    /// An AsyncAPI step, which this crate does not execute.
+    /// An AsyncAPI step given to HTTP operation resolution. Not raised by a
+    /// run: AsyncAPI steps resolve their channel instead.
     #[error("step `{0}` is an AsyncAPI step, which this executor does not run")]
     Async(String),
     /// A step naming no operation at all.

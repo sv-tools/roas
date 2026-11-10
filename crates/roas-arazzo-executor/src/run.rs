@@ -9,6 +9,7 @@ use crate::criterion::{self, CriterionError};
 use crate::documents::{Doc, Document, Documents};
 use crate::expression::{self, Exchange, ExpressionError, Scope, StepState, WorkflowState};
 use crate::http::{HttpRequest, HttpResponse};
+use crate::message::{IncomingMessage, OutgoingMessage, Subscription, SubscriptionId};
 use crate::operation::{self, Source};
 use crate::report::{
     ActionCriteriaOutcome, CriterionOutcome, ExecutionError, ExecutionFailure, ExecutionReport,
@@ -19,7 +20,7 @@ use crate::select;
 use crate::select::SelectError;
 use roas_arazzo::v1_1::{
     Criterion, Description, FailureActionType, Parameter, ParameterLocation, ReusableOr,
-    SourceType, Step, SuccessActionType, ValueOrSelector, Workflow,
+    SourceType, Step, StepAction, SuccessActionType, ValueOrSelector, Workflow,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -291,6 +292,25 @@ pub enum Progress {
     Send(HttpRequest),
     /// Wait this long — a retry asked for it — then carry on.
     Wait(Duration),
+    /// Publish this message — an AsyncAPI `send` step — then advance. The
+    /// step is done once it is sent.
+    Publish(OutgoingMessage),
+    /// Start listening — an AsyncAPI `receive` step — then advance. The
+    /// run carries on while messages arrive; keep them until they are
+    /// asked for.
+    Subscribe(Subscription),
+    /// A step now needs the next message on `subscription`: wait for it
+    /// at most `timeout` (`None`: as long as it takes), then hand it — or
+    /// `None` if nothing came — to [`Run::deliver`].
+    Receive {
+        /// The subscription to read from.
+        subscription: SubscriptionId,
+        /// How long the receive step still waits.
+        timeout: Option<Duration>,
+    },
+    /// The run is done with this subscription: stop listening, then
+    /// advance.
+    Unsubscribe(SubscriptionId),
     /// The run is over.
     Done(Box<ExecutionReport>),
 }
@@ -374,7 +394,33 @@ struct Frame<'d> {
     /// Where to come back to when a retry sent the run to another step
     /// first: "context transfers back upon completion".
     detour: Option<usize>,
+    /// Receive steps listening in the background, oldest first.
+    listening: Vec<Listening>,
+    /// Where to come back to once a receive that was joined is done — the
+    /// step that needed it, or the end of the workflow — and the detour
+    /// that was pending there.
+    /// A stack: a step a joined receive goes back to may itself join one.
+    /// Each entry: the receive step joined, where to go back to, and the
+    /// detour pending there. Only that receive's completion pops it.
+    resume: Vec<(usize, usize, Option<usize>)>,
+    /// An `end`, or a `goto` to another workflow, finished it.
+    ended: bool,
     outcome: Outcome,
+}
+
+/// A receive step waiting for its message.
+struct Listening {
+    step: usize,
+    subscription: SubscriptionId,
+    attempt: u32,
+    exchange: Exchange,
+    started: Instant,
+    /// The step's own `timeout`.
+    timeout: Option<Duration>,
+    /// The `correlationId` a message must carry, when the step gives one.
+    expected: Option<Value>,
+    /// Where the channel's messages carry their correlation id.
+    locations: Vec<String>,
 }
 
 /// What a step's completion needs beyond what the step itself says.
@@ -386,6 +432,12 @@ struct Completion {
     given: BTreeMap<String, Value>,
     /// Whether it counts as passed when the step states no criteria.
     default_pass: bool,
+    /// The step failed whatever its criteria say — a receive that got no
+    /// message — so they are not evaluated, and it names no outputs.
+    failed: bool,
+    /// Its workflow had already ended (`end`, or a `goto` to another
+    /// workflow) when it completed: its action is recorded, not taken.
+    settled: bool,
     attempt: u32,
     performed: Performed,
     elapsed: Duration,
@@ -477,6 +529,14 @@ pub struct Run<'d> {
     resolvers: Vec<Option<crate::operation_index::Resolver<'d>>>,
     /// When the run's [`Options::timeout`] runs out.
     deadline: Option<Instant>,
+    /// A published message whose step completes on the next advance.
+    sending: Option<Pending>,
+    /// The subscription a [`Progress::Receive`] is outstanding for.
+    joining: Option<SubscriptionId>,
+    /// Subscriptions to close, handed out before anything else.
+    closing: Vec<SubscriptionId>,
+    /// Subscriptions made so far, for the next one's id.
+    subscriptions: u64,
 }
 
 /// The ambient scope of a document that has an entered workflow.
@@ -597,6 +657,10 @@ impl<'d> Run<'d> {
             halted: false,
             input_schemas,
             deadline,
+            sending: None,
+            joining: None,
+            closing: Vec::new(),
+            subscriptions: 0,
         };
         run.enter(doc, first, initial_inputs, None)?;
         Ok(run)
@@ -674,13 +738,25 @@ impl<'d> Run<'d> {
         };
         let left = deadline.saturating_duration_since(Instant::now());
         match progress {
-            Progress::Done(_) => Ok(progress),
+            Progress::Done(_) | Progress::Unsubscribe(_) => Ok(progress),
             Progress::Wait(wait) if wait < left => Ok(Progress::Wait(wait)),
             Progress::Send(mut request) if !left.is_zero() => {
                 request.timeout = Some(request.timeout.map_or(left, |own| own.min(left)));
                 Ok(Progress::Send(request))
             }
-            Progress::Wait(_) | Progress::Send(_) => Err(self.timed_out()),
+            Progress::Receive {
+                subscription,
+                timeout,
+            } if !left.is_zero() => Ok(Progress::Receive {
+                subscription,
+                timeout: Some(timeout.map_or(left, |own| own.min(left))),
+            }),
+            Progress::Publish(_) | Progress::Subscribe(_) if !left.is_zero() => Ok(progress),
+            Progress::Wait(_)
+            | Progress::Send(_)
+            | Progress::Receive { .. }
+            | Progress::Publish(_)
+            | Progress::Subscribe(_) => Err(self.timed_out()),
         }
     }
 
@@ -710,7 +786,34 @@ impl<'d> Run<'d> {
         }
     }
 
+    /// Every subscription still open — listening, or done with but not yet
+    /// handed out as [`Progress::Unsubscribe`]. A caller driving the run
+    /// itself closes these when it stops early, as the `execute` functions
+    /// do. One may never have been subscribed — its `Subscribe` failed, or
+    /// the run stopped before handing it out.
+    #[must_use]
+    pub fn open_subscriptions(&self) -> Vec<SubscriptionId> {
+        let mut open = self.closing.clone();
+        for frame in &self.frames {
+            open.extend(
+                frame
+                    .listening
+                    .iter()
+                    .map(|listening| listening.subscription),
+            );
+        }
+        open.sort();
+        open
+    }
+
     fn advance_inner(&mut self) -> Result<Progress, ExecutionError> {
+        // A subscription that is done with is closed before a retry waits.
+        if self.pending.is_none()
+            && self.joining.is_none()
+            && let Some(subscription) = self.closing.pop()
+        {
+            return Ok(Progress::Unsubscribe(subscription));
+        }
         if let Some(wait) = self.wait.take() {
             return Ok(Progress::Wait(wait));
         }
@@ -723,6 +826,35 @@ impl<'d> Run<'d> {
                 url: pending.exchange.request.url.clone(),
             });
         }
+        if let Some(subscription) = self.joining {
+            return Err(ExecutionError::Awaiting {
+                method: "receive".to_owned(),
+                url: format!("subscription {subscription}"),
+            });
+        }
+        // Asking for more means the message went out.
+        if let Some(sent) = self.sending.take() {
+            let performed = Performed::Message {
+                action: "send".to_owned(),
+                channel: sent.exchange.request.url.clone(),
+                delivered: true,
+            };
+            let doc = self.frames.last().expect("the sending frame").doc;
+            self.complete(
+                sent.step,
+                Completion {
+                    exchange: Some(sent.exchange),
+                    given: BTreeMap::new(),
+                    default_pass: true,
+                    failed: false,
+                    settled: false,
+                    attempt: sent.attempt,
+                    performed,
+                    elapsed: sent.started.elapsed(),
+                },
+            )
+            .map_err(|error| locate(&self.documents, doc, error))?;
+        }
         loop {
             if let Some(report) = &self.report {
                 return Ok(Progress::Done(report.clone()));
@@ -730,10 +862,35 @@ impl<'d> Run<'d> {
             let Some(frame) = self.frames.last() else {
                 return Err(ExecutionError::Stopped);
             };
-            // The frame is spent: name its outputs and hand them back.
+            // The frame is spent: name its outputs and hand them back —
+            // once every receive it started has its message.
             if frame.at >= frame.order.len() {
+                if let Some(listening) = frame.listening.first() {
+                    return Ok(self.join(listening.subscription));
+                }
                 self.leave()?;
                 continue;
+            }
+            // A step that depends on a receive still listening waits for it.
+            let index = frame.order[frame.at];
+            if !frame.listening.is_empty() {
+                let step = &frame.workflow.steps[index];
+                let description = self.documents.get(frame.doc).description;
+                let mut needs = steps_named_by(step, frame.workflow, description)
+                    .map_err(|error| locate(&self.documents, frame.doc, error))?;
+                needs.extend(step.depends_on.iter().cloned());
+                // The workflow's own actions are judged after this step.
+                needs.extend(
+                    workflow_action_reads(frame.workflow, description)
+                        .map_err(|error| locate(&self.documents, frame.doc, error))?,
+                );
+                if let Some(listening) = frame
+                    .listening
+                    .iter()
+                    .find(|listening| needs.contains(&frame.workflow.steps[listening.step].step_id))
+                {
+                    return Ok(self.join(listening.subscription));
+                }
             }
 
             self.taken += 1;
@@ -744,12 +901,16 @@ impl<'d> Run<'d> {
                 });
             }
 
-            let index = frame.order[frame.at];
             let doc = frame.doc;
             let step = &frame.workflow.steps[index];
             if step.workflow_id.is_some() {
                 self.call(index)?;
                 continue;
+            }
+            if step.action.is_some() || step.channel_path.is_some() {
+                return self
+                    .message_step(index)
+                    .map_err(|error| locate(&self.documents, doc, error));
             }
 
             let (request, exchange) = self
@@ -822,11 +983,284 @@ impl<'d> Run<'d> {
                 exchange: Some(pending.exchange),
                 given: BTreeMap::new(),
                 default_pass: (200..400).contains(&status),
+                failed: false,
+                settled: false,
                 attempt: pending.attempt,
                 performed,
                 elapsed,
             },
         )
+    }
+
+    /// Hand back what came of the [`Progress::Receive`] [`Run::advance`]
+    /// asked for: the next message on the subscription, or `None` when
+    /// nothing came within the timeout.
+    ///
+    /// A message whose correlation id is not the one the step waits for
+    /// is passed over: the next advance asks for another. A message that
+    /// is, or none at all, completes the receive step — its criteria,
+    /// outputs and actions — at the point the run needed it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Run::supply`]; [`ExecutionError::NotWaiting`] when no message
+    /// was asked for.
+    pub fn deliver(&mut self, message: Option<IncomingMessage>) -> Result<(), ExecutionError> {
+        if self.halted {
+            return Err(ExecutionError::Stopped);
+        }
+        let result = self.deliver_inner(message);
+        if let Err(error) = &result
+            && !matches!(error, ExecutionError::NotWaiting)
+        {
+            self.halted = true;
+        }
+        result
+    }
+
+    fn deliver_inner(&mut self, message: Option<IncomingMessage>) -> Result<(), ExecutionError> {
+        let Some(subscription) = self.joining.take() else {
+            return Err(ExecutionError::NotWaiting);
+        };
+        if self.out_of_time() {
+            return Err(self.timed_out());
+        }
+        let frame = self.frames.last_mut().expect("a frame that is listening");
+        let Some(at) = frame
+            .listening
+            .iter()
+            .position(|listening| listening.subscription == subscription)
+        else {
+            return Err(ExecutionError::NotWaiting);
+        };
+        let message = message.map(|message| expression::Message {
+            payload: message.payload_value(),
+            headers: message.headers,
+        });
+        if let Some(message) = &message
+            && !correlates(&frame.listening[at], message)
+        {
+            // Not the one this step waits for: ask again.
+            return Ok(());
+        }
+        let mut listening = frame.listening.remove(at);
+        self.closing.push(subscription);
+        let delivered = message.is_some();
+        listening.exchange.message = message;
+        // The receive completes where it was needed, then the run comes
+        // back there.
+        let settled = frame.ended;
+        frame
+            .resume
+            .push((listening.step, frame.at, frame.detour.take()));
+        frame.at = frame
+            .order
+            .iter()
+            .position(|&index| index == listening.step)
+            .unwrap_or(frame.at);
+        let doc = frame.doc;
+        let performed = Performed::Message {
+            action: "receive".to_owned(),
+            channel: listening.exchange.request.url.clone(),
+            delivered,
+        };
+        self.complete(
+            listening.step,
+            Completion {
+                exchange: Some(listening.exchange),
+                given: BTreeMap::new(),
+                default_pass: delivered,
+                failed: !delivered,
+                settled,
+                attempt: listening.attempt,
+                performed,
+                elapsed: listening.started.elapsed(),
+            },
+        )
+        .map_err(|error| locate(&self.documents, doc, error))
+    }
+
+    /// Ask for the next message on a listening receive.
+    fn join(&mut self, subscription: SubscriptionId) -> Progress {
+        let frame = self.frames.last().expect("a frame that is listening");
+        let listening = frame
+            .listening
+            .iter()
+            .find(|listening| listening.subscription == subscription)
+            .expect("the subscription is listening");
+        let timeout = listening
+            .timeout
+            .map(|timeout| timeout.saturating_sub(listening.started.elapsed()));
+        self.joining = Some(subscription);
+        Progress::Receive {
+            subscription,
+            timeout,
+        }
+    }
+
+    /// Start an AsyncAPI step: publish its message, or subscribe and move
+    /// on.
+    fn message_step(&mut self, index: usize) -> Result<Progress, ExecutionError> {
+        let resolved = self.channel(index)?;
+        let frame = self.frames.last().expect("a frame to send from");
+        let step = &frame.workflow.steps[index];
+        let scope = scope(
+            frame,
+            &frame.steps,
+            None,
+            &self.finished[frame.doc.0],
+            ambient(&self.ambients, frame.doc),
+        );
+        let description = self.documents.get(frame.doc).description;
+        let mut channel_values = BTreeMap::new();
+        let mut headers = Vec::new();
+        for parameter in effective_parameters(frame.workflow, step, description)? {
+            let parameter = parameter.resolve(&scope)?;
+            match parameter.location {
+                ParameterLocation::Channel => {
+                    channel_values.insert(parameter.name, text(&parameter.value));
+                }
+                ParameterLocation::Header => headers.push((parameter.name, text(&parameter.value))),
+                other => {
+                    return Err(ExecutionError::BadRequest {
+                        step: step.step_id.clone(),
+                        reason: format!(
+                            "parameter `{}` is in `{}`, which an AsyncAPI step has not",
+                            parameter.name,
+                            serde_json::to_value(other)
+                                .ok()
+                                .and_then(|value| value.as_str().map(str::to_owned))
+                                .unwrap_or_default()
+                        ),
+                    });
+                }
+            }
+        }
+        let mut channel = resolved.channel;
+        channel.address =
+            crate::channel::address(&channel.address, &channel_values).map_err(|reason| {
+                ExecutionError::BadRequest {
+                    step: step.step_id.clone(),
+                    reason,
+                }
+            })?;
+        let Some(action) = step.action else {
+            return Err(ExecutionError::BadRequest {
+                step: step.step_id.clone(),
+                reason: "it names a channel but no `action`".into(),
+            });
+        };
+        let receive = action == StepAction::Receive;
+        let payload = body(step, &scope, &resolved.content_type)?;
+        let attempt = frame.attempts.get(&step.step_id).copied().unwrap_or(0) + 1;
+        let timeout = step
+            .timeout
+            .and_then(|timeout| u64::try_from(timeout).ok())
+            .map(Duration::from_millis);
+        let expected = match &step.correlation_id {
+            Some(id) if receive => {
+                if resolved.correlation.is_empty() {
+                    return Err(ExecutionError::BadRequest {
+                        step: step.step_id.clone(),
+                        reason: format!(
+                            "it waits for a `correlationId`, but no message of channel `{}` \
+                             says where its correlation id is",
+                            channel.address
+                        ),
+                    });
+                }
+                Some(select::resolve(id, &scope)?)
+            }
+            _ => None,
+        };
+        let (bytes, value, content_type) = match payload {
+            Some(payload) => (
+                Some(payload.bytes),
+                Some(payload.value),
+                Some(payload.content_type),
+            ),
+            None => (None, None, None),
+        };
+        let exchange = Exchange {
+            request: HttpRequest {
+                method: if receive { "receive" } else { "send" }.to_owned(),
+                url: channel.address.clone(),
+                headers: headers.clone(),
+                body: bytes.clone(),
+                timeout,
+            },
+            body: value.clone(),
+            message: (!receive).then(|| expression::Message {
+                headers: headers.clone(),
+                payload: value,
+            }),
+            ..Exchange::default()
+        };
+        if !receive {
+            self.sending = Some(Pending {
+                step: index,
+                attempt,
+                exchange,
+                started: Instant::now(),
+            });
+            return Ok(Progress::Publish(OutgoingMessage {
+                channel,
+                headers,
+                content_type,
+                payload: bytes,
+            }));
+        }
+        self.subscriptions += 1;
+        let subscription = SubscriptionId(self.subscriptions);
+        let frame = self.frames.last_mut().expect("a frame to listen in");
+        // A receive that runs again replaces the one still listening.
+        if let Some(at) = frame
+            .listening
+            .iter()
+            .position(|listening| listening.step == index)
+        {
+            let old = frame.listening.remove(at);
+            self.closing.push(old.subscription);
+        }
+        frame.listening.push(Listening {
+            step: index,
+            subscription,
+            attempt,
+            exchange,
+            started: Instant::now(),
+            timeout,
+            expected,
+            locations: resolved.correlation,
+        });
+        self.apply(Action::Advance)?;
+        Ok(Progress::Subscribe(Subscription {
+            id: subscription,
+            channel,
+            headers,
+        }))
+    }
+
+    /// The channel an AsyncAPI step names: the plan's, or resolved in the
+    /// step's own document.
+    fn channel(&self, index: usize) -> Result<crate::channel::Resolved, ExecutionError> {
+        let frame = self.frames.last().expect("a frame to resolve in");
+        let (doc, workflow) = (frame.doc, frame.workflow);
+        let step = &workflow.steps[index];
+        if let Some(prepared) = self.prepared {
+            return prepared
+                .channels
+                .get(&(doc, workflow.workflow_id.as_str(), step.step_id.as_str()))
+                .cloned()
+                .ok_or_else(|| {
+                    ExecutionError::Unsupported("channel is outside the prepared plan".into())
+                });
+        }
+        let document = *self.documents.get(doc);
+        Ok(crate::channel::resolve(
+            step,
+            &document.options.sources,
+            &unsupplied(&document),
+        )?)
     }
 
     // ---- the steps of a run -----------------------------------------
@@ -881,12 +1315,19 @@ impl<'d> Run<'d> {
 
             // Criteria, where a step states them, are the whole
             // judgement: a step that says `$statusCode == 404` means it.
-            let mut passed = if step.success_criteria.is_empty() {
+            let mut passed = if done.failed {
+                false
+            } else if step.success_criteria.is_empty() {
                 done.default_pass
             } else {
                 true
             };
-            for criterion in &step.success_criteria {
+            let judged = if done.failed {
+                &[][..]
+            } else {
+                &step.success_criteria[..]
+            };
+            for criterion in judged {
                 let holds =
                     evaluate_criterion(criterion, &scope, &mut self.records[record].criteria)
                         .map_err(|error| locate(&self.documents, here, error))?;
@@ -925,6 +1366,23 @@ impl<'d> Run<'d> {
         let action = self
             .decide(index, passed, done.exchange.as_ref(), record)
             .map_err(|error| locate(&self.documents, here, error))?;
+        if done.settled {
+            // Nothing is left to go to: say what it would have done, and
+            // go back to where it was needed. A receive that fails fails
+            // the workflow, ended or not: a retry or goto that is not
+            // taken recovers nothing.
+            self.records[record].action = describe(&action)
+                .map(|action| format!("{action}, not taken: the workflow had ended"));
+            let frame = self.frames.last_mut().expect("the frame is still there");
+            if !passed {
+                frame.outcome = Outcome::Failed;
+            }
+            if let Some((_, back, detour)) = pop_resume(frame, index) {
+                frame.at = back;
+                frame.detour = detour;
+            }
+            return Ok(());
+        }
         self.records[record].action = describe(&action);
         self.apply(action)
     }
@@ -997,6 +1455,9 @@ impl<'d> Run<'d> {
             caller,
             started: Instant::now(),
             detour: None,
+            listening: Vec::new(),
+            resume: Vec::new(),
+            ended: false,
             outcome: Outcome::Succeeded,
         });
         Ok(())
@@ -1174,6 +1635,8 @@ impl<'d> Run<'d> {
                     },
                 );
                 parent.at = parent.order.len();
+                parent.resume.clear();
+                parent.ended = true;
                 parent.outcome = frame.outcome;
                 Ok(())
             }
@@ -1202,6 +1665,8 @@ impl<'d> Run<'d> {
                         exchange: None,
                         given: outputs,
                         default_pass: frame.outcome != Outcome::Failed && !timed_out,
+                        failed: false,
+                        settled: false,
                         attempt,
                         performed: Performed::Workflow {
                             // The reference as the calling step wrote it: a
@@ -1376,7 +1841,7 @@ impl<'d> Run<'d> {
             }
         }
 
-        let body = body(step, &scope)?;
+        let body = body(step, &scope, "application/json")?;
         if let Some(body) = &body
             && !headers
                 .iter()
@@ -1410,6 +1875,7 @@ impl<'d> Run<'d> {
                 body: body.map(|body| body.value),
                 response: None,
                 response_body: None,
+                message: None,
             },
         ))
     }
@@ -1523,15 +1989,23 @@ impl<'d> Run<'d> {
             Action::Advance => {
                 // A step run as a retry's detour hands control back to
                 // the step that asked for it, which is tried again.
-                match frame.detour.take() {
-                    Some(back) => frame.at = back,
-                    None => frame.at += 1,
+                // A receive completed where it was needed hands control
+                // back there.
+                if let Some(back) = frame.detour.take() {
+                    frame.at = back;
+                } else if let Some((_, back, detour)) = pop_resume(frame, frame.order[frame.at]) {
+                    frame.at = back;
+                    frame.detour = detour;
+                } else {
+                    frame.at += 1;
                 }
                 Ok(())
             }
             Action::End(outcome) => {
                 frame.outcome = outcome;
                 frame.at = frame.order.len();
+                frame.resume.clear();
+                frame.ended = true;
                 // Nothing is forced on the caller here: a workflow that
                 // ends failed comes back through the step that called
                 // it, whose own `onFailure` may yet have something to
@@ -1586,8 +2060,15 @@ impl<'d> Run<'d> {
                 step: Some(step_id),
                 ..
             } => {
+                let current = frame.order.get(frame.at).copied();
                 frame.at = position_of(frame, &step_id)
                     .map_err(|error| locate(&self.documents, here, error))?;
+                // A joined receive that goes elsewhere does not come back.
+                if let Some(current) = current
+                    && let Some((_, _, detour)) = pop_resume(frame, current)
+                {
+                    frame.detour = detour;
+                }
                 Ok(())
             }
             Action::Goto {
@@ -1609,6 +2090,54 @@ impl<'d> Run<'d> {
             }
             Action::Goto { .. } => Ok(()),
         }
+    }
+}
+
+/// Whether a message carries the correlation id its receive step waits
+/// for, at any of the places the channel's messages keep one.
+fn correlates(listening: &Listening, message: &expression::Message) -> bool {
+    let Some(expected) = &listening.expected else {
+        return true;
+    };
+    listening.locations.iter().any(|location| {
+        correlation(location, message)
+            .is_some_and(|found| found == *expected || text(&found) == text(expected))
+    })
+}
+
+/// The value at an AsyncAPI correlation-id location —
+/// `$message.header#/<name>` or `$message.payload#/<pointer>` — in a
+/// message.
+fn correlation(location: &str, message: &expression::Message) -> Option<Value> {
+    let (source, pointer) = match location.split_once('#') {
+        Some((source, pointer)) => (source, pointer),
+        None => (location, ""),
+    };
+    match source.trim() {
+        "$message.header" => {
+            let name = pointer.strip_prefix('/')?;
+            let name = name.replace("~1", "/").replace("~0", "~");
+            message
+                .headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(&name))
+                .map(|(_, value)| Value::String(value.clone()))
+        }
+        "$message.payload" => message.payload.as_ref()?.pointer(pointer).cloned(),
+        _ => None,
+    }
+}
+
+/// The innermost resume entry, if it belongs to the receive `step`.
+fn pop_resume(frame: &mut Frame<'_>, step: usize) -> Option<(usize, usize, Option<usize>)> {
+    if frame
+        .resume
+        .last()
+        .is_some_and(|(receive, _, _)| *receive == step)
+    {
+        frame.resume.pop()
+    } else {
+        None
     }
 }
 
@@ -1964,7 +2493,12 @@ struct Body {
 }
 
 /// The body a step sends, with its replacements applied.
-fn body(step: &Step, scope: &Scope<'_>) -> Result<Option<Body>, ExecutionError> {
+/// `default_type`: the media type when the step's `requestBody` names none.
+fn body(
+    step: &Step,
+    scope: &Scope<'_>,
+    default_type: &str,
+) -> Result<Option<Body>, ExecutionError> {
     let Some(request_body) = &step.request_body else {
         return Ok(None);
     };
@@ -1995,7 +2529,7 @@ fn body(step: &Step, scope: &Scope<'_>) -> Result<Option<Body>, ExecutionError> 
     let content_type = request_body
         .content_type
         .clone()
-        .unwrap_or_else(|| "application/json".to_owned());
+        .unwrap_or_else(|| default_type.to_owned());
     // A string payload sent as anything but JSON goes as it is written;
     // everything else is JSON on the wire.
     let bytes = match (&payload, content_type.contains("json")) {
@@ -2252,6 +2786,9 @@ fn steps_named_by(
     for output in step.outputs.values() {
         visit_value_expressions(output, &mut collect)?;
     }
+    if let Some(id) = &step.correlation_id {
+        visit_literal_expressions(id, &mut collect)?;
+    }
     if let Some(body) = &step.request_body {
         if let Some(payload) = &body.payload {
             visit_literal_expressions(payload, &mut collect)?;
@@ -2277,6 +2814,40 @@ fn steps_named_by(
     }
 
     found.remove(&step.step_id);
+    Ok(found)
+}
+
+/// The steps a workflow's own `successActions` / `failureActions` read.
+fn workflow_action_reads(
+    workflow: &Workflow,
+    description: &Description,
+) -> Result<BTreeSet<String>, ExecutionError> {
+    let mut found = BTreeSet::new();
+    let mut collect = |parsed: Expression<'_>| {
+        if let Some(id) = parsed.step_id() {
+            found.insert(id.to_owned());
+        }
+    };
+    for entry in &workflow.success_actions {
+        if let Ok(action) = success_action(entry, description) {
+            for criterion in &action.criteria {
+                criterion::references(criterion)?
+                    .into_iter()
+                    .for_each(&mut collect);
+            }
+            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
+        }
+    }
+    for entry in &workflow.failure_actions {
+        if let Ok(action) = failure_action(entry, description) {
+            for criterion in &action.criteria {
+                criterion::references(criterion)?
+                    .into_iter()
+                    .for_each(&mut collect);
+            }
+            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
+        }
+    }
     Ok(found)
 }
 
