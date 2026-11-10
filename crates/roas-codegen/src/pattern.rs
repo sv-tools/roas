@@ -13,8 +13,8 @@
 
 use oxc_allocator::Allocator;
 use oxc_regular_expression::ast::{
-    Alternative, BoundaryAssertionKind, CharacterClass, CharacterClassContents,
-    CharacterClassContentsKind, CharacterClassEscapeKind, Disjunction, Term,
+    Alternative, BoundaryAssertionKind, Character, CharacterClass, CharacterClassContents,
+    CharacterClassContentsKind, CharacterClassEscapeKind, CharacterKind, Disjunction, Term,
 };
 use oxc_regular_expression::{LiteralParser, Options};
 
@@ -52,6 +52,8 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
         };
     let mut printer = Printer {
         legacy,
+        source: pattern,
+        budget: MAX_COUNT,
         out: String::new(),
     };
     printer.disjunction(&ast.body)?;
@@ -62,17 +64,23 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
     Ok(printer.out)
 }
 
-struct Printer {
+struct Printer<'a> {
     /// Parsed without the Unicode flag: a code unit is a character, so a
     /// set touching the surrogates could match half an astral character.
     legacy: bool,
+    /// The pattern as written: a character's span reads into it.
+    source: &'a str,
+    /// How many times what is printed next may be repeated, through every
+    /// count around it: Go refuses a nesting whose counts multiply past
+    /// 1000.
+    budget: u64,
     out: String,
 }
 
 /// A set of code points: sorted, disjoint, non-adjacent inclusive ranges.
 type Set = Vec<(u32, u32)>;
 
-impl Printer {
+impl Printer<'_> {
     fn disjunction(&mut self, d: &Disjunction<'_>) -> Result<(), String> {
         for (i, alternative) in d.body.iter().enumerate() {
             if i > 0 {
@@ -112,7 +120,23 @@ impl Printer {
                         "a repetition count above {MAX_COUNT} is not supported"
                     ));
                 }
+                // Go's own rule (`repeatIsValid`): a `{…}` count, its
+                // maximum or else its minimum, divides what may be nested
+                // inside it; `*`, `+` and `?` do not count.
+                let saved = self.budget;
+                if !matches!((q.min, q.max), (0, None) | (1, None) | (0, Some(1))) {
+                    match q.max.unwrap_or(q.min) {
+                        0 => self.budget = u64::MAX,
+                        m if m > self.budget => {
+                            return Err(format!(
+                                "nested repetition counts multiplying past {MAX_COUNT} are not supported"
+                            ));
+                        }
+                        m => self.budget /= m,
+                    }
+                }
                 self.term(&q.body)?;
+                self.budget = saved;
                 // Laziness changes which match is found, never whether one
                 // is: a check only asks the latter.
                 match (q.min, q.max) {
@@ -125,7 +149,7 @@ impl Printer {
                 }
             }
             Term::Character(c) => {
-                self.explicit(c.value, c.value)?;
+                self.character(c)?;
                 self.set(vec![(c.value, c.value)])?;
             }
             Term::Dot(_) => self.set(complement(&normalize(vec![
@@ -155,6 +179,28 @@ impl Printer {
         Ok(())
     }
 
+    /// A single character the pattern spells out.
+    fn character(&self, c: &Character) -> Result<(), String> {
+        // Annex B reads `\400` as `\40` then `0`, and oxc drops the `0`.
+        if matches!(
+            c.kind,
+            CharacterKind::Octal1 | CharacterKind::Octal2 | CharacterKind::Octal3
+        ) {
+            return Err("legacy octal escapes are not supported".into());
+        }
+        // oxc reads `[\c1]` in Unicode mode as `\`, `c`, `1`, where
+        // ECMAScript refuses it: a backslash must be written escaped.
+        if c.value == u32::from(b'\\')
+            && self
+                .source
+                .get(c.span.start as usize..c.span.end as usize)
+                .is_none_or(|text| text == "\\")
+        {
+            return Err("a `\\c` not followed by a letter is not supported".into());
+        }
+        self.explicit(c.value, c.value)
+    }
+
     /// A range the pattern spells out: a surrogate there matches only a
     /// lone surrogate, which a decoded string never holds as one.
     fn explicit(&self, lo: u32, hi: u32) -> Result<(), String> {
@@ -176,12 +222,14 @@ impl Printer {
         for item in &class.body {
             match item {
                 CharacterClassContents::CharacterClassRange(r) => {
+                    self.character(&r.min)?;
+                    self.character(&r.max)?;
                     self.explicit(r.min.value, r.max.value)?;
                     set.push((r.min.value, r.max.value));
                 }
                 CharacterClassContents::CharacterClassEscape(e) => set.extend(escape(e.kind)),
                 CharacterClassContents::Character(c) => {
-                    self.explicit(c.value, c.value)?;
+                    self.character(c)?;
                     set.push((c.value, c.value));
                 }
                 CharacterClassContents::UnicodePropertyEscape(_) => {
@@ -366,6 +414,11 @@ mod tests {
         assert_eq!(ok("(?<year>[0-9]{4})-(?:x)"), "(?:[0-9]{4})-(?:x)");
         assert_eq!(ok(""), "(?:)");
         assert_eq!(ok("a{1000}"), "a{1000}");
+        assert_eq!(ok("(?:a{2}){500}"), "(?:a{2}){500}");
+        assert_eq!(ok("(?:a*){1000}"), "(?:a*){1000}");
+        assert_eq!(ok(r"[\\]"), r"\\");
+        assert_eq!(ok(r"\cJ"), r"\x{A}");
+        assert_eq!(ok(r"\0"), r"\x{0}");
         assert!(ok(r"^https?://\S+$").starts_with("^https?://["));
         assert_eq!(ok("😀+"), r"\x{1F600}+");
         assert_eq!(ok(r"\u{1F600}"), r"\x{1F600}");
@@ -397,6 +450,15 @@ mod tests {
             "(?i:a)",
             "a{1001}",
             "a{0,1001}",
+            r"(?:a{2}){600}",
+            r"^(?:[a-z0-9]{1,63}\.){1,127}$",
+            r"[\c1]",
+            r"[\c_]",
+            r"[\c]",
+            r"[\c-x]",
+            r"\-\400",
+            r"\-[\400]",
+            r"\-\1",
             r"\uD800",
             "(",
         ] {
