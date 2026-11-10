@@ -21,6 +21,9 @@ use oxc_regular_expression::{LiteralParser, Options};
 /// The largest repetition count Go compiles.
 const MAX_COUNT: u64 = 1000;
 const MAX_CHAR: u32 = 0x10FFFF;
+/// Go's `regexp/syntax` size limit (`maxSize`): 128 MiB of 40-byte
+/// instructions.
+const GO_MAX_SIZE: u64 = (128 << 20) / 40;
 /// The longest pattern read, in bytes.
 const MAX_LEN: usize = 16 * 1024;
 /// How deep groups may nest. oxc's parser recurses per level and needs
@@ -64,7 +67,7 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
             // A property escape the Unicode grammar refuses (a typo, or one
             // newer than the parser) would be literal text in the legacy
             // one: refused rather than matched as `p{…}`.
-            Err(unicode) if pattern.contains("\\p{") || pattern.contains("\\P{") => {
+            Err(unicode) if property_escape(pattern) => {
                 return Err(format!(
                     "its Unicode property escape is not supported: {}",
                     unicode
@@ -93,10 +96,12 @@ pub(crate) fn translate(pattern: &str) -> Result<String, String> {
         budget: MAX_COUNT,
         out: String::new(),
     };
-    printer.disjunction(&ast.body)?;
+    if printer.disjunction(&ast.body)? > GO_MAX_SIZE {
+        return Err("it is larger than Go's regexp compiles".into());
+    }
     // The printer's output is meant to compile; this is the proof, with
-    // the limits the generated Rust code compiles it under. (Go's are
-    // looser, past the nesting budget above.)
+    // the limits the generated Rust code compiles it under. Go's other
+    // limits are the repetition budget and the size above.
     regex::Regex::new(&printer.out)
         .map_err(|e| format!("its translation does not compile: {e}"))?;
     Ok(printer.out)
@@ -121,28 +126,38 @@ struct Printer<'a> {
 type Set = Vec<(u32, u32)>;
 
 impl Printer<'_> {
-    fn disjunction(&mut self, d: &Disjunction<'_>) -> Result<(), String> {
+    // Each part returns its size as Go's `calcSize` counts it (at least
+    // one per node): Go refuses a regex past `GO_MAX_SIZE` at compile time.
+    // An overestimate only refuses more.
+
+    fn disjunction(&mut self, d: &Disjunction<'_>) -> Result<u64, String> {
+        let mut size = 0u64;
         for (i, alternative) in d.body.iter().enumerate() {
             if i > 0 {
                 self.out.push('|');
+                size = size.saturating_add(1);
             }
-            self.alternative(alternative)?;
+            size = size.saturating_add(self.alternative(alternative)?);
         }
-        Ok(())
+        Ok(size.max(1))
     }
 
-    fn alternative(&mut self, a: &Alternative<'_>) -> Result<(), String> {
-        a.body.iter().try_for_each(|term| self.term(term))
+    fn alternative(&mut self, a: &Alternative<'_>) -> Result<u64, String> {
+        let mut size = 0u64;
+        for term in &a.body {
+            size = size.saturating_add(self.term(term)?);
+        }
+        Ok(size.max(1))
     }
 
-    fn group(&mut self, d: &Disjunction<'_>) -> Result<(), String> {
+    fn group(&mut self, d: &Disjunction<'_>) -> Result<u64, String> {
         self.out.push_str("(?:");
-        self.disjunction(d)?;
+        let size = self.disjunction(d)?;
         self.out.push(')');
-        Ok(())
+        Ok(size)
     }
 
-    fn term(&mut self, term: &Term<'_>) -> Result<(), String> {
+    fn term(&mut self, term: &Term<'_>) -> Result<u64, String> {
         match term {
             Term::BoundaryAssertion(b) => match b.kind {
                 BoundaryAssertionKind::Start => self.out.push('^'),
@@ -177,18 +192,37 @@ impl Printer<'_> {
                         m => self.budget /= m,
                     }
                 }
-                self.term(&q.body)?;
+                let sub = self.term(&q.body)?;
                 self.budget = saved;
                 // Laziness changes which match is found, never whether one
                 // is: a check only asks the latter.
-                match (q.min, q.max) {
-                    (0, None) => self.out.push('*'),
-                    (1, None) => self.out.push('+'),
-                    (0, Some(1)) => self.out.push('?'),
-                    (min, None) => self.out.push_str(&format!("{{{min},}}")),
-                    (min, Some(max)) if min == max => self.out.push_str(&format!("{{{min}}}")),
-                    (min, Some(max)) => self.out.push_str(&format!("{{{min},{max}}}")),
-                }
+                let size = match (q.min, q.max) {
+                    (0, None) => {
+                        self.out.push('*');
+                        sub.saturating_add(2)
+                    }
+                    (1, None) => {
+                        self.out.push('+');
+                        sub.saturating_add(1)
+                    }
+                    (0, Some(1)) => {
+                        self.out.push('?');
+                        sub.saturating_add(1)
+                    }
+                    (min, None) => {
+                        self.out.push_str(&format!("{{{min},}}"));
+                        min.saturating_mul(sub).saturating_add(1)
+                    }
+                    (min, Some(max)) => {
+                        if min == max {
+                            self.out.push_str(&format!("{{{min}}}"));
+                        } else {
+                            self.out.push_str(&format!("{{{min},{max}}}"));
+                        }
+                        max.saturating_mul(sub).saturating_add(max - min)
+                    }
+                };
+                return Ok(size.max(1));
             }
             Term::Character(c) => {
                 self.character(c)?;
@@ -208,6 +242,7 @@ impl Printer<'_> {
                 self.set(set)?;
             }
             Term::CapturingGroup(g) => {
+                // `(?:…)` is no node of its own.
                 // oxc accepts a name repeated inside its own group, which
                 // ECMAScript refuses; any repeat is refused here.
                 if let Some(name) = &g.name
@@ -215,19 +250,19 @@ impl Printer<'_> {
                 {
                     return Err(format!("the group name `{name}` is repeated"));
                 }
-                self.group(&g.body)?;
+                return self.group(&g.body);
             }
             Term::IgnoreGroup(g) => {
                 if g.modifiers.is_some() {
                     return Err("inline flags are not supported".into());
                 }
-                self.group(&g.body)?;
+                return self.group(&g.body);
             }
             Term::IndexedReference(_) | Term::NamedReference(_) => {
                 return Err("backreferences are not supported".into());
             }
         }
-        Ok(())
+        Ok(1)
     }
 
     /// A single character the pattern spells out.
@@ -326,6 +361,19 @@ impl Printer<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether `pattern` has a `\p{` or `\P{` escape: an unescaped backslash
+/// before it.
+fn property_escape(pattern: &str) -> bool {
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' && matches!(chars.next(), Some('p' | 'P')) && chars.clone().next() == Some('{')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// How deep groups nest in `pattern`, read outside classes and escapes.
@@ -489,6 +537,8 @@ mod tests {
         assert_eq!(ok("a{1000}"), "a{1000}");
         assert_eq!(ok("(?:a{2}){500}"), "(?:a{2}){500}");
         assert_eq!(ok("(?:a*){1000}"), "(?:a*){1000}");
+        // An escaped backslash before `p{` is no property escape.
+        assert_eq!(ok(r"\-\\p{x}"), r"-\\p\{x\}");
         assert_eq!(ok("(?:(?:a{1000}){0}){2}"), "(?:(?:a{1000}){0}){2}");
         assert_eq!(ok("(?:a{1000}){0}"), "(?:a{1000}){0}");
         assert_eq!(ok(r"[\\]"), r"\\");
@@ -551,6 +601,7 @@ mod tests {
             "(?<n>a|(?<n>b))",
             r"\p{Latin}",
             r"\-\P{Foo}",
+            &format!("(?:{}){{1000}}", "^".repeat(3356)),
             "(?:(?:a{1000}){2}){0}",
             r"[\cA]",
             r"\-(?<n>a|(?<n>b))",
