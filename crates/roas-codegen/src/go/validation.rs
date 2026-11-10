@@ -329,9 +329,9 @@ fn render(
                             "for _, k := range slices.Sorted(maps.Keys({e})) {{ {item}p := childPointer({p}, k); {body} }}"
                         )
                     } else {
-                        let binding = if reads { "item" } else { "_" };
+                        let binding = if reads { "i, item" } else { "i" };
                         format!(
-                            "for i, {binding} := range {e} {{ p := childPointer({p}, fmt.Sprint(i)); {body} }}"
+                            "for {binding} := range {e} {{ p := childPointer({p}, fmt.Sprint(i)); {body} }}"
                         )
                     });
                 }

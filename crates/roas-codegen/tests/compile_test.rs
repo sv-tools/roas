@@ -572,6 +572,7 @@ fn validated_description() -> serde_json::Value {
                 {"type": "array", "prefixItems": [{"type": "string"}], "items": {"type": "string", "maxLength": 1}},
                 {"type": "array", "items": {"type": "integer"}}
             ]},
+            "GatedRest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "string", "maxLength": 1}},
             "EachList": {"type": "array", "items": {"type": "string", "maxLength": 1}},
             "Rest": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": {"type": "number", "maximum": 5}},
             "Shorts": {"type": "array", "items": {"$ref": "#/components/schemas/Short"}},
@@ -801,7 +802,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -906,6 +907,8 @@ fn main() {
     assert_eq!(report::<Each>(r#"{"odd":[]}"#), vec![]);
     assert_eq!(report::<Each>(r#"{"odd":["x","y"]}"#), vec![u("/odd/0"), u("/odd/1")]);
     assert_eq!(report::<EachList>(r#"["a","bc"]"#), vec![v("/1")]);
+    // A gated property lands among the other members: not checked as one.
+    assert_eq!(report::<GatedRest>(r#"{"a":"xyz"}"#), vec![u("")]);
     // Beside `prefixItems`, `items` is not applied to the prefix.
     assert_eq!(report::<Pf>(r#"{"p":["abc"]}"#), vec![u("/p")]);
     assert_eq!(report::<Pu>(r#"["abc"]"#), vec![u("")]);

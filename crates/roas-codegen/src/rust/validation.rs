@@ -521,18 +521,25 @@ pub(crate) fn body(
                 let name = &view.fields.last().expect("the catch-all field").name;
                 present.push(format!("self.{name}.len()"));
                 gated.push(String::new());
-                if generated(ty) {
+                let each = checks::each(&TypeRef::Map(Box::new(ty.clone())), &def.constraints);
+                // A property compiled out with `cfg` lands among the other
+                // members, where `additionalProperties` does not apply to
+                // it: with any gated, their values are not checked.
+                let gates = view.fields.iter().any(|f| !f.cfg.is_empty());
+                if gates && (generated(ty) || each.is_some()) {
+                    out.push(format!(
+                        "if !self.{name}.is_empty() {{ report.unevaluated(pointer, \"additionalProperties: a property compiled out with cfg lands among the other members, so their values are not checked\"); }}"
+                    ));
+                } else if generated(ty) {
                     out.push(format!("self.{name}.validate_into(pointer, report);"));
                 }
+                let each = each.filter(|_| !gates);
                 let field = format!("self.{name}");
                 render(
                     &checks::extern_checks(ir, &TypeRef::Map(Box::new(ty.clone())), false)
                         .value
                         .into_iter()
-                        .chain(checks::each(
-                            &TypeRef::Map(Box::new(ty.clone())),
-                            &def.constraints,
-                        ))
+                        .chain(each)
                         .collect::<Vec<_>>(),
                     ValueKind::Map,
                     At {
