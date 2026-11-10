@@ -324,13 +324,8 @@ fn generated_rust_is_a_module_not_a_crate() {
 
 #[test]
 fn settings_this_release_cannot_honour_are_refused() {
-    for toml in ["validation = true\n", "template_dir = \"tpl\"\n"] {
-        let error = generate(&document(pet()), &rust_config(toml)).unwrap_err();
-        assert!(
-            matches!(error, GenerateError::Unsupported(_)),
-            "{toml}: {error}"
-        );
-    }
+    let error = generate(&document(pet()), &rust_config("validation = true\n")).unwrap_err();
+    assert!(matches!(error, GenerateError::Unsupported(_)), "{error}");
 }
 
 #[test]

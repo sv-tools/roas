@@ -106,8 +106,18 @@ pub enum GenerateError {
     Template(String),
     #[error("generated `{path}` is not valid syntax, which is a generator bug: {reason}")]
     InvalidOutput { path: String, reason: String },
+    /// The user's templates rendered `path` into something that does not
+    /// parse; [`render`](crate::render()) shows what they wrote.
+    #[error(
+        "the templates in `template_dir` rendered `{path}` into invalid syntax: {reason}; `render` (`--dump-rendered`) shows the text"
+    )]
+    TemplateOutput { path: String, reason: String },
     #[error("not supported yet: {0}")]
     Unsupported(String),
+    /// Nothing in the description can be generated at all, such as under
+    /// an unknown dialect; the diagnostics say why.
+    #[error("nothing can be generated: {}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
+    NothingToGenerate(Vec<Diagnostic>),
     /// A tool the target needs is missing or failed: generating Go needs
     /// `gofmt`, which is also its syntax check.
     #[error("toolchain: {0}")]
@@ -246,11 +256,26 @@ fn check_go(config: &Config) -> Result<(), GenerateError> {
     Ok(())
 }
 
-/// Generate from a validated document.
-pub fn generate(
-    document: &ValidatedSourceDocument,
-    config: &Config,
-) -> Result<Generation, GenerateError> {
+/// Output that does not parse is the generator's bug with its own
+/// templates, and most likely the user's with theirs.
+fn blame_templates(error: GenerateError, config: &Config) -> GenerateError {
+    match error {
+        GenerateError::InvalidOutput { path, reason } if config.template_dir.is_some() => {
+            GenerateError::TemplateOutput { path, reason }
+        }
+        other => other,
+    }
+}
+
+/// The lowered description and what was said on the way, before any
+/// backend runs. `ir` is `None` when nothing can be generated at all.
+struct Prepared {
+    ir: Option<crate::ir::Ir>,
+    diagnostics: Vec<Diagnostic>,
+    source: String,
+}
+
+fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepared, GenerateError> {
     if config.exact_numbers {
         if !cfg!(feature = "exact-numbers") {
             return Err(GenerateError::Config(
@@ -276,11 +301,6 @@ pub fn generate(
             "`validation = true` (generated validation)".into(),
         ));
     }
-    if config.template_dir.is_some() {
-        return Err(GenerateError::Unsupported(
-            "`template_dir` (user template overrides)".into(),
-        ));
-    }
     match config.target {
         Target::Rust => check_rust(config)?,
         Target::Go => check_go(config)?,
@@ -303,11 +323,10 @@ pub fn generate(
             pointer: "/jsonSchemaDialect".into(),
             message: format!("`jsonSchemaDialect: {dialect}` is not a dialect this generator understands, so no schema is generated; only the OAS dialect and Draft 2020-12 are"),
         });
-        return Ok(Generation {
-            target: config.target,
-            files: Vec::new(),
+        return Ok(Prepared {
+            ir: None,
             diagnostics,
-            dependencies: Dependencies::default(),
+            source: source_name(document.uri()),
         });
     }
 
@@ -360,10 +379,35 @@ pub fn generate(
     }
     diagnostics.append(&mut ir.diagnostics);
 
-    let source = source_name(document.uri());
+    Ok(Prepared {
+        ir: Some(ir),
+        diagnostics,
+        source: source_name(document.uri()),
+    })
+}
+
+/// Generate from a validated document.
+pub fn generate(
+    document: &ValidatedSourceDocument,
+    config: &Config,
+) -> Result<Generation, GenerateError> {
+    let Prepared {
+        ir,
+        mut diagnostics,
+        source,
+    } = prepare(document, config)?;
+    let Some(ir) = ir else {
+        return Ok(Generation {
+            target: config.target,
+            files: Vec::new(),
+            diagnostics,
+            dependencies: Dependencies::default(),
+        });
+    };
     let (files, dependencies, unformatted) = match config.target {
         Target::Rust => {
-            let output = rust::emit(&ir, config, &source)?;
+            let output =
+                rust::emit(&ir, config, &source).map_err(|e| blame_templates(e, config))?;
             diagnostics.extend(output.diagnostics);
             let dependencies = Dependencies {
                 rust: output.dependencies,
@@ -372,7 +416,7 @@ pub fn generate(
             (output.files, dependencies, output.unformatted)
         }
         Target::Go => {
-            let output = go::emit(&ir, config, &source)?;
+            let output = go::emit(&ir, config, &source).map_err(|e| blame_templates(e, config))?;
             diagnostics.extend(output.diagnostics);
             let dependencies = Dependencies {
                 rust: Vec::new(),
@@ -392,6 +436,50 @@ pub fn generate(
             ),
         });
     }
+    sort_diagnostics(&mut diagnostics);
+    Ok(Generation {
+        target: config.target,
+        files,
+        diagnostics,
+        dependencies,
+    })
+}
+
+/// The context the templates receive, and what the generator said while
+/// building it — a type an `Error` suppressed is missing from `context`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct TemplateContext {
+    /// The view model as JSON: the contract a template directory is
+    /// written against (see [`TEMPLATE_API`](crate::TEMPLATE_API)).
+    pub context: serde_json::Value,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// The exact context the templates receive. For writing templates; it is
+/// what `roas openapi generate --print-context` prints.
+pub fn template_context(
+    document: &ValidatedSourceDocument,
+    config: &Config,
+) -> Result<TemplateContext, GenerateError> {
+    let prepared = prepare(document, config)?;
+    let Some(ir) = prepared.ir else {
+        return Err(GenerateError::NothingToGenerate(prepared.diagnostics));
+    };
+    let (context, more) = match config.target {
+        Target::Rust => rust::context(&ir, config, &prepared.source)?,
+        Target::Go => go::context(&ir, config, &prepared.source)?,
+    };
+    let mut diagnostics = prepared.diagnostics;
+    diagnostics.extend(more);
+    sort_diagnostics(&mut diagnostics);
+    Ok(TemplateContext {
+        context,
+        diagnostics,
+    })
+}
+
+fn sort_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     diagnostics.sort_by(|a, b| {
         a.pointer
             .cmp(&b.pointer)
@@ -399,12 +487,23 @@ pub fn generate(
             .then(a.message.cmp(&b.message))
     });
     diagnostics.dedup();
-    Ok(Generation {
-        target: config.target,
-        files,
-        diagnostics,
-        dependencies,
-    })
+}
+
+/// The files as the templates render them, before the syntax check and
+/// the formatter: what to look at when a template produces something the
+/// formatter refuses.
+pub fn render(
+    document: &ValidatedSourceDocument,
+    config: &Config,
+) -> Result<Vec<GeneratedFile>, GenerateError> {
+    let prepared = prepare(document, config)?;
+    let Some(ir) = prepared.ir else {
+        return Err(GenerateError::NothingToGenerate(prepared.diagnostics));
+    };
+    match config.target {
+        Target::Rust => rust::render(&ir, config, &prepared.source),
+        Target::Go => go::render(&ir, config, &prepared.source),
+    }
 }
 
 #[cfg(test)]

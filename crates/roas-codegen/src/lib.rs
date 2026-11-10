@@ -42,6 +42,7 @@ mod lower;
 mod report;
 mod rust;
 mod source;
+mod templates;
 mod validate;
 mod write;
 mod yaml_value;
@@ -51,10 +52,14 @@ pub use config::{
     RustConfigFile, Substitution, Target, TypeConfig, TypeSpelling, rust_module_name,
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
-pub use generate::{Dependencies, GenerateError, GeneratedFile, Generation, generate};
+pub use generate::{
+    Dependencies, GenerateError, GeneratedFile, Generation, TemplateContext, generate, render,
+    template_context,
+};
 pub use go::GoDependency;
 pub use go::naming::go_file_name;
 pub use rust::RustDependency;
 pub use source::{Fidelity, Input, SourceDocument, SourceError, SourceVersion};
+pub use templates::{TEMPLATE_API, TEMPLATE_MANIFEST};
 pub use validate::{SourceValidationError, ValidatedSourceDocument, generation_options, validate};
 pub use write::{CheckReport, WriteError, WriteOptions, WriteReport, check, manifest_name, write};

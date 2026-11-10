@@ -2,5 +2,5 @@
 {% endfor %}{% endblock %}{% block derives %}#[derive({{ t.derives | join(", ") }})]
 {% endblock %}{% block attrs %}{% for a in t.attrs %}{{ a }}
 {% endfor %}{% endblock %}pub enum {{ t.name }} {
-{% block variants %}{% for v in t.variants %}{% include "builtin/rust/variant.rs.jinja" %}{% endfor %}{% endblock %}}
+{% block variants %}{% for v in t.variants %}{% include "rust/variant.rs.jinja" %}{% endfor %}{% endblock %}}
 {% block trailing %}{% endblock %}

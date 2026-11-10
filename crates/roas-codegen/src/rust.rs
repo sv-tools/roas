@@ -22,9 +22,33 @@ pub(crate) struct Output {
     pub unformatted: Option<String>,
 }
 
+pub(crate) fn context(
+    ir: &Ir,
+    config: &Config,
+    source: &str,
+) -> Result<(serde_json::Value, Vec<Diagnostic>), GenerateError> {
+    let built = view::build(ir, config, source)?;
+    let context =
+        serde_json::to_value(&built.file).map_err(|e| GenerateError::Template(e.to_string()))?;
+    Ok((context, built.diagnostics))
+}
+
+pub(crate) fn render(
+    ir: &Ir,
+    config: &Config,
+    source: &str,
+) -> Result<Vec<GeneratedFile>, GenerateError> {
+    let built = view::build(ir, config, source)?;
+    let rendered = render::render_module(&built.file, config.template_dir.as_deref())?;
+    Ok(vec![GeneratedFile::new(
+        format!("{}.rs", config.rust.module),
+        rendered,
+    )])
+}
+
 pub(crate) fn emit(ir: &Ir, config: &Config, source: &str) -> Result<Output, GenerateError> {
     let built = view::build(ir, config, source)?;
-    let rendered = render::render_module(&built.file)?;
+    let rendered = render::render_module(&built.file, config.template_dir.as_deref())?;
     let path = format!("{}.rs", config.rust.module);
     format::validate(&rendered, &path)?;
     let (contents, unformatted) = match format::format(&rendered, &config.rust.edition) {

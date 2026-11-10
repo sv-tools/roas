@@ -106,6 +106,24 @@ pub(crate) struct GenerateArgs {
     /// be generated.
     #[arg(long)]
     pub(crate) check: bool,
+
+    /// A directory of templates overriding the built-in ones by name; it
+    /// holds a `roas-templates.toml` declaring `template_api = 1`.
+    /// Overrides `template_dir` in the configuration.
+    #[arg(long)]
+    pub(crate) template_dir: Option<PathBuf>,
+
+    /// Print the JSON context the templates receive to stdout, and write
+    /// nothing: the reference for writing templates.
+    #[arg(long, conflicts_with_all = ["check", "dump_rendered"])]
+    pub(crate) print_context: bool,
+
+    /// Also write the files as the templates render them, before the syntax
+    /// check and the formatter, into this existing directory, which must be
+    /// apart from the output directory: what to look at when a template
+    /// produces code the formatter refuses.
+    #[arg(long, conflicts_with = "check")]
+    pub(crate) dump_rendered: Option<PathBuf>,
 }
 
 /// Read the description as bytes, so JSON can keep exact numbers, and give
@@ -440,6 +458,44 @@ fn hint(out: &Path, error: roas_codegen::WriteError) -> anyhow::Error {
     }
 }
 
+/// Whether two existing directories are one, by identity rather than by
+/// name: case and Unicode normalization make names an unreliable test.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        matches!(
+            (std::fs::metadata(a), std::fs::metadata(b)),
+            (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+    }
+}
+
+/// Whether the dump directory, which must exist, is the output directory,
+/// holds it, or sits inside it. Compared by identity along every existing
+/// ancestor, so no spelling of either path can hide the overlap.
+fn overlaps(dump: &Path, out: &Path) -> Result<bool> {
+    if !dump.is_dir() {
+        bail!(
+            "--dump-rendered {} must be an existing directory",
+            dump.display()
+        );
+    }
+    let resolved =
+        |path: &Path| resolve(path).ok_or_else(|| anyhow!("cannot resolve {}", path.display()));
+    let (dump, out) = (resolved(dump)?, resolved(out)?);
+    // The output directory, or the part of it that exists, inside the dump.
+    if out.ancestors().any(|a| same_dir(a, &dump)) {
+        return Ok(true);
+    }
+    // The dump inside the output directory, which then exists.
+    Ok(out.is_dir() && dump.ancestors().any(|a| same_dir(a, &out)))
+}
+
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // As the library reads it, so the recorded source is computed too.
     if args.out.as_os_str().is_empty() {
@@ -493,6 +549,10 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     let mut flags = ConfigFile::default();
     flags.target = args.target.map(Target::from);
     flags.allow_codegen_extensions = args.allow_codegen_extensions.then_some(true);
+    if let Some(dir) = &args.template_dir {
+        flags.template_dir =
+            Some(std::path::absolute(dir).with_context(|| format!("resolving {}", dir.display()))?);
+    }
     // The generated file is named after the label unless the configuration
     // names it, so descriptions sharing a directory do not collide.
     if file.rust.module.is_none() {
@@ -508,6 +568,60 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         other => other.into(),
     })?;
 
+    if args.print_context {
+        let context = roas_codegen::template_context(&document, &config)?;
+        println!("{}", serde_json::to_string_pretty(&context.context)?);
+        // What was suppressed is missing from the context: say so, and
+        // fail as a generation would.
+        let mut failing = 0;
+        for diagnostic in &context.diagnostics {
+            eprintln!("{diagnostic}");
+            if args.strict || diagnostic.severity == Severity::Error {
+                failing += 1;
+            }
+        }
+        if failing > 0 {
+            bail!(
+                "{}: {failing} {}{}; the context leaves out what could not be generated",
+                source.display(),
+                if args.strict { "diagnostic" } else { "error" },
+                if failing == 1 { "" } else { "s" }
+            );
+        }
+        return Ok(());
+    }
+    if let Some(dir) = &args.dump_rendered {
+        // The dump is raw text with no ownership rules: it must not land
+        // where generated files and their manifests live.
+        if overlaps(dir, &args.out)? {
+            bail!(
+                "--dump-rendered {} overlaps the output directory {}; dump somewhere else",
+                dir.display(),
+                args.out.display()
+            );
+        }
+        for file in roas_codegen::render(&document, &config)? {
+            let path = dir.join(&file.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            // Replaced, never written through: a link left at that name
+            // (to a generated file, say) is removed rather than followed.
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("replacing {}", path.display())),
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, file.contents.as_bytes()))
+                .with_context(|| format!("writing {}", path.display()))?;
+            eprintln!("rendered {}", path.display());
+        }
+    }
     let generation = generate(&document, &config)?;
     let mut errors = 0;
     let mut warnings = 0;
@@ -715,6 +829,9 @@ mod tests {
             force: false,
             replace_source: false,
             check: false,
+            template_dir: None,
+            print_context: false,
+            dump_rendered: None,
         }
     }
 
@@ -926,6 +1043,108 @@ mod tests {
         // The Rust target for the same description shares the directory.
         run_generate(args(&spec, &out)).unwrap();
         assert!(out.join("pet_store_linux.rs").exists());
+    }
+
+    #[test]
+    fn templates_context_and_rendered_text_are_reachable() {
+        if !have_rustfmt() {
+            return;
+        }
+        let dir = TempDir::new("templates");
+        let spec = dir.0.join("api.json");
+        std::fs::write(&spec, PET).unwrap();
+        let templates = dir.0.join("tpl");
+        std::fs::create_dir_all(templates.join("rust")).unwrap();
+        std::fs::write(templates.join("roas-templates.toml"), "template_api = 1\n").unwrap();
+        std::fs::write(
+            templates.join("rust/module.rs.jinja"),
+            "{% extends \"builtin/rust/module.rs.jinja\" %}{% block footer %}// custom footer\n{% endblock %}",
+        )
+        .unwrap();
+        // --print-context writes nothing.
+        let out = dir.0.join("out");
+        let mut print = args(&spec, &out);
+        print.print_context = true;
+        run_generate(print).unwrap();
+        assert!(!out.exists());
+        // A suppressed type fails it, as a generation would.
+        let bad = dir.0.join("bad.json");
+        std::fs::write(
+            &bad,
+            r##"{"openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+                "components": {"schemas": {"Bad": {"not": {"type": "string"}}}}}"##,
+        )
+        .unwrap();
+        let mut print = args(&bad, &out);
+        print.print_context = true;
+        let error = run_generate(print).unwrap_err().to_string();
+        assert!(error.contains("leaves out"), "{error}");
+        assert!(!out.exists());
+        // --template-dir applies, and --dump-rendered keeps the raw text.
+        let mut custom = args(&spec, &out);
+        custom.template_dir = Some(templates.clone());
+        std::fs::create_dir_all(dir.0.join("rendered")).unwrap();
+        custom.dump_rendered = Some(dir.0.join("rendered"));
+        run_generate(custom).unwrap();
+        let code = std::fs::read_to_string(out.join("api.rs")).unwrap();
+        assert!(code.ends_with("// custom footer\n"), "{code}");
+        let raw = std::fs::read_to_string(dir.0.join("rendered/api.rs")).unwrap();
+        assert!(raw.contains("// custom footer"), "{raw}");
+        // A dump into the output directory, or around it, is refused before
+        // anything is written there.
+        std::fs::write(out.join("api.rs"), "hand written").unwrap();
+        std::fs::create_dir_all(out.join("raw")).unwrap();
+        for dump in [out.clone(), out.join("raw"), dir.0.clone()] {
+            let mut overlapping = args(&spec, &out);
+            overlapping.dump_rendered = Some(dump);
+            let error = run_generate(overlapping).unwrap_err().to_string();
+            assert!(error.contains("overlaps the output directory"), "{error}");
+        }
+        // Nor through a `..` past a directory that does not exist yet.
+        let mut sneaky = args(&spec, &out);
+        std::fs::create_dir_all(dir.0.join("missing")).unwrap();
+        sneaky.dump_rendered = Some(dir.0.join("missing/../out"));
+        let error = run_generate(sneaky).unwrap_err().to_string();
+        assert!(error.contains("overlaps the output directory"), "{error}");
+        // Nor by spelling the output directory in another case.
+        let mut cased = args(&spec, &out);
+        cased.dump_rendered = Some(dir.0.join("OUT/raw"));
+        let error = run_generate(cased).unwrap_err().to_string();
+        // A case-sensitive disk has no `OUT`; a case-insensitive one finds
+        // the output directory under that name.
+        assert!(
+            error.contains("overlaps the output directory") || error.contains("existing directory"),
+            "{error}"
+        );
+        // A dump directory that does not exist is refused, never created.
+        let mut fresh = args(&spec, &out);
+        fresh.dump_rendered = Some(dir.0.join("nowhere"));
+        let error = run_generate(fresh).unwrap_err().to_string();
+        assert!(error.contains("existing directory"), "{error}");
+        assert!(!dir.0.join("nowhere").exists());
+        // Every refusal came before anything was written.
+        assert_eq!(
+            std::fs::read_to_string(out.join("api.rs")).unwrap(),
+            "hand written"
+        );
+        // A link left in the dump directory is replaced, not followed.
+        #[cfg(unix)]
+        {
+            let raw = dir.0.join("raw");
+            std::fs::create_dir_all(&raw).unwrap();
+            let sentinel = dir.0.join("sentinel.rs");
+            std::fs::write(&sentinel, "keep me").unwrap();
+            std::os::unix::fs::symlink(&sentinel, raw.join("api.rs")).unwrap();
+            let mut linked = args(&spec, &out);
+            linked.dump_rendered = Some(raw.clone());
+            run_generate(linked).unwrap();
+            assert!(
+                !std::fs::symlink_metadata(raw.join("api.rs"))
+                    .unwrap()
+                    .is_symlink()
+            );
+            assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep me");
+        }
     }
 
     #[test]

@@ -74,6 +74,8 @@ pub(crate) struct TypeView {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct FileView {
+    /// The contract version this context follows.
+    pub template_api: u32,
     pub source: String,
     pub header: String,
     pub imports: Vec<String>,
@@ -205,6 +207,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     let imports = vec!["use serde::{Deserialize, Serialize};".to_owned()];
     Ok(Built {
         file: FileView {
+            template_api: crate::templates::TEMPLATE_API,
             source: source.to_owned(),
             header: config.header.clone().unwrap_or_default(),
             imports,

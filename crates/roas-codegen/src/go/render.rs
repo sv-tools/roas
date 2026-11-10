@@ -1,15 +1,12 @@
-//! Rendering through the embedded templates, shared with Rust.
+//! Rendering the Go file through the templates.
 
 use crate::generate::GenerateError;
 use crate::go::view::FileView;
-use minijinja::Value;
+use std::path::Path;
 
-pub(crate) fn render_file(file: &FileView) -> Result<String, GenerateError> {
-    let env = crate::rust::render::environment()?;
-    let template = env
-        .get_template("go/file.go.jinja")
-        .map_err(|e| GenerateError::Template(e.to_string()))?;
-    template
-        .render(Value::from_serialize(file))
-        .map_err(|e| GenerateError::Template(format!("{e:#}")))
+pub(crate) fn render_file(
+    file: &FileView,
+    template_dir: Option<&Path>,
+) -> Result<String, GenerateError> {
+    crate::templates::render("go/file.go.jinja", file, template_dir, "\n")
 }
