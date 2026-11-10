@@ -859,6 +859,33 @@ fn a_dependency_a_deeper_entry_ran_meanwhile_is_skipped() {
 }
 
 #[test]
+fn a_calling_steps_timeout_covers_the_dependencies_of_what_it_calls() {
+    use roas_arazzo_executor::{HttpResponse, Progress, Run};
+    let description = description(
+        json!([
+            { "workflowId": "w", "steps": [
+                { "stepId": "call", "workflowId": "t", "timeout": 30 }] },
+            { "workflowId": "t", "dependsOn": ["slow"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] },
+            { "workflowId": "slow", "steps": [{ "stepId": "s", "operationId": "listPets" }] }
+        ]),
+        None,
+    );
+    let options = options().workflow("w");
+    let mut run = Run::start(&description, &options).unwrap();
+    for wait in [60, 0] {
+        assert!(matches!(run.advance().unwrap(), Progress::Send(_)));
+        // `slow` answers after the calling step's whole budget.
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+        run.supply(HttpResponse::json(200, &json!([]))).unwrap();
+    }
+    let Progress::Done(report) = run.advance().unwrap() else {
+        panic!("done")
+    };
+    assert_eq!(report.outcome, Outcome::Failed, "{report:?}");
+}
+
+#[test]
 fn entering_a_workflow_that_depends_on_one_still_running_is_a_cycle() {
     // `w` calls `t`, and `t` depends on `w`, which cannot finish first.
     let description = description(
@@ -885,4 +912,28 @@ fn entering_a_workflow_that_depends_on_one_still_running_is_a_cycle() {
         .execute(&mut Fake::new().reply(200, &json!([])))
         .unwrap_err();
     assert_eq!(failure.error.to_string(), error.to_string());
+}
+
+#[test]
+fn a_dependency_on_a_workflow_running_as_an_ordinary_call_is_a_cycle() {
+    // `w` calls `a`, `a` calls `b`, and `b` depends on `a`: the `a` that is
+    // running waits for `b`, so a second `a` is not started.
+    let description = description(
+        json!([
+            { "workflowId": "w", "steps": [{ "stepId": "call", "workflowId": "a" }] },
+            { "workflowId": "a", "steps": [
+                { "stepId": "first", "operationId": "listPets" },
+                { "stepId": "call", "workflowId": "b" }] },
+            { "workflowId": "b", "dependsOn": ["a"],
+                "steps": [{ "stepId": "s", "operationId": "listPets" }] }
+        ]),
+        None,
+    );
+    let mut client = (0..3).fold(Fake::new(), |client, _| client.reply(200, &json!([])));
+    let error = execute(&description, &options().workflow("w"), &mut client).unwrap_err();
+    assert!(
+        matches!(&error, ExecutionError::Circular(id) if id == "a"),
+        "{error}"
+    );
+    assert_eq!(client.sent().len(), 1);
 }

@@ -618,6 +618,50 @@ mod enabled {
         assert_eq!(client.sent().len(), 2);
     }
 
+    #[test]
+    fn a_nested_entrys_dependency_is_checked_against_the_run_inputs_when_it_starts() {
+        // `root` sends, then calls `target`, whose dependency wants `dep`,
+        // which the run's inputs lack: it stops there, on both paths.
+        let mut raw = value(json!({}));
+        raw["workflows"][0]["steps"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"stepId":"call","workflowId":"target"}));
+        let workflows = raw["workflows"].as_array_mut().unwrap();
+        workflows.push(json!({"workflowId":"target","dependsOn":["dependency"],
+            "steps":[{"stepId":"t","operationId":"check"}]}));
+        workflows.push(
+            json!({"workflowId":"dependency","inputs":{"required":["dep"]},
+            "steps":[{"stepId":"d","operationId":"check"}]}),
+        );
+        let description: Description = serde_json::from_value(raw).unwrap();
+        let options = checked().inputs(json!({"other":1}));
+        let mut lazy = fake();
+        let a = execute(&description, &options, &mut lazy).unwrap_err();
+        assert!(
+            matches!(&a, ExecutionError::Input(InputError::Invalid { workflow, .. })
+                if workflow == "dependency"),
+            "{a}"
+        );
+        assert_eq!(lazy.sent().len(), 1);
+        let mut prepared = fake();
+        let b = prepare(&description, &options)
+            .unwrap()
+            .execute(&mut prepared)
+            .unwrap_err();
+        assert_eq!(b.error.to_string(), a.to_string());
+        assert_eq!(prepared.sent().len(), 1);
+        // With `dep`, the dependency, then the target, run.
+        let options = checked().inputs(json!({"dep":1}));
+        let mut client = fake();
+        assert!(
+            execute(&description, &options, &mut client)
+                .unwrap()
+                .is_success()
+        );
+        assert_eq!(client.sent().len(), 3);
+    }
+
     fn child_document(argument: Value) -> Description {
         let mut raw = value(json!({}));
         raw["workflows"][0]["steps"].as_array_mut().unwrap().push(json!({"stepId":"call","workflowId":"child","parameters":[{"name":"count","value":argument}],

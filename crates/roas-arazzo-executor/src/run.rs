@@ -318,6 +318,9 @@ struct Deferred<'d> {
     workflow: &'d Workflow,
     inputs: Value,
     caller: (String, Then),
+    /// When the entry was asked for: the calling step's `timeout` covers
+    /// the dependencies too.
+    started: Instant,
 }
 
 /// One workflow in progress.
@@ -915,9 +918,9 @@ impl<'d> Run<'d> {
     /// Enter a call, `goto` or `retry` target after the workflows it
     /// depends on. Those run as the root's dependencies do: each once in a
     /// run, with the run's inputs, so one that already finished as a
-    /// dependency is not run again. One still running further up — the
-    /// target depends on a workflow that is, directly or not, entering it
-    /// — can never finish first, which is a `dependsOn` cycle.
+    /// dependency is not run again. One still running further up, however
+    /// it was entered — it is, directly or not, entering the target — can
+    /// never finish first, which is a `dependsOn` cycle.
     fn enter_after_dependencies(
         &mut self,
         doc: Doc,
@@ -936,11 +939,10 @@ impl<'d> Run<'d> {
         if remaining.is_empty() {
             return self.enter(doc, workflow, inputs, Some(caller));
         }
+        // However it was entered, a running workflow waits for this entry.
         if let Some((_, running)) = remaining.iter().find(|(doc, dependency)| {
             self.frames.iter().any(|frame| {
-                frame.doc == *doc
-                    && frame.workflow.workflow_id == dependency.workflow_id
-                    && is_dependency(frame)
+                frame.doc == *doc && frame.workflow.workflow_id == dependency.workflow_id
             })
         }) {
             return Err(locate(
@@ -955,6 +957,7 @@ impl<'d> Run<'d> {
             workflow,
             inputs,
             caller,
+            started: Instant::now(),
         });
         self.next_dependency()
     }
@@ -974,18 +977,24 @@ impl<'d> Run<'d> {
                     workflow,
                     inputs,
                     caller,
+                    started,
                     ..
                 } = self.deferred.pop().expect("the entry just looked at");
-                return self.enter(doc, workflow, inputs, Some(caller));
+                self.enter(doc, workflow, inputs, Some(caller))?;
+                self.frames
+                    .last_mut()
+                    .expect("the entry just entered")
+                    .started = started;
+                return Ok(());
             }
             let (doc, dependency) = deferred.remaining.remove(0);
-            let step_id = deferred.caller.0.clone();
             if self
                 .dependencies_done
                 .contains(&(doc, dependency.workflow_id.clone()))
             {
                 continue;
             }
+            let step_id = deferred.caller.0.clone();
             let inputs = Value::Object(self.root_inputs.clone());
             return self.enter(doc, dependency, inputs, Some((step_id, Then::Dependency)));
         }
