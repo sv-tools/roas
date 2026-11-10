@@ -122,6 +122,8 @@ mod double_option {
 
 {% endif %}{% if support.object_only %}/// Hands a closed struct's derived code the same deserializer, asked for a
 /// JSON object only: serde's derive would also read a struct from an array.
+/// Unused when every closed struct is compiled out.
+#[allow(dead_code)]
 struct ObjectOnly<D>(D);
 
 impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for ObjectOnly<D> {

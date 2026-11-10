@@ -362,7 +362,9 @@ fn pattern_properties(c: &Constraints) -> Option<Check> {
 /// apply whatever the value. A use site holds that `null` outside the type
 /// (`Option`, a nil pointer), so the type is asked for them on its behalf.
 pub(crate) fn null_checks(def: &crate::ir::TypeDef) -> Vec<Check> {
-    if !def.nullable {
+    // A null-only type holds its null outside it too, as a nil.
+    let null_only = matches!(def.kind, TypeKind::Newtype(TypeRef::Null));
+    if !def.nullable && !null_only {
         return Vec::new();
     }
     match &def.kind {

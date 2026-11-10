@@ -547,7 +547,7 @@ impl<'a> Lowerer<'a> {
                         Kind::String {
                             enum_values: Some(_),
                             ..
-                        }
+                        } | Kind::Never
                     )
                     || self.asserts_inside(inner, seen)
             }

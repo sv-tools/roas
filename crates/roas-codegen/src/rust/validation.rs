@@ -363,17 +363,20 @@ pub(crate) fn body(
     match &def.kind {
         TypeKind::Struct(s) => {
             let mut present = Vec::new();
+            let mut gated: Vec<String> = Vec::new();
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
                 let mut list = checks::value_checks(&field.ty, &field.constraints);
                 let ext = checks::extern_checks(ir, &field.ty, false);
                 list.extend(ext.value);
                 let recurse = generated(&field.ty);
+                let gates = field_view.cfg.join(" ");
                 present.push(if field.required {
                     "1".to_owned()
                 } else {
                     format!("usize::from(self.{name}.is_some())")
                 });
+                gated.push(gates.clone());
                 // What applies to a present null as much as to a value.
                 let mut always = Vec::new();
                 render(
@@ -437,11 +440,17 @@ pub(crate) fn body(
                 if recurse {
                     block.push(format!("self.{name}.validate_into(&p, report);"));
                 }
-                out.push(format!("{{ {} }}", block.join(" ")));
+                // A field compiled out is not read either.
+                out.push(
+                    format!("{gates} {{ {} }}", block.join(" "))
+                        .trim_start()
+                        .to_owned(),
+                );
             }
             if let Additional::CatchAll(ty) = &s.additional {
                 let name = &view.fields.last().expect("the catch-all field").name;
                 present.push(format!("self.{name}.len()"));
+                gated.push(String::new());
                 if generated(ty) {
                     out.push(format!("self.{name}.validate_into(pointer, report);"));
                 }
@@ -461,7 +470,18 @@ pub(crate) fn body(
             let counted = list
                 .iter()
                 .any(|c| matches!(c, Check::MinProperties(_) | Check::MaxProperties(_)));
-            if counted {
+            if counted && gated.iter().any(|g| !g.is_empty()) {
+                // A gate cannot sit inside a sum: counted statement by
+                // statement.
+                out.push("#[allow(unused_mut)] let mut members: usize = 0;".to_owned());
+                for (count, gates) in present.iter().zip(&gated) {
+                    out.push(
+                        format!("{gates} {{ members += {count}; }}")
+                            .trim_start()
+                            .to_owned(),
+                    );
+                }
+            } else if counted {
                 out.push(format!(
                     "let members: usize = {};",
                     if present.is_empty() {

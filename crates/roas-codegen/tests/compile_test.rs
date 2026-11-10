@@ -663,6 +663,8 @@ fn validated_description() -> serde_json::Value {
             "Currency": {"type": "string", "enum": ["USD", "EUR"]},
             "HoldsCurrency": {"type": "object", "properties": {"c": {"$ref": "#/components/schemas/Currency"}}},
             "Point": {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}}},
+            "Sub2": {"type": "object", "properties": {"x": false}},
+            "HoldsSub2": {"type": "object", "properties": {"s2": {"$ref": "#/components/schemas/Sub2"}}},
             "Mixed": {"type": ["string", "integer"], "enum": ["a", 1]},
             "Strict": {"type": "object", "required": ["a"]},
             "HoldsMixed": {"type": "object", "properties": {
@@ -670,6 +672,12 @@ fn validated_description() -> serde_json::Value {
                 "s": {"$ref": "#/components/schemas/Strict"}
             }},
             "HoldsPoint": {"type": "object", "properties": {"s": {"$ref": "#/components/schemas/Point"}}},
+            "Gated2": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
+            "GatedField": {"type": "object", "minProperties": 1, "properties": {
+                "a": {"type": "string", "minLength": 1}, "b": {"type": "string"}
+            }},
+            "NullOnlyN": {"type": "null", "if": {}, "then": false},
+            "HoldsNullOnly": {"type": "object", "properties": {"n": {"$ref": "#/components/schemas/NullOnlyN"}}},
             "Gated": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string", "maxLength": 1}}},
             "NullType": {"type": ["null"], "if": {}, "then": false},
             "WrapShort": {"type": "object", "required": ["s"], "properties": {"s": {"$ref": "#/components/schemas/ShortOff"}}},
@@ -712,13 +720,14 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "AliasSub": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Currency": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Point": {"rust": {"name": "serde_json::Value"}, "go": {"name": "any"}},
+            "Sub2": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
             "Mixed": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}},
             "Strict": {"rust": {"name": "serde_json::Value"}, "go": {"name": "jsontext.Value"}}
         }
@@ -961,6 +970,11 @@ fn main() {
     assert_eq!(report::<NullType>("null"), vec![u("")]);
     // A substituted object is not checked against what its members declare.
     assert_eq!(report::<HoldsPoint>(r#"{"s":{"n":-1}}"#), vec![u("/s")]);
+    assert_eq!(report::<HoldsSub2>(r#"{"s2":{"x":1}}"#), vec![u("/s2")]);
+    // A field compiled out is neither read nor counted.
+    assert_eq!(report::<GatedField>(r#"{"b":"x"}"#), vec![]);
+    // A null-only reference keeps what it says.
+    assert_eq!(report::<HoldsNullOnly>(r#"{"n":null}"#), vec![u("/n")]);
     assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
     // An opted-out type nested in a branch proves no match.
     assert_eq!(report::<PickWrap>(r#"{"s":"ab"}"#), vec![u("")]);
@@ -1203,6 +1217,9 @@ func main() {
 	check(`{"c":"BAD"}`, report[api.HoldsCurrency](`{"c":"BAD"}`), u("/c"))
 	check(`null`, report[api.NullType](`null`), u(""))
 	check(`{"s":"ab"}`, report[api.PickWrap](`{"s":"ab"}`), u(""))
+	check(`{"b":"x"}`, report[api.GatedField](`{"b":"x"}`))
+	check(`{"n":null}`, report[api.HoldsNullOnly](`{"n":null}`), u("/n"))
+	check(`{"s2":{"x":1}}`, report[api.HoldsSub2](`{"s2":{"x":1}}`), u("/s2"))
 	check(`{"m":"zzz","s":{"b":1}}`, report[api.HoldsMixed](`{"m":"zzz","s":{"b":1}}`), u("/m"), u("/s"), u("/s"))
 	check(`{"v":"long"}`, report[api.HoldsAliasSub](`{"v":"long"}`), u("/v"))
 	check(`{"v":null}`, report[api.HoldsNIfAlias](`{"v":null}`), u("/v"))

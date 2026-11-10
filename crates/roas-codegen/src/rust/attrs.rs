@@ -53,6 +53,62 @@ fn parse(attr: &str, at: &str) -> Result<syn::Attribute, GenerateError> {
     }
 }
 
+/// The attributes among `attrs` that gate compilation — `cfg`, or a
+/// `cfg_attr` that applies only gates — which every impl generated beside
+/// the item must repeat. A `cfg_attr` mixing a gate with other attributes
+/// cannot be repeated on an impl, so it is refused.
+pub(crate) fn cfg_gates(attrs: &[String], at: &str) -> Result<Vec<String>, GenerateError> {
+    fn gates(meta: &syn::Meta) -> Result<Option<bool>, syn::Error> {
+        if meta.path().is_ident("cfg") {
+            return Ok(Some(true));
+        }
+        if !meta.path().is_ident("cfg_attr") {
+            return Ok(Some(false));
+        }
+        let list = meta.require_list()?;
+        let args = list.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        )?;
+        let mut kinds = Vec::new();
+        for nested in args.iter().skip(1) {
+            match gates(nested)? {
+                Some(kind) => kinds.push(kind),
+                None => return Ok(None),
+            }
+        }
+        Ok(if kinds.iter().all(|k| *k) {
+            Some(true)
+        } else if kinds.iter().all(|k| !*k) {
+            Some(false)
+        } else {
+            None
+        })
+    }
+    let mut out = Vec::new();
+    for attr in attrs {
+        let parsed = parse(attr, at)?;
+        match gates(&parsed.meta) {
+            Ok(Some(true)) => out.push(attr.clone()),
+            Ok(Some(false)) => {}
+            Ok(None) => {
+                return Err(GenerateError::InvalidAttribute {
+                    at: at.to_owned(),
+                    attr: attr.clone(),
+                    reason: "a `cfg_attr` mixing `cfg` with other attributes cannot be repeated on the generated impls; give the `cfg` an attribute of its own".to_owned(),
+                });
+            }
+            Err(error) => {
+                return Err(GenerateError::InvalidAttribute {
+                    at: at.to_owned(),
+                    attr: attr.clone(),
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn serde_keys(attr: &syn::Attribute) -> Vec<String> {
     let mut keys = Vec::new();
     if attr.path().is_ident("serde") {

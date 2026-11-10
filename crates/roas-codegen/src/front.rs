@@ -402,7 +402,13 @@ impl Translator<'_> {
                     "default" => raw[key].is_null(),
                     _ => false,
                 };
-                !rewritten && !has(key)
+                // An annotation asserts nothing: dropped, it changes no
+                // instance's validity.
+                let annotation = key.starts_with("x-")
+                    || (COMMON_KEYWORDS.contains(&key) && key != "type")
+                    || SILENT_KEYWORDS.contains(&key)
+                    || matches!(key, "default" | "examples" | "$id" | "$anchor" | "$defs");
+                !rewritten && !annotation && !has(key)
             })
             .cloned()
             .collect()

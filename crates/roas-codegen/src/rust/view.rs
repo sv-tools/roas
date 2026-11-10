@@ -7,7 +7,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::generate::GenerateError;
 use crate::ir::{Additional, Ir, TypeDef, TypeKind, TypeRef};
-use crate::rust::attrs::{check_container_attrs, check_field_attrs};
+use crate::rust::attrs::{cfg_gates, check_container_attrs, check_field_attrs};
 use crate::rust::naming::{Allocator, legal, pascal, snake};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -33,6 +33,10 @@ pub(crate) struct FieldView {
     pub ty: String,
     pub doc: Vec<String>,
     pub attrs: Vec<String>,
+    /// The field's conditional-compilation gates, which the validation
+    /// reading it repeats.
+    #[serde(skip)]
+    pub cfg: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -537,11 +541,7 @@ impl Builder<'_> {
         check_container_attrs(&user_attrs, &raw_name)?;
         attrs.extend(user_attrs);
         attrs.extend(self.codegen_attrs(&def.extensions, &def.id, false));
-        let cfg: Vec<String> = attrs
-            .iter()
-            .filter(|a| a.trim_start().starts_with("#[cfg("))
-            .cloned()
-            .collect();
+        let cfg = cfg_gates(&attrs, &raw_name)?;
         let mut derives: Vec<String> = ["Debug", "Clone", "PartialEq"]
             .iter()
             .map(|s| (*s).to_owned())
@@ -659,7 +659,9 @@ impl Builder<'_> {
                     let mut at = def.id.clone();
                     at.pointer = format!("{}/properties/{}", def.id.pointer, field.raw_name);
                     attrs.extend(self.codegen_attrs(&field.extensions, &at, true));
+                    let cfg = cfg_gates(&attrs, &format!("{}.{}", view.raw_name, field.raw_name))?;
                     view.fields.push(FieldView {
+                        cfg,
                         name,
                         raw_name: field.raw_name.clone(),
                         ty,
@@ -692,6 +694,7 @@ impl Builder<'_> {
                             ty: format!("std::collections::BTreeMap<String, {inner}>"),
                             doc: vec!["Members not named above.".to_owned()],
                             attrs: vec!["#[serde(flatten)]".to_owned()],
+                            cfg: Vec::new(),
                         });
                     }
                 }
