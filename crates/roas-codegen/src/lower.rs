@@ -1436,10 +1436,13 @@ impl<'a> Lowerer<'a> {
                 );
             }
         }
+        // Said only where validation hears it: a new warning would fail a
+        // `--strict` generation that passed before.
         if let Kind::Number {
             width: Some(FloatWidth::Float),
             ..
         } = &schema.kind
+            && self.config.validation
         {
             let within = |n: &Option<serde_json::Number>| {
                 n.as_ref()

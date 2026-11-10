@@ -241,6 +241,14 @@ fn wide_number(raw: &str, int_limit: f64, float32: bool) -> bool {
         let b = bytes[i];
         if in_string {
             match b {
+                // A lone surrogate escape is raw JSON serde_json captures
+                // but will not read as a string.
+                b'\\' if bytes.get(i + 1) == Some(&b'u')
+                    && bytes.get(i + 2).is_some_and(|c| c.eq_ignore_ascii_case(&b'd'))
+                    && bytes.get(i + 3).is_some_and(|c| matches!(c, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')) =>
+                {
+                    return true;
+                }
                 b'\\' => i += 1,
                 b'"' => in_string = false,
                 _ => {}

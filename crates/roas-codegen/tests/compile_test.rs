@@ -1068,6 +1068,8 @@ fn main() {
     // Rust cannot read an integer inside a flattened catch-all: undecided,
     // not a miss.
     assert_eq!(report::<IntCatchOrStr>(r#"{"x":1}"#), vec![u("")]);
+    // A surrogate escape serde_json will not read as a string: undecided.
+    assert_eq!(report::<IntOrStr>(r#""\ud800""#), vec![u("")]);
     assert_eq!(report::<ZooOrStr>(r#"{"a":{"kind":"ZooCat"}}"#), vec![u("")]);
     assert_eq!(report::<InlineItems>("[]"), vec![]);
     assert_eq!(report::<InlineItems>(r#"["a"]"#), vec![u("")]);
