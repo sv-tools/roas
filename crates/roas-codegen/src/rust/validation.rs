@@ -6,6 +6,17 @@ use crate::front::{FloatWidth, IntWidth};
 use crate::ir::{Additional, Branch, TypeDef, TypeKind, TypeRef};
 use crate::rust::view::TypeView;
 
+thread_local! {
+    /// Whether a `pattern` check was rendered since the last
+    /// [`take_uses_regex`]: the generated code then needs `regex`.
+    static USES_REGEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a `pattern` check was rendered since the last call; resets it.
+pub(crate) fn take_uses_regex() -> bool {
+    USES_REGEX.with(|flag| flag.replace(false))
+}
+
 /// Where a check reads and reports: the value (a `&T`, parenthesised),
 /// the pointer (a `&str`) and the report (a `&mut ValidationReport`).
 #[derive(Clone, Copy)]
@@ -52,6 +63,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                 "{{ let n = {v}.chars().count(); if (n as u64) > {n} {{ {r}.violation({p}, format!(\"is {{n}} characters long, longer than maxLength {n}\")); }} }}"
             )),
             Check::Pattern { regex, source } => {
+                USES_REGEX.with(|flag| flag.set(true));
                 // An argument needs no parentheses, and rustc says so.
                 let arg = v.strip_prefix('(').and_then(|v| v.strip_suffix(')')).unwrap_or(v);
                 // Compiled once, where it is used. A pattern past what the

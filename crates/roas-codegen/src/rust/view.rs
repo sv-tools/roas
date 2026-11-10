@@ -198,6 +198,8 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
     };
     select_check(ir, config)?;
     builder.allocate_type_names();
+    // Reset: only what this build renders counts.
+    super::validation::take_uses_regex();
     let mut types = Vec::new();
     for id in &ir.order {
         if ir.suppressed.contains(id) {
@@ -208,6 +210,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
             types.push(view);
         }
     }
+    let uses_regex = super::validation::take_uses_regex();
     let mut dependencies = vec![
         RustDependency {
             name: "serde".into(),
@@ -225,11 +228,7 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         },
     ];
     // A checked `pattern` is matched with `regex`.
-    if types
-        .iter()
-        .flat_map(|t| t.validate.iter().flatten())
-        .any(|line| line.contains("regex::Regex"))
-    {
+    if uses_regex {
         dependencies.push(RustDependency {
             name: "regex".into(),
             features: Vec::new(),
