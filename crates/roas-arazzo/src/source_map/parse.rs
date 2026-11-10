@@ -1220,8 +1220,7 @@ workflows:
     /// where the object can be edited, not at the anchor.
     #[test]
     fn a_key_an_alias_brings_in_is_located_at_the_alias() {
-        let text =
-            "a: &k t\nx-m: &m {u: 1}\no: &o {v: 1}\nobj:\n  *k : 1\n  <<: *m\n  w: 2\nr: *o\n";
+        let text = "a: &k t\nx-m: &m {u: 1}\no: &o {v: 1}\nobj:\n  *k : 1\n  <<: *m\n  w: 2\nr: *o\ns: {<<: [*m]}\n";
         let map = SourceMap::parse(text).unwrap();
         let at = |path: &str| {
             let range = map.locate_key(path).unwrap();
@@ -1231,6 +1230,8 @@ workflows:
         assert_eq!(at("#.obj.t"), (5, 3, 5));
         assert_eq!(at("#.obj.u"), (6, 7, 9));
         assert_eq!(at("#.r.v"), (8, 4, 6));
+        // A member of a sequence merge, at its own `*name`.
+        assert_eq!(at("#.s.u"), (9, 10, 12));
         // A name written out, and the anchors' own, where they are.
         assert_eq!(at("#.obj.w"), (7, 3, 4));
         assert_eq!(at("#.x-m.u"), (2, 10, 11));
