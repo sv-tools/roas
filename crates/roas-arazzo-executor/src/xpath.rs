@@ -23,7 +23,8 @@ use oxixml_xpath::{
     CompiledXPath, EvaluationLimits, StaticContext, XPath, XPathError, XPathVersion, XpathItem,
 };
 use serde_json::Value;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 const KIND: &str = "XPath";
@@ -33,15 +34,22 @@ const KIND: &str = "XPath";
 const ENGINE_STACK: usize = 16 * 1024 * 1024;
 
 /// How long one evaluation may run, parsing included. The engine checks
-/// it between steps and calls.
-const DEADLINE: Duration = Duration::from_secs(2);
+/// it between steps and calls. What an evaluation allocates is bounded
+/// only by how long it runs, so this is kept short.
+const DEADLINE: Duration = Duration::from_secs(1);
 
 /// How long a run waits for the engine before giving up on it. Parsing
 /// and a single built-in run to completion past [`DEADLINE`]; the limits
 /// on a context and the functions refused keep them short, and this
 /// bounds what they miss. The engine's thread is then left to finish on
 /// its own, and what it built is dropped there.
-const WAIT: Duration = Duration::from_secs(4);
+const WAIT: Duration = Duration::from_secs(2);
+
+/// How many evaluations a run gave up waiting for are still running.
+/// While one is, no other is started: each would otherwise leave a thread
+/// working for as long as the engine takes, and retries would pile them
+/// up.
+static ABANDONED: AtomicUsize = AtomicUsize::new(0);
 
 /// Check that `expression` is a valid expression of `version`.
 pub(crate) fn compile(expression: &str, version: XPathVersion) -> Result<(), SelectError> {
@@ -129,33 +137,62 @@ fn compiled(expression: &str, version: XPathVersion) -> Result<CompiledXPath, Se
 /// panic inside it is an unsupported capability: what the engine cannot
 /// do is a limit of this executor, not a condition that is false.
 /// Everything the engine built is dropped on that thread, so nothing it
-/// left half-done is seen again.
+/// left half-done is seen again. While an evaluation a run gave up on is
+/// still running, the next one fails at once instead.
 fn on_engine<T: Send + 'static>(
     expression: &str,
     work: impl FnOnce() -> Result<T, SelectError> + Send + 'static,
 ) -> Result<T, SelectError> {
+    if ABANDONED.load(Ordering::Acquire) > 0 {
+        return Err(failed(
+            expression,
+            "the XPath engine is still busy with an evaluation that ran past its time",
+        ));
+    }
     let (sender, receiver) = mpsc::sync_channel(1);
+    // Whether the run gave up waiting; settled under its lock, so the
+    // count is taken back exactly once, by whichever side comes second.
+    let abandoned = Arc::new(Mutex::new(false));
+    let finished = Arc::clone(&abandoned);
     std::thread::Builder::new()
         .name("roas-xpath".to_owned())
         .stack_size(ENGINE_STACK)
         .spawn(move || {
-            let _stack = EvaluationLimits::declare(ENGINE_STACK);
-            let _deadline = EvaluationLimits::declare_deadline(Instant::now() + DEADLINE);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-                .unwrap_or(Err(SelectError::Unsupported(UNIMPLEMENTED)));
-            // The run may have stopped waiting.
-            let _ = sender.send(result);
+            let result = {
+                let _stack = EvaluationLimits::declare(ENGINE_STACK);
+                let _deadline = EvaluationLimits::declare_deadline(Instant::now() + DEADLINE);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                    .unwrap_or(Err(SelectError::Unsupported(UNIMPLEMENTED)))
+            };
+            // Held across the send, so the run either takes the result
+            // or has given up before this looks.
+            let gave_up = finished.lock().unwrap_or_else(PoisonError::into_inner);
+            if *gave_up {
+                drop(result);
+                ABANDONED.fetch_sub(1, Ordering::AcqRel);
+            } else {
+                let _ = sender.send(result);
+            }
         })
         .map_err(|_| SelectError::Unsupported(NO_THREAD))?;
     match receiver.recv_timeout(WAIT) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(failed(
-            expression,
-            &format!(
-                "the evaluation did not finish within {} seconds",
-                WAIT.as_secs()
-            ),
-        )),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let mut gave_up = abandoned.lock().unwrap_or_else(PoisonError::into_inner);
+            // The engine may have finished while the lock was taken.
+            if let Ok(result) = receiver.try_recv() {
+                return result;
+            }
+            *gave_up = true;
+            ABANDONED.fetch_add(1, Ordering::AcqRel);
+            Err(failed(
+                expression,
+                &format!(
+                    "the evaluation did not finish within {} seconds",
+                    WAIT.as_secs()
+                ),
+            ))
+        }
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(SelectError::Unsupported(UNIMPLEMENTED)),
     }
 }
@@ -247,13 +284,14 @@ fn json(selector: &str, item: &XpathItem) -> Result<Value, SelectError> {
 /// - The regular-expression functions run a single pattern to completion,
 ///   past the deadline, over text that may be a whole response; an Arazzo
 ///   `regex` criterion matches instead.
-/// - `fn:distinct-values` compares each value with every one it kept, and
+/// - `fn:distinct-values` compares each value with every one it kept,
 ///   `fn:id`, `fn:idref` and `fn:element-with-id` each element with every
-///   token asked for, in a single built-in that runs past the deadline;
-///   over a response's values that is minutes.
+///   token asked for, and `fn:innermost` and `fn:outermost` each node with
+///   every other, in a single built-in that runs past the deadline; over a
+///   response's nodes that is minutes.
 /// - `fn:function-lookup` could reach any of them by a name built at run
 ///   time.
-const REFUSED_FUNCTIONS: [&str; 15] = [
+const REFUSED_FUNCTIONS: [&str; 17] = [
     "parse-xml",
     "parse-xml-fragment",
     "json-to-xml",
@@ -269,11 +307,13 @@ const REFUSED_FUNCTIONS: [&str; 15] = [
     "id",
     "idref",
     "element-with-id",
+    "innermost",
+    "outermost",
 ];
 
 /// What an expression calling or naming one of [`REFUSED_FUNCTIONS`] is
 /// refused as.
-const UNSAFE_FUNCTION: &str = "XPath fn:parse-xml, fn:parse-xml-fragment, fn:json-to-xml, fn:parse-json, fn:distinct-values, fn:id, fn:idref, fn:element-with-id, fn:function-lookup, folds and regular-expression functions";
+const UNSAFE_FUNCTION: &str = "XPath fn:parse-xml, fn:parse-xml-fragment, fn:json-to-xml, fn:parse-json, fn:distinct-values, fn:id, fn:idref, fn:element-with-id, fn:innermost, fn:outermost, fn:function-lookup, folds and regular-expression functions";
 
 /// Refuse an expression that calls or names a function in
 /// [`REFUSED_FUNCTIONS`], by one pass over it. Names inside string
@@ -356,11 +396,11 @@ fn is_name_byte(byte: u8) -> bool {
 
 /// Limits on a context, checked before the engine parses it. A response
 /// body is untrusted, and parsing it runs to completion: the engine
-/// spends close to a kilobyte on each node, checks each attribute against
+/// spends a few kilobytes on each node, checks each attribute against
 /// the ones before it on the same element, and gives every element a node
 /// for every namespace binding in scope on it, so a few megabytes of
 /// markup could take seconds and gigabytes. These keep a parsed context
-/// to a few hundred megabytes at most. Evaluating paths over a large or
+/// to about 300 MB. Evaluating paths over a large or
 /// deep document is bounded by the deadline instead. Real documents stay
 /// far below all of these.
 const MAX_CONTEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -374,6 +414,10 @@ const MAX_ATTRIBUTES: usize = 100_000;
 /// for each prefix (or the default namespace) bound in scope on it,
 /// besides `xml`, which every element holds and [`MAX_NODES`] counts.
 const MAX_NAMESPACE_NODES: usize = 100_000;
+/// Text, counted once for every element it is inside and once for the
+/// document: each of them has a string value that repeats it, and an
+/// expression as plain as `//a` builds every one.
+const MAX_STRING_VALUE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Why `xml` is past one of the limits above, or holds a document type
 /// declaration, if it does, by one pass over its markup. The engine
@@ -397,6 +441,7 @@ fn too_complex(xml: &str) -> Option<String> {
     let mut namespace_nodes = 0usize;
     let mut nodes = 0usize;
     let mut all_attributes = 0usize;
+    let mut string_values = 0usize;
     let skip = |from: usize, end: &str| {
         xml[from..]
             .find(end)
@@ -416,6 +461,18 @@ fn too_complex(xml: &str) -> Option<String> {
     while let Some(found) = xml[at..].find('<') {
         let start = at + found;
         let rest = &xml[start..];
+        // The text before this markup, and a CDATA section's content.
+        let mut text = found;
+        if rest.starts_with("<![CDATA[") {
+            text += xml[start..].find("]]>").unwrap_or(rest.len());
+        }
+        string_values = string_values.saturating_add(text.saturating_mul(open.len() + 1));
+        if string_values > MAX_STRING_VALUE_BYTES {
+            return Some(format!(
+                "the context's text, repeated in the string value of every element around it, is more than {} MiB",
+                MAX_STRING_VALUE_BYTES / 1024 / 1024
+            ));
+        }
         if !rest.starts_with("</") && !rest.starts_with("<![CDATA[") {
             nodes += 1;
             if nodes > MAX_NODES {
@@ -747,14 +804,23 @@ mod tests {
     fn a_run_waits_for_the_engine_only_so_long() {
         let started = Instant::now();
         let result: Result<(), _> = on_engine("x", || {
-            std::thread::sleep(WAIT + Duration::from_secs(1));
+            std::thread::sleep(WAIT + Duration::from_millis(500));
             Ok(())
         });
         assert!(
             matches!(&result, Err(SelectError::Evaluation { message, .. }) if message.contains("did not finish")),
             "{result:?}"
         );
-        assert!(started.elapsed() < WAIT + Duration::from_secs(1));
+        assert!(started.elapsed() < WAIT + Duration::from_millis(500));
+        // Until it finishes, nothing else is started.
+        assert!(
+            evaluation_error(select("/order", V31, &order())).contains("still busy"),
+            "a second evaluation started"
+        );
+        while ABANDONED.load(Ordering::Acquire) > 0 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(passes("/order", V31, &order()), Ok(true));
     }
 
     #[test]
@@ -940,6 +1006,18 @@ mod tests {
                 "{markup}"
             );
         }
+        // Text is counted once for each element around it.
+        let deep_text = |text: &str| format!("{}{text}{}", "<a>".repeat(1000), "</a>".repeat(1000));
+        assert!(!refused(&deep_text(&"x".repeat(60_000))));
+        for text in [
+            "x".repeat(70_000),
+            format!("<![CDATA[{}]]>", "x".repeat(70_000)),
+        ] {
+            assert!(
+                evaluation_error(select("//a", V31, &json!(deep_text(&text))))
+                    .contains("string value of every element"),
+            );
+        }
         // CDATA sections and end tags are not nodes of their own.
         assert!(!refused(&format!(
             "<r>{}</r>",
@@ -1036,6 +1114,8 @@ mod tests {
             "id('a b')",
             "fn:idref('x')",
             "element-with-id('x')",
+            "count(innermost(//*))",
+            "outermost(//a)",
             "for-each(/a, matches#2(?, 'a'))",
             "1 -matches('a', 'a')",
             "count(fold-left(1 to 50000, [], function($a, $x) { [$a] }))",
