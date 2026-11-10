@@ -1285,7 +1285,11 @@ impl<'a> Lowerer<'a> {
             self.warn(
                 DiagnosticKind::UnsupportedKeyword { keyword: keyword.clone() },
                 &schema.id,
-                format!("`{keyword}` is not handled by the generator; it is not represented in the type, and generated validation reports it as unevaluated"),
+                if self.config.validation {
+                    format!("`{keyword}` is not handled by the generator; it is not represented in the type, and generated validation reports it as unevaluated")
+                } else {
+                    format!("`{keyword}` is not handled by the generator; it is neither represented in the type nor validated")
+                },
             );
         }
         if schema.const_value.is_some() && !self.const_is_tag(schema) {
