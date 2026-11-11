@@ -4,9 +4,9 @@
 //! validator has to know more than "did that work": an external
 //! reference is fine and simply unresolvable here, a dangling one is a
 //! document bug, a cycle is a different bug, and a pointer at a place
-//! the typed model does not hold as an object of that kind is neither.
-//! [`Resolution`] carries that distinction so each version module
-//! reports it the same way.
+//! the resolver for that kind does not hand back an object from is
+//! neither. [`Resolution`] carries that distinction so each version
+//! module reports it the same way.
 //!
 //! Pointer syntax lives in [`pointer`](crate::common::pointer); this
 //! module is about what the pointers *mean*.
@@ -40,8 +40,8 @@ pub enum Resolution<'a, T> {
     /// item itself, or the object at the end of a chain of `$ref`s.
     Found(&'a T),
     /// The chain ends in another document (`./other.yaml#/…`), or at a
-    /// place in this one that the typed model does not hold as an
-    /// object of this kind.
+    /// place in this one that the resolver for this kind does not hand
+    /// back an object from.
     ///
     /// `Opaque` does not mean "external": the second case is a pointer
     /// inside this document. A suitably shaped `x-` extension is one
@@ -52,7 +52,14 @@ pub enum Resolution<'a, T> {
     /// ends at something that is not of this kind, which is
     /// [`WrongKind`](Resolution::WrongKind).
     ///
-    /// Either way there is no typed object to hand back, and
+    /// It can also be a place where the typed model does hold an object
+    /// of this kind and the resolver still does not follow a pointer to
+    /// it. A v3 operation's inline `reply`
+    /// (`#/operations/<name>/reply`) is one: replies are resolved
+    /// through `#/components/replies/…` only, as the v3 `Document`'s
+    /// `ResolveReference<OperationReply>` implementation documents.
+    ///
+    /// In every case nothing is handed back, and
     /// [`problem`](Resolution::problem) is `None`.
     ///
     /// A reference into another document is `Opaque` only when its
@@ -60,6 +67,11 @@ pub enum Resolution<'a, T> {
     /// [`Unrecognized`](Resolution::Unrecognized).
     Opaque,
     /// A local pointer that names nothing: a dangling reference.
+    ///
+    /// Where it points is judged first. A pointer into a location that
+    /// belongs to another kind is
+    /// [`WrongKind`](Resolution::WrongKind) whether or not anything is
+    /// there.
     Missing,
     /// The chain revisits a pointer it already followed.
     Cycle,
@@ -71,10 +83,15 @@ pub enum Resolution<'a, T> {
     /// *other* kind of object — a server where a channel belongs, say —
     /// or at a value that cannot be read as this kind at all.
     ///
+    /// The location decides before its contents do: a pointer into
+    /// another kind's location — `#/components/schemas/<name>` where a
+    /// message belongs — is `WrongKind` even when nothing is there, not
+    /// [`Missing`](Resolution::Missing).
+    ///
     /// Distinct from [`Opaque`](Resolution::Opaque): there nothing
     /// shows the target to be anything but this kind — it is in another
-    /// document, or at a place the typed model does not hold as an
-    /// object of this kind; here the target is shown not to be one.
+    /// document, or at a place the resolver for this kind does not hand
+    /// back an object from; here the target is shown not to be one.
     WrongKind,
 }
 
@@ -120,8 +137,8 @@ impl<'a, T> Resolution<'a, T> {
     /// document"`).
     ///
     /// `None` means it resolved, left the document, or ended at a place
-    /// the typed model does not hold as an object of this kind — none
-    /// of which the document is at fault for.
+    /// the resolver for this kind does not hand back an object from —
+    /// none of which the document is at fault for.
     #[must_use]
     pub fn problem(&self) -> Option<&'static str> {
         match self {

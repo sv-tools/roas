@@ -627,9 +627,10 @@ impl ResolveReference<Operation> for Document {
 
 /// Replies, through `#/components/replies/…`.
 ///
-/// A pointer at a reply declared inline on some other operation is
-/// [`Resolution::Opaque`]: only `components` holds replies as objects
-/// of their own.
+/// A pointer at a reply declared inline on an operation
+/// (`#/operations/<name>/reply`) is [`Resolution::Opaque`]: the model
+/// holds a reply there, but this resolver looks only in
+/// `components.replies` and does not hand that one back.
 impl ResolveReference<OperationReply> for Document {
     fn resolve_reference<'a>(
         &'a self,
@@ -2907,6 +2908,10 @@ mod tests {
             ),
             ("#/components/messages/a", Resolution::Cycle),
             ("#/channels/real", Resolution::WrongKind),
+            // Where a pointer points is judged before whether anything
+            // is there: the fixture declares no schemas and no traits.
+            ("#/components/schemas/nope", Resolution::WrongKind),
+            ("#/components/messageTraits/nope", Resolution::WrongKind),
             ("./other.yaml#bad", Resolution::Unrecognized),
         ] {
             let resolution = doc.resolve_message(&reference(target));

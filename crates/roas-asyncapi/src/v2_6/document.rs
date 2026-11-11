@@ -2574,6 +2574,18 @@ mod tests {
             let resolution = messages[key].get_item(&doc);
             assert_eq!(resolution, expected, "message `{key}`");
         }
+
+        // Where a pointer points is judged before whether anything is
+        // there: the fixture declares no schemas and no traits.
+        for target in [
+            "#/components/schemas/nope",
+            "#/components/messageTraits/nope",
+        ] {
+            let entry: RefOr<Message> = RefOr::Reference(Reference {
+                reference: target.to_owned(),
+            });
+            assert_eq!(entry.get_item(&doc), Resolution::WrongKind, "`{target}`");
+        }
     }
 
     #[test]
