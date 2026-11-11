@@ -913,8 +913,10 @@ pub(crate) fn diagnostics(
                             ),
                         );
                     }
-                    let at = pattern.branch.pointer.clone().unwrap_or(pointer);
-                    positions.push((at, &pattern.branch.ty, &pattern.branch.constraints));
+                    if let Some(b) = pattern.branch() {
+                        let at = b.pointer.clone().unwrap_or(pointer);
+                        positions.push((at, &b.ty, &b.constraints));
+                    }
                 }
                 if let crate::ir::Others::Schema(b) = &s.others {
                     let at = b

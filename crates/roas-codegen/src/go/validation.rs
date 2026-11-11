@@ -490,7 +490,7 @@ fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'
     };
     for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
         let label = format!("patternProperties `{}`", pattern.source);
-        let part = part(&pattern.branch, ty, &label, cx);
+        let part = pattern_part(pattern, ty.as_deref(), cx);
         out.push(match &pattern.regex {
             Ok(regex) => {
                 cx.needs.pattern = true;
@@ -519,6 +519,77 @@ fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'
             lit("is not allowed: it matches no property and no pattern")
         )),
         _ => {}
+    }
+    out
+}
+
+/// What `pattern`'s schema says of a member matching it, its JSON in
+/// `value`, at `pointer`.
+fn pattern_part(pattern: &crate::ir::PatternDef, ty: Option<&str>, cx: &mut Context<'_>) -> String {
+    let label = format!("patternProperties `{}`", pattern.source);
+    match (&pattern.schema, ty) {
+        (crate::ir::PatternSchema::Branch(b), Some(ty)) => part(b, ty, &label, cx),
+        (crate::ir::PatternSchema::Unchecked(reason), _) => format!(
+            "r.unevaluated(pointer, {})",
+            lit(&format!("{label}: {reason}"))
+        ),
+        _ => format!(
+            "r.violation(pointer, {})",
+            lit(&format!("is not allowed by {label}"))
+        ),
+    }
+}
+
+/// The checks the patterns a declared property's name matches put on its
+/// value, known at generation: the value is written out and read again
+/// as each pattern's schema, as an undeclared member is.
+fn declared_patterns(
+    s: &crate::ir::StructDef,
+    view: &TypeView,
+    cx: &mut Context<'_>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (field, field_view) in s.fields.iter().zip(&view.fields) {
+        let mut parts = Vec::new();
+        let mut reads = false;
+        for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
+            match pattern.matches_name(&field.raw_name) {
+                None => {}
+                Some(Ok(())) => {
+                    reads |= pattern.branch().is_some();
+                    parts.push(pattern_part(pattern, ty.as_deref(), cx));
+                }
+                Some(Err(reason)) => parts.push(format!(
+                    "r.unevaluated(pointer, {})",
+                    lit(&format!(
+                        "patternProperties `{}`: {reason}, so whether `{}` matches it is not known",
+                        pattern.source, field.raw_name
+                    ))
+                )),
+            }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        let name = &field_view.name;
+        let checks = parts.join("; ");
+        let inner = if reads {
+            format!(
+                "if raw, err := json.Marshal(&v.{name}); err == nil {{ value := jsontext.Value(raw); {checks} }}"
+            )
+        } else {
+            checks
+        };
+        let in_nullable = field_view.ty.starts_with("Nullable[");
+        let body = match (field.required, in_nullable) {
+            (true, _) => inner,
+            (false, true) => format!("if v.{name}.Set {{ {inner} }}"),
+            (false, false) => format!("if v.{name} != nil {{ {inner} }}"),
+        };
+        out.push(format!(
+            "{{ pointer := childPointer(pointer, {}); {body} }}",
+            field_view.literal
+        ));
     }
     out
 }
@@ -824,7 +895,12 @@ pub(crate) fn body(
                 cx.needs.sorted = true;
                 // A member is read only against a pattern's schema: with
                 // every pattern untranslated, never.
-                let read = s.patterns.iter().any(|p| p.regex.is_ok());
+                let read = s
+                    .patterns
+                    .iter()
+                    .any(|p| p.regex.is_ok() && p.branch().is_some())
+                    || (matches!(s.others, crate::ir::Others::Schema(_))
+                        && s.patterns.iter().all(|p| p.regex.is_ok()));
                 let value = if read {
                     format!("value := v.{name}[name]; ")
                 } else {
@@ -834,6 +910,7 @@ pub(crate) fn body(
                     "for _, name := range slices.Sorted(maps.Keys(v.{name})) {{ {value}pointer := childPointer(pointer, name); {} }}",
                     checks.join("; ")
                 ));
+                out.extend(declared_patterns(s, view, cx));
                 let _ = ty;
             }
             if let Additional::CatchAll(ty) = &s.additional {

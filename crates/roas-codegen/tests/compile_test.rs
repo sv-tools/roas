@@ -775,6 +775,15 @@ fn validated_description() -> serde_json::Value {
                 "patternProperties": {"\\bx": {"type": "integer"}},
                 "additionalProperties": {"type": "string"}},
             "PatTypeless": {"patternProperties": {"^a": {"type": "integer"}}},
+            "PatDecl": {"type": "object", "required": ["ar"],
+                "properties": {"ab": {"type": "string"}, "ar": {"type": "string"}, "an": {"type": ["string", "null"]}},
+                "patternProperties": {"^a": {"type": "string", "maxLength": 1}}},
+            "PatDeclDenied": {"type": "object", "additionalProperties": false,
+                "properties": {"ab": {"type": "string"}},
+                "patternProperties": {"^a": {"type": "string", "maxLength": 1}}},
+            "PatFalse": {"type": "object",
+                "properties": {"id": {"type": "string"}, "x-id": {"type": "string"}},
+                "patternProperties": {"^x-": false, "^n": {"not": {"type": "string"}}}},
             "PatMapAdd": {"type": "object",
                 "patternProperties": {"^x": {"type": "integer"}},
                 "additionalProperties": {"$ref": "#/components/schemas/Long3"}},
@@ -1265,6 +1274,17 @@ fn main() {
     assert_eq!(report::<PatOwners>(r#"{"o1":{"nick":"ab"},"z":[]}"#), vec![]);
     // A pattern the generator cannot translate leaves its members undecided.
     assert_eq!(report::<PatUntranslated>(r#"{"x":"s"}"#), vec![u("/x")]);
+    // A declared property matching a pattern is checked against it too.
+    assert_eq!(report::<PatDecl>(r#"{"ar":"x","ab":"xyz"}"#), vec![v("/ab")]);
+    assert_eq!(report::<PatDecl>(r#"{"ar":"xy"}"#), vec![v("/ar")]);
+    assert_eq!(report::<PatDecl>(r#"{"ar":"x","an":null}"#), vec![v("/an")]);
+    assert_eq!(report::<PatDecl>(r#"{"ar":"x","ab":"y","an":"z","ac":"w"}"#), vec![]);
+    assert_eq!(report::<PatDeclDenied>(r#"{"ab":"xyz"}"#), vec![v("/ab")]);
+    // `false` refuses a matching member, declared or not; `not` is unchecked.
+    assert_eq!(report::<PatFalse>(r#"{"id":"q"}"#), vec![]);
+    assert_eq!(report::<PatFalse>(r#"{"x-a":1}"#), vec![v("/x-a")]);
+    assert_eq!(report::<PatFalse>(r#"{"x-id":"a"}"#), vec![v("/x-id")]);
+    assert_eq!(report::<PatFalse>(r#"{"n1":1}"#), vec![u("/n1")]);
     // With no `type`, the patterns speak of objects only.
     assert_eq!(report::<PatTypeless>("5"), vec![]);
     assert_eq!(report::<PatTypeless>(r#"{"a":1}"#), vec![]);
@@ -1674,6 +1694,15 @@ func main() {
 	check(`{"id":"1","o1":{"nick":"abcd"}}`, report[api.PatOwners](`{"id":"1","o1":{"nick":"abcd"}}`), v("/o1/nick"))
 	check(`{"o1":{"nick":"ab"},"z":[]}`, report[api.PatOwners](`{"o1":{"nick":"ab"},"z":[]}`))
 	check(`{"x":"s"}`, report[api.PatUntranslated](`{"x":"s"}`), u("/x"))
+	check(`{"ar":"x","ab":"xyz"}`, report[api.PatDecl](`{"ar":"x","ab":"xyz"}`), v("/ab"))
+	check(`{"ar":"xy"}`, report[api.PatDecl](`{"ar":"xy"}`), v("/ar"))
+	check(`{"ar":"x","an":null}`, report[api.PatDecl](`{"ar":"x","an":null}`), v("/an"))
+	check(`{"ar":"x","ab":"y","an":"z","ac":"w"}`, report[api.PatDecl](`{"ar":"x","ab":"y","an":"z","ac":"w"}`))
+	check(`{"ab":"xyz"}`, report[api.PatDeclDenied](`{"ab":"xyz"}`), v("/ab"))
+	check(`{"id":"q"}`, report[api.PatFalse](`{"id":"q"}`))
+	check(`{"x-a":1}`, report[api.PatFalse](`{"x-a":1}`), v("/x-a"))
+	check(`{"x-id":"a"}`, report[api.PatFalse](`{"x-id":"a"}`), v("/x-id"))
+	check(`{"n1":1}`, report[api.PatFalse](`{"n1":1}`), u("/n1"))
 	check(`5`, report[api.PatTypeless](`5`))
 	check(`{"a":1}`, report[api.PatTypeless](`{"a":1}`))
 	check(`{"a":"x"}`, report[api.PatTypeless](`{"a":"x"}`), v("/a"))

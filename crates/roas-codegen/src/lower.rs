@@ -132,7 +132,7 @@ impl<'a> Lowerer<'a> {
                         TypeKind::StringEnum(_) | TypeKind::Extern => {}
                     }
                     if let TypeKind::Struct(s) = &def.kind {
-                        inner.extend(s.patterns.iter().map(|p| &p.branch.ty));
+                        inner.extend(s.patterns.iter().filter_map(|p| p.branch()).map(|b| &b.ty));
                         if let crate::ir::Others::Schema(b) = &s.others {
                             inner.push(&b.ty);
                         }
@@ -981,7 +981,24 @@ impl<'a> Lowerer<'a> {
             patterns.push(crate::ir::PatternDef {
                 source: source.clone(),
                 regex: crate::pattern::translate(source),
-                branch: self.slot_branch(slot, &hint),
+                schema: match slot {
+                    // A schema no type represents still says what it does of
+                    // the members: `false` refuses them; `not` goes unchecked.
+                    Slot::Inline(schema) if matches!(schema.kind, Kind::Never) => {
+                        crate::ir::PatternSchema::Never
+                    }
+                    Slot::Inline(schema) if matches!(schema.kind, Kind::Not) => {
+                        self.warn(
+                            DiagnosticKind::UnsupportedKeyword { keyword: "not".into() },
+                            &schema.id,
+                            "`not` describes what a member is not, which is not checked; matching members are reported as unevaluated".into(),
+                        );
+                        crate::ir::PatternSchema::Unchecked(
+                            "its schema is a `not`, which is not checked".into(),
+                        )
+                    }
+                    _ => crate::ir::PatternSchema::Branch(self.slot_branch(slot, &hint)),
+                },
             });
         }
         let others = match additional {

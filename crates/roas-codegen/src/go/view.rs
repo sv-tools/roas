@@ -195,7 +195,7 @@ pub(crate) struct TypeView {
     pub member_patterns: Vec<String>,
     /// The Go spelling of each `patternProperties` schema, in order.
     #[serde(skip)]
-    pub pattern_tys: Vec<String>,
+    pub pattern_tys: Vec<Option<String>>,
     /// The Go spelling of the `additionalProperties` schema beside them.
     #[serde(skip)]
     pub others_ty: Option<String>,
@@ -836,7 +836,10 @@ impl Builder<'_> {
                     view.member_patterns = patterns.iter().map(|p| quote(p)).collect();
                 }
                 for pattern in &s.patterns {
-                    let spelled = self.spell(unboxed(&pattern.branch.ty))?;
+                    let spelled = match pattern.branch() {
+                        Some(b) => Some(self.spell(unboxed(&b.ty))?),
+                        None => None,
+                    };
                     view.pattern_tys.push(spelled);
                 }
                 if let crate::ir::Others::Schema(b) = &s.others {

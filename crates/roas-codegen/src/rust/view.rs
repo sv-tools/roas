@@ -124,7 +124,7 @@ pub(crate) struct TypeView {
     pub catch_all: Option<CatchAllView>,
     /// The Rust spelling of each `patternProperties` schema, in order.
     #[serde(skip)]
-    pub pattern_tys: Vec<String>,
+    pub pattern_tys: Vec<Option<String>>,
     /// The Rust spelling of the `additionalProperties` schema beside them.
     #[serde(skip)]
     pub others_ty: Option<String>,
@@ -361,9 +361,17 @@ impl Builder<'_> {
             "reject_null",
             "require_present",
             "integer_token",
-            "RawJson",
         ] {
             allocator.reserve(reserved);
+        }
+        // Generated only beside `patternProperties`.
+        if self
+            .ir
+            .types
+            .values()
+            .any(|def| matches!(&def.kind, TypeKind::Struct(s) if !s.patterns.is_empty()))
+        {
+            allocator.reserve("RawJson");
         }
         if self.config.validation {
             for reserved in [
@@ -817,7 +825,10 @@ impl Builder<'_> {
                             "RawJson".to_owned()
                         };
                         for pattern in &s.patterns {
-                            let spelled = self.spell(&pattern.branch.ty)?;
+                            let spelled = match pattern.branch() {
+                                Some(b) => Some(self.spell(&b.ty)?),
+                                None => None,
+                            };
                             view.pattern_tys.push(spelled);
                         }
                         if let crate::ir::Others::Schema(b) = &s.others {

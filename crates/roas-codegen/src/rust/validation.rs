@@ -464,7 +464,7 @@ fn pattern_members(
     };
     for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
         let label = format!("patternProperties `{}`", pattern.source);
-        let part = part(ir, &pattern.branch, ty, &label, generated, reshaped);
+        let part = pattern_part(ir, pattern, ty.as_deref(), generated, reshaped);
         out.push(match &pattern.regex {
             Ok(regex) => {
                 mark_uses_regex();
@@ -491,6 +491,108 @@ fn pattern_members(
             "if !matched { report.violation(pointer, \"is not allowed: it matches no property and no pattern\"); }".to_owned(),
         ),
         _ => {}
+    }
+    out
+}
+
+/// What `pattern`'s schema says of a member matching it, its text in
+/// `raw`, at `pointer`.
+fn pattern_part(
+    ir: &crate::ir::Ir,
+    pattern: &crate::ir::PatternDef,
+    ty: Option<&str>,
+    generated: &dyn Fn(&TypeRef) -> bool,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+) -> String {
+    let label = format!("patternProperties `{}`", pattern.source);
+    match (&pattern.schema, ty) {
+        (crate::ir::PatternSchema::Branch(b), Some(ty)) => {
+            part(ir, b, ty, &label, generated, reshaped)
+        }
+        (crate::ir::PatternSchema::Unchecked(reason), _) => format!(
+            "report.unevaluated(pointer, {:?});",
+            format!("{label}: {reason}")
+        ),
+        _ => format!(
+            "report.violation(pointer, {:?});",
+            format!("is not allowed by {label}")
+        ),
+    }
+}
+
+/// The checks the patterns a declared property's name matches put on its
+/// value, known at generation: the value is written out and read again
+/// as each pattern's schema, as an undeclared member is.
+fn declared_patterns(
+    ir: &crate::ir::Ir,
+    s: &crate::ir::StructDef,
+    view: &TypeView,
+    generated: &dyn Fn(&TypeRef) -> bool,
+    reshaped: &dyn Fn(&crate::diagnostic::SchemaId) -> bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (field, field_view) in s.fields.iter().zip(&view.fields) {
+        // Reported once already: the name it was read by is not known.
+        if aliased(field_view) {
+            continue;
+        }
+        let mut parts = Vec::new();
+        let mut reads = false;
+        for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
+            match pattern.matches_name(&field.raw_name) {
+                None => {}
+                Some(Ok(())) => {
+                    reads |= pattern.branch().is_some();
+                    parts.push(pattern_part(
+                        ir,
+                        pattern,
+                        ty.as_deref(),
+                        generated,
+                        reshaped,
+                    ));
+                }
+                Some(Err(reason)) => parts.push(format!(
+                    "report.unevaluated(pointer, {:?});",
+                    format!(
+                        "patternProperties `{}`: {reason}, so whether `{}` matches it is not known",
+                        pattern.source, field.raw_name
+                    )
+                )),
+            }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        let name = &field_view.name;
+        let checks = parts.join(" ");
+        let inner = if reads {
+            format!(
+                "if let Ok(text) = serde_json::to_string(member) {{ let raw = text.as_str(); {checks} }}"
+            )
+        } else {
+            format!("let _ = member; {checks}")
+        };
+        let present = if field.required {
+            format!("{{ let member = &self.{name}; {inner} }}")
+        } else {
+            format!("if let Some(member) = self.{name}.as_ref() {{ {inner} }}")
+        };
+        let gates = field_view.cfg.join(" ");
+        if !gates.is_empty()
+            && !out
+                .iter()
+                .any(|l: &String| l.starts_with("let _ = (pointer"))
+        {
+            out.insert(0, "let _ = (pointer, &report);".to_owned());
+        }
+        out.push(
+            format!(
+                "{gates} {{ let p = child_pointer(pointer, {:?}); let pointer: &str = &p; {present} }}",
+                field.raw_name
+            )
+            .trim_start()
+            .to_owned(),
+        );
     }
     out
 }
@@ -743,6 +845,17 @@ pub(crate) fn body(
                 // it: with any gated, their values are not checked.
                 let gates = view.fields.iter().any(|f| !f.cfg.is_empty());
                 if !s.patterns.is_empty() {
+                    // A declared property matching a pattern is checked
+                    // against its schema too.
+                    for line in declared_patterns(ir, s, view, generated, reshaped) {
+                        if line.starts_with("let _ = (pointer") {
+                            if !out.iter().any(|l| l.starts_with("let _ = (pointer")) {
+                                out.insert(0, line);
+                            }
+                        } else {
+                            out.push(line);
+                        }
+                    }
                     if gates {
                         out.push(format!(
                             "if !self.{name}.is_empty() {{ report.unevaluated(pointer, \"patternProperties: a property compiled out with cfg lands among the other members, so they are not checked\"); }}"
@@ -751,7 +864,12 @@ pub(crate) fn body(
                         let checks = pattern_members(ir, s, view, generated, reshaped);
                         // A member is read only against a pattern's schema: with
                         // every pattern untranslated, never.
-                        let read = s.patterns.iter().any(|p| p.regex.is_ok());
+                        let read = s
+                            .patterns
+                            .iter()
+                            .any(|p| p.regex.is_ok() && p.branch().is_some())
+                            || (matches!(s.others, crate::ir::Others::Schema(_))
+                                && s.patterns.iter().all(|p| p.regex.is_ok()));
                         out.push(if read {
                             format!(
                                 "for (name, value) in &self.{name} {{ let p = child_pointer(pointer, name); let pointer: &str = &p; let raw = value.get(); {} }}",

@@ -133,7 +133,41 @@ pub(crate) struct PatternDef {
     /// The pattern translated for both engines, or why it cannot be.
     pub regex: Result<String, String>,
     /// The schema a matching member is checked against.
-    pub branch: Branch,
+    pub schema: PatternSchema,
+}
+
+impl PatternDef {
+    /// The schema a matching member is read as, when it is read at all.
+    pub(crate) fn branch(&self) -> Option<&Branch> {
+        match &self.schema {
+            PatternSchema::Branch(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Whether the declared property `name` matches the pattern: `None`
+    /// for no, `Some(Err)` when that cannot be known.
+    pub(crate) fn matches_name(&self, name: &str) -> Option<Result<(), String>> {
+        let regex = match &self.regex {
+            Ok(regex) => regex,
+            Err(reason) => return Some(Err(reason.clone())),
+        };
+        match regex::Regex::new(regex) {
+            Ok(re) => re.is_match(name).then_some(Ok(())),
+            Err(_) => Some(Err("the pattern is too large to compile".to_owned())),
+        }
+    }
+}
+
+/// What a pattern's schema says of the members it matches.
+#[derive(Debug, Clone)]
+pub(crate) enum PatternSchema {
+    /// A schema each is read as and checked against.
+    Branch(Branch),
+    /// `false`: no such member.
+    Never,
+    /// A schema no type can represent (`not`): each is unevaluated.
+    Unchecked(String),
 }
 
 #[derive(Debug, Clone)]
@@ -280,7 +314,9 @@ impl Ir {
                 }
                 // Checked against, so emitted alongside.
                 for pattern in &s.patterns {
-                    pattern.branch.ty.named(&mut out);
+                    if let Some(b) = pattern.branch() {
+                        b.ty.named(&mut out);
+                    }
                 }
                 if let Others::Schema(others) = &s.others {
                     others.ty.named(&mut out);

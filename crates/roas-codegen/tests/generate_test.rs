@@ -1584,3 +1584,58 @@ fn pattern_schemas_are_warned_about_where_they_are_written() {
         }
     }
 }
+
+#[test]
+fn raw_json_is_reserved_only_beside_pattern_properties() {
+    let plain = generate(
+        &document(serde_json::json!({"RawJson": {"type": "object", "properties": {"q": {"type": "string"}}}})),
+        &rust_config(""),
+    )
+    .unwrap();
+    let text = plain
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(text.contains("pub struct RawJson {"), "{text}");
+    let patterned = generate(
+        &document(serde_json::json!({
+            "RawJson": {"type": "object", "properties": {"q": {"type": "string"}}},
+            "P": {"type": "object", "patternProperties": {"^a": {"type": "string"}}}
+        })),
+        &rust_config(""),
+    )
+    .unwrap();
+    let text = patterned
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("pub struct RawJson2 {") && text.contains("pub struct RawJson("),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_false_or_not_pattern_schema_generates() {
+    let g = generate(
+        &document(serde_json::json!({
+            "F": {"type": "object", "properties": {"id": {"type": "string"}},
+                "patternProperties": {"^x-": false, "^n": {"not": {"type": "string"}}}}
+        })),
+        &rust_config("validation = true"),
+    )
+    .unwrap();
+    assert!(
+        g.diagnostics.iter().all(|d| d.severity != Severity::Error),
+        "{:?}",
+        g.diagnostics
+    );
+    assert!(
+        g.diagnostics.iter().any(|d| d.pointer == "/components/schemas/F/patternProperties/^n"
+            && matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "not")),
+        "{:?}",
+        g.diagnostics
+    );
+}
