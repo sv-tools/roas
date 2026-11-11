@@ -3,7 +3,8 @@
 use roas_arazzo::v1_1::Description;
 use roas_arazzo_executor::{
     AsyncHttpClient, ExecutionError, HttpRequest, HttpResponse, Options, Outcome, Progress,
-    RequestId, Run, SendFuture, SleepFuture, execute, execute_async, testing::Fake,
+    RequestId, Run, SendFuture, SleepFuture, execute, execute_async, execute_async_with_report,
+    testing::Fake,
 };
 use serde_json::{Value, json};
 use std::sync::Mutex;
@@ -367,4 +368,76 @@ fn a_receive_is_joined_with_nothing_else_in_flight() {
     assert!(matches!(run.advance(), Ok(Progress::Await)));
     run.supply_to(a.id, ok()).unwrap();
     assert!(matches!(run.advance(), Ok(Progress::Receive { .. })));
+}
+
+#[tokio::test]
+async fn a_step_that_cannot_start_waits_for_what_is_in_flight() {
+    let description = description(json!([step("a"), step("b"), step("c")]), json!({}));
+    // Out of steps at `c`: `a` and `b` are still answered and recorded.
+    let mut client = Fake::new().reply(200, &json!({})).reply(200, &json!({}));
+    let failure = execute_async_with_report(
+        &description,
+        &options().parallel(3).max_steps(2),
+        &mut client,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(failure.error, ExecutionError::Limit { .. }));
+    let report = failure.report.unwrap();
+    let done: Vec<_> = report.steps.iter().map(|s| s.step_id.as_str()).collect();
+    assert_eq!(done, ["a", "b"]);
+    // An earlier failure ends the workflow before the limit is reached,
+    // as it would one step at a time.
+    let mut client = Fake::new().reply(500, &json!({})).reply(200, &json!({}));
+    let report = execute_async(
+        &description,
+        &options().parallel(3).max_steps(2),
+        &mut client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::Failed);
+
+    // The same for a request that cannot be built.
+    let mut broken = step("c");
+    broken["parameters"] = json!([{ "name": "x", "in": "query", "value": "$inputs.missing" }]);
+    let description = self::description(json!([step("a"), step("b"), broken]), json!({}));
+    let options = options().parallel(3);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    run.supply_to(a.id, HttpResponse::json(500, &json!({})))
+        .unwrap();
+    assert!(matches!(
+        run.supply_to(b.id, ok()),
+        Err(ExecutionError::NotWaiting)
+    ));
+    let Ok(Progress::Done(report)) = run.advance() else {
+        panic!("done");
+    };
+    assert_eq!(report.outcome, Outcome::Failed);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let b = send(&mut run);
+    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    run.supply_to(a.id, ok()).unwrap();
+    run.supply_to(b.id, ok()).unwrap();
+    assert!(run.advance().is_err());
+    assert_eq!(run.partial_report().steps.len(), 2);
+}
+
+#[test]
+fn a_stopped_run_wants_nothing_in_flight() {
+    let mut first = step("a");
+    first["outputs"] = json!({ "x": "$steps.nowhere.outputs.x" });
+    let description = description(json!([first, step("b"), step("c")]), json!({}));
+    let options = options().parallel(3);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    send(&mut run);
+    send(&mut run);
+    assert!(run.supply_to(a.id, ok()).is_err());
+    assert!(run.in_flight().is_empty());
+    assert!(matches!(run.supply(ok()), Err(ExecutionError::Stopped)));
 }

@@ -2323,7 +2323,43 @@ workflows:
                 ] }]
             }),
         );
-        let (base, join) = server(2, 200, "{}");
+        // Answers nothing until both requests are in: a run that sent them
+        // one at a time would never get its first answer.
+        let (base, join) = {
+            use std::io::{BufRead, BufReader, Write};
+            use std::net::TcpListener;
+            use std::time::{Duration, Instant};
+            let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+            listener
+                .set_nonblocking(true)
+                .expect("a non-blocking listener");
+            let base = format!("http://{}", listener.local_addr().expect("an address"));
+            let join = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut streams = Vec::new();
+                while streams.len() < 2 && Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((stream, _)) => streams.push(stream),
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+                let mut asked = Vec::new();
+                let together = streams.len() == 2;
+                for mut stream in streams {
+                    stream.set_nonblocking(false).expect("a blocking stream");
+                    let mut line = String::new();
+                    let _ =
+                        BufReader::new(stream.try_clone().expect("a clone")).read_line(&mut line);
+                    asked.push(line);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                }
+                assert!(together, "the requests were not in flight together");
+                asked
+            });
+            (base, join)
+        };
         let mut args = run_args(&description, &openapi, &base);
         args.parallel = Some(2);
         run_arazzo(ArazzoCommand::Run(args.into())).unwrap();

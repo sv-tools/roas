@@ -981,8 +981,13 @@ impl<'d> Run<'d> {
                 }
             }
 
-            self.taken += 1;
-            if self.taken > self.options.limits.steps {
+            // A step that cannot start while others are in flight waits
+            // for them: one of them may yet end the workflow before it,
+            // as it would have one at a time.
+            if self.taken >= self.options.limits.steps {
+                if !self.pending.is_empty() {
+                    return Ok(Progress::Await);
+                }
                 return Err(ExecutionError::Limit {
                     limit: "step",
                     at: self.options.limits.steps,
@@ -992,19 +997,26 @@ impl<'d> Run<'d> {
             let doc = frame.doc;
             let step = &frame.workflow.steps[index];
             if step.workflow_id.is_some() {
+                self.taken += 1;
                 self.call(index)?;
                 continue;
             }
             if step.action.is_some() || step.channel_path.is_some() {
+                self.taken += 1;
                 return self
                     .message_step(index)
                     .map_err(|error| locate(&self.documents, doc, error));
             }
 
-            let (mut request, exchange) = self
+            let (mut request, exchange) = match self
                 .endpoint(index)
                 .and_then(|endpoint| self.build(index, endpoint))
-                .map_err(|error| locate(&self.documents, doc, error))?;
+            {
+                Ok(built) => built,
+                Err(_) if !self.pending.is_empty() => return Ok(Progress::Await),
+                Err(error) => return Err(locate(&self.documents, doc, error)),
+            };
+            self.taken += 1;
             let frame = self.frames.last_mut().expect("the frame to send from");
             let attempt = frame.attempts.get(&step.step_id).copied().unwrap_or(0) + 1;
             // A step that runs alongside others is passed at once: the
@@ -1036,8 +1048,11 @@ impl<'d> Run<'d> {
     /// and follow failure actions. Terminal errors leave a partial report and
     /// stop later progress; [`ExecutionError::NotWaiting`] remains correctable.
     pub fn supply(&mut self, response: HttpResponse) -> Result<(), ExecutionError> {
+        if self.halted {
+            return Err(ExecutionError::Stopped);
+        }
         match self.pending.as_slice() {
-            [] if !self.halted => Err(ExecutionError::NotWaiting),
+            [] => Err(ExecutionError::NotWaiting),
             [pending] => {
                 let id = pending.id;
                 self.supply_to(id, response)
@@ -1045,7 +1060,6 @@ impl<'d> Run<'d> {
             [_, _, ..] => Err(ExecutionError::InFlight {
                 count: self.pending.len(),
             }),
-            [] => Err(ExecutionError::Stopped),
         }
     }
 
@@ -1081,9 +1095,13 @@ impl<'d> Run<'d> {
 
     /// The requests in flight, oldest first. A request that was handed out
     /// and is no longer here was abandoned: its workflow ended while it
-    /// was in flight, so its response is not wanted.
+    /// was in flight, or the run stopped, so its response is not wanted.
     #[must_use]
     pub fn in_flight(&self) -> Vec<RequestId> {
+        // A stopped run wants nothing more.
+        if self.halted {
+            return Vec::new();
+        }
         self.pending.iter().map(|pending| pending.id).collect()
     }
 
