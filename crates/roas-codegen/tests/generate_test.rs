@@ -1639,3 +1639,35 @@ fn a_false_or_not_pattern_schema_generates() {
         g.diagnostics
     );
 }
+
+#[test]
+fn a_struct_whose_patterns_decide_nothing_compiles_alone() {
+    // Nothing is checked on its members: no loop, and no imports for one.
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml("validation = true", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let g = generate(
+            &document(serde_json::json!({
+                "A": {"type": "object", "properties": {"id": {"type": "string"}},
+                    "patternProperties": {"\\bq": {}}}
+            })),
+            &config,
+        )
+        .unwrap();
+        let code = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        assert!(
+            !code.contains("for (name, value)") && !code.contains("range slices.Sorted"),
+            "{code}"
+        );
+        if language == Target::Go {
+            assert!(!code.contains("\"slices\""), "{code}");
+        }
+    }
+}

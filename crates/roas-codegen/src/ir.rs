@@ -145,6 +145,14 @@ impl PatternDef {
         }
     }
 
+    /// Whether the pattern's schema lets any member be: `{}` or `true`.
+    pub(crate) fn accepts_anything(&self) -> bool {
+        self.branch().is_some_and(|b| {
+            matches!(&b.ty, TypeRef::Any)
+                || matches!(&b.ty, TypeRef::Nullable(inner) if matches!(inner.as_ref(), TypeRef::Any))
+        } && b.constraints == Constraints::default() && !b.unchecked)
+    }
+
     /// Whether the declared property `name` matches the pattern: `None`
     /// for no, `Some(Err)` when that cannot be known.
     pub(crate) fn matches_name(&self, name: &str) -> Option<Result<(), String>> {

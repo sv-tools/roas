@@ -500,6 +500,11 @@ fn pattern_members(s: &crate::ir::StructDef, view: &TypeView, cx: &mut Context<'
                     lit(&format!("{label}: the pattern is too large to compile, so the member is not checked against it"))
                 )
             }
+            // Matching or not, nothing is decided against a pattern that
+            // lets anything be, when the other members may be anything too.
+            Err(_) if pattern.accepts_anything() && matches!(s.others, crate::ir::Others::Any) => {
+                continue;
+            }
             // Whether the member matches is not known: nor whether
             // `additionalProperties` applies to it.
             Err(reason) => format!(
@@ -552,9 +557,23 @@ fn declared_patterns(
     for (field, field_view) in s.fields.iter().zip(&view.fields) {
         let mut parts = Vec::new();
         let mut reads = false;
+        // Decoded into a substitution or a 32-bit float, the value written
+        // out is not the one that was sent.
+        let lossy =
+            checks::reaches_extern(cx.ir, &field.ty) || checks::number_range(cx.ir, &[&field.ty]).1;
         for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
             match pattern.matches_name(&field.raw_name) {
                 None => {}
+                // Matching or not, a pattern that lets anything be decides
+                // nothing.
+                Some(_) if pattern.accepts_anything() => {}
+                Some(Ok(())) if lossy && pattern.branch().is_some() => parts.push(format!(
+                    "r.unevaluated(pointer, {})",
+                    lit(&format!(
+                        "patternProperties `{}`: `{}` is held as a type that does not keep the value as it was sent, so it is not checked against it",
+                        pattern.source, field.raw_name
+                    ))
+                )),
                 Some(Ok(())) => {
                     reads |= pattern.branch().is_some();
                     parts.push(pattern_part(pattern, ty.as_deref(), cx));
@@ -892,7 +911,6 @@ pub(crate) fn body(
             {
                 let name = &view.extra_name;
                 let checks = pattern_members(s, view, cx);
-                cx.needs.sorted = true;
                 // A member is read only against a pattern's schema: with
                 // every pattern untranslated, never.
                 let read = s
@@ -906,10 +924,14 @@ pub(crate) fn body(
                 } else {
                     String::new()
                 };
-                out.push(format!(
-                    "for _, name := range slices.Sorted(maps.Keys(v.{name})) {{ {value}pointer := childPointer(pointer, name); {} }}",
-                    checks.join("; ")
-                ));
+                // Nothing a member could be is decided: no loop.
+                if !checks.is_empty() {
+                    cx.needs.sorted = true;
+                    out.push(format!(
+                        "for _, name := range slices.Sorted(maps.Keys(v.{name})) {{ {value}pointer := childPointer(pointer, name); {} }}",
+                        checks.join("; ")
+                    ));
+                }
                 out.extend(declared_patterns(s, view, cx));
                 let _ = ty;
             }

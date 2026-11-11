@@ -473,6 +473,11 @@ fn pattern_members(
                     format!("{label}: the pattern is too large to compile, so the member is not checked against it")
                 )
             }
+            // Matching or not, nothing is decided against a pattern that
+            // lets anything be, when the other members may be anything too.
+            Err(_) if pattern.accepts_anything() && matches!(s.others, crate::ir::Others::Any) => {
+                continue;
+            }
             // Whether the member matches is not known: nor whether
             // `additionalProperties` applies to it.
             Err(reason) => format!(
@@ -538,9 +543,23 @@ fn declared_patterns(
         }
         let mut parts = Vec::new();
         let mut reads = false;
+        // Decoded into a substitution or a 32-bit float, the value written
+        // out is not the one that was sent.
+        let lossy =
+            checks::reaches_extern(ir, &field.ty) || checks::number_range(ir, &[&field.ty]).1;
         for (pattern, ty) in s.patterns.iter().zip(&view.pattern_tys) {
             match pattern.matches_name(&field.raw_name) {
                 None => {}
+                // Matching or not, a pattern that lets anything be decides
+                // nothing.
+                Some(_) if pattern.accepts_anything() => {}
+                Some(Ok(())) if lossy && pattern.branch().is_some() => parts.push(format!(
+                    "report.unevaluated(pointer, {:?});",
+                    format!(
+                        "patternProperties `{}`: `{}` is held as a type that does not keep the value as it was sent, so it is not checked against it",
+                        pattern.source, field.raw_name
+                    )
+                )),
                 Some(Ok(())) => {
                     reads |= pattern.branch().is_some();
                     parts.push(pattern_part(
@@ -870,17 +889,20 @@ pub(crate) fn body(
                             .any(|p| p.regex.is_ok() && p.branch().is_some())
                             || (matches!(s.others, crate::ir::Others::Schema(_))
                                 && s.patterns.iter().all(|p| p.regex.is_ok()));
-                        out.push(if read {
-                            format!(
+                        // Nothing a member could be is decided: no loop.
+                        if checks.is_empty() {
+                            // Nothing to check on any member.
+                        } else if read {
+                            out.push(format!(
                                 "for (name, value) in &self.{name} {{ let p = child_pointer(pointer, name); let pointer: &str = &p; let raw = value.get(); {} }}",
                                 checks.join(" ")
-                            )
+                            ));
                         } else {
-                            format!(
+                            out.push(format!(
                                 "for name in self.{name}.keys() {{ let p = child_pointer(pointer, name); let pointer: &str = &p; {} }}",
                                 checks.join(" ")
-                            )
-                        });
+                            ));
+                        }
                     }
                 } else if gates && (generated(ty) || each.is_some()) {
                     out.push(format!(

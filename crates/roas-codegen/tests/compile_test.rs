@@ -781,6 +781,14 @@ fn validated_description() -> serde_json::Value {
             "PatDeclDenied": {"type": "object", "additionalProperties": false,
                 "properties": {"ab": {"type": "string"}},
                 "patternProperties": {"^a": {"type": "string", "maxLength": 1}}},
+            "PatF32": {"type": "object", "properties": {"xb": {"type": "number", "format": "float"}},
+                "patternProperties": {"^x": {"type": "number", "exclusiveMaximum": 1}}},
+            "PatSub": {"type": "object", "properties": {"xd": {"type": "string", "format": "date"}},
+                "patternProperties": {"^x": {"type": "string", "maxLength": 1}}},
+            "PatAnything": {"type": "object", "properties": {"id": {"type": "string"}},
+                "patternProperties": {"\\bq": {}}},
+            "PatClosedFalse": {"type": "object", "additionalProperties": false,
+                "patternProperties": {"^x-": false}},
             "PatFalse": {"type": "object",
                 "properties": {"id": {"type": "string"}, "x-id": {"type": "string"}},
                 "patternProperties": {"^x-": false, "^n": {"not": {"type": "string"}}}},
@@ -1279,7 +1287,18 @@ fn main() {
     assert_eq!(report::<PatDecl>(r#"{"ar":"xy"}"#), vec![v("/ar")]);
     assert_eq!(report::<PatDecl>(r#"{"ar":"x","an":null}"#), vec![v("/an")]);
     assert_eq!(report::<PatDecl>(r#"{"ar":"x","ab":"y","an":"z","ac":"w"}"#), vec![]);
+    assert_eq!(report::<PatDecl>(r#"{"ar":"x","an":"zz"}"#), vec![v("/an")]);
     assert_eq!(report::<PatDeclDenied>(r#"{"ab":"xyz"}"#), vec![v("/ab")]);
+    // A field that does not keep the value as sent is not judged by a
+    // pattern: a 32-bit float, a substitution.
+    assert_eq!(report::<PatF32>(r#"{"xb":0.99999999}"#), vec![u("/xb")]);
+    assert_eq!(report::<PatF32>(r#"{"xc":0.5}"#), vec![]);
+    assert_eq!(report::<PatSub>(r#"{"xd":"2024-01-01"}"#), vec![u("/xd")]);
+    // A pattern that lets anything be decides nothing, translated or not.
+    assert_eq!(report::<PatAnything>(r#"{"id":"a","z":1}"#), vec![]);
+    // Let in at decode by its pattern, refused by the pattern's `false`.
+    assert_eq!(report::<PatClosedFalse>(r#"{"x-a":1}"#), vec![v("/x-a")]);
+    assert!(serde_json::from_str::<PatClosedFalse>(r#"{"y":1}"#).is_err());
     // `false` refuses a matching member, declared or not; `not` is unchecked.
     assert_eq!(report::<PatFalse>(r#"{"id":"q"}"#), vec![]);
     assert_eq!(report::<PatFalse>(r#"{"x-a":1}"#), vec![v("/x-a")]);
@@ -1698,7 +1717,13 @@ func main() {
 	check(`{"ar":"xy"}`, report[api.PatDecl](`{"ar":"xy"}`), v("/ar"))
 	check(`{"ar":"x","an":null}`, report[api.PatDecl](`{"ar":"x","an":null}`), v("/an"))
 	check(`{"ar":"x","ab":"y","an":"z","ac":"w"}`, report[api.PatDecl](`{"ar":"x","ab":"y","an":"z","ac":"w"}`))
+	check(`{"ar":"x","an":"zz"}`, report[api.PatDecl](`{"ar":"x","an":"zz"}`), v("/an"))
 	check(`{"ab":"xyz"}`, report[api.PatDeclDenied](`{"ab":"xyz"}`), v("/ab"))
+	check(`{"xb":0.99999999}`, report[api.PatF32](`{"xb":0.99999999}`), u("/xb"))
+	check(`{"xc":0.5}`, report[api.PatF32](`{"xc":0.5}`))
+	check(`{"xd":"2024-01-01"}`, report[api.PatSub](`{"xd":"2024-01-01"}`), u("/xd"))
+	check(`{"id":"a","z":1}`, report[api.PatAnything](`{"id":"a","z":1}`))
+	check(`{"x-a":1}`, report[api.PatClosedFalse](`{"x-a":1}`), v("/x-a"))
 	check(`{"id":"q"}`, report[api.PatFalse](`{"id":"q"}`))
 	check(`{"x-a":1}`, report[api.PatFalse](`{"x-a":1}`), v("/x-a"))
 	check(`{"x-id":"a"}`, report[api.PatFalse](`{"x-id":"a"}`), v("/x-id"))
