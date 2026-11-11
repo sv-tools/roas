@@ -1,8 +1,7 @@
 //! The reference-resolution API as a dependent crate sees it.
 //!
 //! These pin visibility and paths rather than outcomes: every import
-//! below has to stay public, `Resolution` has to be matched with a
-//! wildcard arm from out here, and the trait has to work as a trait
+//! below has to stay public, and the trait has to work as a trait
 //! object. What each reference resolves *to* is the unit tests' job.
 
 use roas_asyncapi::common::Resolution;

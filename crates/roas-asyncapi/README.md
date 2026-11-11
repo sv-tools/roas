@@ -115,7 +115,7 @@ let message = doc.resolve_message(&operation.messages[0]).found().unwrap();
 assert_eq!(message.name.as_deref(), Some("LightMeasured"));
 ```
 
-`RefOr::get_item(&doc)` takes the entry the model holds, where an inline item resolves to itself, and returns a `Resolution<T>`: `Found`, `Opaque` (the chain leaves the document, or ends at a place the resolver for that kind does not hand back an object from), `Missing`, `Cycle`, `Unrecognized`, or `WrongKind`. `found()` gives the object and `problem()` says why a reference is a document bug, if it is one. `Resolution` is `Copy` and comparable, and each version module re-exports it beside `RefOr`.
+`RefOr::get_item(&doc)` takes the entry the model holds, where an inline item resolves to itself, and returns a `Resolution<T>`: `Found`, `Opaque` (the chain leaves the document, or ends at a place the resolver for that kind does not hand back an object from), `Missing`, `Cycle`, `Unrecognized`, or `WrongKind`. `found()` gives the object and `problem()` says why a reference is a document bug, if it is one. `Resolution` is `Clone` and comparable, and each version module re-exports it beside `RefOr`.
 
 `get_item` works for the kinds a version's `Document` implements `common::reference::ResolveReference<T>` for. Where the model holds a bare `Reference` instead of a `RefOr`, the `Document` has a method per kind:
 

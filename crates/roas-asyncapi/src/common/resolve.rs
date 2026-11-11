@@ -2,7 +2,7 @@
 //!
 //! Every AsyncAPI version lets a `$ref` stand in for an object, and a
 //! validator has to know more than "did that work": an external
-//! reference is fine and simply unresolvable here, a dangling one is a
+//! reference with a usable fragment is fine and simply unresolvable here, a dangling one is a
 //! document bug, a cycle is a different bug, and a pointer at a place
 //! the resolver for that kind does not hand back an object from is
 //! neither. [`Resolution`] carries that distinction so each version
@@ -95,15 +95,22 @@ pub enum Resolution<'a, T> {
     WrongKind,
 }
 
-// By hand: a `Resolution` holds a `&T`, so it is `Copy` whatever `T`
-// is, and a derive would ask for `T: Copy`.
+// By hand: a `Resolution` holds a `&T`, so it can be cloned whatever
+// `T` is, and a derive would ask for `T: Clone`. Deliberately not
+// `Copy`: the enum is `#[non_exhaustive]`, and `Copy` would hold every
+// later variant to it.
 impl<T> Clone for Resolution<'_, T> {
     fn clone(&self) -> Self {
-        *self
+        match self {
+            Resolution::Found(item) => Resolution::Found(item),
+            Resolution::Opaque => Resolution::Opaque,
+            Resolution::Missing => Resolution::Missing,
+            Resolution::Cycle => Resolution::Cycle,
+            Resolution::Unrecognized => Resolution::Unrecognized,
+            Resolution::WrongKind => Resolution::WrongKind,
+        }
     }
 }
-
-impl<T> Copy for Resolution<'_, T> {}
 
 impl<'a, T> Resolution<'a, T> {
     /// What a reference into another document resolves to here:
@@ -998,9 +1005,9 @@ mod tests {
     }
 
     #[test]
-    fn a_resolution_is_copy_whatever_it_points_at() {
-        // `Demo` is neither `Clone` nor `Copy`; a `Resolution` of one
-        // is both, since all it holds is a reference.
+    fn a_resolution_clones_whatever_it_points_at() {
+        // `Demo` is not `Clone`; a `Resolution` of one is, since all
+        // it holds is a reference.
         let demo = Demo {
             name: "real".to_owned(),
         };
@@ -1012,17 +1019,13 @@ mod tests {
             Resolution::Unrecognized,
             Resolution::WrongKind,
         ] {
-            let copied = resolution;
-            #[allow(clippy::clone_on_copy)]
-            let cloned = resolution.clone();
-            assert_eq!(copied, resolution);
-            assert_eq!(cloned, resolution);
+            assert_eq!(resolution.clone(), resolution);
         }
-        // The copy is of the reference, not of the object.
+        // The clone is of the reference, not of the object.
         let found = Resolution::Found(&demo);
-        let copied = found;
+        let cloned = found.clone();
         assert!(std::ptr::eq(
-            copied.found().expect("found"),
+            cloned.found().expect("found"),
             found.found().expect("found")
         ));
     }
