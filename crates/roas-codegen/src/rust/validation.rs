@@ -493,7 +493,8 @@ pub(crate) fn body(
             let mut gated: Vec<String> = Vec::new();
             // What the schema says of a member no property names, which is
             // what a member read under an alias really is.
-            let others_constrained = def.constraints.property_names
+            let others_constrained = (def.constraints.property_names
+                && def.constraints.names.as_deref() != Some(&crate::front::Constraints::default()))
                 || match &s.additional {
                     Additional::Denied => true,
                     Additional::CatchAll(TypeRef::Any) => def.constraints.items.is_some(),
@@ -543,7 +544,7 @@ pub(crate) fn body(
                 // Decoded, a field does not say which name it was read by,
                 // and the schema judges a member under an alias as one no
                 // property names: neither verdict can be given.
-                if aliased(field_view) && (says_something || others_constrained) {
+                if aliased(field_view) && (says_something || others_constrained || field.required) {
                     let statement = format!(
                         "report.unevaluated(&child_pointer(pointer, {:?}), {:?});",
                         field.raw_name,

@@ -1378,3 +1378,26 @@ fn a_badly_typed_annotation_on_a_composition_is_reported_in_every_version() {
         }
     }
 }
+
+#[test]
+fn a_pointer_already_into_a_two_oh_source_is_left_alone() {
+    let raw = serde_json::json!({
+        "swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "definitions": {"A": {"type": "string"}},
+        "components": {"schemas": {"X": {"$ref": "other.json#/a"}}}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(
+        doc,
+        IGNORE_UNUSED | Options::IgnoreMissingTags | Options::IgnoreExternalReferences,
+    )
+    .expect("valid");
+    let g = generate(&doc, &rust_config("")).unwrap();
+    let pointers: Vec<&str> = g.diagnostics.iter().map(|d| d.pointer.as_str()).collect();
+    assert!(
+        pointers.contains(&"/components/schemas/X/$ref"),
+        "{pointers:?}"
+    );
+}

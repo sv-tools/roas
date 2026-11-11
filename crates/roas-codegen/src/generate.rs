@@ -374,6 +374,7 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
         }
         ir.suppressed = suppressed;
     }
+    point_into_source(&mut ir.diagnostics, document.version());
     diagnostics.append(&mut ir.diagnostics);
     if config.validation {
         let opted_out = |def: &crate::ir::TypeDef| {
@@ -383,7 +384,9 @@ fn prepare(document: &ValidatedSourceDocument, config: &Config) -> Result<Prepar
                 .and_then(|t| t.validation)
                 == Some(false)
         };
-        diagnostics.extend(crate::checks::diagnostics(&ir, &opted_out));
+        let mut checked = crate::checks::diagnostics(&ir, &opted_out);
+        point_into_source(&mut checked, document.version());
+        diagnostics.append(&mut checked);
     }
 
     Ok(Prepared {
@@ -413,8 +416,9 @@ pub fn generate(
     };
     let (files, dependencies, unformatted) = match config.target {
         Target::Rust => {
-            let output =
+            let mut output =
                 rust::emit(&ir, config, &source).map_err(|e| blame_templates(e, config))?;
+            point_into_source(&mut output.diagnostics, document.version());
             diagnostics.extend(output.diagnostics);
             let dependencies = Dependencies {
                 rust: output.dependencies,
@@ -423,7 +427,9 @@ pub fn generate(
             (output.files, dependencies, output.unformatted)
         }
         Target::Go => {
-            let output = go::emit(&ir, config, &source).map_err(|e| blame_templates(e, config))?;
+            let mut output =
+                go::emit(&ir, config, &source).map_err(|e| blame_templates(e, config))?;
+            point_into_source(&mut output.diagnostics, document.version());
             diagnostics.extend(output.diagnostics);
             let dependencies = Dependencies {
                 rust: Vec::new(),
@@ -443,7 +449,7 @@ pub fn generate(
             ),
         });
     }
-    sort_diagnostics(&mut diagnostics, document.version());
+    sort_diagnostics(&mut diagnostics);
     Ok(Generation {
         target: config.target,
         files,
@@ -473,13 +479,14 @@ pub fn template_context(
     let Some(ir) = prepared.ir else {
         return Err(GenerateError::NothingToGenerate(prepared.diagnostics));
     };
-    let (context, more) = match config.target {
+    let (context, mut more) = match config.target {
         Target::Rust => rust::context(&ir, config, &prepared.source)?,
         Target::Go => go::context(&ir, config, &prepared.source)?,
     };
     let mut diagnostics = prepared.diagnostics;
+    point_into_source(&mut more, document.version());
     diagnostics.extend(more);
-    sort_diagnostics(&mut diagnostics, document.version());
+    sort_diagnostics(&mut diagnostics);
     Ok(TemplateContext {
         context,
         diagnostics,
@@ -488,6 +495,15 @@ pub fn template_context(
 
 /// Point a diagnostic into a 2.0 source as written: its schemas are read
 /// at their 3.2 home, `/components/schemas`, and sit under `/definitions`.
+///
+/// Only for what the generator found in the normalized document: the
+/// source report's pointers are into the source already.
+fn point_into_source(diagnostics: &mut [Diagnostic], version: SourceVersion) {
+    if matches!(version, SourceVersion::V2) {
+        diagnostics.iter_mut().for_each(point_into_v2_source);
+    }
+}
+
 fn point_into_v2_source(diagnostic: &mut Diagnostic) {
     let Some(rest) = diagnostic.pointer.strip_prefix("/components/schemas/") else {
         return;
@@ -507,10 +523,7 @@ fn point_into_v2_source(diagnostic: &mut Diagnostic) {
     diagnostic.pointer = pointer;
 }
 
-fn sort_diagnostics(diagnostics: &mut Vec<Diagnostic>, version: SourceVersion) {
-    if matches!(version, SourceVersion::V2) {
-        diagnostics.iter_mut().for_each(point_into_v2_source);
-    }
+fn sort_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     diagnostics.sort_by(|a, b| {
         a.pointer
             .cmp(&b.pointer)

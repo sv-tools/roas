@@ -779,6 +779,9 @@ fn validated_description() -> serde_json::Value {
             "ClosedAliased": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}},
             "RequiredAliased": {"type": "object", "required": ["a"], "properties": {"a": {"type": "string", "maxLength": 2}}},
             "NamesAliased": {"type": "object", "propertyNames": {"maxLength": 1}, "properties": {"ab": {"type": "string"}}},
+            "ReqFreeAliased": {"type": "object", "required": ["a"], "properties": {"a": {"type": "string"}}},
+            "NamesTrueAliased": {"type": "object", "propertyNames": true, "properties": {"a": {"type": "string"}}},
+            "NamesEmptyAliased": {"type": "object", "propertyNames": {}, "properties": {"a": {"type": "string"}}},
             "Ip": {"oneOf": [{"type": "string", "format": "ipv4"}, {"type": "string", "maxLength": 3}]},
             "StringOnly": {"type": "string", "enum": ["a", "b"]},
             "ObjectOnly": {"type": "object", "additionalProperties": false, "properties": {"s": {"$ref": "#/components/schemas/StringOnly"}}},
@@ -850,7 +853,7 @@ fn validated_generation(target: Target) -> roas_codegen::Generation {
     let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).unwrap();
     // One type opted out, and a format substituted by a plain string.
     let mut config: ConfigFile = serde_json::from_value(serde_json::json!({
-        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "FreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ClosedAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "RequiredAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesAliased": {"fields": {"ab": {"attrs": ["#[serde(alias = \"b\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
+        "types": {"NIfOff": {"validation": false}, "ShortOff": {"validation": false}, "Gated": {"attrs": ["#[cfg(any())]"]}, "Gated2": {"attrs": ["#[cfg_attr(all(), cfg(any()))]"]}, "GatedU": {"attrs": ["#[cfg(any())]"]}, "GatedField": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedRest": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedInt": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "GatedClosed": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "SubAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ShortAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "FreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "ClosedAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "RequiredAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesAliased": {"fields": {"ab": {"attrs": ["#[serde(alias = \"b\")]"]}}}, "ReqFreeAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesTrueAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesEmptyAliased": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "IntCatch": {"fields": {"a": {"attrs": ["#[serde(alias = \"aa\")]"]}}}, "NamesGated": {"fields": {"ab": {"attrs": ["#[cfg(any())]"]}}}, "AllGated": {"fields": {"a": {"attrs": ["#[cfg(any())]"]}}}, "NIfAlias": {"attrs": ["#[allow(dead_code)]"]}},
         "substitutions": {
             "date": {"rust": {"name": "String"}, "go": {"name": "string"}},
             "Money": {"rust": {"name": "String"}, "go": {"name": "string"}},
@@ -1258,6 +1261,10 @@ fn main() {
     assert_eq!(report::<IntCatch>(r#"{"aa":"x","b":1}"#), vec![u("/a")]);
     // Nothing would be decided differently: nothing to report.
     assert_eq!(report::<FreeAliased>(r#"{"aa":"x","r":"y"}"#), vec![]);
+    assert_eq!(report::<NamesTrueAliased>(r#"{"aa":"x"}"#), vec![]);
+    assert_eq!(report::<NamesEmptyAliased>(r#"{"aa":"x"}"#), vec![]);
+    // A required member under an alias is really missing.
+    assert_eq!(report::<ReqFreeAliased>(r#"{"aa":"x"}"#), vec![u("/a")]);
     let caught: IntCatch = serde_json::from_str(r#"{"aa":"x","b":7,"c":1.0}"#).unwrap();
     assert_eq!(caught.a.as_deref(), Some("x"));
     assert_eq!(serde_json::to_string(&caught).unwrap(), r#"{"a":"x","b":7,"c":1}"#);
