@@ -50,8 +50,9 @@
 //! [`execute_with_messages`] — XPath criteria and
 //! selectors without the `xpath` feature (and, with it, XPath versions
 //! Arazzo does not name, XPath payload replacement targets, and the XPath
-//! functions it refuses), and running the workflows a workflow depends on
-//! together (steps run together under [`Options::parallel`]). Unsupported execution capabilities are reported when
+//! functions it refuses), and running the workflows a called workflow
+//! depends on together (steps, and the workflows the one asked for depends
+//! on, run together under [`Options::parallel`]). Unsupported execution capabilities are reported when
 //! reached, or statically by preparation. The optional `input-validation` feature supports
 //! offline JSON Schema 2020-12 when [`Options::input_validation`] enables it.
 //! Plans compile schemas; each run validates its actual bound inputs at entry.
@@ -277,7 +278,7 @@ impl<M: MessageClient + ?Sized> Carrier for Messages<'_, M> {
                 client.unsubscribe(subscription);
                 Carried::Nothing
             }
-            Progress::Send(_) | Progress::Await | Progress::Wait(_) | Progress::Done(_) => {
+            Progress::Send(_) | Progress::Await(_) | Progress::Wait(_) | Progress::Done(_) => {
                 Carried::Nothing
             }
         })
@@ -334,7 +335,7 @@ fn drive_loop<C: HttpClient + ?Sized>(
                 run.supply_to(request.id, response)
                     .map_err(|error| run.failure(error))?;
             }
-            Progress::Await => unreachable!("every request is answered before the next advance"),
+            Progress::Await(_) => unreachable!("every request is answered before the next advance"),
             Progress::Wait(duration) => std::thread::sleep(duration),
             Progress::Done(report) => return Ok(*report),
             progress => {
@@ -428,7 +429,45 @@ async fn answer_one<F: Future<Output = Result<HttpResponse, ClientError>>>(
     run: &mut Run<'_>,
     flying: &mut Vec<(RequestId, Pin<Box<F>>)>,
 ) -> Result<(), ExecutionFailure> {
-    let (id, result) = first_answered(flying).await;
+    let answered = first_answered(flying).await;
+    answer(run, flying, answered)
+}
+
+/// As [`answer_one`], but give up waiting once `wake` has passed: a
+/// workflow running alongside is due to retry a step.
+async fn answer_one_within<
+    C: AsyncHttpClient + ?Sized,
+    F: Future<Output = Result<HttpResponse, ClientError>>,
+>(
+    run: &mut Run<'_>,
+    client: &C,
+    flying: &mut Vec<(RequestId, Pin<Box<F>>)>,
+    wake: std::time::Duration,
+) -> Result<(), ExecutionFailure> {
+    let answered = {
+        let mut sleep = client.sleep(wake);
+        let mut first = std::pin::pin!(first_answered(flying));
+        std::future::poll_fn(|context| {
+            if let std::task::Poll::Ready(answered) = first.as_mut().poll(context) {
+                return std::task::Poll::Ready(Some(answered));
+            }
+            sleep.as_mut().poll(context).map(|()| None)
+        })
+        .await
+    };
+    match answered {
+        Some(answered) => answer(run, flying, answered),
+        None => Ok(()),
+    }
+}
+
+/// Hand the run a response, and stop waiting for whatever the run then
+/// abandoned.
+fn answer<F>(
+    run: &mut Run<'_>,
+    flying: &mut Vec<(RequestId, Pin<Box<F>>)>,
+    (id, result): (RequestId, Result<HttpResponse, ClientError>),
+) -> Result<(), ExecutionFailure> {
     let response = result.map_err(|error| run.failure(run.client_failure(error)))?;
     run.supply_to(id, response)
         .map_err(|error| run.failure(error))?;
@@ -473,7 +512,10 @@ async fn drive_async_loop<C: AsyncHttpClient + ?Sized, M: AsyncMessageClient + ?
                     answer_one(run, &mut flying).await?;
                 }
             }
-            Progress::Await => answer_one(run, &mut flying).await?,
+            Progress::Await(None) => answer_one(run, &mut flying).await?,
+            Progress::Await(Some(wake)) => {
+                answer_one_within(run, &*client, &mut flying, wake).await?;
+            }
             Progress::Wait(duration) => client.sleep(duration).await,
             Progress::Done(report) => return Ok(*report),
             progress => {
@@ -500,8 +542,10 @@ async fn drive_async_loop<C: AsyncHttpClient + ?Sized, M: AsyncMessageClient + ?
                         run.deliver(message).map_err(|error| run.failure(error))?;
                     }
                     Progress::Unsubscribe(subscription) => messages.unsubscribe(subscription),
-                    Progress::Send(_) | Progress::Await | Progress::Wait(_) | Progress::Done(_) => {
-                    }
+                    Progress::Send(_)
+                    | Progress::Await(_)
+                    | Progress::Wait(_)
+                    | Progress::Done(_) => {}
                 }
             }
         }

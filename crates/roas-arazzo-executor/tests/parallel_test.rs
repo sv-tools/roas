@@ -78,12 +78,12 @@ fn independent_steps_are_in_flight_together() {
     let c = send(&mut run);
     assert_eq!([path(&a), path(&b), path(&c)], ["a", "b", "c"]);
     assert_ne!(a.id, b.id);
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     assert_eq!(run.in_flight(), [a.id, b.id, c.id]);
     // Answered in any order, judged in the order they are listed.
     run.supply_to(c.id, ok()).unwrap();
     run.supply_to(a.id, ok()).unwrap();
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(b.id, ok()).unwrap();
     let Ok(Progress::Done(report)) = run.advance() else {
         panic!("done");
@@ -100,7 +100,7 @@ fn no_more_than_the_limit_are_in_flight() {
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
     send(&mut run);
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(a.id, ok()).unwrap();
     assert_eq!(path(&send(&mut run)), "c");
 }
@@ -119,7 +119,7 @@ fn a_step_waits_for_what_it_depends_on_or_reads() {
         let mut run = Run::start(&description, &options).unwrap();
         let a = send(&mut run);
         // `b` needs `a`, and `c` comes after `b`.
-        assert!(matches!(run.advance(), Ok(Progress::Await)));
+        assert!(matches!(run.advance(), Ok(Progress::Await(None))));
         run.supply_to(a.id, ok()).unwrap();
         assert_eq!(path(&send(&mut run)), "b");
         assert_eq!(path(&send(&mut run)), "c");
@@ -135,11 +135,11 @@ fn a_step_with_actions_runs_alone() {
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
     // `b` waits for `a` to be answered…
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(a.id, ok()).unwrap();
     let b = send(&mut run);
     // …and nothing starts beside it.
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(b.id, ok()).unwrap();
     assert_eq!(path(&send(&mut run)), "c");
 
@@ -150,7 +150,7 @@ fn a_step_with_actions_runs_alone() {
     );
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(a.id, ok()).unwrap();
     assert_eq!(path(&send(&mut run)), "b");
 }
@@ -252,7 +252,7 @@ fn a_called_workflow_runs_its_own_steps_together() {
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
     let b = send(&mut run);
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(b.id, ok()).unwrap();
     run.supply_to(a.id, ok()).unwrap();
     // The calling step is done only once its workflow is.
@@ -365,7 +365,7 @@ fn a_receive_is_joined_with_nothing_else_in_flight() {
     assert!(matches!(run.advance(), Ok(Progress::Subscribe(_))));
     let a = send(&mut run);
     // `b` needs the receive, which is not joined while `a` is in flight.
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(a.id, ok()).unwrap();
     assert!(matches!(run.advance(), Ok(Progress::Receive { .. })));
 }
@@ -406,7 +406,7 @@ async fn a_step_that_cannot_start_waits_for_what_is_in_flight() {
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
     let b = send(&mut run);
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(a.id, HttpResponse::json(500, &json!({})))
         .unwrap();
     assert!(matches!(
@@ -420,7 +420,7 @@ async fn a_step_that_cannot_start_waits_for_what_is_in_flight() {
     let mut run = Run::start(&description, &options).unwrap();
     let a = send(&mut run);
     let b = send(&mut run);
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(a.id, ok()).unwrap();
     run.supply_to(b.id, ok()).unwrap();
     assert!(run.advance().is_err());
@@ -474,7 +474,7 @@ fn requests_in_flight_together_share_the_run_time() {
     assert!(a.timeout.is_some_and(|t| t <= Duration::from_millis(20)));
     assert!(b.timeout.is_some_and(|t| t <= Duration::from_millis(20)));
     std::thread::sleep(Duration::from_millis(40));
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     assert!(matches!(
         run.supply_to(a.id, ok()),
         Err(ExecutionError::TimedOut { .. })
@@ -511,7 +511,7 @@ fn responses_are_judged_in_the_order_the_steps_are_listed() {
         run.supply_to(b.id, ok()),
         Err(ExecutionError::NotWaiting)
     ));
-    assert!(matches!(run.advance(), Ok(Progress::Await)));
+    assert!(matches!(run.advance(), Ok(Progress::Await(None))));
     run.supply_to(a.id, HttpResponse::json(500, &json!({})))
         .unwrap();
     assert!(run.in_flight().is_empty());

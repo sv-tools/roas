@@ -395,9 +395,8 @@ let report = execute_async(description, &options.parallel(4), &mut Fake::new())
 - **Everything else runs alone**: a step with actions (they may jump or retry), one that calls a workflow (its own steps may run together inside it), and an AsyncAPI step start once everything before them is done, and nothing after them starts until they are.
 - **Judged in order.** Responses may come back in any order, but steps are judged — criteria, outputs, the report record — in the order they are listed, as they would be one at a time. A response that arrives before those of the steps listed ahead of it waits for them. So the report lists steps in their usual order, and a run ends or stops where it would have one step at a time.
 - **Failure.** When a step fails and its workflow ends, requests still in flight in that workflow are abandoned: they are not recorded, and their responses are not wanted. A step that could not start — the run's step limit is reached, or its request cannot be built — waits for what is in flight first. A client that fails to carry out a request still stops the run at once, whichever step sent it.
-- **Drivers.** `execute_async` and the other async functions send the requests in flight together. `execute` and the other blocking functions still send one at a time. A caller driving `Run` itself gets several `Progress::Send`s in a row, then `Progress::Await` when nothing more can start; it answers each with `Run::supply_to(request.id, response)`, and `Run::in_flight` says which requests are still wanted.
-
-The workflows a workflow depends on (`dependsOn`) still run one after another.
+- **Workflows it depends on.** The workflows the one asked for depends on (`dependsOn`, and what those depend on) run together too, each as its steps allow. One waits for a workflow listed before it only when they could tell which ran first: they can run a common workflow — by `dependsOn`, a call, a `goto` or a `retry` — or one reads with `$workflows.<id>` a workflow the other can run. The one asked for starts once all of them are done. Their steps are reported in the order they run one after another, and when one of them stops the run, the error is the one that would have come first: an error waits for the workflows listed before it, and those listed after it are abandoned. None of them runs together when any can reach an AsyncAPI step, or a workflow reference that does not resolve. The step limit counts the steps of all of them, so it may stop the run in another of them than it would one after another. The workflows a call, `goto` or `retry` depends on still run one after another.
+- **Drivers.** `execute_async` and the other async functions send the requests in flight together. `execute` and the other blocking functions still send one at a time. A caller driving `Run` itself gets several `Progress::Send`s in a row, then `Progress::Await` when nothing more can start; it answers each with `Run::supply_to(request.id, response)`, and `Run::in_flight` says which requests are still wanted. `Progress::Await(Some(wait))` says a workflow is waiting that long to retry a step: advance once it has passed, answered or not.
 
 ### XPath
 
@@ -438,7 +437,7 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | JSON Pointer selectors and criteria (v1.1) | Typed | — | Constant pointers' syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | With the `xpath` feature: constant expressions compiled as their version, unknown versions, refused functions and XPath replacement targets refused; without it, a preparation error | With the `xpath` feature, evaluated as XPath 1.0 to 3.1 over XML text ([details](#xpath)); without it, not run |
 | Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
-| `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time, except that an AsyncAPI receive listens in the background until a step depends on it; a call, `goto` or `retry` target's dependencies run first, each once in a run, with the run's inputs |
+| `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time, except that an AsyncAPI receive listens in the background until a step depends on it, and under `Options::parallel` independent steps, and the run's own independent dependencies, run together; a call, `goto` or `retry` target's dependencies run first, each once in a run, with the run's inputs |
 
 ## Condition profile
 
@@ -808,7 +807,7 @@ Each of these is reported where it is met, never passed over — a run should no
 
 - **AsyncAPI steps without a message client**: the plain `execute` functions, and `roas arazzo run`, stop at them.
 - **XPath** criteria and selectors without the `xpath` feature; with it, versions Arazzo does not name, XPath payload replacement targets, and the functions listed under [XPath](#xpath).
-- **Parallel workflows**: the workflows a workflow depends on run one after another. Steps run together only under `Options::parallel` (see [Parallel steps](#parallel-steps)).
+- **Parallel work by default**: steps, and the workflows the one asked for depends on, run together only under `Options::parallel` (see [Parallel steps](#parallel-steps)). The workflows a called workflow depends on always run one after another.
 
 ## Safety rails
 

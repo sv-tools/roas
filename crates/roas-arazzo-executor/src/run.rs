@@ -26,6 +26,8 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+mod roots;
+
 /// How far a run can go before it is treated as looping.
 #[derive(Clone, Copy, Debug)]
 struct Limits {
@@ -299,6 +301,13 @@ impl Options {
     /// step fails and its workflow ends, requests still in flight in that
     /// workflow are abandoned: they are not recorded.
     ///
+    /// The workflows the one asked for depends on run together as well,
+    /// unless they could tell which ran first — they can run a common
+    /// workflow, or one reads another's with `$workflows.<id>` — or any
+    /// can reach an AsyncAPI step. Their steps are reported, and an error
+    /// among them raised, as one after another; the step limit counts all
+    /// of their steps.
+    ///
     /// [`execute_async`](crate::execute_async) and its kin send requests
     /// in flight together; [`execute`](crate::execute) and its kin still
     /// send one at a time. A caller driving [`Run`] itself hands each
@@ -327,7 +336,11 @@ pub enum Progress {
     /// Nothing more can start until a request in flight is answered:
     /// hand one of their responses to [`Run::supply_to`], then advance.
     /// Only a run with [`Options::parallel`] above one asks for this.
-    Await,
+    ///
+    /// With a duration, a workflow running alongside is waiting that long
+    /// to retry a step: advance once it has passed, even if no response
+    /// came yet. Waiting for a response anyway only makes the retry later.
+    Await(Option<Duration>),
     /// Wait this long — a retry asked for it — then carry on.
     Wait(Duration),
     /// Publish this message — an AsyncAPI `send` step — then advance. The
@@ -567,6 +580,14 @@ pub struct Run<'d> {
     wait: Option<Duration>,
     records: Vec<StepRecord>,
     taken: usize,
+    /// How many steps this run may take: [`Options::max_steps`], less
+    /// what workflows running alongside it took.
+    cap: usize,
+    /// Workflows that finished in this run, as `finished` names them —
+    /// what a workflow run alongside others hands back.
+    fresh: BTreeSet<(Doc, String)>,
+    /// The workflows the one asked for depends on, run together.
+    roots: Option<roots::Roots<'d>>,
     report: Option<Box<ExecutionReport>>,
     halted: bool,
     /// Per document; validators are keyed by workflow id within it.
@@ -663,7 +684,7 @@ impl<'d> Run<'d> {
         };
 
         let documents = Documents::new(description, options);
-        let mut queue = match prepared {
+        let queue = match prepared {
             Some(prepared) => prepared.queue.clone(),
             None => ordered_workflows(&documents, Doc::ENTRY, wanted)?,
         };
@@ -683,7 +704,11 @@ impl<'d> Run<'d> {
             }
             .map_err(|error| error.in_document(document.identity))?;
         }
-        let (doc, first) = queue.remove(0);
+        // Under `parallel`, the workflows the one asked for depends on run
+        // together where nothing one does can change another.
+        let roots = (options.limits.parallel > 1 && queue.len() > 2)
+            .then(|| roots::plan(&documents, &queue[..queue.len() - 1]))
+            .flatten();
         let mut run = Self {
             description,
             options,
@@ -702,6 +727,9 @@ impl<'d> Run<'d> {
             wait: None,
             records: Vec::new(),
             taken: 0,
+            cap: options.limits.steps,
+            fresh: BTreeSet::new(),
+            roots: None,
             report: None,
             halted: false,
             input_schemas,
@@ -711,7 +739,17 @@ impl<'d> Run<'d> {
             closing: Vec::new(),
             subscriptions: 0,
         };
-        run.enter(doc, first, initial_inputs, None)?;
+        match roots {
+            Some(entries) => {
+                // Only the one asked for is left to run after them.
+                run.queue.drain(..run.queue.len() - 1);
+                run.start_roots(entries)?;
+            }
+            None => {
+                let (doc, first) = run.queue.remove(0);
+                run.enter(doc, first, initial_inputs, None)?;
+            }
+        }
         Ok(run)
     }
 
@@ -742,7 +780,10 @@ impl<'d> Run<'d> {
                 .unwrap_or_default(),
             outcome: Outcome::Incomplete,
             outputs: BTreeMap::new(),
-            steps: self.records.clone(),
+            steps: match &self.roots {
+                Some(roots) => roots.records(),
+                None => self.records.clone(),
+            },
         }
     }
 
@@ -787,7 +828,7 @@ impl<'d> Run<'d> {
         };
         let left = deadline.saturating_duration_since(Instant::now());
         match progress {
-            Progress::Done(_) | Progress::Unsubscribe(_) | Progress::Await => Ok(progress),
+            Progress::Done(_) | Progress::Unsubscribe(_) | Progress::Await(_) => Ok(progress),
             Progress::Wait(wait) if wait < left => Ok(Progress::Wait(wait)),
             Progress::Send(mut request) if !left.is_zero() => {
                 request.timeout = Some(request.timeout.map_or(left, |own| own.min(left)));
@@ -856,6 +897,9 @@ impl<'d> Run<'d> {
     }
 
     fn advance_inner(&mut self) -> Result<Progress, ExecutionError> {
+        if self.roots.is_some() {
+            return self.advance_roots();
+        }
         // A subscription that is done with is closed before a retry waits.
         if self.pending.is_empty()
             && self.joining.is_none()
@@ -919,7 +963,7 @@ impl<'d> Run<'d> {
             // closed unheard.
             if frame.at >= frame.order.len() {
                 if !self.pending.is_empty() {
-                    return Ok(Progress::Await);
+                    return Ok(Progress::Await(None));
                 }
                 if frame.ended && !frame.listening.is_empty() {
                     let frame = self.frames.last_mut().expect("the frame is still there");
@@ -946,7 +990,7 @@ impl<'d> Run<'d> {
             let alongside = self.options.limits.parallel > 1 && alongside(frame, index);
             if !self.pending.is_empty() {
                 if !alongside || self.flying() >= self.options.limits.parallel {
-                    return Ok(Progress::Await);
+                    return Ok(Progress::Await(None));
                 }
                 let step = &frame.workflow.steps[index];
                 let description = self.documents.get(frame.doc).description;
@@ -958,7 +1002,7 @@ impl<'d> Run<'d> {
                     .iter()
                     .any(|pending| needs.contains(&frame.workflow.steps[pending.step].step_id))
                 {
-                    return Ok(Progress::Await);
+                    return Ok(Progress::Await(None));
                 }
             }
             // A step that depends on a receive still listening waits for it.
@@ -980,7 +1024,7 @@ impl<'d> Run<'d> {
                 {
                     // Joined with nothing else in flight.
                     if !self.pending.is_empty() {
-                        return Ok(Progress::Await);
+                        return Ok(Progress::Await(None));
                     }
                     return Ok(self.join(listening.subscription));
                 }
@@ -989,9 +1033,9 @@ impl<'d> Run<'d> {
             // A step that cannot start while others are in flight waits
             // for them: one of them may yet end the workflow before it,
             // as it would have one at a time.
-            if self.taken >= self.options.limits.steps {
+            if self.taken >= self.cap {
                 if !self.pending.is_empty() {
-                    return Ok(Progress::Await);
+                    return Ok(Progress::Await(None));
                 }
                 return Err(ExecutionError::Limit {
                     limit: "step",
@@ -1018,7 +1062,7 @@ impl<'d> Run<'d> {
                 .and_then(|endpoint| self.build(index, endpoint))
             {
                 Ok(built) => built,
-                Err(_) if !self.pending.is_empty() => return Ok(Progress::Await),
+                Err(_) if !self.pending.is_empty() => return Ok(Progress::Await(None)),
                 Err(error) => return Err(locate(&self.documents, doc, error)),
             };
             self.taken += 1;
@@ -1100,6 +1144,7 @@ impl<'d> Run<'d> {
             .iter()
             .filter(|pending| pending.answer.is_none())
             .count()
+            + self.roots.as_ref().map_or(0, roots::Roots::flying)
     }
 
     /// The requests in flight, oldest first. A request that was handed out
@@ -1110,6 +1155,9 @@ impl<'d> Run<'d> {
         // A stopped run wants nothing more.
         if self.halted {
             return Vec::new();
+        }
+        if let Some(roots) = &self.roots {
+            return roots.in_flight();
         }
         self.pending
             .iter()
@@ -1123,6 +1171,9 @@ impl<'d> Run<'d> {
         id: RequestId,
         response: HttpResponse,
     ) -> Result<(), ExecutionError> {
+        if self.roots.is_some() {
+            return self.supply_root(id, response);
+        }
         if self.frames.last().is_none() {
             return Err(ExecutionError::NotWaiting);
         }
@@ -1751,6 +1802,8 @@ impl<'d> Run<'d> {
                 outputs: outputs.clone(),
             },
         );
+        self.fresh
+            .insert((frame.doc, frame.workflow.workflow_id.clone()));
         if is_dependency(&frame) {
             self.dependencies_done
                 .insert((frame.doc, frame.workflow.workflow_id.clone()));
@@ -2801,7 +2854,7 @@ fn visit<'d>(
 
 /// Parse the expressions a value evaluates, with no runtime value lookups.
 /// The visitor may collect dependencies or just leave syntax checked.
-fn visit_value_expressions(
+pub(super) fn visit_value_expressions(
     value: &ValueOrSelector,
     visitor: &mut impl FnMut(Expression<'_>),
 ) -> Result<(), ExecutionError> {
@@ -2904,41 +2957,36 @@ fn steps_named_by(
     description: &Description,
 ) -> Result<BTreeSet<String>, ExecutionError> {
     let mut found = BTreeSet::new();
-    let mut collect = |parsed: Expression<'_>| {
+    step_expressions(step, workflow, description, &mut |parsed| {
         if let Some(id) = parsed.step_id() {
             found.insert(id.to_owned());
         }
-    };
+    })?;
+    found.remove(&step.step_id);
+    Ok(found)
+}
 
-    fn read_criteria(
-        list: &[Criterion],
-        visitor: &mut impl FnMut(Expression<'_>),
-    ) -> Result<(), ExecutionError> {
-        for criterion in list {
-            for parsed in criterion::references(criterion)? {
-                visitor(parsed);
-            }
-        }
-        Ok(())
-    }
-
-    visit_parameter_expressions(
-        effective_parameters(workflow, step, description)?,
-        &mut collect,
-    )?;
-    read_criteria(&step.success_criteria, &mut collect)?;
+/// Visit every expression a step evaluates — see [`steps_named_by`].
+pub(super) fn step_expressions(
+    step: &Step,
+    workflow: &Workflow,
+    description: &Description,
+    visitor: &mut impl FnMut(Expression<'_>),
+) -> Result<(), ExecutionError> {
+    visit_parameter_expressions(effective_parameters(workflow, step, description)?, visitor)?;
+    read_criteria(&step.success_criteria, visitor)?;
     for output in step.outputs.values() {
-        visit_value_expressions(output, &mut collect)?;
+        visit_value_expressions(output, visitor)?;
     }
     if let Some(id) = &step.correlation_id {
-        visit_literal_expressions(id, &mut collect)?;
+        visit_literal_expressions(id, visitor)?;
     }
     if let Some(body) = &step.request_body {
         if let Some(payload) = &body.payload {
-            visit_literal_expressions(payload, &mut collect)?;
+            visit_literal_expressions(payload, visitor)?;
         }
         for replacement in &body.replacements {
-            visit_value_expressions(&replacement.value, &mut collect)?;
+            visit_value_expressions(&replacement.value, visitor)?;
         }
     }
     for entry in &step.on_success {
@@ -2946,19 +2994,29 @@ fn steps_named_by(
         // earlier action, may make this action unreachable. Syntax failures in
         // an available action remain errors rather than erased dependencies.
         if let Ok(action) = success_action(entry, description) {
-            read_criteria(&action.criteria, &mut collect)?;
-            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
+            read_criteria(&action.criteria, visitor)?;
+            visit_action_parameter_expressions(&action.parameters, description, visitor)?;
         }
     }
     for entry in &step.on_failure {
         if let Ok(action) = failure_action(entry, description) {
-            read_criteria(&action.criteria, &mut collect)?;
-            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
+            read_criteria(&action.criteria, visitor)?;
+            visit_action_parameter_expressions(&action.parameters, description, visitor)?;
         }
     }
+    Ok(())
+}
 
-    found.remove(&step.step_id);
-    Ok(found)
+fn read_criteria(
+    list: &[Criterion],
+    visitor: &mut impl FnMut(Expression<'_>),
+) -> Result<(), ExecutionError> {
+    for criterion in list {
+        for parsed in criterion::references(criterion)? {
+            visitor(parsed);
+        }
+    }
+    Ok(())
 }
 
 /// The steps a workflow's own `successActions` / `failureActions` read.
@@ -2967,32 +3025,34 @@ fn workflow_action_reads(
     description: &Description,
 ) -> Result<BTreeSet<String>, ExecutionError> {
     let mut found = BTreeSet::new();
-    let mut collect = |parsed: Expression<'_>| {
+    workflow_action_expressions(workflow, description, &mut |parsed| {
         if let Some(id) = parsed.step_id() {
             found.insert(id.to_owned());
         }
-    };
+    })?;
+    Ok(found)
+}
+
+/// Visit every expression a workflow's own `successActions` /
+/// `failureActions` evaluate.
+pub(super) fn workflow_action_expressions(
+    workflow: &Workflow,
+    description: &Description,
+    visitor: &mut impl FnMut(Expression<'_>),
+) -> Result<(), ExecutionError> {
     for entry in &workflow.success_actions {
         if let Ok(action) = success_action(entry, description) {
-            for criterion in &action.criteria {
-                criterion::references(criterion)?
-                    .into_iter()
-                    .for_each(&mut collect);
-            }
-            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
+            read_criteria(&action.criteria, visitor)?;
+            visit_action_parameter_expressions(&action.parameters, description, visitor)?;
         }
     }
     for entry in &workflow.failure_actions {
         if let Ok(action) = failure_action(entry, description) {
-            for criterion in &action.criteria {
-                criterion::references(criterion)?
-                    .into_iter()
-                    .for_each(&mut collect);
-            }
-            visit_action_parameter_expressions(&action.parameters, description, &mut collect)?;
+            read_criteria(&action.criteria, visitor)?;
+            visit_action_parameter_expressions(&action.parameters, description, visitor)?;
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 /// Step indices in an order that respects `dependsOn` and the steps an

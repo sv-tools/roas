@@ -467,7 +467,8 @@ pub(crate) struct ArazzoRunArgs {
     /// Let up to this many requests be in flight at once. A step runs
     /// beside others only when it is an HTTP step with no actions, in a
     /// workflow with none, and does not depend on or read a step still in
-    /// flight. One at a time by default.
+    /// flight; the workflows the one asked for depends on run together
+    /// where none can tell which ran first. One at a time by default.
     #[arg(long, value_name = "N")]
     parallel: Option<usize>,
 
