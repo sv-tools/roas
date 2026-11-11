@@ -52,6 +52,10 @@ pub(crate) struct CatchAllView {
     pub ty: String,
     /// The members routed to the derived code, one entry per field.
     pub declared: Vec<DeclaredView>,
+    /// A Rust function from a member name no field reads to whether it is
+    /// let in: beside `additionalProperties: false`, only one matching a
+    /// pattern of `patternProperties`.
+    pub allowed: String,
 }
 
 /// The names one declared field is read by.
@@ -810,10 +814,28 @@ impl Builder<'_> {
                         // and the declared members are handed to it while the
                         // rest decode into the catch-all as they stream by.
                         view.attrs.push("#[serde(remote = \"Self\")]".to_owned());
+                        let allowed = match &s.only_patterns {
+                            None => "|_: &str| true".to_owned(),
+                            Some(patterns) => {
+                                super::validation::mark_uses_regex();
+                                let list = patterns
+                                    .iter()
+                                    .map(|p| format!("{p:?}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                // A pattern the engine cannot compile lets
+                                // every member in rather than refuse one it
+                                // allows.
+                                format!(
+                                    "|name: &str| {{ static PATTERNS: std::sync::LazyLock<Option<Vec<regex::Regex>>> = std::sync::LazyLock::new(|| [{list}].iter().map(|p| regex::Regex::new(p).ok()).collect()); PATTERNS.as_ref().is_none_or(|patterns| patterns.iter().any(|re| re.is_match(name))) }}"
+                                )
+                            }
+                        };
                         view.catch_all = Some(CatchAllView {
                             field: name,
                             ty: inner,
                             declared,
+                            allowed,
                         });
                         self.support.catch_all = true;
                     }

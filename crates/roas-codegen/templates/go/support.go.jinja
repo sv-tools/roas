@@ -232,7 +232,6 @@ func (*Null) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 	return nil
 }
 {% endif %}
-{% if support.validation %}
 {% if support.patterns %}// patterns holds each pattern compiled, or nil when it is too large to.
 var patterns sync.Map
 
@@ -253,7 +252,20 @@ func matchPattern(src, s string) (matched, compiled bool) {
 	return false, false
 }
 
-{% endif %}// wideNumber says whether raw has a number a generated type may fail to
+{% if support.member_patterns %}// memberMatches says whether a member name matches one of the patterns
+// of patternProperties. A pattern that does not compile lets every name
+// in, rather than refuse one it allows.
+func memberMatches(name string, srcs ...string) bool {
+	for _, src := range srcs {
+		if matched, compiled := matchPattern(src, name); matched || !compiled {
+			return true
+		}
+	}
+	return false
+}
+
+{% endif %}{% endif %}{% if support.validation %}
+// wideNumber says whether raw has a number a generated type may fail to
 // decode for its range rather than its value: a whole number from intLimit
 // on, one past the 32-bit float range when narrow holds, or one past
 // float64 — or nests deeper than the decoder reads. A union branch that

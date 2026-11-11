@@ -1430,3 +1430,60 @@ fn a_pointer_already_into_a_two_oh_source_is_left_alone() {
         "{pointers:?}"
     );
 }
+
+#[test]
+fn closed_pattern_properties_are_checked_at_decode() {
+    let components = serde_json::json!({
+        "Ext": {"type": "object", "additionalProperties": false,
+            "properties": {"id": {"type": "string"}},
+            "patternProperties": {"^x-": {"type": "string"}}},
+        "Loose": {"type": "object", "additionalProperties": false,
+            "patternProperties": {"\\bx": {}}}
+    });
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml("", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let g = generate(&document(components.clone()), &config).unwrap();
+        let message = |name: &str| {
+            g.diagnostics
+                .iter()
+                .find(|d| d.pointer == format!("/components/schemas/{name}")
+                    && matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "patternProperties"))
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| panic!("{name}: {:?}", g.diagnostics))
+        };
+        assert!(
+            message("Ext").contains("refused at decode"),
+            "{}",
+            message("Ext")
+        );
+        assert!(
+            message("Loose").contains("not refused at decode"),
+            "{}",
+            message("Loose")
+        );
+        let code = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        if language == Target::Rust {
+            // Even with validation off, the decoder needs a regex engine.
+            assert!(
+                g.dependencies.rust.iter().any(|d| d.name == "regex"),
+                "{:?}",
+                g.dependencies
+            );
+            assert!(code.contains("\"^x-\""), "{code}");
+        } else {
+            assert!(
+                code.contains("\"regexp\"") && code.contains("memberMatches(name, `^x-`)")
+                    || code.contains("memberMatches(name, \"^x-\")"),
+                "{code}"
+            );
+        }
+    }
+}

@@ -99,6 +99,11 @@ pub(crate) enum Additional {
 pub(crate) struct StructDef {
     pub fields: Vec<Field>,
     pub additional: Additional,
+    /// Beside `additionalProperties: false`, the patterns of
+    /// `patternProperties`, translated: a member no property names must
+    /// match one, or it is refused at decode. `None` when any member is
+    /// let in, including when a pattern cannot be translated.
+    pub only_patterns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]

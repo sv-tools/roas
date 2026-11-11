@@ -112,6 +112,16 @@ fn main() {
     let ids: Ids = serde_json::from_str(r#"["a","b"]"#).unwrap();
     assert_eq!(ids.0.len(), 2);
     let _: Alias = serde_json::from_str(r#"{"petType":"Cat"}"#).unwrap();
+    // Beside `additionalProperties: false`, a member must be a property or
+    // match a pattern; pattern members land in the catch-all.
+    assert_eq!(
+        round_trip::<Extensible>(r#"{"id":"a","x-k":"v","n12":5}"#),
+        r#"{"id":"a","n12":5,"x-k":"v"}"#
+    );
+    assert!(serde_json::from_str::<Extensible>(r#"{"id":"a","zz":1}"#).is_err());
+    assert!(serde_json::from_str::<Extensible>(r#"{"n1x":1}"#).is_err());
+    // A pattern the generator cannot translate lets every member in.
+    assert!(serde_json::from_str::<Untranslated>(r#"{"zz":1}"#).is_ok());
     assert_eq!(round_trip::<Holder>(r#"{"needed":null}"#), r#"{"needed":null}"#);
     assert_eq!(
         round_trip::<Holder>(r#"{"any":null,"loose":null,"needed":1,"nothing":null,"ref":null}"#),
@@ -158,7 +168,13 @@ fn description() -> serde_json::Value {
             "Composed": {"allOf": [{"$ref": "#/components/schemas/Cat"}, {"type": "object", "additionalProperties": false}]},
             "Node": {"type": "object", "properties": {"next": {"type": ["object", "null"], "$comment": "x"}}},
             "Ids": {"type": "array", "items": {"type": "string"}},
-            "Alias": {"$ref": "#/components/schemas/Cat"}
+            "Alias": {"$ref": "#/components/schemas/Cat"},
+            "Extensible": {"type": "object", "additionalProperties": false,
+                "properties": {"id": {"type": "string"}},
+                "patternProperties": {"^x-": {"type": "string"}, "^n\\d+$": {"type": "integer"}}},
+            "Untranslated": {"type": "object", "additionalProperties": false,
+                "properties": {"id": {"type": "string"}},
+                "patternProperties": {"\\bx": {}}}
         }}
     });
     // `Node.next` must reference Node; write it as a reference.
@@ -408,6 +424,10 @@ func main() {
 	check(len(decode[api.Ids](`["a","b"]`)), 2)
 	check(roundTrip[api.Ids](`["a","b"]`), `["a","b"]`)
 	var _ api.Cat = decode[api.Alias](`{"petType":"Cat"}`)
+	check(len(decode[api.Extensible](`{"id":"a","x-k":"v","n12":5}`).AdditionalProperties), 2)
+	mustFail[api.Extensible](`{"id":"a","zz":1}`, "zz matches no pattern")
+	mustFail[api.Extensible](`{"n1x":1}`, "n1x matches no pattern")
+	check(len(decode[api.Untranslated](`{"zz":1}`).AdditionalProperties), 1)
 	// null is a value of `{}`, `type: null` and an open holder: kept, not lost.
 	check(roundTrip[api.Holder](`{"needed":null}`), `{"needed":null}`)
 	check(roundTrip[api.Holder](`{"any":null,"loose":null,"needed":1,"nothing":null,"ref":null}`),

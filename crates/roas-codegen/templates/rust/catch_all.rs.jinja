@@ -24,6 +24,7 @@ impl<'de> serde::Deserialize<'de> for {{ t.name }} {
 {% endfor %}                {{ d.names }} => true,
 {% endfor %}                _ => false,
             },
+            allowed: {{ t.catch_all.allowed }},
             rest: &mut rest,
         })?;
         value.{{ t.catch_all.field }} = rest;

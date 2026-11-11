@@ -37,7 +37,10 @@ func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 				return err
 			}
 {% endfor %}		default:
-{% if t.extra_ty %}			var value {{ t.extra_ty }}
+{% if t.member_patterns %}			if !memberMatches(name, {{ t.member_patterns | join(", ") }}) {
+				return fmt.Errorf("%s: unknown member %q: it matches no property and no pattern", {{ t.name_literal }}, name)
+			}
+{% endif %}{% if t.extra_ty %}			var value {{ t.extra_ty }}
 			if err := json.UnmarshalDecode(d, &value, decodeOptions); err != nil {
 				return err
 			}

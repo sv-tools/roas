@@ -214,6 +214,8 @@ impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for roas_object_
 struct roas_catch_all<'r, D, T> {
     inner: D,
     declared: fn(&str) -> bool,
+    /// Whether a member no field reads is let in.
+    allowed: fn(&str) -> bool,
     rest: &'r mut std::collections::BTreeMap<String, T>,
 }
 
@@ -221,7 +223,7 @@ impl<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de>> serde::Deseri
     type Error = D::Error;
 
     fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
-        self.inner.deserialize_map(roas_catch_all { inner: visitor, declared: self.declared, rest: self.rest })
+        self.inner.deserialize_map(roas_catch_all { inner: visitor, declared: self.declared, allowed: self.allowed, rest: self.rest })
     }
 
     fn is_human_readable(&self) -> bool {
@@ -243,7 +245,7 @@ impl<'de, V: serde::de::Visitor<'de>, T: serde::Deserialize<'de>> serde::de::Vis
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<V::Value, A::Error> {
-        self.inner.visit_map(roas_catch_all { inner: map, declared: self.declared, rest: self.rest })
+        self.inner.visit_map(roas_catch_all { inner: map, declared: self.declared, allowed: self.allowed, rest: self.rest })
     }
 }
 
@@ -254,6 +256,9 @@ impl<'de, A: serde::de::MapAccess<'de>, T: serde::Deserialize<'de>> serde::de::M
         while let Some(key) = self.inner.next_key::<String>()? {
             if (self.declared)(&key) {
                 return seed.deserialize(serde::de::value::StringDeserializer::<A::Error>::new(key)).map(Some);
+            }
+            if !(self.allowed)(&key) {
+                return Err(serde::de::Error::custom(format!("unknown field `{key}`: it matches no property and no pattern")));
             }
             let value = self.inner.next_value::<T>()?;
             self.rest.insert(key, value);

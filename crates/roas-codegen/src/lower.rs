@@ -950,6 +950,20 @@ impl<'a> Lowerer<'a> {
                 format!("`required` names `{missing}`, which `properties` does not declare; the requirement is not enforced"),
             );
         }
+        // Beside `additionalProperties: false`, a member must be a property
+        // or match a pattern: the decoder can tell, when every pattern
+        // means the same to it as to JSON Schema.
+        let only_patterns = (matches!(additional, FrontAdditional::Denied)
+            && !schema.constraints.pattern_properties.is_empty())
+        .then(|| {
+            schema
+                .constraints
+                .pattern_properties
+                .iter()
+                .map(|p| crate::pattern::translate(p).ok())
+                .collect::<Option<Vec<_>>>()
+        })
+        .flatten();
         let additional = match additional {
             // Members the patterns allow are not unknown: refusing them
             // would refuse valid values. They land in the catch-all.
@@ -970,13 +984,34 @@ impl<'a> Lowerer<'a> {
             }
         };
         if !schema.constraints.pattern_properties.is_empty() {
+            let message = if only_patterns.is_some() {
+                "`patternProperties` schemas are not represented in the type: matching members land in the catch-all, and a member matching no pattern is refused at decode"
+            } else if matches!(additional, Additional::CatchAll(_))
+                && matches!(
+                    &schema.kind,
+                    Kind::Object {
+                        additional: FrontAdditional::Denied,
+                        ..
+                    }
+                )
+            {
+                "`patternProperties` is not represented in the type: matching members land in the catch-all, and since a pattern cannot be translated, a member matching none is not refused at decode"
+            } else {
+                "`patternProperties` is not represented in the type; matching members land in the catch-all"
+            };
             self.warn(
-                DiagnosticKind::UnsupportedKeyword { keyword: "patternProperties".into() },
+                DiagnosticKind::UnsupportedKeyword {
+                    keyword: "patternProperties".into(),
+                },
                 &schema.id,
-                "`patternProperties` is not represented in the type; matching members land in the catch-all".into(),
+                message.into(),
             );
         }
-        StructDef { fields, additional }
+        StructDef {
+            fields,
+            additional,
+            only_patterns,
+        }
     }
 
     fn branches(&mut self, slots: &[Slot], name: &[String], word: &str) -> Vec<Branch> {
@@ -1068,6 +1103,7 @@ impl<'a> Lowerer<'a> {
             return TypeKind::Struct(StructDef {
                 fields,
                 additional: Additional::CatchAll(TypeRef::Any),
+                only_patterns: None,
             });
         }
         self.warn(

@@ -13,6 +13,11 @@ thread_local! {
 }
 
 /// Whether a `pattern` check was rendered since the last call; resets it.
+/// The generated code compiles a regex, so it needs `regex`.
+pub(crate) fn mark_uses_regex() {
+    USES_REGEX.with(|flag| flag.set(true));
+}
+
 pub(crate) fn take_uses_regex() -> bool {
     USES_REGEX.with(|flag| flag.replace(false))
 }
