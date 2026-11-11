@@ -70,6 +70,62 @@ One limit is worth stating: `enum` uniqueness compares numbers after the parser 
 
 `ValidationOptions` (EnumSet): `IgnoreEmptyInfoTitle`, `IgnoreEmptyInfoVersion`, `IgnoreUnusedChannelParameter`, and `ErrorOnExternalReference`. Behind the `clap` feature, the enum implements `clap::ValueEnum` so downstream CLIs can surface it directly.
 
+## Resolving references
+
+Each version's `Document` can follow a `$ref` to the object it names, as long as the chain stays inside that document:
+
+```rust
+use roas_asyncapi::v3_1::{Document, Resolution};
+
+let doc: Document = serde_json::from_str(r##"{
+    "asyncapi": "3.1.0",
+    "info": { "title": "Streetlights", "version": "1.0.0" },
+    "channels": {
+        "lightMeasured": {
+            "address": "lighting/measured",
+            "messages": { "lightMeasured": { "name": "LightMeasured" } }
+        }
+    },
+    "operations": {
+        "receiveLightMeasurement": {
+            "action": "receive",
+            "channel": { "$ref": "#/channels/lightMeasured" },
+            "messages": [ { "$ref": "#/channels/lightMeasured/messages/lightMeasured" } ]
+        }
+    }
+}"##).unwrap();
+
+// A `RefOr<T>` entry: the item itself, or what its `$ref` leads to.
+let operation = doc.operations["receiveLightMeasurement"]
+    .get_item(&doc)
+    .found()
+    .expect("declared inline");
+
+// A bare `Reference`, which says nothing of its kind: the document's
+// method for that kind follows it.
+match doc.resolve_channel(&operation.channel) {
+    Resolution::Found(channel) => assert_eq!(channel.messages.len(), 1),
+    // Another document (nothing is loaded), or a place in this one
+    // the channel resolver does not hand back an object from.
+    Resolution::Opaque => {}
+    other => panic!("channel {}", other.problem().unwrap_or("did not resolve")),
+}
+
+let message = doc.resolve_message(&operation.messages[0]).found().unwrap();
+assert_eq!(message.name.as_deref(), Some("LightMeasured"));
+```
+
+`RefOr::get_item(&doc)` takes the entry the model holds, where an inline item resolves to itself, and returns a `Resolution<T>`: `Found`, `Opaque` (the chain leaves the document, or ends at a place the resolver for that kind does not hand back an object from), `Missing`, `Cycle`, `Unrecognized`, or `WrongKind`. `found()` gives the object and `problem()` says why a reference is a document bug, if it is one. `Resolution` is `Clone` and comparable, and each version module re-exports it beside `RefOr`.
+
+`get_item` works for the kinds a version's `Document` implements `common::reference::ResolveReference<T>` for. Where the model holds a bare `Reference` instead of a `RefOr`, the `Document` has a method per kind:
+
+| Version | `RefOr<T>::get_item(&doc)` for `T` | `Document` methods |
+|---|---|---|
+| 3.0 / 3.1 | `Server`, `Channel`, `Operation`, `Message`, `OperationReply` | `resolve_server(&Reference)` (a channel's `servers`), `resolve_channel(&Reference)` (an operation's or reply's `channel`), `resolve_message(&Reference)` (an operation's or reply's `messages`) |
+| 2.6 | `Server`, `Message`, `SecurityScheme` | `resolve_channel(&ChannelItem)` (a channel item carries its own `$ref`) |
+
+Every other kind has no resolver. That includes `SecurityScheme` in 3.x, which only 2.6 covers.
+
 ## What 2.6 does differently
 
 2.6 is a different document rather than an earlier draft of v3, so `v2_6` is its own model rather than a variation on `v3_0`:
@@ -89,9 +145,9 @@ The `publish` / `subscribe` inversion is the migration trap worth naming: 2.6's 
 
 ## Scope
 
-The model and its validators are the whole surface. Out of scope for this release:
+Out of scope for this release:
 
-- **`$ref` resolution across documents.** Cross-reference checks run on document-local pointers; an external `$ref` is accepted without further checking unless `ErrorOnExternalReference` asks for a self-contained document.
+- **`$ref` resolution across documents.** No other document is ever loaded, by the validator or by `RefOr::get_item` and the `resolve_*` methods. A resolver returns `Resolution::Opaque` for an external `$ref` it follows (the one given, or an alias it looks up), or `Resolution::Unrecognized` when its fragment is not a JSON Pointer. `ErrorOnExternalReference` asks the validator for a self-contained document.
 - **Trait merging.** `message.traits` and `operation.traits` are parsed and validated, not applied.
 - **Typed protocol bindings.** AsyncAPI 3.0 types ~17 protocols across server / channel / operation / message, each with its own independently versioned `bindingVersion`. Bindings are held as raw JSON keyed by protocol, so they round-trip losslessly and typed accessors can be layered on later without a breaking change.
 - **Payload dialects other than the default.** Only the AsyncAPI Schema Object dialect — JSON Schema draft-07 plus `discriminator` / `externalDocs` / `deprecated` — is typed, and every draft-07 keyword is modeled so a schema round-trips unchanged. A payload carrying a `schema` property is a Multi Format Schema Object (that presence is the discriminator, exactly as the specification's `anySchema` defines it, not the optional `schemaFormat`), and its `schema` stays raw JSON whatever dialect it names.

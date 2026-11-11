@@ -8,8 +8,10 @@
 //! ## Modules
 //!
 //! - [`common`] — version-agnostic helpers: the `x-` extensions serde
-//!   helper, the `$ref` wrapper, untyped protocol bindings, and the
-//!   runtime-expression grammar.
+//!   helper, the `$ref` wrapper with its
+//!   [`get_item`](common::reference::RefOr::get_item) and the
+//!   [`Resolution`](common::Resolution) of following one, untyped
+//!   protocol bindings, and the runtime-expression grammar.
 //! - [`validation`] — [`Validate`](validation::Validate) trait,
 //!   [`ValidationOptions`](validation::ValidationOptions) flag set,
 //!   `Context` / `ValidationError` types.
@@ -69,12 +71,79 @@
 //! YAML documents work the same way — parse with `serde-saphyr` (or
 //! any other YAML crate) into a version module's `Document`.
 //!
+//! ## Resolving references
+//!
+//! Each version's `Document` can follow a `$ref` to the object it
+//! names, as long as the chain stays inside that document:
+//!
+//! ```rust
+//! # // Gated on the v3_1 feature like the example above: with v3_1 off
+//! # // the doctest compiles to an empty `fn main()`.
+//! # #[cfg(feature = "v3_1")] {
+//! use roas_asyncapi::v3_1::{Document, Resolution};
+//!
+//! let doc: Document = serde_json::from_str(r##"{
+//!     "asyncapi": "3.1.0",
+//!     "info": { "title": "Streetlights", "version": "1.0.0" },
+//!     "channels": {
+//!         "lightMeasured": {
+//!             "address": "lighting/measured",
+//!             "messages": { "lightMeasured": { "name": "LightMeasured" } }
+//!         }
+//!     },
+//!     "operations": {
+//!         "receiveLightMeasurement": {
+//!             "action": "receive",
+//!             "channel": { "$ref": "#/channels/lightMeasured" },
+//!             "messages": [ { "$ref": "#/channels/lightMeasured/messages/lightMeasured" } ]
+//!         }
+//!     }
+//! }"##).unwrap();
+//!
+//! // A `RefOr<T>` entry: the item itself, or what its `$ref` leads to.
+//! let operation = doc.operations["receiveLightMeasurement"]
+//!     .get_item(&doc)
+//!     .found()
+//!     .expect("declared inline");
+//!
+//! // A bare `Reference`, which says nothing of its kind: the document's
+//! // method for that kind follows it.
+//! match doc.resolve_channel(&operation.channel) {
+//!     Resolution::Found(channel) => assert_eq!(channel.messages.len(), 1),
+//!     // Another document (nothing is loaded), or a place in this one
+//!     // the channel resolver does not hand back an object from.
+//!     Resolution::Opaque => {}
+//!     other => panic!("channel {}", other.problem().unwrap_or("did not resolve")),
+//! }
+//!
+//! let message = doc.resolve_message(&operation.messages[0]).found().unwrap();
+//! assert_eq!(message.name.as_deref(), Some("LightMeasured"));
+//! # }
+//! ```
+//!
+//! [`RefOr::get_item`](common::reference::RefOr::get_item) takes a
+//! version's `Document` and returns a
+//! [`Resolution`](common::Resolution): the item itself, the object at
+//! the end of the `$ref` chain, or whether the chain left the document,
+//! dangles, loops, or names something of another kind. It works for the
+//! kinds that `Document` implements
+//! [`ResolveReference`](common::reference::ResolveReference) for, which
+//! `get_item` lists per version. Where the model holds a bare
+//! `Reference` instead, the v3 `Document` has `resolve_server`,
+//! `resolve_channel` and `resolve_message`; a v2.6 channel item carries
+//! its own `$ref` and is followed with the v2.6
+//! `Document::resolve_channel`. Nothing is loaded, so a `$ref` into
+//! another file — the one given, or an alias the resolver looks up —
+//! is reported as opaque rather than followed, or as unrecognized when
+//! its fragment is not a JSON Pointer, which shows without loading
+//! anything.
+//!
 //! ## Scope
 //!
-//! The document model and its validators are the whole surface: this
-//! crate does not resolve `$ref`s across files, apply message /
-//! operation traits, or type protocol bindings. Cross-reference checks
-//! therefore run on document-local pointers only — see
+//! This crate does not resolve `$ref`s across files, apply message /
+//! operation traits, or type protocol bindings. No other document is
+//! ever loaded, so a cross-reference check that would have to look
+//! inside one does not run — see
 //! [`ValidationOptions`](validation::ValidationOptions) to require a
 //! self-contained document instead.
 //!

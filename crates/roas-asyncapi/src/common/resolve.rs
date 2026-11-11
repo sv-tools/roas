@@ -2,9 +2,10 @@
 //!
 //! Every AsyncAPI version lets a `$ref` stand in for an object, and a
 //! validator has to know more than "did that work": an external
-//! reference is fine and simply unresolvable here, a dangling one is a
-//! document bug, a cycle is a different bug, and a pointer at something
-//! this crate does not model is neither. [`Resolution`] carries that
+//! reference with a usable fragment is fine and simply unresolvable
+//! here, a dangling one is a document bug, a cycle is a different bug,
+//! and a pointer at a place the resolver for that kind does not hand
+//! back an object from is neither. [`Resolution`] carries that
 //! distinction so each version module reports it the same way.
 //!
 //! Pointer syntax lives in [`pointer`](crate::common::pointer); this
@@ -17,51 +18,141 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 
-/// What following a document-local pointer turned out to be.
-#[derive(Debug)]
-pub(crate) enum Resolution<'a, T> {
-    /// Resolved to a concrete object in this document.
+/// What resolving a reference inside one document turned out to be.
+///
+/// Returned by [`RefOr::get_item`] and by the `resolve_*` methods on
+/// each version's `Document`.
+/// Resolution is document-local: a chain of `$ref`s is followed as far
+/// as it stays in the document it started in, and no other document is
+/// ever loaded. The variants tell apart the ways that can end, because
+/// only some of them are the document's fault — see
+/// [`problem`](Resolution::problem).
+///
+/// The enum is `#[non_exhaustive]`: match with a wildcard arm, or use
+/// [`found`](Resolution::found) when only the object matters.
+///
+/// Two resolutions are equal when they are the same variant and, for
+/// [`Found`](Resolution::Found), the objects compare equal.
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[must_use]
+pub enum Resolution<'a, T> {
+    /// Resolved to a concrete object in this document — the inline
+    /// item itself, or the object at the end of a chain of `$ref`s.
     Found(&'a T),
-    /// The chain ends at a reference into another document, or at a
-    /// location this crate does not model. Either way it is not a
-    /// document bug, and not something this crate can inspect.
+    /// The chain ends in another document (`./other.yaml#/…`), or at a
+    /// place in this one that the resolver for this kind does not hand
+    /// back an object from.
+    ///
+    /// `Opaque` does not mean "external": the second case is a pointer
+    /// inside this document. A suitably shaped `x-` extension is one
+    /// such place. So is a spot that holds only a reference of its
+    /// own, such as a v3 operation's `channel`
+    /// (`#/operations/<name>/channel`) or an entry of its `messages`
+    /// (`#/operations/<name>/messages/0`) — unless the reference there
+    /// ends at something that is not of this kind, which is
+    /// [`WrongKind`](Resolution::WrongKind).
+    ///
+    /// It can also be a place where the typed model does hold an object
+    /// of this kind and the resolver still does not follow a pointer to
+    /// it. A v3 operation's inline `reply`
+    /// (`#/operations/<name>/reply`) is one: replies are resolved
+    /// through `#/components/replies/…` only, as the v3 `Document`'s
+    /// `ResolveReference<OperationReply>` implementation documents.
+    ///
+    /// In every case nothing is handed back, and
+    /// [`problem`](Resolution::problem) is `None`.
+    ///
+    /// A reference the resolver follows — the one given, or an alias it
+    /// looks up — that leads into another document is `Opaque` only
+    /// when its fragment is a JSON Pointer; otherwise it is
+    /// [`Unrecognized`](Resolution::Unrecognized).
     Opaque,
-    /// A local pointer that names nothing.
+    /// A local pointer that names nothing: a dangling reference.
+    ///
+    /// Where it points is judged first. A pointer into a location that
+    /// belongs to another kind is
+    /// [`WrongKind`](Resolution::WrongKind) whether or not anything is
+    /// there.
     Missing,
     /// The chain revisits a pointer it already followed.
     Cycle,
-    /// Not a usable pointer: malformed escapes, or a shape that is not
-    /// a JSON Pointer at all.
+    /// Not a usable pointer: an empty reference, malformed escapes, or
+    /// a fragment that is not a JSON Pointer at all — in this document
+    /// or, since it shows without fetching anything, in another one.
+    ///
+    /// It is said of a reference the resolver follows — the one given,
+    /// or an alias it looks up.
     Unrecognized,
     /// A pointer at a location the document itself declares to be some
-    /// *other* kind of object — a server where a channel belongs, say.
+    /// *other* kind of object — a server where a channel belongs, say —
+    /// or at a value that cannot be read as this kind at all.
     ///
-    /// Distinct from [`Opaque`](Resolution::Opaque): there the target
-    /// is something this crate does not model and cannot judge; here
-    /// the document has already said what it is.
+    /// The location decides before its contents do: a pointer into
+    /// another kind's location — `#/components/schemas/<name>` where a
+    /// message belongs — is `WrongKind` even when nothing is there, not
+    /// [`Missing`](Resolution::Missing).
+    ///
+    /// Distinct from [`Opaque`](Resolution::Opaque): there nothing
+    /// shows the target to be anything but this kind — it is in another
+    /// document, or at a place the resolver for this kind does not hand
+    /// back an object from; here the target is shown not to be one.
     WrongKind,
 }
 
+// By hand: a `Resolution` holds a `&T`, so it can be cloned whatever
+// `T` is, and a derive would ask for `T: Clone`. Deliberately not
+// `Copy`: the enum is `#[non_exhaustive]`, and `Copy` would hold every
+// later variant to it.
+impl<T> Clone for Resolution<'_, T> {
+    fn clone(&self) -> Self {
+        match self {
+            Resolution::Found(item) => Resolution::Found(item),
+            Resolution::Opaque => Resolution::Opaque,
+            Resolution::Missing => Resolution::Missing,
+            Resolution::Cycle => Resolution::Cycle,
+            Resolution::Unrecognized => Resolution::Unrecognized,
+            Resolution::WrongKind => Resolution::WrongKind,
+        }
+    }
+}
+
 impl<'a, T> Resolution<'a, T> {
-    /// The object, if the pointer resolved inside this document.
+    /// What a reference into another document resolves to here:
+    /// [`Opaque`](Resolution::Opaque), unless its fragment is not a
+    /// usable JSON Pointer — which shows without fetching anything.
+    ///
+    /// The same judgement [`follow_tracked`] makes, for the v2.6
+    /// resolvers that walk their own chains.
+    #[cfg(feature = "v2_6")]
+    pub(crate) fn external(reference: &str) -> Self {
+        match Terminus::parse(reference) {
+            Some(_) => Resolution::Opaque,
+            None => Resolution::Unrecognized,
+        }
+    }
+
+    /// The object, if the reference resolved inside this document.
     ///
     /// Takes `self` so the borrow is the document's, not this
     /// `Resolution`'s — callers routinely resolve into a temporary.
     #[must_use]
-    pub(crate) fn found(self) -> Option<&'a T> {
+    pub fn found(self) -> Option<&'a T> {
         match self {
             Resolution::Found(item) => Some(item),
             _ => None,
         }
     }
 
-    /// Why this pointer is a document bug, if it is one.
+    /// Why this reference is a document bug, if it is one, phrased to
+    /// follow the reference it describes (`"names nothing in this
+    /// document"`).
     ///
-    /// `None` means it resolved, left the document, or landed somewhere
-    /// this crate does not model — none of which the document is at
-    /// fault for.
+    /// `None` means it resolved, left the document, or ended at a place
+    /// the resolver for this kind does not hand back an object from —
+    /// none of which the document is at fault for.
     #[must_use]
-    pub(crate) fn problem(&self) -> Option<&'static str> {
+    pub fn problem(&self) -> Option<&'static str> {
         match self {
             Resolution::Found(_) | Resolution::Opaque => None,
             Resolution::Missing => Some("names nothing in this document"),
@@ -916,6 +1007,56 @@ mod tests {
 
         // An inline entry resolves to itself.
         assert!(resolve(&doc, &doc.entries["real"]).found().is_some());
+    }
+
+    #[test]
+    fn a_resolution_clones_whatever_it_points_at() {
+        // `Demo` is not `Clone`; a `Resolution` of one is, since all
+        // it holds is a reference.
+        let demo = Demo {
+            name: "real".to_owned(),
+        };
+        for resolution in [
+            Resolution::Found(&demo),
+            Resolution::Opaque,
+            Resolution::Missing,
+            Resolution::Cycle,
+            Resolution::Unrecognized,
+            Resolution::WrongKind,
+        ] {
+            assert_eq!(resolution.clone(), resolution);
+        }
+        // The clone is of the reference, not of the object.
+        let found = Resolution::Found(&demo);
+        let cloned = found.clone();
+        assert!(std::ptr::eq(
+            cloned.found().expect("found"),
+            found.found().expect("found")
+        ));
+    }
+
+    #[test]
+    fn an_external_reference_is_opaque_only_with_a_usable_fragment() {
+        let doc = document();
+        for (target, usable) in [
+            ("./other.yaml#/entries/real", true),
+            ("./other.yaml", true),
+            ("./other.yaml#bad", false),
+            ("o.yaml#/a~2", false),
+            ("o.yaml#/%zz", false),
+            ("http://e.com/x.json#frag", false),
+        ] {
+            let entry = reference(target);
+            let resolution = resolve(&doc, &entry);
+            let expected = if usable {
+                Resolution::Opaque
+            } else {
+                Resolution::Unrecognized
+            };
+            assert_eq!(resolution, expected, "`{target}`");
+            #[cfg(feature = "v2_6")]
+            assert_eq!(Resolution::<Demo>::external(target), expected, "`{target}`");
+        }
     }
 
     #[test]
