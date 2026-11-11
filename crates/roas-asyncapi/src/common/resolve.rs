@@ -3,9 +3,10 @@
 //! Every AsyncAPI version lets a `$ref` stand in for an object, and a
 //! validator has to know more than "did that work": an external
 //! reference is fine and simply unresolvable here, a dangling one is a
-//! document bug, a cycle is a different bug, and a pointer at something
-//! this crate does not model is neither. [`Resolution`] carries that
-//! distinction so each version module reports it the same way.
+//! document bug, a cycle is a different bug, and a pointer at a place
+//! the typed model does not hold as an object of that kind is neither.
+//! [`Resolution`] carries that distinction so each version module
+//! reports it the same way.
 //!
 //! Pointer syntax lives in [`pointer`](crate::common::pointer); this
 //! module is about what the pointers *mean*.
@@ -70,9 +71,10 @@ pub enum Resolution<'a, T> {
     /// *other* kind of object — a server where a channel belongs, say —
     /// or at a value that cannot be read as this kind at all.
     ///
-    /// Distinct from [`Opaque`](Resolution::Opaque): there the target
-    /// is something this crate does not model and cannot judge; here
-    /// the document has already said what it is.
+    /// Distinct from [`Opaque`](Resolution::Opaque): there nothing
+    /// shows the target to be anything but this kind — it is in another
+    /// document, or at a place the typed model does not hold as an
+    /// object of this kind; here the target is shown not to be one.
     WrongKind,
 }
 
@@ -117,9 +119,9 @@ impl<'a, T> Resolution<'a, T> {
     /// follow the reference it describes (`"names nothing in this
     /// document"`).
     ///
-    /// `None` means it resolved, left the document, or landed somewhere
-    /// this crate does not model — none of which the document is at
-    /// fault for.
+    /// `None` means it resolved, left the document, or ended at a place
+    /// the typed model does not hold as an object of this kind — none
+    /// of which the document is at fault for.
     #[must_use]
     pub fn problem(&self) -> Option<&'static str> {
         match self {

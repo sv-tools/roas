@@ -2406,6 +2406,7 @@ mod tests {
                 "wrong": { "$ref": "#/components/messages/real" },
                 "malformed": { "$ref": "#/servers/bad~2escape" },
                 "badFragment": { "$ref": "./other.yaml#bad" },
+                "empty": { "$ref": "" },
                 "viaBadFragment": { "$ref": "#/servers/badFragment" }
             },
             "channels": {
@@ -2425,6 +2426,7 @@ mod tests {
                 "wrong": { "$ref": "#/servers/real" },
                 "malformed": { "$ref": "#/channels/bad~2escape" },
                 "badFragment": { "$ref": "./other.yaml#bad" },
+                "empty": { "$ref": "" },
                 "viaBadFragment": { "$ref": "#/channels/badFragment" }
             },
             "components": {
@@ -2464,6 +2466,7 @@ mod tests {
                     "wrong": { "$ref": "#/servers/real" },
                     "malformed": { "$ref": "#/components/messages/bad~2escape" },
                     "badFragment": { "$ref": "./other.yaml#bad" },
+                    "empty": { "$ref": "" },
                     "viaBadFragment": { "$ref": "#/components/messages/badFragment" }
                 },
                 "securitySchemes": {
@@ -2478,6 +2481,7 @@ mod tests {
                     "wrong": { "$ref": "#/servers/real" },
                     "malformed": { "$ref": "#/components/securitySchemes/bad~2escape" },
                     "badFragment": { "$ref": "./other.yaml#bad" },
+                    "empty": { "$ref": "" },
                     "viaBadFragment": { "$ref": "#/components/securitySchemes/badFragment" }
                 }
             }
@@ -2487,7 +2491,7 @@ mod tests {
 
     /// The outcomes every kind shares that find nothing, by the key
     /// that produces each.
-    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 8] {
+    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 9] {
         [
             // Another document, reached directly or through an alias.
             ("outside", Resolution::Opaque),
@@ -2496,6 +2500,8 @@ mod tests {
             ("loop", Resolution::Cycle),
             ("wrong", Resolution::WrongKind),
             ("malformed", Resolution::Unrecognized),
+            // Neither external nor a pointer.
+            ("empty", Resolution::Unrecognized),
             // Another document, but not a pointer into it — which shows
             // without fetching anything, however the chain got there.
             ("badFragment", Resolution::Unrecognized),

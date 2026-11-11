@@ -76,10 +76,10 @@
 //! The document model, its validators and document-local `$ref`
 //! resolution are the whole surface: this crate does not resolve
 //! `$ref`s across files, apply message / operation traits, or type
-//! protocol bindings. Cross-reference checks therefore run on
-//! document-local pointers only — see
-//! [`ValidationOptions`](validation::ValidationOptions) to require a
-//! self-contained document instead.
+//! protocol bindings. No other document is ever loaded, so a
+//! cross-reference check that would have to look inside one does not
+//! run — see [`ValidationOptions`](validation::ValidationOptions) to
+//! require a self-contained document instead.
 //!
 //! The same resolution is open to callers.
 //! [`RefOr::get_item`](common::reference::RefOr::get_item) takes a

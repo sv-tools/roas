@@ -2489,6 +2489,7 @@ mod tests {
                 "malformed": { "$ref": "#/servers/bad~2escape" },
                 "viaOutside": { "$ref": "#/servers/outside" },
                 "badFragment": { "$ref": "./other.yaml#bad" },
+                "empty": { "$ref": "" },
                 "viaBadFragment": { "$ref": "#/servers/badFragment" }
             },
             "channels": {
@@ -2507,6 +2508,7 @@ mod tests {
                 "malformed": { "$ref": "#/channels/bad~2escape" },
                 "viaOutside": { "$ref": "#/channels/outside" },
                 "badFragment": { "$ref": "./other.yaml#bad" },
+                "empty": { "$ref": "" },
                 "viaBadFragment": { "$ref": "#/channels/badFragment" }
             },
             "operations": {
@@ -2524,6 +2526,7 @@ mod tests {
                 "malformed": { "$ref": "#/operations/bad~2escape" },
                 "viaOutside": { "$ref": "#/operations/outside" },
                 "badFragment": { "$ref": "./other.yaml#bad" },
+                "empty": { "$ref": "" },
                 "viaBadFragment": { "$ref": "#/operations/badFragment" }
             },
             "components": {
@@ -2555,6 +2558,7 @@ mod tests {
                     "malformed": { "$ref": "#/components/replies/bad~2escape" },
                     "viaOutside": { "$ref": "#/components/replies/outside" },
                     "badFragment": { "$ref": "./other.yaml#bad" },
+                    "empty": { "$ref": "" },
                     "viaBadFragment": { "$ref": "#/components/replies/badFragment" },
                     "elsewhere": { "$ref": "#/operations/real/reply" }
                 },
@@ -2574,6 +2578,7 @@ mod tests {
                     "malformed": { "$ref": "#/components/messages/bad~2escape" },
                     "viaOutside": { "$ref": "#/components/messages/outside" },
                     "badFragment": { "$ref": "./other.yaml#bad" },
+                    "empty": { "$ref": "" },
                     "viaBadFragment": { "$ref": "#/components/messages/badFragment" }
                 }
             }
@@ -2583,7 +2588,7 @@ mod tests {
 
     /// The outcomes every kind shares that find nothing, by the key
     /// that produces each.
-    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 8] {
+    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 9] {
         [
             // Another document, reached directly or through an alias.
             ("outside", Resolution::Opaque),
@@ -2592,6 +2597,8 @@ mod tests {
             ("loop", Resolution::Cycle),
             ("wrong", Resolution::WrongKind),
             ("malformed", Resolution::Unrecognized),
+            // Neither external nor a pointer.
+            ("empty", Resolution::Unrecognized),
             // Another document, but not a pointer into it — which shows
             // without fetching anything, however the chain got there.
             ("badFragment", Resolution::Unrecognized),
