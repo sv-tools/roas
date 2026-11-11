@@ -1319,6 +1319,7 @@ fn a_two_oh_warning_points_into_the_source_as_written() {
         "swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {},
         "definitions": {
             "P": {"type": "string", "pattern": "(?=a)"},
+            "L": {"maxLength": 3, "allOf": [{"type": "string"}]},
             "H": {"type": "object", "properties": {
                 "x": {"type": "string", "x-rust-attrs": "#[serde(rename = \"z\")]"}}},
             "Base": {"type": "object", "discriminator": "kind", "required": ["kind"],
@@ -1340,6 +1341,7 @@ fn a_two_oh_warning_points_into_the_source_as_written() {
     let pointers: Vec<&str> = g.diagnostics.iter().map(|d| d.pointer.as_str()).collect();
     for want in [
         "/definitions/P/pattern",
+        "/definitions/L",
         "/definitions/H/properties/x/x-rust-attrs",
         "/definitions/Base/discriminator",
     ] {
@@ -1354,6 +1356,29 @@ fn a_two_oh_warning_points_into_the_source_as_written() {
         ignored.message.contains("`/definitions/H/properties/x`"),
         "{}",
         ignored.message
+    );
+    // The context's warnings are the same ones.
+    let context = roas_codegen::template_context(
+        &doc,
+        &rust_config("validation = true\nallow_codegen_extensions = true"),
+    )
+    .unwrap();
+    assert!(
+        context
+            .diagnostics
+            .iter()
+            .all(|d| !d.pointer.starts_with("/components/")
+                && !d.message.contains("`/components/schemas/")),
+        "{:?}",
+        context.diagnostics
+    );
+    assert!(
+        context
+            .diagnostics
+            .iter()
+            .any(|d| d.pointer == "/definitions/H/properties/x/x-rust-attrs"),
+        "{:?}",
+        context.diagnostics
     );
 }
 
