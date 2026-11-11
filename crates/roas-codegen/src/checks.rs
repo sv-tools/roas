@@ -1305,6 +1305,18 @@ pub(crate) fn f64_holds(n: &Number) -> bool {
     }
 }
 
+/// The float32 values a literal equal to `f` may decode to: the nearest,
+/// and the other one around it too when `f` is exactly halfway between
+/// them, where reading through an `f64` may round either way.
+pub(crate) fn f32_candidates(f: f64) -> Vec<f32> {
+    let (below, above) = f32_neighbours(f);
+    if below != above && f - f64::from(below) == f64::from(above) - f {
+        vec![below, above]
+    } else {
+        vec![f as f32]
+    }
+}
+
 /// The integer `n` is, when it is one.
 pub(crate) fn exact_integer(n: &Number) -> Option<i128> {
     let (floor, ceil) = floor_ceil(n);
@@ -1355,7 +1367,13 @@ mod tests {
             ("2", true),
             ("-2.50", true),
             ("0", true),
+            ("-0", true),
             ("1e2", true),
+            ("2.5e-1", true),
+            ("5e-324", true),
+            ("1.7976931348623157e308", true),
+            ("9007199254740993", false),
+            ("18446744073709551615", false),
         ] {
             let n: Number = serde_json::from_str(text).unwrap();
             assert_eq!(super::f64_holds(&n), holds, "{text}");

@@ -222,10 +222,7 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                             .iter()
                             .filter_map(serde_json::Number::as_f64)
                             .filter(|f| f.is_finite())
-                            .flat_map(|f| {
-                                let (below, above) = checks::f32_neighbours(f);
-                                [below, above]
-                            })
+                            .flat_map(checks::f32_candidates)
                             .filter(|f| f.is_finite())
                             .collect();
                         set.sort_by(f32::total_cmp);
@@ -272,19 +269,21 @@ fn render(list: &[Check], kind: ValueKind, at: At<'_>, out: &mut Vec<String>) ->
                         let violation = format!(
                             "{r}.violation({p}, format!(\"{{}} is not {what}\", {v}));"
                         );
-                        let missed = if exact.is_empty() {
+                        // A value equal to a listed value held exactly is
+                        // decided first; only then one no float holds.
+                        let missed = if inexact.is_empty() {
                             violation
                         } else {
-                            format!("if !({}) {{ {violation} }}", any(&exact))
-                        };
-                        out.push(if inexact.is_empty() {
-                            missed
-                        } else {
                             format!(
-                                "if {} {{ {r}.unevaluated({p}, {:?}); }} else {{ {missed} }}",
+                                "if {} {{ {r}.unevaluated({p}, {:?}); }} else {{ {violation} }}",
                                 any(&inexact),
                                 format!("{keyword} {literal}: a listed value is not exactly a float, and the value is its float")
                             )
+                        };
+                        out.push(if exact.is_empty() {
+                            missed
+                        } else {
+                            format!("if !({}) {{ {missed} }}", any(&exact))
                         });
                     }
                 }
