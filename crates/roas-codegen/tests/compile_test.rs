@@ -812,6 +812,20 @@ fn validated_description() -> serde_json::Value {
             }},
             "Leaf": {"type": "object", "additionalProperties": false, "properties": {"s": {"type": "string"}}},
             "OldClosed": {"type": "object", "additionalProperties": false, "deprecated": true, "properties": {"a": {"type": "string"}}},
+            "OldCatch": {"type": "object", "deprecated": true, "additionalProperties": {"type": "integer"}},
+            "OldEnum": {"type": "string", "deprecated": true, "enum": ["a"]},
+            "OldNew": {"type": "string", "deprecated": true, "maxLength": 3},
+            "OldAlias": {"$ref": "#/components/schemas/OldClosed", "deprecated": true},
+            "OldTagged": {"deprecated": true, "oneOf": [{"$ref": "#/components/schemas/ZooCat"}, {"$ref": "#/components/schemas/ZooDog"}], "discriminator": {"propertyName": "kind"}},
+            "OldOpen": {"deprecated": true, "description": "Old.", "anyOf": [{"type": "string"}, {"$ref": "#/components/schemas/OldClosed"}]},
+            "OldAll": {"deprecated": true, "title": "Old all", "allOf": [{"type": "string"}, {"maxLength": 3}]},
+            "OldList": {"type": "array", "deprecated": true, "items": {"$ref": "#/components/schemas/OldClosed"}},
+            "UsesOld": {"type": "object", "properties": {
+                "c": {"$ref": "#/components/schemas/OldCatch"}, "e": {"$ref": "#/components/schemas/OldEnum"},
+                "n": {"$ref": "#/components/schemas/OldNew"}, "a": {"$ref": "#/components/schemas/OldAlias"},
+                "t": {"$ref": "#/components/schemas/OldTagged"}, "o": {"$ref": "#/components/schemas/OldOpen"},
+                "l": {"$ref": "#/components/schemas/OldAll"}, "s": {"$ref": "#/components/schemas/OldList"}}},
+            "NullName": {"type": "object", "propertyNames": {"maxLength": 1}, "properties": {"ab": {}, "c": {}}},
             "Leaves": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Leaf"}},
             "S": {"type": "object", "additionalProperties": false, "properties": {"x": {"type": "string"}}},
             "D": {"type": "object", "additionalProperties": false, "properties": {"x": {"type": "string"}}},
@@ -1199,6 +1213,12 @@ fn main() {
     // No items, nothing unchecked about them.
     // Pattern members are not judged by `additionalProperties`.
     assert_eq!(report::<PatAdd>(r#"{"x":""}"#), vec![u("")]);
+    // Deprecated types of every kind are used without a warning, and a
+    // deprecated composition's annotations are not unevaluated keywords
+    // (the typeless `allOf` part's `maxLength` is).
+    assert_eq!(report::<UsesOld>(r#"{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}"#), vec![u("/l")]);
+    // A typeless member takes null.
+    assert_eq!(report::<NullName>(r#"{"ab":null,"c":null}"#), vec![v("/ab")]);
     assert_eq!(report::<PatMapAdd>(r#"{"x":1}"#), vec![u("")]);
     // Integers, raw holders and tagged unions decode inside a catch-all
     // (`ZooOrStr` below); `IntCatch` has an alias, so it proves nothing.
@@ -1568,6 +1588,8 @@ func main() {
 	check(`{"a":null}`, report[api.EnumOrObj](`{"a":null}`))
 	check(`[{"a":null}]`, report[api.EnumItems](`[{"a":null}]`))
 	check(`{"x":""}`, report[api.PatAdd](`{"x":""}`), u(""))
+	check(`{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}`, report[api.UsesOld](`{"o":"x","l":"abc","t":{"kind":"ZooCat"},"c":{"k":1}}`), u("/l"))
+	check(`{"ab":null,"c":null}`, report[api.NullName](`{"ab":null,"c":null}`), v("/ab"))
 	check(`{"x":1}`, report[api.PatMapAdd](`{"x":1}`), u(""))
 	check(`{"x":1}`, report[api.IntCatchOrStr](`{"x":1}`))
 	// Go has no cfg gates or aliases: these decode and match (beside a

@@ -83,6 +83,9 @@ pub(crate) struct Field {
     pub constraints: Constraints,
     /// `x-` extensions on the property schema.
     pub extensions: BTreeMap<String, Value>,
+    /// Where the property is written: under the struct's own schema, or
+    /// under the `allOf` part it was merged from.
+    pub pointer: String,
 }
 
 /// How a struct treats members its fields do not name.
@@ -127,6 +130,11 @@ pub(crate) struct Branch {
     /// check enforces (a numeric `enum`, a `const`, a keyword the generator
     /// does not handle): decoding it is no proof that it matches.
     pub unchecked: bool,
+    /// Where the branch is written in the source, for a `oneOf`, `anyOf`
+    /// or `allOf` branch; `None` for one read from the holder's own
+    /// keywords (a type list member, `$ref` siblings, a typeless
+    /// schema's object keywords).
+    pub pointer: Option<String>,
 }
 
 #[derive(Debug, Clone)]

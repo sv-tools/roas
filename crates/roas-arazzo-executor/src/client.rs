@@ -74,7 +74,7 @@ impl HttpClient for Client<reqwest::blocking::Client> {
 }
 
 impl AsyncHttpClient for Client<reqwest::Client> {
-    fn send<'a>(&'a mut self, request: &'a HttpRequest) -> SendFuture<'a> {
+    fn send<'a>(&'a self, request: &'a HttpRequest) -> SendFuture<'a> {
         let client = self.client.clone();
         Box::pin(async move {
             let method = method(request)?;

@@ -14,6 +14,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+/// Names one request for the rest of a run, so its response can be
+/// handed back with [`Run::supply_to`](crate::Run::supply_to) when several
+/// are in flight.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestId(pub u64);
+
+impl std::fmt::Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
 /// A request a step wants performed.
 ///
 /// Header names are kept as written — a runtime expression may name one
@@ -21,6 +33,8 @@ use std::time::Duration;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HttpRequest {
+    /// Which request of the run this is.
+    pub id: RequestId,
     /// Upper-case HTTP method, e.g. `GET`.
     pub method: String,
     /// The fully resolved URL, query string included.
@@ -162,13 +176,17 @@ pub type SendFuture<'a> =
 pub type SleepFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 /// Performs a request without blocking the thread.
+///
+/// `send` takes `&self` so that, with
+/// [`Options::parallel`](crate::Options::parallel), the async driver can
+/// have several requests in flight at once.
 pub trait AsyncHttpClient {
     /// Send `request` and return what came back.
     ///
     /// # Errors
     ///
     /// As [`HttpClient::send`].
-    fn send<'a>(&'a mut self, request: &'a HttpRequest) -> SendFuture<'a>;
+    fn send<'a>(&'a self, request: &'a HttpRequest) -> SendFuture<'a>;
 
     /// Wait for `duration`.
     ///
