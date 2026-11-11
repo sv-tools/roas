@@ -6,10 +6,11 @@
 //! document's internal wiring: an operation's `channel` must name a
 //! channel that exists, its `messages` must be a subset of that
 //! channel's messages, and a channel's `servers` must name declared
-//! servers. References into another document are skipped — following
-//! them needs a loader — unless
+//! servers. References into another document are not loaded —
+//! following them needs a loader — so only the syntax of their
+//! fragment is checked, where the validator follows a reference;
 //! [`ValidationOptions::ErrorOnExternalReference`] asks for a
-//! self-contained document.
+//! self-contained document instead.
 
 use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference, ResolveReference};
