@@ -6,9 +6,9 @@
 //! document's internal wiring: an operation's `channel` must name a
 //! channel that exists, its `messages` must be a subset of that
 //! channel's messages, and a channel's `servers` must name declared
-//! servers. References into another document are not loaded —
-//! following them needs a loader — so only the syntax of their
-//! fragment is checked, where the validator follows a reference;
+//! servers. No other document is ever loaded — following a reference
+//! into one needs a loader — so a check that would have to look inside
+//! another document does not run.
 //! [`ValidationOptions::ErrorOnExternalReference`] asks for a
 //! self-contained document instead.
 
@@ -178,9 +178,8 @@ impl Document {
     /// Resolution is document-local: nothing is loaded, so a `$ref`
     /// into another document is [`Resolution::Opaque`] — or
     /// [`Resolution::Unrecognized`] when its fragment is not a JSON
-    /// Pointer, which shows without loading anything. A local pointer
-    /// at a place the model does not hold as a server, such as a
-    /// server-shaped `x-` extension, is `Opaque` too. For a
+    /// Pointer, which shows without loading anything. A pointer at a
+    /// server-shaped `x-` extension is `Opaque` too. For a
     /// `RefOr<Server>` use [`RefOr::get_item`].
     pub fn resolve_server(&self, reference: &Reference) -> Resolution<'_, Server> {
         self.resolve(
@@ -202,12 +201,13 @@ impl Document {
     /// Pointer, which shows without loading anything. For a
     /// `RefOr<Channel>` use [`RefOr::get_item`].
     ///
-    /// A local pointer at a place the model does not hold as a channel
-    /// is `Opaque` too, though it is in this document. That covers a
-    /// pointer at another reference to a channel —
+    /// Only the two channel maps hold channels. A pointer at a
+    /// channel-shaped `x-` extension is `Opaque`, though it is in this
+    /// document. So is a pointer at another reference to a channel —
     /// `#/operations/<name>/channel` or
-    /// `#/operations/<name>/reply/channel` — and a channel-shaped `x-`
-    /// extension. Only the two channel maps hold channels.
+    /// `#/operations/<name>/reply/channel` — unless the reference
+    /// there ends at something that is not a channel, which is
+    /// [`Resolution::WrongKind`].
     ///
     /// ```
     /// use roas_asyncapi::v3_0::Document;
@@ -268,11 +268,11 @@ impl Document {
     /// Pointer, which shows without loading anything. For a
     /// `RefOr<Message>` use [`RefOr::get_item`].
     ///
-    /// A local pointer at a place the model does not hold as a message
-    /// is `Opaque` too, though it is in this document. That covers a
-    /// pointer at another reference to a message —
-    /// `#/operations/<name>/messages/0` — and a message-shaped `x-`
-    /// extension.
+    /// A pointer at a message-shaped `x-` extension is `Opaque`, though
+    /// it is in this document. So is a pointer at another reference to
+    /// a message — `#/operations/<name>/messages/0` — unless the
+    /// reference there ends at something that is not a message, which
+    /// is [`Resolution::WrongKind`].
     ///
     /// A pointer is walked over the document as written, so one that
     /// steps through a channel which is itself only a `$ref` names
@@ -2619,34 +2619,54 @@ mod tests {
     }
 
     #[test]
-    fn a_pointer_at_a_reference_does_not_answer_for_it() {
-        // The slot pointed at holds a reference that dangles. That is
-        // a bug where it is written — `operations.dangling.channel` —
-        // and the validator says so there. A pointer *at* the slot is
-        // still only a pointer at a place that holds no channel.
+    fn a_pointer_at_a_reference_is_judged_by_where_that_reference_ends() {
+        // Each operation's `channel` and `messages/0` hold a reference
+        // of their own, so a pointer at either is a pointer at a place
+        // that holds no channel or message. It is wrong only when the
+        // reference there ends at something that is not of the kind
+        // asked for; one that dangles, loops or leaves the document is
+        // a matter for where it is written, not for a pointer at it.
         let mut doc = resolvable();
-        doc.operations.insert(
-            "dangling".to_owned(),
-            serde_json::from_value(json!({
-                "action": "send",
-                "channel": { "$ref": "#/channels/nope" },
-                "messages": [ { "$ref": "#/channels/nope/messages/nope" } ]
-            }))
-            .unwrap(),
-        );
-        let channel = doc.resolve_channel(&reference("#/operations/dangling/channel"));
-        assert_eq!(channel, Resolution::Opaque);
-        assert_eq!(channel.problem(), None);
-        let message = doc.resolve_message(&reference("#/operations/dangling/messages/0"));
-        assert_eq!(message, Resolution::Opaque);
-        assert_eq!(message.problem(), None);
+        doc.extensions = Some(BTreeMap::from([(
+            "x-note".to_owned(),
+            json!("just a string"),
+        )]));
+        for (name, target, wrong) in [
+            ("dangling", "#/channels/nope", false),
+            ("looping", "#/components/channels/a", false),
+            ("leaving", "./other.yaml#/somewhere", false),
+            ("toServer", "#/servers/real", true),
+            ("toScalar", "#/x-note", true),
+        ] {
+            doc.operations.insert(
+                name.to_owned(),
+                serde_json::from_value(json!({
+                    "action": "send",
+                    "channel": { "$ref": target },
+                    "messages": [ { "$ref": target } ]
+                }))
+                .unwrap(),
+            );
+            let channel = doc.resolve_channel(&reference(&format!("#/operations/{name}/channel")));
+            let message =
+                doc.resolve_message(&reference(&format!("#/operations/{name}/messages/0")));
+            if wrong {
+                assert_eq!(channel, Resolution::WrongKind, "channel slot `{name}`");
+                assert_eq!(message, Resolution::WrongKind, "message slot `{name}`");
+            } else {
+                assert_eq!(channel, Resolution::Opaque, "channel slot `{name}`");
+                assert_eq!(channel.problem(), None);
+                assert_eq!(message, Resolution::Opaque, "message slot `{name}`");
+                assert_eq!(message.problem(), None);
+            }
+        }
     }
 
     #[test]
-    fn an_external_fragment_is_checked_only_where_a_reference_is_followed() {
-        // Nothing is loaded, so all there is to check of an external
-        // reference is its fragment's syntax — and that is checked
-        // where the validator follows a reference, not on every entry.
+    fn an_unusable_external_fragment_is_reported_where_a_channel_reference_ends_at_it() {
+        // Pins this one document and no more: an operation's `channel`
+        // that ends at an external reference with an unusable fragment
+        // is reported, and the entries nothing refers to are not.
         let value = json!({
             "asyncapi": "3.0.0",
             "info": { "title": "T", "version": "1" },

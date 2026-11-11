@@ -138,9 +138,8 @@ impl<T> RefOr<T> {
     /// Resolution is document-local. Nothing is loaded, so a `$ref`
     /// into another document is [`Resolution::Opaque`] — or
     /// [`Resolution::Unrecognized`] when its fragment is not a JSON
-    /// Pointer, which shows without loading anything. A `$ref` at a
-    /// place in this document that the typed model does not hold as a
-    /// `T` is `Opaque` as well.
+    /// Pointer, which shows without loading anything. `Opaque` is not
+    /// only for other documents, though: see its own documentation.
     ///
     /// `doc` is a version's `Document`, which implements
     /// [`ResolveReference<T>`] for the kinds it can follow:

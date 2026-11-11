@@ -100,11 +100,9 @@ pub enum ValidationOptions {
     ///
     /// Cross-reference checks resolve only local (`#/...`) pointers —
     /// following an external reference needs a loader, which is outside
-    /// this crate's scope. By default an external `$ref` is not loaded:
-    /// only the syntax of its fragment is checked, and only on
-    /// references the validator follows (see
-    /// [`Resolution::Unrecognized`](crate::common::Resolution::Unrecognized)).
-    /// Enable this to require a document that is self-contained.
+    /// this crate's scope. No other document is ever loaded, so a check
+    /// that would have to look inside one does not run. Enable this to
+    /// require a document that is self-contained.
     ErrorOnExternalReference,
     /// Allow a channel parameter that is declared but never appears as
     /// a `{placeholder}` in the channel's `address`.

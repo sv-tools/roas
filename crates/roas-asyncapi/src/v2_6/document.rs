@@ -88,9 +88,8 @@ impl Document {
     /// Resolution is document-local: nothing is loaded, so a `$ref`
     /// into another document is [`Resolution::Opaque`] — or
     /// [`Resolution::Unrecognized`] when its fragment is not a JSON
-    /// Pointer, which shows without loading anything. A local pointer
-    /// at a place the model does not hold as a channel item, such as a
-    /// channel-shaped `#/x-channel` extension, is `Opaque` too.
+    /// Pointer, which shows without loading anything. A pointer at a
+    /// channel-shaped `x-` extension is `Opaque` too.
     ///
     /// ```
     /// use roas_asyncapi::v2_6::Document;
@@ -619,11 +618,11 @@ impl ResolveReference<Server> for Document {
 /// through a channel item names what that item itself declares, not
 /// what the item's own `$ref` leads to.
 ///
-/// A local pointer at a place the model does not hold as one message
-/// is [`Resolution::Opaque`]: `#/channels/<path>/publish/message`
-/// where that is a `oneOf` set, or a message-shaped `x-` extension. So
-/// is a `$ref` into another document, unless its fragment is not a
-/// JSON Pointer, which is [`Resolution::Unrecognized`].
+/// A pointer at `#/channels/<path>/publish/message` where that is a
+/// `oneOf` set, or at a message-shaped `x-` extension, is
+/// [`Resolution::Opaque`]. So is a `$ref` into another document,
+/// unless its fragment is not a JSON Pointer, which is
+/// [`Resolution::Unrecognized`].
 impl ResolveReference<Message> for Document {
     fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Message>) -> Resolution<'a, Message> {
         match entry {
@@ -2449,6 +2448,7 @@ mod tests {
                     "inChannel": { "$ref": "#/channels/real/publish/message" },
                     "inOneOf": { "$ref": "#/channels/real/subscribe/message/oneOf/1" },
                     "inSubscribe": { "$ref": "#/channels/real/subscribe/message/oneOf/0" },
+                    "throughAlias": { "$ref": "#/channels/alias/publish/message" },
                     "inReusablePublish": {
                         "$ref": "#/components/channels/reusable/publish/message"
                     },
@@ -2558,6 +2558,11 @@ mod tests {
             let message = found.unwrap_or_else(|| panic!("message `{key}` resolves"));
             assert_eq!(message.name.as_deref(), Some(name), "message `{key}`");
         }
+
+        // A pointer does not dereference as it walks: `alias` is only
+        // a `$ref`, and declares no `publish` of its own to step into.
+        let resolution = messages["throughAlias"].get_item(&doc);
+        assert_eq!(resolution, Resolution::Missing);
 
         for (key, expected) in unfound() {
             let resolution = messages[key].get_item(&doc);

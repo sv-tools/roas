@@ -42,16 +42,17 @@ pub enum Resolution<'a, T> {
     /// place in this one that the typed model does not hold as an
     /// object of this kind.
     ///
-    /// The second is as common as the first, so `Opaque` does not mean
-    /// "external". A suitably shaped `x-` extension is one such place.
-    /// So is a spot that holds only a reference of its own, such as a
-    /// v3 operation's `channel` (`#/operations/<name>/channel`) or an
-    /// entry of its `messages` (`#/operations/<name>/messages/0`) —
-    /// whatever that reference itself leads to, if anything: one that
-    /// dangles is a bug where it is written, not in a pointer at it.
+    /// `Opaque` does not mean "external": the second case is a pointer
+    /// inside this document. A suitably shaped `x-` extension is one
+    /// such place. So is a spot that holds only a reference of its
+    /// own, such as a v3 operation's `channel`
+    /// (`#/operations/<name>/channel`) or an entry of its `messages`
+    /// (`#/operations/<name>/messages/0`) — unless the reference there
+    /// ends at something that is not of this kind, which is
+    /// [`WrongKind`](Resolution::WrongKind).
     ///
-    /// Either way there is nothing wrong with the reference resolved,
-    /// and no typed object to hand back.
+    /// Either way there is no typed object to hand back, and
+    /// [`problem`](Resolution::problem) is `None`.
     ///
     /// A reference into another document is `Opaque` only when its
     /// fragment is a JSON Pointer; otherwise it is
