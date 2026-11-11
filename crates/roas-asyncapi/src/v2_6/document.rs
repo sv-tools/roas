@@ -10,7 +10,7 @@
 
 use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference, ResolveReference};
-use crate::common::resolve::{Resolution, classify_unresolved, follow};
+use crate::common::resolve::{Resolution, classify_unresolved, follow, last_reference};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
 use crate::v2_6::external_documentation::ExternalDocumentation;
@@ -138,6 +138,46 @@ impl Document {
         }
     }
 
+    /// The last `$ref` the chain from a channel item follows, as
+    /// [`resolve_channel`](Self::resolve_channel) walks it: `None` for
+    /// an item without a `$ref`.
+    ///
+    /// ```
+    /// use roas_asyncapi::v2_6::Document;
+    ///
+    /// let doc: Document = serde_json::from_str(r##"{
+    ///     "asyncapi": "2.6.0",
+    ///     "info": { "title": "Signups", "version": "1.0.0" },
+    ///     "channels": {
+    ///         "user/signedup": { "$ref": "#/components/channels/signedUp" }
+    ///     },
+    ///     "components": {
+    ///         "channels": { "signedUp": { "description": "A user signed up" } }
+    ///     }
+    /// }"##).unwrap();
+    ///
+    /// assert_eq!(
+    ///     doc.resolved_channel_ref(&doc.channels["user/signedup"]),
+    ///     Some("#/components/channels/signedUp"),
+    /// );
+    /// ```
+    #[must_use]
+    pub fn resolved_channel_ref<'a>(&'a self, channel: &'a ChannelItem) -> Option<&'a str> {
+        let mut reference = channel.reference.as_deref()?;
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        loop {
+            let next = reference
+                .strip_prefix('#')
+                .filter(|_| seen.insert(reference))
+                .and_then(|pointer| self.channel_at(pointer))
+                .and_then(|item| item.reference.as_deref());
+            match next {
+                Some(next) => reference = next,
+                None => return Some(reference),
+            }
+        }
+    }
+
     /// The channel a document-local pointer names, in either map.
     fn channel_at<'a>(&'a self, pointer: &str) -> Option<&'a ChannelItem> {
         let tokens = pointer::tokens(pointer)?;
@@ -158,6 +198,29 @@ impl Document {
                 Some((&self.components.as_ref()?.channels, rest))
             }
             [channels, rest @ ..] if channels == "channels" => Some((&self.channels, rest)),
+            _ => None,
+        }
+    }
+
+    /// Which security scheme entry a pointer's decoded tokens name.
+    fn security_scheme_lookup<'a>(
+        &'a self,
+    ) -> impl Fn(&[String]) -> Option<&'a RefOr<SecurityScheme>> + 'a {
+        move |path| match path {
+            [c, kind, key] if c == "components" && kind == "securitySchemes" => {
+                self.components.as_ref()?.security_schemes.get(key)
+            }
+            _ => None,
+        }
+    }
+
+    /// Which server entry a pointer's decoded tokens name, in either map.
+    fn server_lookup<'a>(&'a self) -> impl Fn(&[String]) -> Option<&'a RefOr<Server>> + 'a {
+        move |path| match path {
+            [c, servers, key] if c == "components" && servers == "servers" => {
+                self.components.as_ref()?.servers.get(key)
+            }
+            [servers, key] if servers == "servers" => self.servers.get(key),
             _ => None,
         }
     }
@@ -203,8 +266,13 @@ impl Document {
     /// `$ref` resolves to, so a message declared beside a `$ref` is
     /// reachable and one on the target is not (through this pointer).
     fn message_at<'a>(&'a self, pointer: &str) -> Option<&'a RefOr<Message>> {
-        let tokens = pointer::tokens(pointer)?;
-        if let [components, messages, key] = tokens.as_slice()
+        self.message_at_tokens(&pointer::tokens(pointer)?)
+    }
+
+    /// [`message_at`](Self::message_at), for a pointer already split
+    /// into decoded tokens.
+    fn message_at_tokens<'a>(&'a self, tokens: &[String]) -> Option<&'a RefOr<Message>> {
+        if let [components, messages, key] = tokens
             && components == "components"
             && messages == "messages"
         {
@@ -212,7 +280,7 @@ impl Document {
         }
 
         // `<channel map>/<path>/publish|subscribe/message[/oneOf/<i>]`
-        let (map, rest) = self.channel_map_for(&tokens)?;
+        let (map, rest) = self.channel_map_for(tokens)?;
         let [key, kind, field, steps @ ..] = rest else {
             return None;
         };
@@ -587,25 +655,27 @@ impl ResolveReference<SecurityScheme> for Document {
         &'a self,
         entry: &'a RefOr<SecurityScheme>,
     ) -> Resolution<'a, SecurityScheme> {
-        follow(self, entry, "securitySchemes", |path| match path {
-            [c, kind, key] if c == "components" && kind == "securitySchemes" => {
-                self.components.as_ref()?.security_schemes.get(key)
-            }
-            _ => None,
-        })
+        follow(
+            self,
+            entry,
+            "securitySchemes",
+            self.security_scheme_lookup(),
+        )
+    }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<SecurityScheme>) -> Option<&'a str> {
+        last_reference(entry, self.security_scheme_lookup())
     }
 }
 
 /// Servers, through both `#/servers/…` and `#/components/servers/…`.
 impl ResolveReference<Server> for Document {
     fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
-        follow(self, entry, "servers", |path| match path {
-            [c, servers, key] if c == "components" && servers == "servers" => {
-                self.components.as_ref()?.servers.get(key)
-            }
-            [servers, key] if servers == "servers" => self.servers.get(key),
-            _ => None,
-        })
+        follow(self, entry, "servers", self.server_lookup())
+    }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Server>) -> Option<&'a str> {
+        last_reference(entry, self.server_lookup())
     }
 }
 
@@ -631,12 +701,82 @@ impl ResolveReference<Message> for Document {
             RefOr::Reference(reference) => self.resolve_message(reference),
         }
     }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Message>) -> Option<&'a str> {
+        last_reference(entry, |path| self.message_at_tokens(path))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn resolved_ref_reports_where_each_kind_of_chain_ends() {
+        let doc: Document = serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "prod": { "$ref": "#/components/servers/alias" }
+            },
+            "channels": {
+                "user/signedup": {
+                    "$ref": "#/channels/real",
+                    "publish": { "message": { "$ref": "#/components/messages/alias" } }
+                },
+                "real": { "$ref": "#/components/channels/real" },
+                "loop": { "$ref": "#/channels/loop" },
+                "plain": { "description": "no ref" }
+            },
+            "components": {
+                "servers": {
+                    "alias": { "$ref": "#/components/servers/kafka" },
+                    "kafka": { "url": "broker", "protocol": "kafka" }
+                },
+                "channels": { "real": { "description": "real" } },
+                "messages": {
+                    "alias": { "$ref": "#/components/messages/real" },
+                    "real": { "name": "M" },
+                    "viaChannel": { "$ref": "#/channels/user~1signedup/publish/message" }
+                },
+                "securitySchemes": {
+                    "alias": { "$ref": "#/components/securitySchemes/key" },
+                    "key": { "type": "httpApiKey", "name": "k", "in": "header" }
+                }
+            }
+        }))
+        .unwrap();
+        let components = doc.components.as_ref().unwrap();
+
+        assert_eq!(
+            doc.servers["prod"].resolved_ref(&doc),
+            Some("#/components/servers/kafka")
+        );
+        assert_eq!(
+            components.security_schemes["alias"].resolved_ref(&doc),
+            Some("#/components/securitySchemes/key")
+        );
+        assert_eq!(
+            components.messages["alias"].resolved_ref(&doc),
+            Some("#/components/messages/real")
+        );
+        assert_eq!(components.messages["real"].resolved_ref(&doc), None);
+        assert_eq!(
+            components.messages["viaChannel"].resolved_ref(&doc),
+            Some("#/components/messages/real")
+        );
+
+        assert_eq!(
+            doc.resolved_channel_ref(&doc.channels["user/signedup"]),
+            Some("#/components/channels/real")
+        );
+        assert_eq!(
+            doc.resolved_channel_ref(&doc.channels["loop"]),
+            Some("#/channels/loop")
+        );
+        assert_eq!(doc.resolved_channel_ref(&doc.channels["plain"]), None);
+    }
 
     fn minimal() -> serde_json::Value {
         json!({

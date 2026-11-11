@@ -12,7 +12,7 @@
 //! module is about what the pointers *mean*.
 
 use crate::common::pointer;
-use crate::common::reference::RefOr;
+use crate::common::reference::{RefOr, Reference};
 use crate::validation::Context;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -572,6 +572,45 @@ where
     F: Fn(&[String]) -> Option<&'a RefOr<T>>,
 {
     follow_tracked(document, Vec::new(), start, expected_kind, lookup).1
+}
+
+/// The last `$ref` a chain starting at `entry` follows, for
+/// [`ResolveReference::resolved_reference`](crate::common::reference::ResolveReference::resolved_reference).
+///
+/// `lookup` is the one the kind resolves with. The walk stops at the
+/// first reference that does not lead to another reference — whether
+/// it found an object, names nothing, leaves the document, or is not a
+/// pointer — or that it has already followed.
+pub(crate) fn last_reference<'a, T, F>(entry: &'a RefOr<T>, lookup: F) -> Option<&'a str>
+where
+    T: 'a,
+    F: Fn(&[String]) -> Option<&'a RefOr<T>>,
+{
+    match entry {
+        RefOr::Item(_) => None,
+        RefOr::Reference(reference) => Some(last_reference_from(reference, lookup)),
+    }
+}
+
+/// [`last_reference`], starting from a bare reference.
+pub(crate) fn last_reference_from<'a, T, F>(start: &'a Reference, lookup: F) -> &'a str
+where
+    T: 'a,
+    F: Fn(&[String]) -> Option<&'a RefOr<T>>,
+{
+    let mut reference = start;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let next = reference
+            .local_pointer()
+            .filter(|local| seen.insert(local))
+            .and_then(pointer::tokens)
+            .and_then(|path| lookup(&path));
+        match next {
+            Some(RefOr::Reference(next)) => reference = next,
+            _ => return &reference.reference,
+        }
+    }
 }
 
 /// Where a chain ended, as an identity two references can be compared

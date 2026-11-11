@@ -126,6 +126,8 @@ assert_eq!(message.name.as_deref(), Some("LightMeasured"));
 
 Every other kind has no resolver. That includes `SecurityScheme` in 3.x, which only 2.6 covers.
 
+`RefOr::resolved_ref(&doc)` returns where the item was found: `None` for an inline item, otherwise the last `$ref` the chain followed — the target of an alias, the reference into another document when the chain leaves it, or the last reference reached when the chain dangles or loops. It takes the same documents and kinds as `get_item`. For the references the model holds outside a `RefOr`, the 3.x `Document` has `resolved_server_ref`, `resolved_channel_ref` and `resolved_message_ref`, each taking a bare `Reference`; the 2.6 `Document` has `resolved_channel_ref`, taking a `ChannelItem`.
+
 ## What 2.6 does differently
 
 2.6 is a different document rather than an earlier draft of v3, so `v2_6` is its own model rather than a variation on `v3_0`:

@@ -68,7 +68,7 @@ YAML descriptions work the same way — parse with `serde-saphyr` (or any other 
 
 ## Reusable objects
 
-A parameter or action list holds `ReusableOr<T>`: the object itself, or a `Reusable` naming one in `components` (`$components.parameters.page`). `ReusableOr::get_item(&description)` returns the object either way, and takes a `Components` just as well; a reference of another kind and a name the components have not got are separate `ResolveError`s. A `Reusable`'s `value` is not applied — read it with `value_override()`.
+A parameter or action list holds `ReusableOr<T>`: the object itself, or a `Reusable` naming one in `components` (`$components.parameters.page`). `ReusableOr::get_item(&description)` returns the object either way, and takes a `Components` just as well; a reference of another kind and a name the components have not got are separate `ResolveError`s. A `Reusable`'s `value` is not applied — read it with `value_override()`. `ReusableOr::resolved_ref(&description)` gives the `Reusable`'s reference, or `None` for an inline object.
 
 ## Unknown members
 

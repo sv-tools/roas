@@ -14,7 +14,9 @@
 
 use crate::common::pointer;
 use crate::common::reference::{RefOr, Reference, ResolveReference};
-use crate::common::resolve::{Resolution, Terminus, classify_unresolved, follow_tracked};
+use crate::common::resolve::{
+    Resolution, Terminus, classify_unresolved, follow_tracked, last_reference, last_reference_from,
+};
 use crate::v3_1::channel::Channel;
 use crate::v3_1::components::Components;
 use crate::v3_1::info::Info;
@@ -118,13 +120,7 @@ impl Document {
     where
         T: DeserializeOwned,
     {
-        self.resolve_with(reference, field, |path| match path {
-            [c, this, key] if c == "components" && this == field => {
-                components.and_then(|map| map.get(key))
-            }
-            [this, key] if this == field => inline.and_then(|map| map.get(key)),
-            _ => None,
-        })
+        self.resolve_with(reference, field, map_lookup(field, inline, components))
     }
 
     /// [`resolve`](Self::resolve), for a kind whose objects live
@@ -183,13 +179,8 @@ impl Document {
     /// server-shaped `x-` extension is `Opaque` too. For a
     /// `RefOr<Server>` use [`RefOr::get_item`].
     pub fn resolve_server(&self, reference: &Reference) -> Resolution<'_, Server> {
-        self.resolve(
-            reference,
-            "servers",
-            Some(&self.servers),
-            self.components_map(|c| &c.servers),
-        )
-        .1
+        self.resolve_with(reference, "servers", self.server_lookup())
+            .1
     }
 
     /// Resolve a bare channel `$ref` — an operation's or a reply's
@@ -249,13 +240,8 @@ impl Document {
     /// assert_eq!(message.name.as_deref(), Some("UserSignedUp"));
     /// ```
     pub fn resolve_channel(&self, reference: &Reference) -> Resolution<'_, Channel> {
-        self.resolve(
-            reference,
-            "channels",
-            Some(&self.channels),
-            self.components_map(|c| &c.channels),
-        )
-        .1
+        self.resolve_with(reference, "channels", self.channel_lookup())
+            .1
     }
 
     /// Resolve a bare message `$ref` — an entry of an operation's or a
@@ -282,6 +268,97 @@ impl Document {
     /// nothing: resolve the channel first and look the message up in
     /// its `messages`.
     pub fn resolve_message(&self, reference: &Reference) -> Resolution<'_, Message> {
+        self.resolve_with(reference, "messages", self.message_lookup())
+            .1
+    }
+
+    /// The last `$ref` the chain from a bare server reference follows,
+    /// as [`resolve_server`](Self::resolve_server) walks it — the
+    /// counterpart of [`RefOr::resolved_ref`] for a reference the model
+    /// holds bare.
+    #[must_use]
+    pub fn resolved_server_ref<'a>(&'a self, reference: &'a Reference) -> &'a str {
+        last_reference_from(reference, self.server_lookup())
+    }
+
+    /// The last `$ref` the chain from a bare channel reference follows,
+    /// as [`resolve_channel`](Self::resolve_channel) walks it.
+    ///
+    /// ```
+    /// use roas_asyncapi::v3_1::Document;
+    ///
+    /// let doc: Document = serde_json::from_str(r##"{
+    ///     "asyncapi": "3.1.0",
+    ///     "info": { "title": "Signups", "version": "1.0.0" },
+    ///     "channels": {
+    ///         "signups": { "$ref": "#/components/channels/userSignedUp" }
+    ///     },
+    ///     "operations": {
+    ///         "receiveSignups": {
+    ///             "action": "receive",
+    ///             "channel": { "$ref": "#/channels/signups" }
+    ///         }
+    ///     },
+    ///     "components": {
+    ///         "channels": { "userSignedUp": { "address": "user/signedup" } }
+    ///     }
+    /// }"##).unwrap();
+    ///
+    /// let operation = doc.operations["receiveSignups"].get_item(&doc).found().unwrap();
+    /// assert_eq!(
+    ///     doc.resolved_channel_ref(&operation.channel),
+    ///     "#/components/channels/userSignedUp",
+    /// );
+    /// ```
+    #[must_use]
+    pub fn resolved_channel_ref<'a>(&'a self, reference: &'a Reference) -> &'a str {
+        last_reference_from(reference, self.channel_lookup())
+    }
+
+    /// The last `$ref` the chain from a bare message reference follows,
+    /// as [`resolve_message`](Self::resolve_message) walks it.
+    #[must_use]
+    pub fn resolved_message_ref<'a>(&'a self, reference: &'a Reference) -> &'a str {
+        last_reference_from(reference, self.message_lookup())
+    }
+
+    /// Which server entry a pointer's decoded tokens name, in either map.
+    fn server_lookup<'a>(&'a self) -> impl Fn(&[String]) -> Option<&'a RefOr<Server>> + 'a {
+        map_lookup(
+            "servers",
+            Some(&self.servers),
+            self.components_map(|c| &c.servers),
+        )
+    }
+
+    /// Which channel entry a pointer's decoded tokens name, in either map.
+    fn channel_lookup<'a>(&'a self) -> impl Fn(&[String]) -> Option<&'a RefOr<Channel>> + 'a {
+        map_lookup(
+            "channels",
+            Some(&self.channels),
+            self.components_map(|c| &c.channels),
+        )
+    }
+
+    /// Which operation entry a pointer's decoded tokens name, in either map.
+    fn operation_lookup<'a>(&'a self) -> impl Fn(&[String]) -> Option<&'a RefOr<Operation>> + 'a {
+        map_lookup(
+            "operations",
+            Some(&self.operations),
+            self.components_map(|c| &c.operations),
+        )
+    }
+
+    /// Which reply entry a pointer's decoded tokens name: only
+    /// `#/components/replies/…`.
+    fn reply_lookup<'a>(&'a self) -> impl Fn(&[String]) -> Option<&'a RefOr<OperationReply>> + 'a {
+        map_lookup("replies", None, self.components_map(|c| &c.replies))
+    }
+
+    /// Which message entry a pointer's decoded tokens name:
+    /// `#/components/messages/…`, or a channel's own `messages` under
+    /// either channel map.
+    fn message_lookup<'a>(&'a self) -> impl Fn(&[String]) -> Option<&'a RefOr<Message>> + 'a {
         // As written: a channel that is only a `$ref` declares no
         // messages of its own for a pointer to step into.
         fn of_channel<'a>(
@@ -291,7 +368,7 @@ impl Document {
         ) -> Option<&'a RefOr<Message>> {
             channels.get(channel)?.item()?.messages.get(key)
         }
-        self.resolve_with(reference, "messages", |path| match path {
+        move |path| match path {
             [c, messages, key] if c == "components" && messages == "messages" => {
                 self.components.as_ref()?.messages.get(key)
             }
@@ -306,8 +383,7 @@ impl Document {
                 of_channel(&self.channels, channel, key)
             }
             _ => None,
-        })
-        .1
+        }
     }
 
     /// Check a `$ref` the specification pins to a particular place.
@@ -588,6 +664,22 @@ impl Validate for Document {
     }
 }
 
+/// Which entry a pointer's decoded tokens name, for a kind that lives
+/// in `#/<field>/<key>` and `#/components/<field>/<key>`.
+fn map_lookup<'a, T>(
+    field: &str,
+    inline: Option<&'a BTreeMap<String, RefOr<T>>>,
+    components: Option<&'a BTreeMap<String, RefOr<T>>>,
+) -> impl Fn(&[String]) -> Option<&'a RefOr<T>> {
+    move |path| match path {
+        [c, this, key] if c == "components" && this == field => {
+            components.and_then(|map| map.get(key))
+        }
+        [this, key] if this == field => inline.and_then(|map| map.get(key)),
+        _ => None,
+    }
+}
+
 /// Servers, through both `#/servers/…` and `#/components/servers/…`.
 impl ResolveReference<Server> for Document {
     fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
@@ -595,6 +687,10 @@ impl ResolveReference<Server> for Document {
             RefOr::Item(server) => Resolution::Found(server),
             RefOr::Reference(reference) => self.resolve_server(reference),
         }
+    }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Server>) -> Option<&'a str> {
+        last_reference(entry, self.server_lookup())
     }
 }
 
@@ -607,6 +703,10 @@ impl ResolveReference<Channel> for Document {
             RefOr::Reference(reference) => self.resolve_channel(reference),
         }
     }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Channel>) -> Option<&'a str> {
+        last_reference(entry, self.channel_lookup())
+    }
 }
 
 /// Operations, through both `#/operations/…` and
@@ -616,15 +716,14 @@ impl ResolveReference<Operation> for Document {
         match entry {
             RefOr::Item(operation) => Resolution::Found(operation),
             RefOr::Reference(reference) => {
-                self.resolve(
-                    reference,
-                    "operations",
-                    Some(&self.operations),
-                    self.components_map(|c| &c.operations),
-                )
-                .1
+                self.resolve_with(reference, "operations", self.operation_lookup())
+                    .1
             }
         }
+    }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Operation>) -> Option<&'a str> {
+        last_reference(entry, self.operation_lookup())
     }
 }
 
@@ -642,15 +741,14 @@ impl ResolveReference<OperationReply> for Document {
         match entry {
             RefOr::Item(reply) => Resolution::Found(reply),
             RefOr::Reference(reference) => {
-                self.resolve(
-                    reference,
-                    "replies",
-                    None,
-                    self.components_map(|c| &c.replies),
-                )
-                .1
+                self.resolve_with(reference, "replies", self.reply_lookup())
+                    .1
             }
         }
+    }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<OperationReply>) -> Option<&'a str> {
+        last_reference(entry, self.reply_lookup())
     }
 }
 
@@ -663,12 +761,110 @@ impl ResolveReference<Message> for Document {
             RefOr::Reference(reference) => self.resolve_message(reference),
         }
     }
+
+    fn resolved_reference<'a>(&'a self, entry: &'a RefOr<Message>) -> Option<&'a str> {
+        last_reference(entry, self.message_lookup())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn resolved_ref_reports_where_each_kind_of_chain_ends() {
+        let doc: Document = serde_json::from_value(json!({
+            "asyncapi": "3.1.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "prod": { "$ref": "#/components/servers/alias" },
+                "inline": { "host": "h", "protocol": "kafka" }
+            },
+            "channels": {
+                "real": {
+                    "address": "a",
+                    "messages": { "m": { "$ref": "#/components/messages/alias" } }
+                },
+                "alias": { "$ref": "#/components/channels/real" }
+            },
+            "operations": {
+                "send": {
+                    "action": "send",
+                    "channel": { "$ref": "#/channels/alias" },
+                    "messages": [ { "$ref": "#/channels/real/messages/m" } ],
+                    "reply": { "$ref": "#/components/replies/alias" }
+                },
+                "alias": { "$ref": "#/components/operations/send" }
+            },
+            "components": {
+                "servers": {
+                    "alias": { "$ref": "#/components/servers/kafka" },
+                    "kafka": { "host": "broker", "protocol": "kafka" },
+                    "away": { "$ref": "other.yaml#/servers/x" },
+                    "loopA": { "$ref": "#/components/servers/loopB" },
+                    "loopB": { "$ref": "#/components/servers/loopA" },
+                    "dangling": { "$ref": "#/components/servers/missing" }
+                },
+                "channels": { "real": { "address": "c" } },
+                "operations": { "send": { "action": "send", "channel": { "$ref": "#/channels/real" } } },
+                "replies": {
+                    "alias": { "$ref": "#/components/replies/real" },
+                    "real": {}
+                },
+                "messages": {
+                    "alias": { "$ref": "#/components/messages/real" },
+                    "real": { "name": "M" }
+                }
+            }
+        }))
+        .unwrap();
+
+        // `get_item` still returns only the item; `resolved_ref` says where.
+        let prod = &doc.servers["prod"];
+        assert_eq!(prod.get_item(&doc).found().unwrap().host, "broker");
+        assert_eq!(prod.resolved_ref(&doc), Some("#/components/servers/kafka"));
+        assert_eq!(doc.servers["inline"].resolved_ref(&doc), None);
+
+        let server = |name: &str| doc.components.as_ref().unwrap().servers[name].resolved_ref(&doc);
+        assert_eq!(server("away"), Some("other.yaml#/servers/x"));
+        // The chain starts at the entry's own `$ref` and loops back to it.
+        assert_eq!(server("loopA"), Some("#/components/servers/loopB"));
+        assert_eq!(server("dangling"), Some("#/components/servers/missing"));
+
+        assert_eq!(
+            doc.channels["alias"].resolved_ref(&doc),
+            Some("#/components/channels/real")
+        );
+        assert_eq!(
+            doc.operations["alias"].resolved_ref(&doc),
+            Some("#/components/operations/send")
+        );
+        let send = doc.operations["send"].get_item(&doc).found().unwrap();
+        assert_eq!(
+            send.reply.as_ref().unwrap().resolved_ref(&doc),
+            Some("#/components/replies/real")
+        );
+        let channel = doc.channels["real"].get_item(&doc).found().unwrap();
+        assert_eq!(
+            channel.messages["m"].resolved_ref(&doc),
+            Some("#/components/messages/real")
+        );
+
+        // The bare references the model holds without a `RefOr`.
+        assert_eq!(
+            doc.resolved_channel_ref(&send.channel),
+            "#/components/channels/real"
+        );
+        assert_eq!(
+            doc.resolved_message_ref(&send.messages[0]),
+            "#/components/messages/real"
+        );
+        let bare = Reference {
+            reference: "#/servers/prod".to_owned(),
+        };
+        assert_eq!(doc.resolved_server_ref(&bare), "#/components/servers/kafka");
+    }
 
     fn minimal() -> serde_json::Value {
         json!({
