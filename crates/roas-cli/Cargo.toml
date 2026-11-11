@@ -38,8 +38,8 @@ roas-arazzo = { version = "0.4.0", path = "../roas-arazzo", features = ["clap", 
 roas-arazzo-executor = { version = "0.2", path = "../roas-arazzo-executor", features = ["reqwest", "source-graph", "input-validation"] }
 roas-asyncapi = { workspace = true, features = ["clap", "v2_6", "v3_0", "v3_1"] }
 roas-codegen.workspace = true
-roas-file-fetcher = { version = "0.1.6", path = "../roas-file-fetcher", features = ["yaml"] }
-roas-http-fetcher = { version = "0.2.6", path = "../roas-http-fetcher", features = ["yaml"] }
+roas-file-fetcher = { version = "0.2.0", path = "../roas-file-fetcher", features = ["yaml"] }
+roas-http-fetcher = { version = "0.3.0", path = "../roas-http-fetcher", features = ["yaml"] }
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true

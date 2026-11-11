@@ -17,7 +17,7 @@ Filesystem [`ResourceFetcher`](https://docs.rs/roas/latest/roas/loader/trait.Res
 
 ```toml
 [dependencies]
-roas-file-fetcher = { version = "0.1", features = ["async", "yaml"] }
+roas-file-fetcher = { version = "0.2", features = ["async", "yaml"] }
 ```
 
 ## Usage
