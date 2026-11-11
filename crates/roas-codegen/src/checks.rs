@@ -798,9 +798,12 @@ pub(crate) fn reaches_leaf(
                     return false;
                 }
                 match ir.types.get(id).map(|d| &d.kind) {
+                    // Beside `patternProperties`, the other members are held
+                    // as their text in both languages.
                     Some(TypeKind::Struct(s)) => {
                         s.fields.iter().any(|f| walk(ir, &f.ty, leaf, seen))
-                            || matches!(&s.additional, crate::ir::Additional::CatchAll(t) if walk(ir, t, leaf, seen))
+                            || (s.patterns.is_empty()
+                                && matches!(&s.additional, crate::ir::Additional::CatchAll(t) if walk(ir, t, leaf, seen)))
                     }
                     Some(TypeKind::Newtype(t) | TypeKind::Alias(t)) => walk(ir, t, leaf, seen),
                     Some(TypeKind::UnionTagged(u)) => {
@@ -945,7 +948,12 @@ pub(crate) fn diagnostics(
                     let mut pointer = def.id.pointer.clone();
                     push_token(&mut pointer, "patternProperties");
                     push_token(&mut pointer, &pattern.source);
+                    // A pattern that lets anything be, beside members that may
+                    // be anything too, decides nothing: nothing is reported.
+                    let decides = !(pattern.accepts_anything(ir)
+                        && matches!(s.others, crate::ir::Others::Any));
                     if !opted_out(def)
+                        && decides
                         && let Err(reason) = &pattern.regex
                     {
                         warn(

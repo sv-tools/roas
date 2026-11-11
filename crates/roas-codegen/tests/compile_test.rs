@@ -794,6 +794,9 @@ fn validated_description() -> serde_json::Value {
                 "patternProperties": {"\\bq": {"$ref": "#/components/schemas/Whatever"}}},
             "PatAliasRef": {"type": "object", "properties": {"xa": {"$ref": "#/components/schemas/ShortAliased"}},
                 "patternProperties": {"^x": {"type": "object", "properties": {"aa": {"type": "string", "maxLength": 1}}}}},
+            "PatHoldsPatterned": {"type": "object",
+                "properties": {"xInner": {"$ref": "#/components/schemas/PatBoth"}},
+                "patternProperties": {"^x": {"type": "object", "maxProperties": 0}}},
             "PatClosedFalse": {"type": "object", "additionalProperties": false,
                 "patternProperties": {"^x-": false}},
             "PatFalse": {"type": "object",
@@ -1310,6 +1313,9 @@ fn main() {
     // A pattern that lets anything be decides nothing, translated or not.
     assert_eq!(report::<PatAnything>(r#"{"id":"a","z":1}"#), vec![]);
     assert_eq!(report::<PatRefAnything>(r#"{"id":"a","z":1}"#), vec![]);
+    // A struct holding its pattern members as text keeps them exactly.
+    assert_eq!(report::<PatHoldsPatterned>(r#"{"xInner":{"ab":"xy"}}"#), vec![v("/xInner")]);
+    assert_eq!(report::<PatHoldsPatterned>(r#"{"xInner":{}}"#), vec![]);
     // Let in at decode by its pattern, refused by the pattern's `false`.
     assert_eq!(report::<PatClosedFalse>(r#"{"x-a":1}"#), vec![v("/x-a")]);
     assert!(serde_json::from_str::<PatClosedFalse>(r#"{"y":1}"#).is_err());
@@ -1744,6 +1750,8 @@ func main() {
 	check(`{"xa":{"aa":"long"}}`, report[api.PatAliasRef](`{"xa":{"aa":"long"}}`), v("/xa/aa"))
 	check(`{"id":"a","z":1}`, report[api.PatAnything](`{"id":"a","z":1}`))
 	check(`{"id":"a","z":1}`, report[api.PatRefAnything](`{"id":"a","z":1}`))
+	check(`{"xInner":{"ab":"xy"}}`, report[api.PatHoldsPatterned](`{"xInner":{"ab":"xy"}}`), v("/xInner"))
+	check(`{"xInner":{}}`, report[api.PatHoldsPatterned](`{"xInner":{}}`))
 	check(`{"x-a":1}`, report[api.PatClosedFalse](`{"x-a":1}`), v("/x-a"))
 	check(`{"id":"q"}`, report[api.PatFalse](`{"id":"q"}`))
 	check(`{"x-a":1}`, report[api.PatFalse](`{"x-a":1}`), v("/x-a"))

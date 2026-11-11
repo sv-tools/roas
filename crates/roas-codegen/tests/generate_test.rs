@@ -1666,6 +1666,12 @@ fn a_struct_whose_patterns_decide_nothing_compiles_alone() {
             !code.contains("for (name, value)") && !code.contains("range slices.Sorted"),
             "{code}"
         );
+        // Nor is it warned about as unevaluated.
+        assert!(
+            !g.diagnostics.iter().any(|d| matches!(&d.kind, DiagnosticKind::Unvalidated { keyword } if keyword == "patternProperties")),
+            "{:?}",
+            g.diagnostics
+        );
         if language == Target::Go {
             assert!(!code.contains("\"slices\""), "{code}");
         }
