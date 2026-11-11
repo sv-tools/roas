@@ -43,7 +43,7 @@ pub(super) struct Roots<'d> {
     slept: Option<Instant>,
     /// The wake handed out as [`Progress::Await`]: advancing again with
     /// nothing handed back means the caller waited until then.
-    awaited: Option<Instant>,
+    pub(super) awaited: Option<Instant>,
 }
 
 /// One workflow the one asked for depends on.

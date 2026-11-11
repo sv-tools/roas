@@ -903,3 +903,24 @@ async fn a_retry_waits_by_the_clients_clock_with_requests_in_flight() {
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(client.sent(), ["a", "b", "a", "c"]);
 }
+
+#[test]
+fn a_failure_handed_back_is_no_wait() {
+    let description = retrying(10.0);
+    let options = options().parallel(4);
+    let mut run = Run::start(&description, &options).unwrap();
+    let a = send(&mut run);
+    let _b = send(&mut run);
+    run.supply_to(a.id, HttpResponse::json(500, &json!({})))
+        .unwrap();
+    assert!(matches!(run.advance(), Ok(Progress::Await(Some(_)))));
+    assert!(matches!(
+        run.supply_failure(a.id, ClientError::new("late")),
+        Err(ExecutionError::NotWaiting)
+    ));
+    // Still waiting for the retry, or for `b`.
+    assert!(matches!(run.advance(), Ok(Progress::Await(Some(_)))));
+    // Advancing with nothing handed back means the wait is over.
+    assert_eq!(path(&send(&mut run)), "a");
+    assert_eq!(run.in_flight().len(), 2);
+}

@@ -341,6 +341,8 @@ pub enum Progress {
     /// With a duration, a workflow running alongside is waiting that long
     /// to retry a step: advance once it has passed, even if no response
     /// came yet. Waiting for a response anyway only makes the retry later.
+    /// Advancing again with nothing handed back counts as having waited
+    /// it, as after [`Progress::Wait`].
     Await(Option<Duration>),
     /// Wait this long — a retry asked for it — then carry on.
     Wait(Duration),
@@ -897,6 +899,10 @@ impl<'d> Run<'d> {
     ) -> Result<(), ExecutionError> {
         if self.halted {
             return Err(ExecutionError::Stopped);
+        }
+        // Something was handed back: the caller did not wait for a wake.
+        if let Some(roots) = self.roots.as_mut() {
+            roots.awaited = None;
         }
         if !self.in_flight().contains(&id) {
             return Err(ExecutionError::NotWaiting);
