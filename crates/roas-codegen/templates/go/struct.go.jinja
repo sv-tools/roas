@@ -4,7 +4,8 @@
 
 // UnmarshalJSONFrom decodes {{ t.name }} in one pass, refusing what its struct
 // tags cannot: a missing required member, a null where none is allowed{% if not t.extra_ty %},
-// and a member not named above{% endif %}. A nested value keeps its own
+// and a member not named above{% elif t.member_patterns %},
+// and a member matching no property and no pattern{% endif %}. A nested value keeps its own
 // type's rules.
 func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 	if d.PeekKind() != '{' {

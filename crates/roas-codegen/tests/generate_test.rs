@@ -1480,6 +1480,10 @@ fn closed_pattern_properties_are_checked_at_decode() {
             assert!(code.contains("\"^x-\""), "{code}");
         } else {
             assert!(
+                code.contains("and a member matching no property and no pattern"),
+                "{code}"
+            );
+            assert!(
                 code.contains("\"regexp\"")
                     && (code.contains("memberMatches(name, `^x-`)")
                         || code.contains("memberMatches(name, \"^x-\")")),

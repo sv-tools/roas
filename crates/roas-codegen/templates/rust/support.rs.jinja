@@ -207,8 +207,9 @@ impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for roas_object_
 }
 
 {% endif %}{% if support.catch_all %}/// Hands a struct's derived code the same deserializer, asked for a JSON
-/// object, with only the members `declared` names: the rest decode into
-/// `rest` straight from the deserializer, which still has their raw tokens.
+/// object, with only the members `declared` names: the rest, when `allowed`
+/// lets them in, decode into `rest` straight from the deserializer, which
+/// still has their raw tokens; any other member is refused.
 /// Unused when every struct with a catch-all is compiled out.
 #[allow(dead_code, non_camel_case_types)]
 struct roas_catch_all<'r, D, T> {

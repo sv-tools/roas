@@ -1310,6 +1310,8 @@ fn main() {
     assert_eq!(report::<EnumItems>(r#"["a"]"#), vec![]);
     // Members a pattern allows are not refused as unknown.
     assert_eq!(report::<PatOrStr>(r#"{"x":1}"#), vec![u("")]);
+    // A member matching no pattern is refused at decode: no branch matches.
+    assert_eq!(report::<PatOrStr>(r#"{"y":1}"#), vec![v("")]);
     // A branch that misses for its value is still a miss.
     assert_eq!(report::<IntOrStr>("true"), vec![v("")]);
     assert_eq!(report::<HoldsMixed>(r#"{"m":"zzz","s":{"b":1}}"#), vec![u("/m"), u("/s"), u("/s")]);
@@ -1659,6 +1661,7 @@ func main() {
 	padded := strings.Repeat(`{"next":`, 30) + `{"pad":"` + strings.Repeat("x", 1<<20) + `"}` + strings.Repeat("}", 30)
 	_ = report[api.PadNode](padded)
 	check(`{"x":1}`, report[api.PatOrStr](`{"x":1}`), u(""))
+	check(`{"y":1}`, report[api.PatOrStr](`{"y":1}`), v(""))
 	twice := strings.Repeat(`{"h":`, 40) + `{}` + strings.Repeat("}", 40)
 	if got := report[api.Twice](twice); len(got) == 0 {
 		panic("doubling branches passed unchecked")
