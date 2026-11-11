@@ -141,7 +141,7 @@ roas openapi convert --to v3_2 --apply patch.yaml --apply-option error-on-zero-m
 
 ### `openapi generate`
 
-Generates Rust or Go types from a description of any version, using [`roas-codegen`](https://crates.io/crates/roas-codegen). The description is validated first, with external references skipped and reported. Numbers are read as `f64` by default; a build with the `exact-numbers` feature (`cargo install roas-cli --features exact-numbers`) keeps JSON numbers without rounding them through `f64`. That feature is off by default because it changes how the other commands compare numbers.
+Generates Rust or Go types from a description of any version, using [`roas-codegen`](https://crates.io/crates/roas-codegen). The description is validated first, with external references skipped and reported. Numbers are read as `f64` by default; a build with the `exact-numbers` feature (`cargo install roas-cli --features exact-numbers`) keeps JSON numbers without rounding them through `f64`. That feature is off by default because it changes how the other commands compare numbers. Two limits remain with it, both upstream: YAML still reads an integer past the 64-bit range, and any decimal, through an `f64`; and an integer between 2^64 and 2^128 inside an object that carries `x-` extensions is refused (`invalid type: integer … as u128`), because the CLI reads every document into a `serde_json::Value` first and serde cannot buffer a 128-bit integer there.
 
 ```shell
 roas openapi generate --target rust --out src/api spec.yaml       # write src/api/spec.rs
