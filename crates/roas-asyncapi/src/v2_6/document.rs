@@ -9,7 +9,7 @@
 //! scopes only where the scheme's type allows them.
 
 use crate::common::pointer;
-use crate::common::reference::{RefOr, Reference};
+use crate::common::reference::{RefOr, Reference, ResolveReference};
 use crate::common::resolve::{Resolution, classify_unresolved, follow};
 use crate::v2_6::channel_item::ChannelItem;
 use crate::v2_6::components::Components;
@@ -80,11 +80,39 @@ impl Document {
     /// Resolve a channel item, following its `$ref` field through both
     /// `#/channels/…` and `#/components/channels/…` pointers.
     ///
-    /// An item without a `$ref` resolves to itself.
-    pub(crate) fn resolve_channel<'a>(
-        &'a self,
-        channel: &'a ChannelItem,
-    ) -> Resolution<'a, ChannelItem> {
+    /// An item without a `$ref` resolves to itself. A v2.6 channel item
+    /// carries its `$ref` as a field, beside whatever else it declares,
+    /// so the item passed in and the one found may both have content:
+    /// this returns the one at the end of the chain.
+    ///
+    /// Resolution is document-local: nothing is loaded, so a `$ref`
+    /// into another document — the one given, or an alias the resolver
+    /// looks up — is [`Resolution::Opaque`], or
+    /// [`Resolution::Unrecognized`] when its fragment is not a JSON
+    /// Pointer, which shows without loading anything. A pointer at a
+    /// channel-shaped `x-` extension is `Opaque` too.
+    ///
+    /// ```
+    /// use roas_asyncapi::v2_6::Document;
+    ///
+    /// let doc: Document = serde_json::from_str(r##"{
+    ///     "asyncapi": "2.6.0",
+    ///     "info": { "title": "Signups", "version": "1.0.0" },
+    ///     "channels": {
+    ///         "user/signedup": { "$ref": "#/components/channels/signedUp" }
+    ///     },
+    ///     "components": {
+    ///         "channels": { "signedUp": { "description": "A user signed up" } }
+    ///     }
+    /// }"##).unwrap();
+    ///
+    /// let channel = doc
+    ///     .resolve_channel(&doc.channels["user/signedup"])
+    ///     .found()
+    ///     .expect("declared in this document");
+    /// assert_eq!(channel.description.as_deref(), Some("A user signed up"));
+    /// ```
+    pub fn resolve_channel<'a>(&'a self, channel: &'a ChannelItem) -> Resolution<'a, ChannelItem> {
         let mut current = channel;
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         loop {
@@ -95,7 +123,7 @@ impl Document {
                 reference: reference.to_owned(),
             };
             if reference.is_external() {
-                return Resolution::Opaque;
+                return Resolution::external(&reference.reference);
             }
             let Some(pointer) = reference.local_pointer() else {
                 return Resolution::Unrecognized;
@@ -141,23 +169,7 @@ impl Document {
         let Some(entry) = components.security_schemes.get(name) else {
             return Resolution::Missing;
         };
-        follow(self, entry, "securitySchemes", |path| match path {
-            [c, kind, key] if c == "components" && kind == "securitySchemes" => {
-                components.security_schemes.get(key)
-            }
-            _ => None,
-        })
-    }
-
-    /// Resolve a `RefOr<Server>` through either server map.
-    fn resolve_server<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
-        follow(self, entry, "servers", |path| match path {
-            [c, servers, key] if c == "components" && servers == "servers" => {
-                self.components.as_ref()?.servers.get(key)
-            }
-            [servers, key] if servers == "servers" => self.servers.get(key),
-            _ => None,
-        })
+        entry.get_item(self)
     }
 
     /// Resolve a message `$ref`, following component aliases and
@@ -167,7 +179,7 @@ impl Document {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         loop {
             if current.is_external() {
-                return Resolution::Opaque;
+                return Resolution::external(&current.reference);
             }
             let Some(pointer) = current.local_pointer() else {
                 return Resolution::Unrecognized;
@@ -425,7 +437,7 @@ impl Document {
                 server.validate_with_context(ctx);
                 // Follow a `$ref` so a referenced server's security is
                 // checked as well as an inline one's.
-                let resolution = self.resolve_server(server);
+                let resolution = server.get_item(self);
                 if let Some(problem) = resolution.problem()
                     && let RefOr::Reference(reference) = server
                 {
@@ -566,6 +578,58 @@ impl Document {
 impl Validate for Document {
     fn validate(&self, options: EnumSet<ValidationOptions>) -> Result<(), Error> {
         self.validate_inner(options)
+    }
+}
+
+/// Security schemes, through `#/components/securitySchemes/…`.
+impl ResolveReference<SecurityScheme> for Document {
+    fn resolve_reference<'a>(
+        &'a self,
+        entry: &'a RefOr<SecurityScheme>,
+    ) -> Resolution<'a, SecurityScheme> {
+        follow(self, entry, "securitySchemes", |path| match path {
+            [c, kind, key] if c == "components" && kind == "securitySchemes" => {
+                self.components.as_ref()?.security_schemes.get(key)
+            }
+            _ => None,
+        })
+    }
+}
+
+/// Servers, through both `#/servers/…` and `#/components/servers/…`.
+impl ResolveReference<Server> for Document {
+    fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Server>) -> Resolution<'a, Server> {
+        follow(self, entry, "servers", |path| match path {
+            [c, servers, key] if c == "components" && servers == "servers" => {
+                self.components.as_ref()?.servers.get(key)
+            }
+            [servers, key] if servers == "servers" => self.servers.get(key),
+            _ => None,
+        })
+    }
+}
+
+/// Messages, through `#/components/messages/…` and through pointers at
+/// a channel's operation: `#/channels/<path>/publish/message` or
+/// `…/subscribe/message`, the same under
+/// `#/components/channels/<name>/…`, and any `oneOf/<index>` steps
+/// after either.
+///
+/// A pointer is walked over the document as written, so one that steps
+/// through a channel item names what that item itself declares, not
+/// what the item's own `$ref` leads to.
+///
+/// A pointer at `#/channels/<path>/publish/message` where that is a
+/// `oneOf` set, or at a message-shaped `x-` extension, is
+/// [`Resolution::Opaque`]. So is a `$ref` into another document,
+/// unless its fragment is not a JSON Pointer, which is
+/// [`Resolution::Unrecognized`].
+impl ResolveReference<Message> for Document {
+    fn resolve_reference<'a>(&'a self, entry: &'a RefOr<Message>) -> Resolution<'a, Message> {
+        match entry {
+            RefOr::Item(message) => Resolution::Found(message),
+            RefOr::Reference(reference) => self.resolve_message(reference),
+        }
     }
 }
 
@@ -763,6 +827,7 @@ mod tests {
 
     #[test]
     fn an_external_channel_reference_is_left_alone() {
+        // Left alone because its fragment is a usable pointer.
         let mut value = minimal();
         value["channels"] = json!({ "user": { "$ref": "./channels.yaml#/user" } });
         assert!(errors_for(value).is_empty());
@@ -856,8 +921,8 @@ mod tests {
             e.contains("message `#/components/messages/missing` names nothing in this document")
         }),);
 
-        // Declared is fine; external is left alone; `oneOf` members are
-        // checked individually.
+        // Declared is fine; external with a usable fragment is left
+        // alone; `oneOf` members are checked individually.
         let mut value = minimal();
         value["components"] = json!({ "messages": { "signup": { "name": "S" } } });
         value["channels"] = json!({
@@ -1047,7 +1112,8 @@ mod tests {
 
     #[test]
     fn a_chain_ending_outside_the_document_is_accepted() {
-        // root alias → component channel → external `$ref`.
+        // root alias → component channel → external `$ref` with a
+        // usable fragment.
         let value = json!({
             "asyncapi": "2.6.0",
             "info": { "title": "T", "version": "1" },
@@ -1058,7 +1124,7 @@ mod tests {
         });
         assert!(
             errors_for(value).is_empty(),
-            "an external terminus is not a document bug",
+            "an external terminus with a usable fragment is not a document bug",
         );
     }
 
@@ -1173,7 +1239,8 @@ mod tests {
     #[test]
     fn external_aliases_terminate_every_resolver() {
         // Security scheme, server, and message chains that leave the
-        // document are all accepted.
+        // document through a reference with a usable fragment are all
+        // accepted.
         let value = json!({
             "asyncapi": "2.6.0",
             "info": { "title": "T", "version": "1" },
@@ -1194,7 +1261,7 @@ mod tests {
         });
         assert!(
             errors_for(value).is_empty(),
-            "external termini are accepted"
+            "external termini with a usable fragment are accepted"
         );
     }
 
@@ -2325,5 +2392,373 @@ mod tests {
         let json = serde_json::to_string(&doc).unwrap();
         let reparsed: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(reparsed, doc);
+    }
+
+    /// A document holding one reference of every outcome, per kind.
+    /// It is resolved, never validated.
+    fn resolvable() -> Document {
+        serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "real": { "url": "kafka://root", "protocol": "kafka" },
+                "alias": { "$ref": "#/components/servers/hop" },
+                "outside": { "$ref": "./other.yaml#/servers/real" },
+                "viaOutside": { "$ref": "#/servers/outside" },
+                "ghost": { "$ref": "#/components/servers/nope" },
+                "loop": { "$ref": "#/components/servers/a" },
+                "wrong": { "$ref": "#/components/messages/real" },
+                "malformed": { "$ref": "#/servers/bad~2escape" },
+                "badFragment": { "$ref": "./other.yaml#bad" },
+                "empty": { "$ref": "" },
+                "viaBadFragment": { "$ref": "#/servers/badFragment" }
+            },
+            "channels": {
+                "real": {
+                    "description": "root",
+                    "publish": { "message": { "name": "Inline" } },
+                    "subscribe": { "message": { "oneOf": [
+                        { "name": "First" },
+                        { "$ref": "#/components/messages/real" }
+                    ] } }
+                },
+                "alias": { "$ref": "#/components/channels/hop" },
+                "outside": { "$ref": "./other.yaml#/channels/real" },
+                "viaOutside": { "$ref": "#/channels/outside" },
+                "ghost": { "$ref": "#/channels/nope" },
+                "loop": { "$ref": "#/components/channels/a" },
+                "wrong": { "$ref": "#/servers/real" },
+                "malformed": { "$ref": "#/channels/bad~2escape" },
+                "badFragment": { "$ref": "./other.yaml#bad" },
+                "empty": { "$ref": "" },
+                "viaBadFragment": { "$ref": "#/channels/badFragment" }
+            },
+            "components": {
+                "servers": {
+                    "hop": { "$ref": "#/servers/real" },
+                    "a": { "$ref": "#/components/servers/b" },
+                    "b": { "$ref": "#/components/servers/a" }
+                },
+                "channels": {
+                    "hop": { "$ref": "#/channels/real" },
+                    "reusable": {
+                        "publish": { "message": { "name": "ReusablePublish" } },
+                        "subscribe": { "message": { "name": "ReusableSubscribe" } }
+                    },
+                    "a": { "$ref": "#/components/channels/b" },
+                    "b": { "$ref": "#/components/channels/a" }
+                },
+                "messages": {
+                    "real": { "name": "Component" },
+                    "alias": { "$ref": "#/components/messages/real" },
+                    "inChannel": { "$ref": "#/channels/real/publish/message" },
+                    "inOneOf": { "$ref": "#/channels/real/subscribe/message/oneOf/1" },
+                    "inSubscribe": { "$ref": "#/channels/real/subscribe/message/oneOf/0" },
+                    "throughAlias": { "$ref": "#/channels/alias/publish/message" },
+                    "inReusablePublish": {
+                        "$ref": "#/components/channels/reusable/publish/message"
+                    },
+                    "inReusableSubscribe": {
+                        "$ref": "#/components/channels/reusable/subscribe/message"
+                    },
+                    "outside": { "$ref": "./other.yaml#/messages/real" },
+                    "viaOutside": { "$ref": "#/components/messages/outside" },
+                    "ghost": { "$ref": "#/components/messages/nope" },
+                    "loop": { "$ref": "#/components/messages/a" },
+                    "a": { "$ref": "#/components/messages/b" },
+                    "b": { "$ref": "#/components/messages/a" },
+                    "wrong": { "$ref": "#/servers/real" },
+                    "malformed": { "$ref": "#/components/messages/bad~2escape" },
+                    "badFragment": { "$ref": "./other.yaml#bad" },
+                    "empty": { "$ref": "" },
+                    "viaBadFragment": { "$ref": "#/components/messages/badFragment" }
+                },
+                "securitySchemes": {
+                    "real": { "type": "userPassword", "description": "declared" },
+                    "alias": { "$ref": "#/components/securitySchemes/real" },
+                    "outside": { "$ref": "./other.yaml#/schemes/real" },
+                    "viaOutside": { "$ref": "#/components/securitySchemes/outside" },
+                    "ghost": { "$ref": "#/components/securitySchemes/nope" },
+                    "loop": { "$ref": "#/components/securitySchemes/a" },
+                    "a": { "$ref": "#/components/securitySchemes/b" },
+                    "b": { "$ref": "#/components/securitySchemes/a" },
+                    "wrong": { "$ref": "#/servers/real" },
+                    "malformed": { "$ref": "#/components/securitySchemes/bad~2escape" },
+                    "badFragment": { "$ref": "./other.yaml#bad" },
+                    "empty": { "$ref": "" },
+                    "viaBadFragment": { "$ref": "#/components/securitySchemes/badFragment" }
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    /// The outcomes every kind shares that find nothing, by the key
+    /// that produces each.
+    fn unfound<T>() -> [(&'static str, Resolution<'static, T>); 9] {
+        [
+            // Another document, reached directly or through an alias.
+            ("outside", Resolution::Opaque),
+            ("viaOutside", Resolution::Opaque),
+            ("ghost", Resolution::Missing),
+            ("loop", Resolution::Cycle),
+            ("wrong", Resolution::WrongKind),
+            ("malformed", Resolution::Unrecognized),
+            // Neither external nor a pointer.
+            ("empty", Resolution::Unrecognized),
+            // Another document, but not a pointer into it — which shows
+            // without fetching anything, directly or through an alias.
+            ("badFragment", Resolution::Unrecognized),
+            ("viaBadFragment", Resolution::Unrecognized),
+        ]
+    }
+
+    #[test]
+    fn resolve_channel_tells_every_outcome_apart() {
+        let doc = resolvable();
+        // An item without a `$ref` is itself; an alias is its target.
+        let real = &doc.channels["real"];
+        for key in ["real", "alias"] {
+            let found = doc.resolve_channel(&doc.channels[key]).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        for (key, expected) in unfound() {
+            let resolution = doc.resolve_channel(&doc.channels[key]);
+            assert_eq!(resolution, expected, "channel `{key}`");
+        }
+    }
+
+    #[test]
+    fn get_item_tells_every_server_outcome_apart() {
+        let doc = resolvable();
+        // An inline entry is itself; an alias is its target.
+        let RefOr::Item(real) = &doc.servers["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias"] {
+            let found = doc.servers[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        for (key, expected) in unfound() {
+            let resolution = doc.servers[key].get_item(&doc);
+            assert_eq!(resolution, expected, "server `{key}`");
+        }
+    }
+
+    #[test]
+    fn get_item_tells_every_message_outcome_apart() {
+        let doc = resolvable();
+        let messages = &doc.components.as_ref().expect("components").messages;
+        let RefOr::Item(real) = &messages["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias", "inOneOf"] {
+            let found = messages[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        // A message hanging off a channel's operation is reachable by
+        // pointer: either operation, in either channel map.
+        for (key, name) in [
+            ("inChannel", "Inline"),
+            ("inSubscribe", "First"),
+            ("inReusablePublish", "ReusablePublish"),
+            ("inReusableSubscribe", "ReusableSubscribe"),
+        ] {
+            let found = messages[key].get_item(&doc).found();
+            let message = found.unwrap_or_else(|| panic!("message `{key}` resolves"));
+            assert_eq!(message.name.as_deref(), Some(name), "message `{key}`");
+        }
+
+        // A pointer does not dereference as it walks: `alias` is only
+        // a `$ref`, and declares no `publish` of its own to step into.
+        let resolution = messages["throughAlias"].get_item(&doc);
+        assert_eq!(resolution, Resolution::Missing);
+
+        for (key, expected) in unfound() {
+            let resolution = messages[key].get_item(&doc);
+            assert_eq!(resolution, expected, "message `{key}`");
+        }
+
+        // Where a pointer points is judged before whether anything is
+        // there: the fixture declares no schemas and no traits.
+        for target in [
+            "#/components/schemas/nope",
+            "#/components/messageTraits/nope",
+        ] {
+            let entry: RefOr<Message> = RefOr::Reference(Reference {
+                reference: target.to_owned(),
+            });
+            assert_eq!(entry.get_item(&doc), Resolution::WrongKind, "`{target}`");
+        }
+    }
+
+    #[test]
+    fn get_item_tells_every_security_scheme_outcome_apart() {
+        let doc = resolvable();
+        let schemes = &doc
+            .components
+            .as_ref()
+            .expect("components")
+            .security_schemes;
+        let RefOr::Item(real) = &schemes["real"] else {
+            panic!("inline");
+        };
+        for key in ["real", "alias"] {
+            let found = schemes[key].get_item(&doc).found();
+            assert!(std::ptr::eq(found.expect("resolves"), real), "`{key}`");
+        }
+        for (key, expected) in unfound() {
+            let resolution = schemes[key].get_item(&doc);
+            assert_eq!(resolution, expected, "scheme `{key}`");
+        }
+
+        // Without `components` there is nowhere for a pointer to land.
+        let mut bare = resolvable();
+        let alias = schemes["alias"].clone();
+        bare.components = None;
+        assert_eq!(alias.get_item(&bare), Resolution::Missing);
+    }
+
+    #[test]
+    fn a_local_reference_the_model_cannot_hand_back_is_opaque() {
+        // `#/channels/one/publish/message` is real, but what sits there
+        // is a `oneOf` set rather than a message; an `x-` extension
+        // shaped like a message is not held as one either. Neither is
+        // a document bug, and neither is in another document.
+        let doc: Document = serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "one": {
+                    "publish": { "message": { "oneOf": [ { "name": "A" }, { "name": "B" } ] } }
+                },
+                "extended": { "$ref": "#/x-channel" }
+            },
+            "components": {
+                "messages": {
+                    "set": { "$ref": "#/channels/one/publish/message" },
+                    "extended": { "$ref": "#/x-message" }
+                }
+            },
+            "x-message": { "name": "Shared" },
+            "x-channel": { "description": "shared" }
+        }))
+        .unwrap();
+        let messages = &doc.components.as_ref().expect("components").messages;
+        assert_eq!(messages["set"].get_item(&doc), Resolution::Opaque);
+        assert_eq!(messages["extended"].get_item(&doc), Resolution::Opaque);
+        assert_eq!(
+            doc.resolve_channel(&doc.channels["extended"]),
+            Resolution::Opaque
+        );
+    }
+
+    #[test]
+    fn an_unusable_external_fragment_is_reported_inside_one_of() {
+        let value = json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "channels": {
+                "user": {
+                    "publish": { "message": { "oneOf": [
+                        { "$ref": "./other.yaml#bad" },
+                        { "$ref": "./other.yaml#/messages/fine" }
+                    ] } }
+                }
+            }
+        });
+        assert_eq!(
+            errors_for(value),
+            [
+                "#.channels.user.publish.message.oneOf[0].$ref: message `./other.yaml#bad` is not a usable JSON Pointer"
+            ],
+        );
+    }
+
+    #[test]
+    fn an_unusable_external_fragment_is_reported_beside_the_external_reference() {
+        // Asking for a self-contained document reports the reference
+        // for leaving it; that it is also not a pointer is a second
+        // finding, for a channel and a message as for a server.
+        let doc: Document = serde_json::from_value(json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": { "prod": { "$ref": "./other.yaml#bad" } },
+            "channels": {
+                "direct": { "$ref": "./other.yaml#bad" },
+                "user": { "publish": { "message": { "$ref": "./other.yaml#bad" } } }
+            }
+        }))
+        .unwrap();
+        let mut errors: Vec<String> = doc
+            .validate(EnumSet::only(ValidationOptions::ErrorOnExternalReference))
+            .expect_err("external references are errors here")
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        errors.sort();
+        assert_eq!(
+            errors,
+            [
+                "#.channels.direct.$ref: channel `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.channels.direct.$ref: external reference `./other.yaml#bad` cannot be resolved by this crate",
+                "#.channels.user.publish.message.$ref: external reference `./other.yaml#bad` cannot be resolved by this crate",
+                "#.channels.user.publish.message.$ref: message `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.servers.prod.$ref: external reference `./other.yaml#bad` cannot be resolved by this crate",
+                "#.servers.prod.$ref: server `./other.yaml#bad` is not a usable JSON Pointer",
+            ],
+        );
+    }
+
+    /// One reference of each kind, written directly and behind an
+    /// alias, all naming `target`.
+    fn pointing_outside(target: &str) -> serde_json::Value {
+        json!({
+            "asyncapi": "2.6.0",
+            "info": { "title": "T", "version": "1" },
+            "servers": {
+                "direct": { "$ref": target },
+                "aliased": { "$ref": "#/components/servers/hop" }
+            },
+            "channels": {
+                "direct": { "$ref": target },
+                "aliased": { "$ref": "#/components/channels/hop" },
+                "user": {
+                    "publish": { "message": { "$ref": target } },
+                    "subscribe": { "message": { "$ref": "#/components/messages/hop" } }
+                }
+            },
+            "components": {
+                "servers": { "hop": { "$ref": target } },
+                "channels": { "hop": { "$ref": target } },
+                "messages": { "hop": { "$ref": target } }
+            }
+        })
+    }
+
+    #[test]
+    fn an_external_reference_is_judged_by_its_fragment_alone() {
+        // A pointer into another document is accepted, directly or at
+        // the end of a chain: what it names is not here to be checked.
+        let errors = errors_for(pointing_outside("./other.yaml#/somewhere"));
+        assert!(errors.is_empty(), "got: {errors:?}");
+
+        // A fragment that is not a pointer is wrong whatever the other
+        // document holds, and a channel or a message says so just as a
+        // server does.
+        let mut errors = errors_for(pointing_outside("./other.yaml#bad"));
+        errors.sort();
+        assert_eq!(
+            errors,
+            [
+                "#.channels.aliased.$ref: channel `#/components/channels/hop` is not a usable JSON Pointer",
+                "#.channels.direct.$ref: channel `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.channels.user.publish.message.$ref: message `./other.yaml#bad` is not a usable JSON Pointer",
+                "#.channels.user.subscribe.message.$ref: message `#/components/messages/hop` is not a usable JSON Pointer",
+                "#.servers.aliased.$ref: server `#/components/servers/hop` is not a usable JSON Pointer",
+                "#.servers.direct.$ref: server `./other.yaml#bad` is not a usable JSON Pointer",
+            ],
+        );
     }
 }

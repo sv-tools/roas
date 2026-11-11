@@ -6,3 +6,5 @@ pub(crate) mod pointer;
 pub mod reference;
 pub(crate) mod resolve;
 pub mod runtime_expression;
+
+pub use resolve::Resolution;

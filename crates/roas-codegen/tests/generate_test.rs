@@ -1312,3 +1312,117 @@ fn only_applied_aliases_make_a_branch_undecided() {
     );
     assert!(impl_of("ExtOkU").contains(guard), "{}", impl_of("ExtOkU"));
 }
+
+#[test]
+fn a_two_oh_warning_points_into_the_source_as_written() {
+    let doc = raw_document(serde_json::json!({
+        "swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "definitions": {
+            "P": {"type": "string", "pattern": "(?=a)"},
+            "L": {"maxLength": 3, "allOf": [{"type": "string"}]},
+            "H": {"type": "object", "properties": {
+                "x": {"type": "string", "x-rust-attrs": "#[serde(rename = \"z\")]"}}},
+            "Base": {"type": "object", "discriminator": "kind", "required": ["kind"],
+                "properties": {"kind": {"type": "string"}}}
+        }
+    }));
+    let g = generate(
+        &doc,
+        &rust_config("validation = true\nallow_codegen_extensions = true"),
+    )
+    .unwrap();
+    assert!(
+        g.diagnostics
+            .iter()
+            .all(|d| !d.pointer.starts_with("/components/")),
+        "{:?}",
+        g.diagnostics
+    );
+    let pointers: Vec<&str> = g.diagnostics.iter().map(|d| d.pointer.as_str()).collect();
+    for want in [
+        "/definitions/P/pattern",
+        "/definitions/L",
+        "/definitions/H/properties/x/x-rust-attrs",
+        "/definitions/Base/discriminator",
+    ] {
+        assert!(pointers.contains(&want), "{want} in {pointers:?}");
+    }
+    let ignored = g
+        .diagnostics
+        .iter()
+        .find(|d| matches!(&d.kind, DiagnosticKind::IgnoredExtension { .. }))
+        .expect("the attribute is refused");
+    assert!(
+        ignored.message.contains("`/definitions/H/properties/x`"),
+        "{}",
+        ignored.message
+    );
+    // The context's warnings are the same ones.
+    let context = roas_codegen::template_context(
+        &doc,
+        &rust_config("validation = true\nallow_codegen_extensions = true"),
+    )
+    .unwrap();
+    assert!(
+        context
+            .diagnostics
+            .iter()
+            .all(|d| !d.pointer.starts_with("/components/")
+                && !d.message.contains("`/components/schemas/")),
+        "{:?}",
+        context.diagnostics
+    );
+    assert!(
+        context
+            .diagnostics
+            .iter()
+            .any(|d| d.pointer == "/definitions/H/properties/x/x-rust-attrs"),
+        "{:?}",
+        context.diagnostics
+    );
+}
+
+#[test]
+fn a_badly_typed_annotation_on_a_composition_is_reported_in_every_version() {
+    for openapi in ["3.0.3", "3.1.0"] {
+        let doc = raw_document(serde_json::json!({
+            "openapi": openapi, "info": {"title": "t", "version": "1"}, "paths": {},
+            "components": {"schemas": {
+                "A": {"deprecated": "yes", "title": 5,
+                    "anyOf": [{"type": "string"}, {"type": "boolean"}]}
+            }}
+        }));
+        let g = generate(&doc, &rust_config("")).unwrap();
+        for keyword in ["deprecated", "title"] {
+            assert!(
+                g.diagnostics.iter().any(|d| d.pointer == "/components/schemas/A"
+                    && matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword: k } if k == keyword)),
+                "{openapi} {keyword}: {:?}",
+                g.diagnostics
+            );
+        }
+    }
+}
+
+#[test]
+fn a_pointer_already_into_a_two_oh_source_is_left_alone() {
+    let raw = serde_json::json!({
+        "swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "definitions": {"A": {"type": "string"}},
+        "components": {"schemas": {"X": {"$ref": "other.json#/a"}}}
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let doc = SourceDocument::parse(Input::Json(bytes), Url::parse("file:///t.json").unwrap())
+        .expect("parses");
+    let doc = validate(
+        doc,
+        IGNORE_UNUSED | Options::IgnoreMissingTags | Options::IgnoreExternalReferences,
+    )
+    .expect("valid");
+    let g = generate(&doc, &rust_config("")).unwrap();
+    let pointers: Vec<&str> = g.diagnostics.iter().map(|d| d.pointer.as_str()).collect();
+    assert!(
+        pointers.contains(&"/components/schemas/X/$ref"),
+        "{pointers:?}"
+    );
+}

@@ -11,7 +11,7 @@
 //! object can appear; [`RefOr`] models that `oneOf`.
 
 use crate::common::pointer;
-use crate::common::resolve::Kind;
+use crate::common::resolve::{Kind, Resolution};
 use crate::validation::{Context, ValidateWithContext};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -127,6 +127,84 @@ impl<T> RefOr<T> {
             RefOr::Item(_) => None,
         }
     }
+
+    /// The item itself, or what the `$ref` leads to inside `doc`.
+    ///
+    /// An inline item resolves to itself. A reference is followed
+    /// through `doc` to the object at the end of the chain, and the
+    /// [`Resolution`] says how that went: found, left the document,
+    /// dangling, looping, or naming something of another kind.
+    ///
+    /// Resolution is document-local. Nothing is loaded, so a `$ref`
+    /// into another document — the one given, or an alias the resolver
+    /// looks up — is [`Resolution::Opaque`], or
+    /// [`Resolution::Unrecognized`] when its fragment is not a JSON
+    /// Pointer, which shows without loading anything. `Opaque` is not
+    /// only for other documents, though: see its own documentation.
+    ///
+    /// With a version's `Document`, a reference that resolves is found
+    /// by lookup; telling apart one whose pointer is usable but names
+    /// no entry the resolver looks up — [`Resolution::Missing`], an
+    /// `Opaque` inside this document, or a
+    /// [`Resolution::WrongKind`] decided by what is there rather than
+    /// by where the pointer points — serializes the document, so it
+    /// costs time proportional to the document's size.
+    ///
+    /// `doc` is a version's `Document`, which implements
+    /// [`ResolveReference<T>`] for the kinds it can follow:
+    ///
+    /// | Version | `T` |
+    /// |---|---|
+    /// | `v3_0`, `v3_1` | `Server`, `Channel`, `Operation`, `Message`, `OperationReply` |
+    /// | `v2_6` | `Server`, `Message`, `SecurityScheme` |
+    ///
+    /// Where the model holds a bare [`Reference`] rather than a
+    /// `RefOr` — a v3 operation's `channel` and `messages`, a v3
+    /// channel's `servers` — the v3 `Document` has `resolve_channel`,
+    /// `resolve_message` and `resolve_server` taking the reference. A
+    /// v2.6 channel item carries its `$ref` as a field, and is followed
+    /// with the v2.6 `Document::resolve_channel`.
+    ///
+    /// ```
+    /// # #[cfg(feature = "v3_1")] {
+    /// use roas_asyncapi::v3_1::Document;
+    ///
+    /// let doc: Document = serde_json::from_str(r##"{
+    ///     "asyncapi": "3.1.0",
+    ///     "info": { "title": "Signups", "version": "1.0.0" },
+    ///     "servers": {
+    ///         "production": { "$ref": "#/components/servers/kafka" }
+    ///     },
+    ///     "components": {
+    ///         "servers": { "kafka": { "host": "broker:9092", "protocol": "kafka" } }
+    ///     }
+    /// }"##).unwrap();
+    ///
+    /// let server = doc.servers["production"]
+    ///     .get_item(&doc)
+    ///     .found()
+    ///     .expect("declared in this document");
+    /// assert_eq!(server.host, "broker:9092");
+    /// # }
+    /// ```
+    pub fn get_item<'a, D>(&'a self, doc: &'a D) -> Resolution<'a, T>
+    where
+        D: ResolveReference<T> + ?Sized,
+    {
+        doc.resolve_reference(self)
+    }
+}
+
+/// A document that can follow a `RefOr<T>` to the `T` it names.
+///
+/// Implemented by each version's `Document`, once per kind of object it
+/// can resolve; [`RefOr::get_item`] is the usual way to call it.
+/// Resolution is document-local: an implementation follows a chain of
+/// `$ref`s as far as it stays inside the document, and loads nothing.
+pub trait ResolveReference<T> {
+    /// Resolve `entry` inside this document. An inline item must
+    /// resolve to itself.
+    fn resolve_reference<'a>(&'a self, entry: &'a RefOr<T>) -> Resolution<'a, T>;
 }
 
 impl<'de, T> Deserialize<'de> for RefOr<T>

@@ -208,10 +208,16 @@ call, `goto` or `retry` runs its own `dependsOn` first, in its own document, as
 a local one does.
 
 Dependencies receive the root inputs, as local dependencies do. An external
-dependency's outputs are recorded in its own document's `$workflows` namespace.
-The runtime-expression grammar has no qualified `$workflows` form, so the dependent
-cannot read them. A same-named local workflow is a different workflow: reading its
-outputs before it has run is a runtime error, as for any workflow that has not run.
+dependency's outputs are recorded in its own document's `$workflows` namespace, and
+any workflow reads them the way the spec names an external workflow's steps:
+`$sourceDescriptions.<name>.<workflowId>.outputs.<output>` (or `.inputs.<input>`),
+with a `#/pointer` as `$workflows.<id>` takes one. The spec defines no form for this
+read; its grammar allows it, and a workflow of the source comes before a field of
+the Source Description, as the spec orders them. It reads a workflow that finished
+in this run, however it ran; one that has not is a runtime error, as for any workflow
+that has not run, and one an Arazzo source does not declare is a preparation error.
+`$workflows.<id>` stays the document's own: a same-named local workflow is a
+different workflow.
 
 Each Arazzo document is upconverted independently: a v1.0 entry may call a v1.1
 document and vice versa, and every document runs under the same condition profile
@@ -340,7 +346,7 @@ Driving `Run` directly goes one step further: `Progress::Wait` hands back the de
 - **Response bodies** — a JSON body is parsed; any other non-empty UTF-8 body is its text, a string (without a leading byte-order mark), so `$response.body` names an XML or plain-text body too. An empty body, or one in another encoding, is no body: it is not decoded lossily, which would change the data criteria and selectors judge.
 - **Actions** — `end`, `goto` a step or a workflow, and `retry`, which honours `retryAfter`, defaults to a single attempt when `retryLimit` is absent, may send the run through another step or workflow before trying again, and gives way to the next failure action once its limit is spent.
 - **Outputs** at step and workflow level, including [`Selector`](https://spec.openapis.org/arazzo/v1.1.0.html#selector-object)s, readable by later steps as `$steps.<id>.outputs.<name>`.
-- **Runtime expressions** — `$url`, `$method`, `$statusCode`, `$request.*`, `$response.*`, `$inputs`, `$outputs`, `$steps`, `$workflows.<id>.inputs` / `.outputs`, `$sourceDescriptions`, `$components`, and `$self`.
+- **Runtime expressions** — `$url`, `$method`, `$statusCode`, `$request.*`, `$response.*`, `$inputs`, `$outputs`, `$steps`, `$workflows.<id>.inputs` / `.outputs`, `$sourceDescriptions` (with `$sourceDescriptions.<name>.<workflowId>.inputs` / `.outputs` for another document's workflow), `$components`, and `$self`.
 - **`dependsOn`** between steps and between workflows, which orders them and rejects circles — as does reading another step's outputs, which orders the two without anyone having to say so. A workflow entered by a call, `goto` or `retry` runs what it depends on first, as the run's own workflow does: each dependency once in a run, with the run's inputs (not the arguments of the call), so one that already ran as a dependency — of the root or of an earlier entry — is not run again. A dependency that has not yet run as one, while an instance of it is still running further up (`a` calls `b`, and `b` depends on `a`), stops the run with `ExecutionError::Circular` before `b` or a second `a` sends anything — whatever inputs the running `a` has, so a dependency run is never started inside a running instance of itself. One that already finished as a dependency is met, so `b` then runs. As for the run's own workflow, a dependency that fails does not stop what depends on it: the target still runs. For a call, the calling step is judged on the target alone, and its `timeout` covers the dependencies too.
 
 A step that calls a workflow is a step like any other: what it called becomes its outputs, its own `outputs` are named on top, its `successCriteria` are judged, its `timeout` covers the whole call, and its `onSuccess` / `onFailure` decide where the workflow goes next. It gets a record of its own in the report — `Performed::Workflow` rather than `Performed::Request`.
@@ -394,10 +400,9 @@ let report = execute_async(description, &options.parallel(4), &mut Fake::new())
 - **Which steps run together.** A step starts while others are in flight when it is an HTTP step with no `onSuccess` or `onFailure` actions, in a workflow with no `successActions` or `failureActions`, and none of the steps it names in `dependsOn` or reads (`$steps.<id>…`) is still in flight. Steps start in the run's order, so a step that must wait holds back the ones after it.
 - **Everything else runs alone**: a step with actions (they may jump or retry), one that calls a workflow (its own steps may run together inside it), and an AsyncAPI step start once everything before them is done, and nothing after them starts until they are.
 - **Judged in order.** Responses may come back in any order, but steps are judged — criteria, outputs, the report record — in the order they are listed, as they would be one at a time. A response that arrives before those of the steps listed ahead of it waits for them. So the report lists steps in their usual order, and a run ends or stops where it would have one step at a time.
-- **Failure.** When a step fails and its workflow ends, requests still in flight in that workflow are abandoned: they are not recorded, and their responses are not wanted. A step that could not start — the run's step limit is reached, or its request cannot be built — waits for what is in flight first. A client that fails to carry out a request still stops the run at once, whichever step sent it.
-- **Drivers.** `execute_async` and the other async functions send the requests in flight together. `execute` and the other blocking functions still send one at a time. A caller driving `Run` itself gets several `Progress::Send`s in a row, then `Progress::Await` when nothing more can start; it answers each with `Run::supply_to(request.id, response)`, and `Run::in_flight` says which requests are still wanted.
-
-The workflows a workflow depends on (`dependsOn`) still run one after another.
+- **Failure.** When a step fails and its workflow ends, requests still in flight in that workflow are abandoned: they are not recorded, and their responses are not wanted. A step that could not start — the run's step limit is reached, or its request cannot be built — waits for what is in flight first. A client that fails to carry out a request still stops the run at once, whichever step sent it — unless the request belongs to one of the workflows run together below, behind one listed before it that is still running: then it waits, as any error there does.
+- **Workflows it depends on.** The workflows the one asked for depends on (`dependsOn`, and what those depend on) run together too, each as its steps allow. One waits for a workflow listed before it only when they could tell which ran first: they can run a common workflow — by `dependsOn`, a call, a `goto` or a `retry` — or one reads a workflow the other can run, with `$workflows.<id>` or `$sourceDescriptions.<name>.<workflowId>`. The one asked for starts once all of them are done. Their steps are reported in the order they run one after another, and when one of them stops the run, the error is the one that would have come first: an error waits for the workflows listed before it, and those listed after it are abandoned. A partial report shows what one after another would have recorded: the steps of a workflow whose earlier ones are still running are not shown until they are done. None of them runs together when any can reach an AsyncAPI step, or a workflow reference that does not resolve. The step limit counts the steps of all of them, so it may stop the run in another of them than it would one after another. The workflows a call, `goto` or `retry` depends on still run one after another.
+- **Drivers.** `execute_async` and the other async functions send the requests in flight together. `execute` and the other blocking functions still send one at a time. A caller driving `Run` itself gets several `Progress::Send`s in a row, then `Progress::Await` when nothing more can start; it answers each with `Run::supply_to(request.id, response)` — or `Run::supply_failure(request.id, error)` when its client could not carry it out — and `Run::in_flight` says which requests are still wanted, after a response and after an advance. `Progress::Await(Some(wait))` says a workflow is waiting that long to retry a step: advance once it has passed, answered or not.
 
 ### XPath
 
@@ -431,14 +436,14 @@ Each column is a separate layer: [`roas-arazzo`](https://crates.io/crates/roas-a
 | AsyncAPI 2.6 / 3.0 / 3.1 sources | Raw values with a checked version | Operations and channels by `operationId` / `channelPath`, local `$ref`s | Channels, parameter locations and sources checked; `$message` outside an AsyncAPI step is an error | Messages sent and received through a `MessageClient` ([details](#asyncapi-steps)) |
 | External Arazzo workflows | Typed models from the registry | `$sourceDescriptions.<name>.<workflowId>` | Structure, unknown members and the cross-document workflow graph | In their own document's scope |
 | Components | Typed models | `$components.<kind>.<name>` by name | A missing component is a preparation error | Resolved where used |
-| Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>` | Syntax and references checked, with byte offsets | Evaluated |
+| Runtime expressions | Strings | `$sourceDescriptions`, `$components`, `$self`, `$workflows.<id>`, `$sourceDescriptions.<name>.<workflowId>.inputs` / `.outputs` (an extension the grammar allows) | Syntax and references checked, with byte offsets | Evaluated |
 | `simple` conditions | Strings | — | Parsed under the [condition profile](#condition-profile) | Evaluated, short-circuiting |
 | `regex` criteria | Typed criterion types | — | Constant patterns compiled | Evaluated |
 | JSONPath criteria, and selectors (v1.1) | Typed | — | Constant paths compiled; only version `rfc9535`, so a v1.0 criterion that names the Goessner draft is refused | Evaluated as RFC 9535; a lazy run refuses any other version when it reaches it |
 | JSON Pointer selectors and criteria (v1.1) | Typed | — | Constant pointers' syntax checked | Evaluated; the criterion type is an extension |
 | XPath criteria and selectors | Typed | — | With the `xpath` feature: constant expressions compiled as their version, unknown versions, refused functions and XPath replacement targets refused; without it, a preparation error | With the `xpath` feature, evaluated as XPath 1.0 to 3.1 over XML text ([details](#xpath)); without it, not run |
 | Workflow input schemas | JSON values | Offline only: `Options::schema_document`, the registry, `Options::source` documents, local references ([details](#workflow-input-validation)) | Compiled when the `input-validation` feature is on and `Options::input_validation` selects `Draft202012` (off by default) | When enabled, inputs validated at every start, call and transfer |
-| `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time, except that an AsyncAPI receive listens in the background until a step depends on it; a call, `goto` or `retry` target's dependencies run first, each once in a run, with the run's inputs |
+| `dependsOn` | Typed | Step and workflow ids | Cycles rejected | One at a time, except that an AsyncAPI receive listens in the background until a step depends on it, and under `Options::parallel` independent steps, and the run's own independent dependencies, run together; a call, `goto` or `retry` target's dependencies run first, each once in a run, with the run's inputs |
 
 ## Condition profile
 
@@ -808,11 +813,11 @@ Each of these is reported where it is met, never passed over — a run should no
 
 - **AsyncAPI steps without a message client**: the plain `execute` functions, and `roas arazzo run`, stop at them.
 - **XPath** criteria and selectors without the `xpath` feature; with it, versions Arazzo does not name, XPath payload replacement targets, and the functions listed under [XPath](#xpath).
-- **Parallel workflows**: the workflows a workflow depends on run one after another. Steps run together only under `Options::parallel` (see [Parallel steps](#parallel-steps)).
+- **Parallel work by default**: steps, and the workflows the one asked for depends on, run together only under `Options::parallel` (see [Parallel steps](#parallel-steps)). The workflows a called workflow depends on always run one after another.
 
 ## Safety rails
 
-A description can loop — `goto` is a jump. `Options` caps the number of steps (1000), the depth of workflow calls (8) and the retries of one step (10); each raises `ExecutionError::Limit` rather than running forever. Time is not limited unless you ask: `Options::timeout` bounds the whole run. Each request's timeout is cut to the time left, a retry wait that would outlast it is not taken, and a response that comes back after the time is spent — or a client that gives up then — stops the run with `ExecutionError::TimedOut` and a partial report (a caller driving `Run` itself maps its client's failures with `Run::client_failure`). Running out of time ends the run; it is not a failed step, so `onFailure` actions do not run.
+A description can loop — `goto` is a jump. `Options` caps the number of steps (1000), the depth of workflow calls (8) and the retries of one step (10); each raises `ExecutionError::Limit` rather than running forever. Time is not limited unless you ask: `Options::timeout` bounds the whole run. Each request's timeout is cut to the time left, a retry wait that would outlast it is not taken, and a response that comes back after the time is spent — or a client that gives up then — stops the run with `ExecutionError::TimedOut` and a partial report (a caller driving `Run` itself hands its client's failures back with `Run::supply_failure`, which uses `Run::client_failure`). Running out of time ends the run; it is not a failed step, so `onFailure` actions do not run.
 
 ## License
 
