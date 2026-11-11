@@ -998,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn a_resolution_copies_whatever_it_points_at() {
+    fn a_resolution_is_copy_whatever_it_points_at() {
         // `Demo` is neither `Clone` nor `Copy`; a `Resolution` of one
         // is both, since all it holds is a reference.
         let demo = Demo {
