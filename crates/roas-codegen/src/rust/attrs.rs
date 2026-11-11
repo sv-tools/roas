@@ -132,6 +132,78 @@ fn serde_keys(attr: &syn::Attribute) -> Vec<String> {
     keys
 }
 
+/// The names `#[serde(alias = "…")]` among `attrs` lets a field also be
+/// read by. A struct with a catch-all routes members by name before its
+/// derived code sees them, so an alias it cannot read is refused rather
+/// than routed into the catch-all: one written as anything but a string
+/// literal, or one under a `cfg_attr`.
+pub(crate) fn serde_aliases(attrs: &[String], at: &str) -> Result<Vec<String>, GenerateError> {
+    fn walk(meta: &syn::Meta, gated: bool, out: &mut Vec<String>) -> Result<(), String> {
+        if meta.path().is_ident("cfg_attr") {
+            let list = meta.require_list().map_err(|e| e.to_string())?;
+            let args = list
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .map_err(|e| e.to_string())?;
+            for nested in args.iter().skip(1) {
+                walk(nested, true, out)?;
+            }
+            return Ok(());
+        }
+        if !meta.path().is_ident("serde") {
+            return Ok(());
+        }
+        let list = meta.require_list().map_err(|e| e.to_string())?;
+        let mut found = Vec::new();
+        list.parse_nested_meta(|nested| {
+            let alias = nested.path.is_ident("alias");
+            if nested.input.peek(syn::Token![=]) {
+                let _: syn::Token![=] = nested.input.parse()?;
+                let value: syn::Expr = nested.input.parse()?;
+                if alias {
+                    match value {
+                        syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(s),
+                            ..
+                        }) => found.push(Some(s.value())),
+                        _ => found.push(None),
+                    }
+                }
+            } else if nested.input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in nested.input);
+                let _: syn::punctuated::Punctuated<syn::Expr, syn::Token![,]> =
+                    content.parse_terminated(syn::Expr::parse, syn::Token![,])?;
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+        for alias in found {
+            match alias {
+                Some(_) if gated => {
+                    return Err("a `serde(alias)` under `cfg_attr` on a struct with a catch-all cannot be routed to its field; give the alias an attribute of its own".to_owned());
+                }
+                Some(name) => out.push(name),
+                None => {
+                    return Err("a `serde(alias)` on a struct with a catch-all must be a string literal, so members can be routed to the field".to_owned());
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    for attr in attrs {
+        let parsed = parse(attr, at)?;
+        walk(&parsed.meta, false, &mut out).map_err(|reason| GenerateError::InvalidAttribute {
+            at: at.to_owned(),
+            attr: attr.clone(),
+            reason,
+        })?;
+    }
+    Ok(out)
+}
+
 fn check(attrs: &[String], at: &str, owned: &[&str], level: &str) -> Result<(), GenerateError> {
     for attr in attrs {
         let parsed = parse(attr, at)?;
@@ -189,6 +261,30 @@ mod tests {
             .is_ok()
         );
         assert!(check_container_attrs(&["#[derive(Eq, Hash)]".into()], "Pet").is_ok());
+    }
+
+    #[test]
+    fn aliases_are_read_from_string_literals_only() {
+        let aliases = serde_aliases(
+            &[
+                "#[serde(alias = \"t\", alias = \"u\")]".into(),
+                "#[validate(alias = \"no\")]".into(),
+                "#[cfg_attr(test, derive(Eq))]".into(),
+            ],
+            "Pet.tag",
+        )
+        .unwrap();
+        assert_eq!(aliases, ["t", "u"]);
+        for refused in [
+            "#[serde(alias = concat!(\"a\"))]",
+            "#[cfg_attr(test, serde(alias = \"t\"))]",
+        ] {
+            let error = serde_aliases(&[refused.into()], "Pet.tag").unwrap_err();
+            assert!(
+                matches!(error, GenerateError::InvalidAttribute { .. }),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

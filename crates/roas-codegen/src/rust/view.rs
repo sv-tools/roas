@@ -7,7 +7,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind, SchemaId, Severity};
 use crate::front::{Constraints, FloatWidth, IntWidth};
 use crate::generate::GenerateError;
 use crate::ir::{Additional, Ir, TypeDef, TypeKind, TypeRef};
-use crate::rust::attrs::{cfg_gates, check_container_attrs, check_field_attrs};
+use crate::rust::attrs::{cfg_gates, check_container_attrs, check_field_attrs, serde_aliases};
 use crate::rust::naming::{Allocator, legal, pascal, snake};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -24,6 +24,8 @@ pub(crate) struct SupportView {
     pub object_only: bool,
     /// A string enum reads through `StringOnly`.
     pub string_only: bool,
+    /// A struct with a catch-all reads through `roas_catch_all`.
+    pub catch_all: bool,
     /// Generated validation is on: the report types and `Validate`.
     pub validation: bool,
 }
@@ -39,6 +41,26 @@ pub(crate) struct FieldView {
     /// reading it repeats.
     #[serde(skip)]
     pub cfg: Vec<String>,
+}
+
+/// A struct's catch-all, decoded as the members stream by.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CatchAllView {
+    /// The catch-all field.
+    pub field: String,
+    /// The type of one of its values.
+    pub ty: String,
+    /// The members routed to the derived code, one entry per field.
+    pub declared: Vec<DeclaredView>,
+}
+
+/// The names one declared field is read by.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DeclaredView {
+    /// The field's conditional-compilation gates.
+    pub cfg: Vec<String>,
+    /// A Rust pattern: the quoted name and aliases, joined by `|`.
+    pub names: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +113,9 @@ pub(crate) struct TypeView {
     /// A string enum read from a JSON string only: serde's derive would
     /// also read `{"a": null}` as `"a"`.
     pub string_only: bool,
+    /// A struct with a catch-all: the members it does not declare decode
+    /// into the catch-all as they stream by.
+    pub catch_all: Option<CatchAllView>,
     /// The type's conditional-compilation gates (`#[cfg(...)]` among its
     /// configured attributes), repeated on every impl generated beside it.
     pub cfg: Vec<String>,
@@ -574,6 +599,7 @@ impl Builder<'_> {
             validate_null: Vec::new(),
             object_only: false,
             string_only: false,
+            catch_all: None,
             cfg,
         };
         let result = self.fill_kind(def, &mut view)?;
@@ -617,6 +643,7 @@ impl Builder<'_> {
                 view.derives
                     .extend(["Serialize".to_owned(), "Deserialize".to_owned()]);
                 let mut allocator = Allocator::default();
+                let mut declared = Vec::new();
                 for field in &s.fields {
                     let rename = self
                         .field_config(def, &field.raw_name)
@@ -671,6 +698,21 @@ impl Builder<'_> {
                     at.pointer = format!("{}/properties/{}", def.id.pointer, field.raw_name);
                     attrs.extend(self.codegen_attrs(&field.extensions, &at, true));
                     let cfg = cfg_gates(&attrs, &format!("{}.{}", view.raw_name, field.raw_name))?;
+                    if matches!(s.additional, Additional::CatchAll(_)) {
+                        let mut names = vec![field.raw_name.clone()];
+                        names.extend(serde_aliases(
+                            &attrs,
+                            &format!("{}.{}", view.raw_name, field.raw_name),
+                        )?);
+                        declared.push(DeclaredView {
+                            cfg: cfg.clone(),
+                            names: names
+                                .iter()
+                                .map(|n| format!("{n:?}"))
+                                .collect::<Vec<_>>()
+                                .join(" | "),
+                        });
+                    }
                     view.fields.push(FieldView {
                         cfg,
                         name,
@@ -700,13 +742,27 @@ impl Builder<'_> {
                         let inner = self.spell(ty)?;
                         let name = allocator.allocate("additional_properties".to_owned());
                         view.fields.push(FieldView {
-                            name,
+                            name: name.clone(),
                             raw_name: "additionalProperties".to_owned(),
                             ty: format!("std::collections::BTreeMap<String, {inner}>"),
                             doc: vec!["Members not named above.".to_owned()],
-                            attrs: vec!["#[serde(flatten)]".to_owned()],
+                            // Serialized inline; read by the impls in
+                            // `rust/catch_all.rs.jinja`, not by `flatten`.
+                            attrs: vec!["#[serde(flatten, skip_deserializing)]".to_owned()],
                             cfg: Vec::new(),
                         });
+                        // serde's `flatten` buffers the members it does not
+                        // know, and an integer or a raw holder cannot be read
+                        // from the buffer: the derived code becomes inherent,
+                        // and the declared members are handed to it while the
+                        // rest decode into the catch-all as they stream by.
+                        view.attrs.push("#[serde(remote = \"Self\")]".to_owned());
+                        view.catch_all = Some(CatchAllView {
+                            field: name,
+                            ty: inner,
+                            declared,
+                        });
+                        self.support.catch_all = true;
                     }
                 }
             }
