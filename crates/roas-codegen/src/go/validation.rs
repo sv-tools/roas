@@ -18,7 +18,8 @@ pub(crate) struct Needs {
     pub slices: bool,
     /// A raw holder is built from `null`: `jsontext`.
     pub jsontext: bool,
-    /// A `pattern` is matched: `regexp`, `sync` and `matchPattern`.
+    /// A pattern is matched — a `pattern` check, or patterns checked at
+    /// decode: `regexp`, `sync` and `matchPattern`.
     pub pattern: bool,
 }
 

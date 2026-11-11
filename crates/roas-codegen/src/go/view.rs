@@ -40,10 +40,6 @@ const VALIDATION_NAMES: &[&str] = &[
     "repeated",
     "childPointer",
     "wideNumber",
-    "matchPattern",
-    "patterns",
-    "matched",
-    "compiled",
     "members",
     "seen",
     "item",
@@ -52,6 +48,10 @@ const VALIDATION_NAMES: &[&str] = &[
     "f",
     "zero",
 ];
+
+/// The package-level names the pattern support declares, reserved only
+/// when it is generated.
+const PATTERN_NAMES: &[&str] = &["matchPattern", "patterns"];
 
 const TEMPLATE_NAMES: &[&str] = &[
     "decodeOptions",
@@ -115,8 +115,10 @@ pub(crate) struct SupportView {
     pub isolated: Vec<String>,
     /// Generated validation is on: the report types and `Validator`.
     pub validation: bool,
-    /// A `pattern` is checked: `matchPattern`.
+    /// A pattern is matched, by validation or at decode: `matchPattern`.
     pub patterns: bool,
+    /// A struct lets in only members matching a pattern: `memberMatches`.
+    pub member_patterns: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,6 +190,9 @@ pub(crate) struct TypeView {
     pub extra_ty: String,
     /// The catch-all field's name.
     pub extra_name: String,
+    /// Beside `additionalProperties: false`, the quoted patterns a member
+    /// no field reads must match.
+    pub member_patterns: Vec<String>,
     /// A member name no struct tag can carry: the struct writes itself.
     pub marshal: bool,
     /// The raw constructor of a composed holder.
@@ -327,6 +332,14 @@ pub(crate) fn build(ir: &Ir, config: &Config, source: &str) -> Result<Built, Gen
         // shadowed by it, or clash with it.
         for local in TEMPLATE_NAMES {
             used.insert(local, "a name the generated code declares");
+        }
+        if builder.needs.pattern {
+            for local in PATTERN_NAMES {
+                used.insert(local, "a name the generated code declares");
+            }
+        }
+        if builder.support.member_patterns {
+            used.insert("memberMatches", "a name the generated code declares");
         }
         if config.validation {
             for local in VALIDATION_NAMES {
@@ -612,6 +625,7 @@ impl Builder<'_> {
             required_count: 0,
             extra_ty: String::new(),
             extra_name: String::new(),
+            member_patterns: Vec::new(),
             marshal: false,
             from_raw: String::new(),
             validate: None,
@@ -808,6 +822,11 @@ impl Builder<'_> {
                     });
                 }
                 view.required_count = required_count;
+                if let Some(patterns) = &s.only_patterns {
+                    self.needs.pattern = true;
+                    self.support.member_patterns = true;
+                    view.member_patterns = patterns.iter().map(|p| quote(p)).collect();
+                }
                 if let Additional::CatchAll(ty) = &s.additional {
                     let inner = self.spell(unboxed(ty))?;
                     let name = fields.allocate("AdditionalProperties".to_owned());

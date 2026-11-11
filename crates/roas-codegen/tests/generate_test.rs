@@ -1430,3 +1430,130 @@ fn a_pointer_already_into_a_two_oh_source_is_left_alone() {
         "{pointers:?}"
     );
 }
+
+#[test]
+fn closed_pattern_properties_are_checked_at_decode() {
+    let components = serde_json::json!({
+        "Ext": {"type": "object", "additionalProperties": false,
+            "properties": {"id": {"type": "string"}},
+            "patternProperties": {"^x-": {"type": "string"}}},
+        "Loose": {"type": "object", "additionalProperties": false,
+            "patternProperties": {"\\bx": {}}}
+    });
+    for language in [Target::Rust, Target::Go] {
+        let config = ConfigFile::from_toml("", Path::new("/"))
+            .unwrap()
+            .merge(target(language))
+            .build()
+            .unwrap();
+        let g = generate(&document(components.clone()), &config).unwrap();
+        let message = |name: &str| {
+            g.diagnostics
+                .iter()
+                .find(|d| d.pointer == format!("/components/schemas/{name}")
+                    && matches!(&d.kind, DiagnosticKind::UnsupportedKeyword { keyword } if keyword == "patternProperties"))
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| panic!("{name}: {:?}", g.diagnostics))
+        };
+        assert!(
+            message("Ext").contains("refused at decode"),
+            "{}",
+            message("Ext")
+        );
+        assert!(
+            message("Loose").contains("not refused at decode"),
+            "{}",
+            message("Loose")
+        );
+        let code = g
+            .files
+            .iter()
+            .map(|f| f.contents.as_str())
+            .collect::<String>();
+        if language == Target::Rust {
+            // Even with validation off, the decoder needs a regex engine.
+            assert!(
+                g.dependencies.rust.iter().any(|d| d.name == "regex"),
+                "{:?}",
+                g.dependencies
+            );
+            assert!(code.contains("\"^x-\""), "{code}");
+        } else {
+            assert!(
+                code.contains("and a member matching no property and no pattern"),
+                "{code}"
+            );
+            assert!(
+                code.contains("\"regexp\"")
+                    && (code.contains("memberMatches(name, `^x-`)")
+                        || code.contains("memberMatches(name, \"^x-\")")),
+                "{code}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_go_import_may_use_a_pattern_helper_name_when_no_pattern_is_generated() {
+    let config = ConfigFile::from_toml(
+        "[substitutions.date-time.go]\nname = \"patterns.Time\"\nimport = \"example.com/x/patterns\"\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Go))
+    .build()
+    .unwrap();
+    let doc = document(serde_json::json!({
+        "A": {"type": "object", "properties": {"when": {"type": "string", "format": "date-time"}}}
+    }));
+    generate(&doc, &config).expect("no pattern helper is declared");
+}
+
+#[test]
+fn a_go_import_may_not_shadow_a_pattern_helper_that_is_generated() {
+    let refused = |toml: &str, components: serde_json::Value| {
+        let config = ConfigFile::from_toml(toml, Path::new("/"))
+            .unwrap()
+            .merge(target(Target::Go))
+            .build()
+            .unwrap();
+        match generate(&document(components), &config) {
+            Err(GenerateError::Config(message)) => {
+                assert!(message.contains("already imports"), "{message}")
+            }
+            other => panic!("{:?}", other.map(|g| g.diagnostics)),
+        }
+    };
+    let closed = serde_json::json!({
+        "Ext": {"type": "object", "additionalProperties": false,
+            "properties": {"when": {"type": "string", "format": "date-time"}},
+            "patternProperties": {"^x-": {"type": "string"}}}
+    });
+    for name in ["patterns", "matchPattern", "memberMatches"] {
+        refused(
+            &format!(
+                "[substitutions.date-time.go]\nname = \"{name}.T\"\nimport = \"example.com/x/{name}\"\n"
+            ),
+            closed.clone(),
+        );
+    }
+    // A `pattern` check declares the cache too, but not `memberMatches`.
+    let checked = serde_json::json!({
+        "Code": {"type": "object", "properties": {
+            "c": {"type": "string", "pattern": "^[a-z]+$"},
+            "when": {"type": "string", "format": "date-time"}}}
+    });
+    refused(
+        "validation = true\n[substitutions.date-time.go]\nname = \"matchPattern.T\"\nimport = \"example.com/x/matchPattern\"\n",
+        checked.clone(),
+    );
+    let config = ConfigFile::from_toml(
+        "validation = true\n[substitutions.date-time.go]\nname = \"memberMatches.T\"\nimport = \"example.com/x/memberMatches\"\n",
+        Path::new("/"),
+    )
+    .unwrap()
+    .merge(target(Target::Go))
+    .build()
+    .unwrap();
+    generate(&document(checked), &config).expect("`memberMatches` is not declared");
+}

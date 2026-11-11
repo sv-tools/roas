@@ -207,13 +207,16 @@ impl<'de, D: serde::Deserializer<'de>> serde::Deserializer<'de> for roas_object_
 }
 
 {% endif %}{% if support.catch_all %}/// Hands a struct's derived code the same deserializer, asked for a JSON
-/// object, with only the members `declared` names: the rest decode into
-/// `rest` straight from the deserializer, which still has their raw tokens.
+/// object, with only the members `declared` names: the rest, when `allowed`
+/// lets them in, decode into `rest` straight from the deserializer, which
+/// still has their raw tokens; any other member is refused.
 /// Unused when every struct with a catch-all is compiled out.
 #[allow(dead_code, non_camel_case_types)]
 struct roas_catch_all<'r, D, T> {
     inner: D,
     declared: fn(&str) -> bool,
+    /// Whether a member no field reads is let in.
+    allowed: fn(&str) -> bool,
     rest: &'r mut std::collections::BTreeMap<String, T>,
 }
 
@@ -221,7 +224,7 @@ impl<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de>> serde::Deseri
     type Error = D::Error;
 
     fn deserialize_any<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
-        self.inner.deserialize_map(roas_catch_all { inner: visitor, declared: self.declared, rest: self.rest })
+        self.inner.deserialize_map(roas_catch_all { inner: visitor, declared: self.declared, allowed: self.allowed, rest: self.rest })
     }
 
     fn is_human_readable(&self) -> bool {
@@ -243,7 +246,7 @@ impl<'de, V: serde::de::Visitor<'de>, T: serde::Deserialize<'de>> serde::de::Vis
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<V::Value, A::Error> {
-        self.inner.visit_map(roas_catch_all { inner: map, declared: self.declared, rest: self.rest })
+        self.inner.visit_map(roas_catch_all { inner: map, declared: self.declared, allowed: self.allowed, rest: self.rest })
     }
 }
 
@@ -254,6 +257,9 @@ impl<'de, A: serde::de::MapAccess<'de>, T: serde::Deserialize<'de>> serde::de::M
         while let Some(key) = self.inner.next_key::<String>()? {
             if (self.declared)(&key) {
                 return seed.deserialize(serde::de::value::StringDeserializer::<A::Error>::new(key)).map(Some);
+            }
+            if !(self.allowed)(&key) {
+                return Err(serde::de::Error::custom(format!("unknown field `{key}`: it matches no property and no pattern")));
             }
             let value = self.inner.next_value::<T>()?;
             self.rest.insert(key, value);

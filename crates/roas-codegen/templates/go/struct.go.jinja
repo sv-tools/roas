@@ -4,7 +4,8 @@
 
 // UnmarshalJSONFrom decodes {{ t.name }} in one pass, refusing what its struct
 // tags cannot: a missing required member, a null where none is allowed{% if not t.extra_ty %},
-// and a member not named above{% endif %}. A nested value keeps its own
+// and a member not named above{% elif t.member_patterns %},
+// and a member matching no property and no pattern{% endif %}. A nested value keeps its own
 // type's rules.
 func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 	if d.PeekKind() != '{' {
@@ -37,7 +38,10 @@ func (v *{{ t.name }}) UnmarshalJSONFrom(d *jsontext.Decoder) error {
 				return err
 			}
 {% endfor %}		default:
-{% if t.extra_ty %}			var value {{ t.extra_ty }}
+{% if t.member_patterns %}			if !memberMatches(name, {{ t.member_patterns | join(", ") }}) {
+				return fmt.Errorf("%s: unknown member %q: it matches no property and no pattern", {{ t.name_literal }}, name)
+			}
+{% endif %}{% if t.extra_ty %}			var value {{ t.extra_ty }}
 			if err := json.UnmarshalDecode(d, &value, decodeOptions); err != nil {
 				return err
 			}

@@ -33,7 +33,7 @@ for diagnostic in &generation.diagnostics {
 # Ok(()) }
 ```
 
-`generate` returns files in memory, writing no output files, together with every diagnostic and the dependency list the generated code needs — for Rust, `serde` and `serde_json` with `raw_value`, plus whatever a type substitution imports; for Go, only the modules a substitution imports, since the output uses the standard library. Nothing generated depends on `roas`.
+`generate` returns files in memory, writing no output files, together with every diagnostic and the dependency list the generated code needs — for Rust, `serde` and `serde_json` with `raw_value`, `regex` when a pattern is checked (at decode beside `additionalProperties: false`, or by validation), plus whatever a type substitution imports; for Go, only the modules a substitution imports, since the output uses the standard library. Nothing generated depends on `roas`.
 
 ## What the Rust output looks like
 
@@ -105,7 +105,7 @@ const (
 The output uses `encoding/json/v2` from the standard library, so it needs Go 1.27 or later and nothing else. Struct tags cannot say what the schema says, so every generated type has its own `UnmarshalJSONFrom`:
 
 - **Presence and null are checked.** Go leaves a missing member at its zero value and stores a zero value for a JSON `null`. A struct's decoder refuses a missing required member and a `null` in a member that is not nullable, and a `null` anywhere else a schema forbids it — a list item, say — is refused too. `Nullable[T]` keeps the three states of an optional, nullable member: `omitzero` leaves out only the absent one.
-- **Unknown members.** `additionalProperties: false` is refused at decode, as in Rust; otherwise the extra members land in an `AdditionalProperties` map embedded with `json:",embed"` and are written back out.
+- **Unknown members.** `additionalProperties: false` is refused at decode, as in Rust; otherwise the extra members land in an `AdditionalProperties` map embedded with `json:",embed"` and are written back out. Beside `patternProperties`, a member matching a pattern lands there too, and with `additionalProperties: false` one matching neither a property nor a pattern is refused at decode in both languages — unless a pattern cannot be translated, when every member is let in. Checking a pattern at decode puts a regex engine into the generated code (`regex` in Rust, `regexp` in Go) even with validation off.
 - **Enums check membership.** A named string type accepts any string, so its decoder accepts only the listed values.
 - **Integers read the token** into `Int64` / `Int32`, exactly as in Rust.
 - **The decoders own their options.** Each generated type decodes its members with its own null rules, so unmarshalers a caller passes with `json.WithUnmarshalers` do not reach inside generated types; a substituted type decodes by its own rules alone, as in Rust.
