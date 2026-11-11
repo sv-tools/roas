@@ -1709,3 +1709,24 @@ fn an_integer_const_read_as_a_float_past_2_53_is_compared_rounded() {
         assert!(code.contains(rounded), "{code}");
     }
 }
+
+#[cfg(feature = "exact-numbers")]
+#[test]
+fn a_yaml_integer_const_written_as_a_float_is_compared_rounded_even_read_exactly() {
+    // YAML is read through an `f64`, whatever the build: such a const says
+    // no more than its float, so integers rounding to it are undecided.
+    let yaml = "openapi: 3.2.0\ninfo: {title: t, version: '1'}\npaths: {}\ncomponents:\n  schemas:\n    C: {type: integer, format: int64, const: 9007199254740993.0}\n";
+    let doc = SourceDocument::parse(
+        Input::Yaml(yaml.as_bytes().to_vec()),
+        Url::parse("file:///t.yaml").unwrap(),
+    )
+    .expect("parses");
+    let doc = validate(doc, IGNORE_UNUSED | Options::IgnoreMissingTags).expect("valid");
+    let g = generate(&doc, &rust_config("validation = true")).unwrap();
+    let code = g
+        .files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect::<String>();
+    assert!(code.contains("as f64)"), "{code}");
+}

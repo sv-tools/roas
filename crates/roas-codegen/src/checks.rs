@@ -1328,14 +1328,16 @@ pub(crate) fn f32_candidates(f: f64) -> Vec<f32> {
     }
 }
 
-/// Whether `n`, an integer, is known as written: an integer token, or a
-/// float read exactly (`exact-numbers`), or one small enough that every
-/// integer near it is a float too.
+/// Whether `n`, an integer, is known as written: an integer token, one
+/// small enough that every integer near it is a float too, or a float
+/// whose text says more than its `f64` does — which only a description
+/// read exactly (`exact-numbers`, JSON) keeps. A float written as an `f64`
+/// prints it, as a YAML source does even then, says no more than it.
 pub(crate) fn integer_held(n: &Number) -> bool {
     n.is_i64()
         || n.is_u64()
-        || cfg!(feature = "exact-numbers")
         || n.as_f64().is_some_and(|f| f.abs() < 2f64.powi(53))
+        || (cfg!(feature = "exact-numbers") && !f64_holds(n))
 }
 
 /// The integer `n` is, when it is one.
@@ -1394,7 +1396,13 @@ mod tests {
         let int: Number = serde_json::from_str("9007199254740993").unwrap();
         let small: Number = serde_json::from_str("2.0").unwrap();
         assert!(super::integer_held(&int) && super::integer_held(&small));
-        assert_eq!(super::integer_held(&big), cfg!(feature = "exact-numbers"));
+        // Its text says no more than its float: it may have been read as one.
+        assert!(!super::integer_held(&big));
+        #[cfg(feature = "exact-numbers")]
+        {
+            let precise: Number = serde_json::from_str("9007199254740993.0").unwrap();
+            assert!(super::integer_held(&precise));
+        }
     }
 
     #[test]
