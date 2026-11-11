@@ -1205,7 +1205,13 @@ fn composition_annotations(front: &mut FrontSchema, keywords: &serde_json::Map<S
             ("default", value) => front.default = Some(value.clone()),
             // Serialization hints for XML, which the generated code is not.
             ("xml", _) => {}
-            _ => continue,
+            // A 2.0 or 3.0 model holds no such key, so it is not listed yet.
+            _ => {
+                if !front.unsupported.iter().any(|k| k == key) {
+                    front.unsupported.push(key.to_owned());
+                }
+                continue;
+            }
         }
         front.unsupported.retain(|k| k != key);
     }

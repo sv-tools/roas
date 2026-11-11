@@ -370,6 +370,12 @@ fn branch(
 /// valid.
 const NULL_IS_VALID: &str = "if self.raw.get().trim() == \"null\" { return; }";
 
+/// Whether a field can be read under a `serde(alias)`. An alias this cannot
+/// read counts: the attribute is on the field either way.
+fn aliased(field: &super::view::FieldView) -> bool {
+    !matches!(super::attrs::serde_aliases(&field.attrs, ""), Ok(a) if a.is_empty())
+}
+
 /// When decoding `ty` may fail for the decoder rather than the value, the
 /// Rust condition on the holder's raw value under which a failure proves
 /// nothing: always for a substitution, which may take any value; for a
@@ -485,6 +491,15 @@ pub(crate) fn body(
         TypeKind::Struct(s) => {
             let mut present = Vec::new();
             let mut gated: Vec<String> = Vec::new();
+            // What the schema says of a member no property names, which is
+            // what a member read under an alias really is.
+            let others_constrained = (def.constraints.property_names
+                && def.constraints.names.as_deref() != Some(&crate::front::Constraints::default()))
+                || match &s.additional {
+                    Additional::Denied => true,
+                    Additional::CatchAll(TypeRef::Any) => def.constraints.items.is_some(),
+                    Additional::CatchAll(_) => true,
+                };
             for (field, field_view) in s.fields.iter().zip(&view.fields) {
                 let name = &field_view.name;
                 let mut list = checks::value_checks(&field.ty, &field.constraints);
@@ -525,8 +540,32 @@ pub(crate) fn body(
                     },
                     &mut inner,
                 );
+                let says_something = !inner.is_empty() || recurse || !always.is_empty();
+                // Decoded, a field does not say which name it was read by,
+                // and the schema judges a member under an alias as one no
+                // property names: neither verdict can be given.
+                if aliased(field_view) && (says_something || others_constrained || field.required) {
+                    let statement = format!(
+                        "report.unevaluated(&child_pointer(pointer, {:?}), {:?});",
+                        field.raw_name,
+                        format!(
+                            "{}: may have been read under a serde alias, so what the schema says of it is not checked",
+                            field.raw_name
+                        )
+                    );
+                    let statement = if field.required {
+                        statement
+                    } else {
+                        format!("if self.{name}.is_some() {{ {statement} }}")
+                    };
+                    if !gates.is_empty() && !out.iter().any(|l| l.starts_with("let _ = (pointer")) {
+                        out.insert(0, "let _ = (pointer, &report);".to_owned());
+                    }
+                    out.push(format!("{gates} {{ {statement} }}").trim_start().to_owned());
+                    continue;
+                }
                 // Every check may have been decided away.
-                if inner.is_empty() && !recurse && always.is_empty() {
+                if !says_something {
                     continue;
                 }
                 let mut block = vec![format!(
@@ -643,6 +682,11 @@ pub(crate) fn body(
                     // names are read from the catch-all.
                     Check::Keys(names) => {
                         for (field, field_view) in s.fields.iter().zip(&view.fields) {
+                            // Reported above: the name it was read by is
+                            // not known.
+                            if aliased(field_view) {
+                                continue;
+                            }
                             let pointer = format!("&child_pointer(pointer, {:?})", field.raw_name);
                             let statement = match checks::name_verdict(&field.raw_name, names) {
                                 checks::Verdict::Pass => continue,
