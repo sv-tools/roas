@@ -997,7 +997,7 @@ impl<'a> Lowerer<'a> {
                             "its schema is a `not`, which is not checked".into(),
                         )
                     }
-                    _ => crate::ir::PatternSchema::Branch(self.slot_branch(slot, &hint)),
+                    _ => crate::ir::PatternSchema::Branch(Box::new(self.slot_branch(slot, &hint))),
                 },
             });
         }

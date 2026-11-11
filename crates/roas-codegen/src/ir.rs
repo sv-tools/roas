@@ -140,7 +140,7 @@ impl PatternDef {
     /// The schema a matching member is read as, when it is read at all.
     pub(crate) fn branch(&self) -> Option<&Branch> {
         match &self.schema {
-            PatternSchema::Branch(b) => Some(b),
+            PatternSchema::Branch(b) => Some(b.as_ref()),
             _ => None,
         }
     }
@@ -163,7 +163,7 @@ impl PatternDef {
 #[derive(Debug, Clone)]
 pub(crate) enum PatternSchema {
     /// A schema each is read as and checked against.
-    Branch(Branch),
+    Branch(Box<Branch>),
     /// `false`: no such member.
     Never,
     /// A schema no type can represent (`not`): each is unevaluated.
